@@ -18,7 +18,7 @@ services:
     environment:
       - JOURNAL_API_KEY
       - JOURNAL_JOURNAL_ROOT=/app/journal/content
-      - JOURNAL_DB_PATH=/app/journal.db
+      - JOURNAL_DB_PATH=/app/journal/journal.db
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
@@ -45,7 +45,7 @@ services:
       - "127.0.0.1:8300:8000"
     volumes:
       # Whole journal repo mounted — mkdocs.yml at root, content/ as docs_dir
-      - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH}:/docs:ro
+      - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH}:/docs
     environment:
       # Allow MkDocs dev server to accept requests with any Host header
       # (needed when behind nginx reverse proxy)

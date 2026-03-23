@@ -14,10 +14,9 @@ ENV PYTHONUNBUFFERED=1 \
 
 ENV PATH="$POETRY_HOME/bin:$VENV_PATH/bin:$PATH"
 
-# Install system deps (git for daily_sync.sh if run inside container)
 RUN apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y curl build-essential git && \
+    apt-get install -y curl build-essential gosu && \
     rm -rf /var/lib/apt/lists/*
 
 # Install poetry
@@ -34,11 +33,15 @@ RUN poetry install --only main
 COPY . /src
 WORKDIR /src
 
-# Create non-root user and log directory
+# Create non-root user and writable directories.
 RUN adduser --disabled-password --gecos "" appuser && \
     mkdir -p /app/logs /app/journal && \
     chown -R appuser:appuser /src /app
-USER appuser
+
+# Entrypoint handles permission fixing + privilege drop
+COPY deployment/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+ENTRYPOINT ["/entrypoint.sh"]
 
 EXPOSE 8100
 
