@@ -1,0 +1,63 @@
+[tool.poetry]
+name = "journalctl"
+version = "0.1.0"
+description = "Personal journal MCP server - append-only historical record"
+authors = ["madhukar01 <mholla8@gmail.com>"]
+readme = "README.md"
+package-mode = false
+
+[tool.poetry.dependencies]
+python = "^3.11"
+fastapi = "^0.115.6"
+uvicorn = "^0.34.0"
+pydantic = "^2.10.5"
+pydantic-settings = "^2.7.0"
+structlog = "^24.4.0"
+gunicorn = "^23.0.0"
+mcp = "^1.26.0"
+python-frontmatter = "^1.1.0"
+filelock = "^3.16.0"
+python-slugify = "^8.0.4"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.0.0"
+pytest-asyncio = "^0.24.0"
+pytest-cov = "^6.0.0"
+pre-commit = "^3.5.0"
+ruff = "^0.8.0"
+mypy = "^1.13.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "B", "I", "N", "UP", "ANN", "S", "A", "C4", "T20", "PT", "RET", "SIM"]
+ignore = ["ANN401"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = ["S101", "PT011"]
+"scripts/**/*.py" = ["T201", "S112"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["journalctl"]
+
+[tool.mypy]
+python_version = "3.11"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+no_implicit_optional = true
+strict_optional = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
+asyncio_mode = "auto"

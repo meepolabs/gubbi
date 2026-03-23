@@ -1,0 +1,163 @@
+"""Journal MCP Server — FastAPI application entry point.
+
+Serves the MCP protocol over streamable HTTP (production) or
+stdio (local development). Based on fastapi_template
+patterns: CustomFastAPI subclass, lifespan, structlog.
+"""
+
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+
+import structlog
+from fastapi import FastAPI, Request
+from fastapi.responses import JSONResponse
+from mcp.server.fastmcp import FastMCP
+
+from journalctl.auth import BearerAuthMiddleware
+from journalctl.config import Settings, get_settings
+from journalctl.core.logger import initialize_logger
+from journalctl.import_tools import import_tools
+from journalctl.storage.index import SearchIndex
+from journalctl.storage.markdown import MarkdownStorage
+
+
+class CustomFastAPI(FastAPI):
+    """Extended FastAPI with journal-specific attributes."""
+
+    logger: structlog.BoundLogger
+    storage: MarkdownStorage
+    index: SearchIndex
+    settings: Settings
+    mcp: FastMCP
+
+
+def create_mcp_server(
+    storage: MarkdownStorage,
+    index: SearchIndex,
+    settings: Settings,
+) -> FastMCP:
+    """Create and configure the MCP server with all tools."""
+    mcp = FastMCP(
+        "journalctl",
+        stateless_http=True,
+    )
+    import_tools(mcp, storage, index, settings)
+    return mcp
+
+
+@asynccontextmanager
+async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
+    """Application lifespan: startup and shutdown."""
+    settings = get_settings()
+
+    # Initialize logger
+    initialize_logger("journalctl")
+    app.logger = structlog.get_logger("journalctl")
+    await app.logger.info("Server starting up")
+
+    # Initialize storage
+    app.settings = settings
+    app.storage = MarkdownStorage(settings.journal_root)
+    app.index = SearchIndex(settings.db_path, settings.journal_root)
+
+    # Ensure directories exist
+    settings.topics_dir.mkdir(parents=True, exist_ok=True)
+    settings.conversations_dir.mkdir(parents=True, exist_ok=True)
+    settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+    # Incremental index rebuild on startup
+    count = app.index.incremental_rebuild()
+    await app.logger.info(
+        "Index rebuild complete",
+        files_updated=count,
+    )
+
+    # Create and mount MCP server
+    app.mcp = create_mcp_server(app.storage, app.index, settings)
+
+    async with app.mcp.session_manager.run():
+        yield
+
+    # Shutdown
+    await app.logger.info("Server shutting down")
+    app.index.close()
+
+
+# Create FastAPI app
+server = CustomFastAPI(
+    title="journalctl",
+    description="Personal journal MCP server",
+    version="0.1.0",
+    lifespan=lifespan,
+)
+
+
+# Global exception handler
+@server.exception_handler(Exception)
+async def general_exception_handler(
+    request: Request,
+    exc: Exception,
+) -> JSONResponse:
+    """Handle unhandled exceptions."""
+    logger = structlog.get_logger("journalctl")
+    await logger.error(
+        "Unhandled exception",
+        exc_info=exc,
+        path=request.url.path,
+        method=request.method,
+    )
+    return JSONResponse(
+        status_code=500,
+        content={"error": "Internal server error"},
+    )
+
+
+# Health check (unprotected)
+@server.get("/health")
+async def health() -> dict:
+    """Health check endpoint."""
+    return {"status": "ok", "service": "journalctl"}
+
+
+# Mount MCP server at /mcp with Bearer token auth.
+# NOTE: This must happen after lifespan creates the MCP instance.
+# BearerAuthMiddleware wraps the MCP ASGI app directly (not
+# BaseHTTPMiddleware) so SSE streaming is not buffered.
+@server.on_event("startup")
+async def mount_mcp() -> None:
+    """Mount the authenticated MCP ASGI app."""
+    if hasattr(server, "mcp"):
+        mcp_app = server.mcp.streamable_http_app()
+        authed_app = BearerAuthMiddleware(mcp_app)
+        server.mount("/mcp", authed_app)
+
+
+def main() -> None:
+    """Entry point for running the server."""
+    settings = get_settings()
+
+    if settings.transport == "stdio":
+        # stdio mode: run MCP directly without FastAPI
+        storage = MarkdownStorage(settings.journal_root)
+        idx = SearchIndex(settings.db_path, settings.journal_root)
+
+        settings.topics_dir.mkdir(parents=True, exist_ok=True)
+        settings.conversations_dir.mkdir(parents=True, exist_ok=True)
+        settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
+
+        idx.incremental_rebuild()
+        mcp = create_mcp_server(storage, idx, settings)
+        mcp.run(transport="stdio")
+    else:
+        import uvicorn
+
+        uvicorn.run(
+            "journalctl.main:server",
+            host=settings.host,
+            port=settings.port,
+            reload=False,
+        )
+
+
+if __name__ == "__main__":
+    main()

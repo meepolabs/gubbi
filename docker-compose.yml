@@ -1,0 +1,48 @@
+# Host environment must provide:
+#   JOURNAL_HOST_PATH  — absolute path to journal repo on host
+#   JOURNAL_API_KEY    — Bearer token for MCP auth
+#   JOURNAL_TIMEZONE   — e.g. America/Los_Angeles
+#
+# Set these via Doppler, .env file, or export before running docker compose.
+
+services:
+  journalctl:
+    container_name: journalctl
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+    image: journalctl:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8100:8100"
+    environment:
+      - JOURNAL_API_KEY
+      - JOURNAL_JOURNAL_ROOT=/app/journal
+      - JOURNAL_DB_PATH=/app/journal.db
+      - JOURNAL_TRANSPORT=streamable-http
+      - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
+      - JOURNAL_LOG_LEVEL=info
+    volumes:
+      - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH to your journal repo}:/app/journal
+      - ./logs:/app/logs
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 256M
+
+  mkdocs:
+    image: squidfunk/mkdocs-material:latest
+    container_name: journal-mkdocs
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8300:8000"
+    volumes:
+      - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH}:/docs:ro
+    command: serve --dev-addr=0.0.0.0:8000
