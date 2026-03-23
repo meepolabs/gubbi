@@ -40,6 +40,8 @@ def create_mcp_server(
     mcp = FastMCP(
         "journalctl",
         stateless_http=True,
+        streamable_http_path="/",
+        host="0.0.0.0",  # noqa: S104 — accept any Host header behind reverse proxy
     )
     import_tools(mcp, storage, index, settings)
     return mcp
@@ -72,9 +74,13 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         files_updated=count,
     )
 
-    # Create and mount MCP server
+    # Create MCP server and mount on FastAPI
     app.mcp = create_mcp_server(app.storage, app.index, settings)
+    mcp_http = app.mcp.streamable_http_app()
+    authed_mcp = BearerAuthMiddleware(mcp_http)
+    app.mount("/mcp", authed_mcp)
 
+    # session_manager must be entered AFTER streamable_http_app()
     async with app.mcp.session_manager.run():
         yield
 
@@ -117,19 +123,6 @@ async def general_exception_handler(
 async def health() -> dict:
     """Health check endpoint."""
     return {"status": "ok", "service": "journalctl"}
-
-
-# Mount MCP server at /mcp with Bearer token auth.
-# NOTE: This must happen after lifespan creates the MCP instance.
-# BearerAuthMiddleware wraps the MCP ASGI app directly (not
-# BaseHTTPMiddleware) so SSE streaming is not buffered.
-@server.on_event("startup")
-async def mount_mcp() -> None:
-    """Mount the authenticated MCP ASGI app."""
-    if hasattr(server, "mcp"):
-        mcp_app = server.mcp.streamable_http_app()
-        authed_app = BearerAuthMiddleware(mcp_app)
-        server.mount("/mcp", authed_app)
 
 
 def main() -> None:

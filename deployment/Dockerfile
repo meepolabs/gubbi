@@ -36,8 +36,8 @@ WORKDIR /src
 
 # Create non-root user and log directory
 RUN adduser --disabled-password --gecos "" appuser && \
-    mkdir -p /app/logs && \
-    chown -R appuser:appuser /src /app/logs
+    mkdir -p /app/logs /app/journal && \
+    chown -R appuser:appuser /src /app
 USER appuser
 
 EXPOSE 8100
