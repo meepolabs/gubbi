@@ -8,15 +8,39 @@ JSON output through a shared ProcessorFormatter.
 import logging
 import os
 from logging import handlers
+from typing import Any
 
 import structlog
 
 LOG_ROTATE_WHEN = os.getenv(key="LOG_ROTATE_WHEN", default="W6")
 LOG_ROTATE_BACKUP = int(os.getenv(key="LOG_ROTATE_BACKUP", default="4"))
 
+
+def _safe_add_logger_name(
+    logger: Any,
+    method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Like add_logger_name but handles None logger.
+
+    The MCP SDK's internal loggers pass records through the
+    ProcessorFormatter where the logger reference can be None,
+    causing the standard add_logger_name to crash with
+    AttributeError: 'NoneType' object has no attribute 'name'.
+    """
+    record = event_dict.get("_record")
+    if record is not None:
+        event_dict["logger"] = record.name
+    elif logger is not None:
+        event_dict["logger"] = getattr(logger, "name", "unknown")
+    else:
+        event_dict["logger"] = "unknown"
+    return event_dict
+
+
 # Shared processors used by both structlog and ProcessorFormatter
 _SHARED_PROCESSORS: list[structlog.types.Processor] = [
-    structlog.stdlib.add_logger_name,
+    _safe_add_logger_name,
     structlog.stdlib.add_log_level,
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.StackInfoRenderer(),
@@ -77,13 +101,10 @@ def initialize_logger(logger_name: str, log_dir: str = "logs") -> None:
         processors=[
             structlog.stdlib.filter_by_level,
             structlog.contextvars.merge_contextvars,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.processors.TimeStamper(fmt="iso"),
             structlog.processors.StackInfoRenderer(),
             structlog.processors.ExceptionPrettyPrinter(),
             structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer(),
+            structlog.stdlib.ProcessorFormatter.wrap_for_formatter,
         ],
         wrapper_class=structlog.stdlib.AsyncBoundLogger,
         logger_factory=structlog.stdlib.LoggerFactory(),

@@ -159,5 +159,6 @@ def render_login_page(
         samesite="lax",
         secure=secure_cookies,
         max_age=cookie_max_age,
+        path="/",
     )
     return response
