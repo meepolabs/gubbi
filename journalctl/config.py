@@ -31,9 +31,6 @@ class Settings(BaseSettings):
     port: int = 8100
     transport: str = "streamable-http"  # or "stdio"
 
-    # Timezone for "this-week" calculations
-    timezone: str = "America/Los_Angeles"
-
     # Logging
     log_level: str = "info"
     log_dir: Path = Path("./logs")
@@ -49,10 +46,6 @@ class Settings(BaseSettings):
     @property
     def knowledge_dir(self) -> Path:
         return self.journal_root / "knowledge"
-
-    @property
-    def timeline_dir(self) -> Path:
-        return self.journal_root / "timeline"
 
     model_config = {"env_prefix": "JOURNAL_"}
 

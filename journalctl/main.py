@@ -13,40 +13,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
-from starlette.types import ASGIApp, Receive, Scope, Send
 
-from journalctl.auth import BearerAuthMiddleware
 from journalctl.config import Settings, get_settings
 from journalctl.core.logger import initialize_logger
 from journalctl.import_tools import import_tools
+from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
 from journalctl.oauth.setup import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.index import SearchIndex
 from journalctl.storage.markdown import MarkdownStorage
-
-
-class MCPPathNormalizer:
-    """Normalize /mcp → /mcp/ at the ASGI level.
-
-    Starlette's Mount("/mcp") returns a 307 redirect for requests to
-    /mcp (without trailing slash).  HTTP clients following the 307
-    often change POST→GET, which breaks the MCP streamable HTTP
-    transport — the initialize POST arrives as a GET and opens an
-    SSE stream instead.
-
-    This raw ASGI middleware rewrites the path before it reaches the
-    router, avoiding the redirect entirely.  Unlike BaseHTTPMiddleware,
-    it does NOT buffer responses, so SSE streaming works correctly.
-    """
-
-    def __init__(self, app: ASGIApp) -> None:
-        self.app = app
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope["path"] == "/mcp":
-            scope = dict(scope)
-            scope["path"] = "/mcp/"
-        await self.app(scope, receive, send)
 
 
 class CustomFastAPI(FastAPI):

@@ -1,8 +1,14 @@
-"""Tests for input validation — path traversal prevention."""
+"""Tests for input validation, sanitization, and path traversal prevention."""
 
 import pytest
 
-from journalctl.models.entry import slugify, validate_title, validate_topic
+from journalctl.models.entry import (
+    sanitize_freetext,
+    sanitize_label,
+    slugify,
+    validate_title,
+    validate_topic,
+)
 
 
 class TestTopicValidation:
@@ -77,6 +83,67 @@ class TestTitleValidation:
     def test_reject_special_start(self) -> None:
         with pytest.raises(ValueError):
             validate_title(" Leading space")
+
+
+class TestSanitizeLabel:
+    """Label sanitization for frontmatter-safe values."""
+
+    def test_normal_label_unchanged(self) -> None:
+        assert sanitize_label("claude-3.5") == "claude-3.5"
+
+    def test_strips_control_chars(self) -> None:
+        assert sanitize_label("test\x00tag") == "testtag"
+
+    def test_strips_unsafe_chars(self) -> None:
+        assert sanitize_label("hello@world!") == "helloworld"
+
+    def test_preserves_dots_hyphens_underscores(self) -> None:
+        assert sanitize_label("my_tag.v2-beta") == "my_tag.v2-beta"
+
+    def test_enforces_max_length(self) -> None:
+        assert sanitize_label("a" * 100) == "a" * 50
+
+    def test_custom_max_length(self) -> None:
+        assert sanitize_label("a" * 200, max_len=100) == "a" * 100
+
+    def test_empty_after_strip_returns_unknown(self) -> None:
+        assert sanitize_label("!@#$%") == "unknown"
+
+    def test_empty_string_returns_unknown(self) -> None:
+        assert sanitize_label("") == "unknown"
+
+    def test_whitespace_only_returns_unknown(self) -> None:
+        assert sanitize_label("   ") == "unknown"
+
+
+class TestSanitizeFreetext:
+    """Free-text sanitization for markdown content."""
+
+    def test_preserves_newlines(self) -> None:
+        assert sanitize_freetext("hello\nworld") == "hello\nworld"
+
+    def test_preserves_tabs(self) -> None:
+        assert sanitize_freetext("col1\tcol2") == "col1\tcol2"
+
+    def test_preserves_carriage_return(self) -> None:
+        assert sanitize_freetext("line\r\n") == "line\r\n"
+
+    def test_strips_null_bytes(self) -> None:
+        assert sanitize_freetext("test\x00content") == "testcontent"
+
+    def test_strips_escape_chars(self) -> None:
+        assert sanitize_freetext("test\x1bcontent") == "testcontent"
+
+    def test_enforces_max_length(self) -> None:
+        result = sanitize_freetext("a" * 2_000_000)
+        assert len(result) == 1_000_000
+
+    def test_custom_max_length(self) -> None:
+        result = sanitize_freetext("a" * 1000, max_len=500)
+        assert len(result) == 500
+
+    def test_unicode_preserved(self) -> None:
+        assert sanitize_freetext("hello 🌍 world") == "hello 🌍 world"
 
 
 class TestSlugify:

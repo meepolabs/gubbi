@@ -3,6 +3,31 @@ from datetime import datetime
 
 from pydantic import BaseModel, field_validator
 
+# Sanitization
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_SAFE_LABEL = re.compile(r"[^a-zA-Z0-9 ._-]")
+
+
+def sanitize_label(value: str, max_len: int = 50) -> str:
+    """Sanitize a short label (source, tag) for safe use in frontmatter.
+
+    Strips control characters, restricts to alphanumeric + space/dot/hyphen,
+    and enforces a length limit.  Returns 'unknown' if the result is empty.
+    """
+    value = _CONTROL_CHARS.sub("", value).strip()
+    value = _SAFE_LABEL.sub("", value)
+    return value[:max_len] or "unknown"
+
+
+def sanitize_freetext(value: str, max_len: int = 1_000_000) -> str:
+    """Sanitize free-text content.
+
+    Strips control characters (null bytes, escape codes, etc.) but
+    preserves tabs, newlines, and carriage returns for markdown.
+    """
+    return _CONTROL_CHARS.sub("", value)[:max_len]
+
+
 # Validation patterns
 # Matches 1-2 level paths: "work", "work/acme", "hobbies/my-project"
 # Prevents path traversal, requires lowercase alphanumeric with hyphens
@@ -113,18 +138,6 @@ class Entry(BaseModel):
     content: str
 
 
-class TopicInfo(BaseModel):
-    """Summary info for journal_list_topics."""
-
-    topic: str
-    title: str
-    description: str
-    tags: list[str]
-    entry_count: int
-    created: str
-    updated: str
-
-
 class SearchResult(BaseModel):
     """A single search result from FTS5."""
 
@@ -137,34 +150,9 @@ class SearchResult(BaseModel):
     date: str
 
 
-class ConversationInfo(BaseModel):
-    """Summary info for journal_list_conversations."""
-
-    topic: str
-    title: str
-    filename: str
-    summary: str
-    source: str
-    created: str
-    updated: str
-    message_count: int
-    thread: str | None = None
-    thread_seq: int | None = None
-
-
 class Message(BaseModel):
     """A single message in a conversation."""
 
     role: str  # 'user' or 'assistant'
     content: str
     timestamp: str | None = None
-
-
-class TimelineEntry(BaseModel):
-    """A single entry in a timeline view."""
-
-    date: str
-    topic: str
-    summary: str
-    source_path: str
-    tags: list[str] = []

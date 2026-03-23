@@ -1,3 +1,10 @@
+"""Structured logging setup.
+
+Configures both structlog (for async code in main.py) and stdlib
+logging (for sync code in storage/oauth) to produce consistent
+JSON output through a shared ProcessorFormatter.
+"""
+
 import logging
 import os
 from logging import handlers
@@ -7,9 +14,31 @@ import structlog
 LOG_ROTATE_WHEN = os.getenv(key="LOG_ROTATE_WHEN", default="W6")
 LOG_ROTATE_BACKUP = int(os.getenv(key="LOG_ROTATE_BACKUP", default="4"))
 
+# Shared processors used by both structlog and ProcessorFormatter
+_SHARED_PROCESSORS: list[structlog.types.Processor] = [
+    structlog.stdlib.add_logger_name,
+    structlog.stdlib.add_log_level,
+    structlog.processors.TimeStamper(fmt="iso"),
+    structlog.processors.StackInfoRenderer(),
+    structlog.processors.UnicodeDecoder(),
+    structlog.processors.JSONRenderer(),
+]
+
 
 def initialize_logger(logger_name: str, log_dir: str = "logs") -> None:
-    """Initialize structlog with rotating file handler.
+    """Initialize structured logging for the application.
+
+    Sets up a ProcessorFormatter on the file handler so that ALL
+    loggers (both structlog and plain stdlib) produce consistent
+    JSON output.  This means modules can safely use either:
+
+        # Async context (main.py, lifespan):
+        logger = structlog.get_logger("journalctl")
+        logger.info("event", key=value)
+
+        # Sync (storage, oauth):
+        logger = logging.getLogger("journalctl.oauth.login")
+        logger.info("event", extra={"key": value})
 
     Args:
         logger_name: Name of the logger and log file.
@@ -17,6 +46,7 @@ def initialize_logger(logger_name: str, log_dir: str = "logs") -> None:
     """
     os.makedirs(log_dir, exist_ok=True)
 
+    # File handler with rotation
     log_file_path = f"{log_dir}/{logger_name}.log"
     file_handler = handlers.TimedRotatingFileHandler(
         filename=log_file_path,
@@ -26,12 +56,23 @@ def initialize_logger(logger_name: str, log_dir: str = "logs") -> None:
     )
     file_handler.setLevel(logging.INFO)
 
+    # ProcessorFormatter: renders ALL stdlib log records through
+    # structlog processors, producing consistent JSON output
+    file_handler.setFormatter(
+        structlog.stdlib.ProcessorFormatter(
+            processors=[
+                structlog.stdlib.ProcessorFormatter.remove_processors_meta,
+                *_SHARED_PROCESSORS,
+            ],
+        ),
+    )
+
     logging.basicConfig(
-        format="%(message)s",
         level=logging.INFO,
         handlers=[file_handler],
     )
 
+    # Configure structlog for async callers (main.py)
     structlog.configure(
         processors=[
             structlog.stdlib.filter_by_level,

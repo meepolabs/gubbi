@@ -50,7 +50,8 @@ class TestAppendAndRead:
         assert result["entry_count"] == 1
 
         result = await tools["journal_read"](topic="work/acme")
-        assert "Got the offer today." in result["content"]
+        assert result["total_entries"] == 1
+        assert "Got the offer today." in result["entries"][0]["content"]
 
     @pytest.mark.asyncio
     async def test_read_recent_entries(self, tools: dict) -> None:
@@ -101,7 +102,7 @@ class TestConversationFlow:
         assert result["status"] == "saved"
         assert "Q3 Planning Session" in result["summary"]
 
-        listed = await tools["journal_list_conversations"](topic="work")
+        listed = await tools["journal_list_conversations"](topic_prefix="work")
         assert listed["count"] == 1
 
     @pytest.mark.asyncio
@@ -116,8 +117,9 @@ class TestConversationFlow:
         )
 
         result = await tools["journal_read"](topic="hobbies/running")
-        assert "conversation-summary" in result["content"]
-        assert "[[conversations/hobbies/running/training-plan]]" in result["content"]
+        summary_entry = result["entries"][0]["content"]
+        assert "conversation-summary" in result["entries"][0]["tags"]
+        assert "[[conversations/hobbies/running/training-plan]]" in summary_entry
 
     @pytest.mark.asyncio
     async def test_resave_updates(self, tools: dict) -> None:
@@ -159,7 +161,7 @@ class TestTopicManagement:
             description="Second project.",
         )
 
-        result = await tools["journal_list_topics"](prefix="projects")
+        result = await tools["journal_list_topics"](topic_prefix="projects")
         assert result["total"] == 2
 
 

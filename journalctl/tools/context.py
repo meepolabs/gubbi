@@ -11,7 +11,6 @@ from journalctl.storage.markdown import MarkdownStorage
 
 def _resolve_period(
     period: str,
-    tz_name: str,
 ) -> tuple[str, str, str]:
     """Resolve a period string to (date_from, date_to, label).
 
@@ -98,10 +97,7 @@ def register(
         profile = storage.read_knowledge("user-profile")
 
         # This week's timeline
-        date_from, date_to, label = _resolve_period(
-            "this-week",
-            settings.timezone,
-        )
+        date_from, date_to, label = _resolve_period("this-week")
         week_entries = index.get_entries_by_date_range(date_from, date_to)
 
         # Top 20 recently active topics
@@ -143,10 +139,7 @@ def register(
             Chronological list of entries for the period,
             grouped by date and topic.
         """
-        date_from, date_to, label = _resolve_period(
-            period,
-            settings.timezone,
-        )
+        date_from, date_to, label = _resolve_period(period)
         entries = index.get_entries_by_date_range(date_from, date_to)
 
         return {

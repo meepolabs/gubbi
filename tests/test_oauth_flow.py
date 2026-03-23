@@ -281,7 +281,7 @@ class TestTokenLengthValidation:
         from starlette.responses import JSONResponse
         from starlette.routing import Route
 
-        from journalctl.auth import BearerAuthMiddleware
+        from journalctl.middleware import BearerAuthMiddleware
 
         async def echo(request: object) -> JSONResponse:  # noqa: ARG001
             return JSONResponse({"ok": True})

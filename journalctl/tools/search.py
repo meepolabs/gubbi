@@ -2,6 +2,7 @@
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.models.entry import validate_topic
 from journalctl.storage.index import SearchIndex
 
 
@@ -23,14 +24,20 @@ def register(mcp: FastMCP, index: SearchIndex) -> None:
         Args:
             query: Search query. Supports FTS5 syntax:
                    AND, OR, NOT, "exact phrase".
-            topic_prefix: Filter to topics under this prefix.
-            date_from: Filter from this date (YYYY-MM-DD).
-            date_to: Filter to this date (YYYY-MM-DD).
+            topic_prefix: Filter to topics under this prefix (e.g. 'work').
+            date_from: Filter by document last-modified date (YYYY-MM-DD).
+                       Scopes to files updated on or after this date.
+            date_to: Filter by document last-modified date (YYYY-MM-DD).
+                     Scopes to files updated on or before this date.
             limit: Maximum results (default 10).
 
         Returns:
             List of matching results with snippets and scores.
         """
+        if topic_prefix:
+            topic_prefix = topic_prefix.rstrip("/") or None
+        if topic_prefix:
+            validate_topic(topic_prefix)
         results = index.search(
             query=query,
             topic_prefix=topic_prefix,

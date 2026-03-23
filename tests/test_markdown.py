@@ -155,7 +155,7 @@ class TestTopicListing:
         storage.create_topic("work/initech", "Initech")
         storage.create_topic("hobbies/running", "Running")
 
-        work_topics = storage.list_topics(prefix="work")
+        work_topics = storage.list_topics(topic_prefix="work")
         assert len(work_topics) == 2
         assert all(t.topic.startswith("work/") for t in work_topics)
 

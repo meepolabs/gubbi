@@ -53,9 +53,6 @@ class MarkdownStorage:
         validate_topic(topic)
         return self.topics_dir / f"{topic}.md"
 
-    def topic_exists(self, topic: str) -> bool:
-        return self.topic_path(topic).exists()
-
     def read_topic(self, topic: str) -> tuple[TopicMeta, str]:
         """Read a topic file. Returns (metadata, body content)."""
         path = self.topic_path(topic)
@@ -400,15 +397,15 @@ class MarkdownStorage:
 
     def list_topics(
         self,
-        prefix: str | None = None,
+        topic_prefix: str | None = None,
     ) -> list[TopicMeta]:
         """List all topics with metadata from frontmatter."""
         results: list[TopicMeta] = []
 
         search_dir = self.topics_dir
-        if prefix:
-            validate_topic(prefix)
-            search_dir = self.topics_dir / prefix
+        if topic_prefix:
+            validate_topic(topic_prefix)
+            search_dir = self.topics_dir / topic_prefix
 
         if not search_dir.exists():
             return results

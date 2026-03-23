@@ -3,7 +3,7 @@ journal_read_conversation."""
 
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.models.entry import Message, validate_topic
+from journalctl.models.entry import Message, sanitize_freetext, sanitize_label, validate_topic
 from journalctl.storage.index import SearchIndex
 from journalctl.storage.markdown import MarkdownStorage
 
@@ -38,7 +38,7 @@ def register(
             messages: List of message dicts with keys:
                       role ('user'/'assistant'), content (str),
                       and optional timestamp (str).
-            source: Origin: 'claude', 'chatgpt', 'manual'.
+            source: Name of the app or LLM (e.g. 'claude', 'chatgpt').
             tags: Tags for the conversation.
             thread: Thread ID linking related conversations.
             thread_seq: Sequence number within the thread.
@@ -50,7 +50,27 @@ def register(
             or an update.
         """
         validate_topic(topic)
-        parsed_messages = [Message(**m) for m in messages]
+        title = sanitize_label(title, max_len=100)
+        source = sanitize_label(source)
+        if tags:
+            tags = [sanitize_label(t) for t in tags]
+        if summary:
+            summary = sanitize_freetext(summary)
+        try:
+            parsed_messages = [
+                Message(
+                    role=m.get("role", "user"),
+                    content=sanitize_freetext(m.get("content", "")),
+                    timestamp=m.get("timestamp"),
+                )
+                for m in messages
+            ]
+        except (TypeError, AttributeError) as e:
+            msg = (
+                "Invalid message format — each message"
+                + f" must be a dict with 'role' and 'content': {e}"
+            )
+            raise ValueError(msg) from e
 
         # Check if this is an update
         conv_path = storage.conversation_path(topic, title)
@@ -95,20 +115,24 @@ def register(
 
     @mcp.tool()
     async def journal_list_conversations(
-        topic: str | None = None,
+        topic_prefix: str | None = None,
     ) -> dict:
         """List archived conversations.
 
         Args:
-            topic: Filter by topic prefix (e.g. 'work/').
-                   If omitted, lists all conversations.
+            topic_prefix: Filter by topic prefix (e.g. 'work').
+                          If omitted, lists all conversations.
 
         Returns:
             List of conversations with title, date, summary,
             message count.
         """
+        if topic_prefix:
+            topic_prefix = topic_prefix.rstrip("/") or None
+        if topic_prefix:
+            validate_topic(topic_prefix)
         conversations = storage.list_conversations(
-            topic_prefix=topic,
+            topic_prefix=topic_prefix,
         )
         return {
             "conversations": [c.model_dump() for c in conversations],
