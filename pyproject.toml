@@ -18,6 +18,7 @@ mcp = "^1.26.0"
 python-frontmatter = "^1.1.0"
 filelock = "^3.16.0"
 python-slugify = "^8.0.4"
+bcrypt = "^5.0.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
@@ -40,7 +41,7 @@ select = ["E", "F", "B", "I", "N", "UP", "ANN", "S", "A", "C4", "T20", "PT", "RE
 ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PT011"]
+"tests/**/*.py" = ["S101", "PT011", "S105", "S106", "S107"]
 "scripts/**/*.py" = ["T201", "S112"]
 
 [tool.ruff.lint.isort]

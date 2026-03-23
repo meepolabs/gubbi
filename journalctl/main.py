@@ -17,6 +17,8 @@ from journalctl.auth import BearerAuthMiddleware
 from journalctl.config import Settings, get_settings
 from journalctl.core.logger import initialize_logger
 from journalctl.import_tools import import_tools
+from journalctl.oauth.setup import register_oauth_routes
+from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.index import SearchIndex
 from journalctl.storage.markdown import MarkdownStorage
 
@@ -74,19 +76,31 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         files_updated=count,
     )
 
+    # Initialize OAuth storage and register routes
+    oauth_storage = OAuthStorage(settings.oauth_db_path)
+    _ = oauth_storage.conn  # Force schema init
+    expired = oauth_storage.cleanup_expired()
+    if expired:
+        await app.logger.info("OAuth cleanup", expired_tokens=expired)
+
+    token_validator = register_oauth_routes(app, oauth_storage, settings)
+    if token_validator:
+        await app.logger.info("OAuth endpoints registered")
+
     # Create MCP server and mount on FastAPI
     app.mcp = create_mcp_server(app.storage, app.index, settings)
     mcp_http = app.mcp.streamable_http_app()
-    authed_mcp = BearerAuthMiddleware(mcp_http)
+    authed_mcp = BearerAuthMiddleware(mcp_http, token_validator=token_validator)
     app.mount("/mcp", authed_mcp)
 
     # session_manager must be entered AFTER streamable_http_app()
-    async with app.mcp.session_manager.run():
-        yield
-
-    # Shutdown
-    await app.logger.info("Server shutting down")
-    app.index.close()
+    try:
+        async with app.mcp.session_manager.run():
+            yield
+    finally:
+        await app.logger.info("Server shutting down")
+        app.index.close()
+        oauth_storage.close()
 
 
 # Create FastAPI app

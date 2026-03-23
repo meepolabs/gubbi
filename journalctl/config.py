@@ -14,6 +14,14 @@ class Settings(BaseSettings):
     # Auth
     api_key: str
 
+    # OAuth — empty owner_password_hash disables OAuth endpoints
+    server_url: str = "http://localhost:8100"
+    owner_password_hash: str = ""
+    oauth_db_path: Path = Path("./oauth.db")
+    oauth_access_token_ttl: int = 3600  # 1 hour
+    oauth_refresh_token_ttl: int = 2592000  # 30 days
+    oauth_auth_code_ttl: int = 300  # 5 minutes
+
     # Paths — override via JOURNAL_JOURNAL_ROOT / JOURNAL_DB_PATH
     journal_root: Path = Path("./journal")
     db_path: Path = Path("./journal.db")

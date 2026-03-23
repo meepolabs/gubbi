@@ -1,0 +1,25 @@
+"""Generate a bcrypt hash for the journal owner password.
+
+Usage: python -m journalctl.oauth.hash_password
+"""
+
+import getpass
+import sys
+
+import bcrypt
+
+
+def main() -> None:
+    password = getpass.getpass("Enter owner password: ")
+    confirm = getpass.getpass("Confirm password: ")
+    if password != confirm:
+        print("Passwords don't match!")  # noqa: T201
+        sys.exit(1)
+
+    hashed = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+    print("\nAdd to Doppler:")  # noqa: T201
+    print(f"JOURNAL_OWNER_PASSWORD_HASH={hashed}")  # noqa: T201
+
+
+if __name__ == "__main__":
+    main()
