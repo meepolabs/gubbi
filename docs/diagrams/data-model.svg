@@ -1,0 +1,61 @@
+<svg width="720" viewBox="0 0 720 420" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: transparent;">
+  <style>
+    .box { fill: #f8f9fa; stroke: #dee2e6; stroke-width: 1; }
+    .box-teal { fill: #e0f2f1; stroke: #80cbc4; stroke-width: 1; }
+    .box-purple { fill: #f3e5f5; stroke: #ce93d8; stroke-width: 1; }
+    .box-amber { fill: #fff8e1; stroke: #ffcc80; stroke-width: 1; }
+    .box-blue { fill: #e8f4fd; stroke: #90caf9; stroke-width: 1; }
+    .title { font-size: 14px; font-weight: 600; fill: #212529; }
+    .subtitle { font-size: 12px; fill: #6c757d; }
+    .label { font-size: 11px; fill: #868e96; }
+    .arr { stroke: #adb5bd; stroke-width: 1.2; marker-end: url(#arrow); }
+    .arr-bi { stroke: #adb5bd; stroke-width: 1.2; marker-start: url(#arrow); marker-end: url(#arrow); }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M2 1L8 5L2 9" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+  </defs>
+
+  <!-- Layer 1 -->
+  <rect class="box-teal" x="40" y="20" width="640" height="100" rx="12"/>
+  <text class="title" x="360" y="46" text-anchor="middle">Layer 1: Curated entries — topics/**/*.md</text>
+  <text class="subtitle" x="360" y="66" text-anchor="middle">Dated entries per topic: decisions, milestones, updates, reflections</text>
+
+  <rect class="box" x="60" y="80" width="180" height="30" rx="6"/>
+  <text class="subtitle" x="150" y="99" text-anchor="middle">hobbies/running.md</text>
+  <rect class="box" x="260" y="80" width="200" height="30" rx="6"/>
+  <text class="subtitle" x="360" y="99" text-anchor="middle">projects/homelab.md</text>
+  <rect class="box" x="480" y="80" width="180" height="30" rx="6"/>
+  <text class="subtitle" x="570" y="99" text-anchor="middle">health/fitness.md</text>
+
+  <!-- Bidirectional arrow Layer 1 <-> Layer 2 -->
+  <line x1="360" y1="120" x2="360" y2="160" class="arr-bi"/>
+  <text class="label" x="440" y="144" text-anchor="middle">linked via [[wikilinks]]</text>
+
+  <!-- Layer 2 -->
+  <rect class="box-purple" x="40" y="160" width="640" height="100" rx="12"/>
+  <text class="title" x="360" y="186" text-anchor="middle">Layer 2: Full transcripts — conversations/**/*.md</text>
+  <text class="subtitle" x="360" y="206" text-anchor="middle">Complete chat archives, saved explicitly, idempotent overwrites</text>
+
+  <rect class="box" x="60" y="220" width="280" height="30" rx="6"/>
+  <text class="subtitle" x="200" y="239" text-anchor="middle">hobbies/running/marathon-plan.md</text>
+  <rect class="box" x="360" y="220" width="300" height="30" rx="6"/>
+  <text class="subtitle" x="510" y="239" text-anchor="middle">projects/homelab/network-setup.md</text>
+
+  <!-- Arrow Layer 2 -> Layer 3 -->
+  <line x1="360" y1="260" x2="360" y2="300" class="arr-bi"/>
+  <text class="label" x="440" y="284" text-anchor="middle">both indexed in FTS5</text>
+
+  <!-- Layer 3 -->
+  <rect class="box-amber" x="40" y="300" width="640" height="100" rx="12"/>
+  <text class="title" x="360" y="326" text-anchor="middle">Layer 3: Temporal views — dynamic from FTS5</text>
+  <text class="subtitle" x="360" y="346" text-anchor="middle">Timeline queries assembled on-demand, not stored as static files</text>
+
+  <rect class="box" x="80" y="360" width="160" height="30" rx="6"/>
+  <text class="subtitle" x="160" y="379" text-anchor="middle">this-week</text>
+  <rect class="box" x="260" y="360" width="160" height="30" rx="6"/>
+  <text class="subtitle" x="340" y="379" text-anchor="middle">2026-03</text>
+  <rect class="box" x="440" y="360" width="160" height="30" rx="6"/>
+  <text class="subtitle" x="520" y="379" text-anchor="middle">2026-W12</text>
+</svg>
