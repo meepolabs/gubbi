@@ -54,4 +54,6 @@ CMD ["gunicorn", "journalctl.main:server", \
     "--bind", "0.0.0.0:8100", \
     "--timeout", "300", \
     "--keep-alive", "120", \
-    "--log-level", "info"]
+    "--log-level", "info", \
+    "--access-logfile", "-", \
+    "--access-logformat", "%(m)s %(U)s → %(s)s (%(D)sμs)"]

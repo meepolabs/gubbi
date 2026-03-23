@@ -22,6 +22,11 @@ services:
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
+      - JOURNAL_LOG_DIR=/app/logs
+      # OAuth
+      - JOURNAL_SERVER_URL
+      - JOURNAL_OWNER_PASSWORD_HASH
+      - JOURNAL_OAUTH_DB_PATH
     volumes:
       - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH to your journal repo}:/app/journal
       - ./logs:/app/logs

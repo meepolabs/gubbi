@@ -36,6 +36,7 @@ class Settings(BaseSettings):
 
     # Logging
     log_level: str = "info"
+    log_dir: Path = Path("./logs")
 
     @property
     def topics_dir(self) -> Path:

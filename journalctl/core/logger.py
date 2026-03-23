@@ -8,15 +8,16 @@ LOG_ROTATE_WHEN = os.getenv(key="LOG_ROTATE_WHEN", default="W6")
 LOG_ROTATE_BACKUP = int(os.getenv(key="LOG_ROTATE_BACKUP", default="4"))
 
 
-def initialize_logger(logger_name: str) -> None:
+def initialize_logger(logger_name: str, log_dir: str = "logs") -> None:
     """Initialize structlog with rotating file handler.
 
     Args:
         logger_name: Name of the logger and log file.
+        log_dir: Directory for log files.
     """
-    os.makedirs("logs", exist_ok=True)
+    os.makedirs(log_dir, exist_ok=True)
 
-    log_file_path = f"logs/{logger_name}.log"
+    log_file_path = f"{log_dir}/{logger_name}.log"
     file_handler = handlers.TimedRotatingFileHandler(
         filename=log_file_path,
         when=LOG_ROTATE_WHEN,
