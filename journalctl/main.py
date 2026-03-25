@@ -17,6 +17,8 @@ from starlette.middleware import Middleware
 from journalctl.config import Settings, get_settings
 from journalctl.core.logger import initialize_logger
 from journalctl.import_tools import import_tools
+from journalctl.memory.protocol import MemoryServiceProtocol
+from journalctl.memory.setup import configure_env, init_service
 from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
 from journalctl.oauth.setup import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
@@ -32,12 +34,14 @@ class CustomFastAPI(FastAPI):
     index: SearchIndex
     settings: Settings
     mcp: FastMCP
+    memory_service: MemoryServiceProtocol | None
 
 
 def create_mcp_server(
     storage: MarkdownStorage,
     index: SearchIndex,
     settings: Settings,
+    memory_service: MemoryServiceProtocol | None = None,
 ) -> FastMCP:
     """Create and configure the MCP server with all tools."""
     mcp = FastMCP(
@@ -46,7 +50,7 @@ def create_mcp_server(
         streamable_http_path="/",
         host="0.0.0.0",  # noqa: S104 — accept any Host header behind reverse proxy
     )
-    import_tools(mcp, storage, index, settings)
+    import_tools(mcp, storage, index, settings, memory_service=memory_service)
     return mcp
 
 
@@ -72,10 +76,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     # Incremental index rebuild on startup
     count = app.index.incremental_rebuild()
-    await app.logger.info(
-        "Index rebuild complete",
-        files_updated=count,
-    )
+    await app.logger.info("Index rebuild complete", files_updated=count)
 
     # Initialize OAuth storage and register routes
     oauth_storage = OAuthStorage(settings.oauth_db_path)
@@ -88,8 +89,14 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     if token_validator:
         await app.logger.info("OAuth endpoints registered")
 
+    # Initialize memory service
+    configure_env()
+    app.memory_service = await init_service(settings)
+    if app.memory_service is not None:
+        await app.logger.info("Memory service initialized", db_path=str(settings.memory_db_path))
+
     # Create MCP server and mount on FastAPI
-    app.mcp = create_mcp_server(app.storage, app.index, settings)
+    app.mcp = create_mcp_server(app.storage, app.index, settings, memory_service=app.memory_service)
     mcp_http = app.mcp.streamable_http_app()
     authed_mcp = BearerAuthMiddleware(mcp_http, token_validator=token_validator)
     app.mount("/mcp", authed_mcp)
@@ -100,6 +107,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await app.logger.info("Server shutting down")
+        if app.memory_service is not None:
+            await app.memory_service.close()
         app.index.close()
         oauth_storage.close()
 
@@ -146,7 +155,10 @@ def main() -> None:
     settings = get_settings()
 
     if settings.transport == "stdio":
-        # stdio mode: run MCP directly without FastAPI
+        import asyncio  # noqa: PLC0415
+
+        configure_env()
+
         storage = MarkdownStorage(settings.journal_root)
         idx = SearchIndex(settings.db_path, settings.journal_root)
 
@@ -155,10 +167,12 @@ def main() -> None:
         settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
 
         idx.incremental_rebuild()
-        mcp = create_mcp_server(storage, idx, settings)
+        mem_service = asyncio.run(init_service(settings))
+
+        mcp = create_mcp_server(storage, idx, settings, memory_service=mem_service)
         mcp.run(transport="stdio")
     else:
-        import uvicorn
+        import uvicorn  # noqa: PLC0415
 
         uvicorn.run(
             "journalctl.main:server",

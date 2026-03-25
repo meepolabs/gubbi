@@ -27,6 +27,9 @@ services:
       - JOURNAL_SERVER_URL
       - JOURNAL_OWNER_PASSWORD_HASH
       - JOURNAL_OAUTH_DB_PATH
+      # Memory service
+      - JOURNAL_MEMORY_ENABLED=true
+      - JOURNAL_MEMORY_DB_PATH=/app/journal/memory.db
     volumes:
       - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH to your journal repo}:/app/journal
       - ./logs:/app/logs
@@ -38,9 +41,9 @@ services:
     deploy:
       resources:
         limits:
-          memory: 512M
+          memory: 1024M   # gunicorn 2 workers + ONNX model (~80MB) + sqlite-vec
         reservations:
-          memory: 256M
+          memory: 512M    # baseline without cached embeddings
 
   mkdocs:
     image: squidfunk/mkdocs-material:latest

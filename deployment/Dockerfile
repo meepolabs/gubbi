@@ -26,8 +26,19 @@ RUN curl -sSL https://install.python-poetry.org | python -
 WORKDIR $PYSETUP_PATH
 COPY poetry.lock pyproject.toml ./
 
-# Install runtime deps
+# Install runtime deps — versions and hashes locked via poetry.lock
 RUN poetry install --only main
+
+# Install mcp-memory-service from PyPI, exact version + sha256 hash verified.
+# --no-deps: skips torch/sentence-transformers (2.7GB); lightweight deps
+# are provided by the Poetry install above (onnxruntime, tokenizers, sqlite-vec).
+# To upgrade: bump version, update hash from https://pypi.org/pypi/mcp-memory-service/<ver>/json
+COPY deployment/requirements-memory.txt ./
+RUN pip install --no-deps --require-hashes -r requirements-memory.txt
+
+# Pre-download ONNX embedding model at build time (~80MB).
+# Cached in image layer — no network calls at container startup.
+RUN python -c "from mcp_memory_service.embeddings.onnx_embeddings import ONNXEmbeddingModel; ONNXEmbeddingModel()"
 
 # Copy source
 COPY . /src
@@ -48,8 +59,10 @@ EXPOSE 8100
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8100/health || exit 1
 
+# --preload loads app once in master, workers share model memory via fork (copy-on-write).
 CMD ["gunicorn", "journalctl.main:server", \
-    "--workers", "4", \
+    "--workers", "2", \
+    "--preload", \
     "--worker-class", "uvicorn.workers.UvicornWorker", \
     "--bind", "0.0.0.0:8100", \
     "--timeout", "300", \
