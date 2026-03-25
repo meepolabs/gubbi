@@ -30,9 +30,11 @@ services:
       # Memory service
       - JOURNAL_MEMORY_ENABLED=true
       - JOURNAL_MEMORY_DB_PATH=/app/journal/memory.db
+      - MCP_CUSTOM_MEMORY_TYPES
     volumes:
       - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH to your journal repo}:/app/journal
       - ./logs:/app/logs
+      - onnx-model-cache:/home/appuser/.cache/mcp_memory
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
       interval: 30s
@@ -59,3 +61,6 @@ services:
       # (needed when behind nginx reverse proxy)
       - MKDOCS_DEV_ADDR=0.0.0.0:8000
     command: serve --dev-addr=0.0.0.0:8000 --no-strict
+
+volumes:
+  onnx-model-cache:

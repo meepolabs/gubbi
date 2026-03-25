@@ -36,7 +36,6 @@ RUN poetry install --only main
 COPY deployment/requirements-memory.txt ./
 RUN pip install --no-deps --require-hashes -r requirements-memory.txt
 
-# Pre-download ONNX embedding model at build time (~80MB).
 RUN adduser --disabled-password --gecos "" appuser && \
     mkdir -p /app/logs /app/journal
 
@@ -46,12 +45,9 @@ WORKDIR /src
 
 RUN chown -R appuser:appuser /src /app /home/appuser
 
-# Download ONNX model as appuser
-USER appuser
-RUN python -c "from mcp_memory_service.embeddings.onnx_embeddings import ONNXEmbeddingModel; ONNXEmbeddingModel()"
-USER root
-
 # Entrypoint handles permission fixing + privilege drop
+# ONNX model (~80MB) downloads to /home/appuser/.cache on first container start,
+# persisted via the onnx-model-cache Docker volume — survives all future rebuilds.
 COPY deployment/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]

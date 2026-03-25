@@ -15,8 +15,16 @@ if [ "$MOUNT_UID" != "0" ]; then
     groupmod -g "$MOUNT_GID" appuser 2>/dev/null || true
 fi
 
-# Fix ownership of app-internal directories
-chown -R appuser:appuser /src /app/logs 2>/dev/null || true
+# Fix ownership of app-internal directories (including ONNX model volume)
+chown -R appuser:appuser /src /app/logs /home/appuser/.cache 2>/dev/null || true
+
+# Pre-download ONNX model as appuser before gunicorn workers start.
+# Without this, both workers race to download simultaneously and one gets
+# a corrupted archive. Running once here serializes the download.
+gosu appuser python -c "
+from mcp_memory_service.embeddings.onnx_embeddings import ONNXEmbeddingModel
+ONNXEmbeddingModel()
+" 2>&1 || true
 
 # Drop privileges and run the CMD
 exec gosu appuser "$@"

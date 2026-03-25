@@ -120,6 +120,45 @@ def register(
             "stats": stats,
         }
 
+    @mcp.prompt(
+        name="journal-context",
+        description=(
+            "Load current journal context: this week's activity, "
+            "active topics, and user profile. "
+            "Include at conversation start for zero-prompt personal context."
+        ),
+    )
+    async def journal_context_prompt() -> str:
+        """Journal context prompt resource — loaded automatically at conversation start."""
+        profile = storage.read_knowledge("user-profile") or ""
+        date_from, date_to, label = _resolve_period("this-week")
+        week_entries = index.get_entries_by_date_range(date_from, date_to)
+        all_topics = storage.list_topics()
+        top_topics = all_topics[:20]
+        stats = index.get_stats()
+
+        sections = []
+        if profile:
+            sections.append(f"## Profile\n{profile.strip()}")
+
+        if week_entries:
+            entry_lines = "\n".join(
+                f"- {e['date']} [{e['topic']}] {str(e.get('content', ''))[:120]}"
+                for e in week_entries[:15]
+            )
+            sections.append(f"## This Week ({label})\n{entry_lines}")
+        else:
+            sections.append(f"## This Week ({label})\nNo entries this week.")
+
+        topic_lines = "\n".join(
+            f"- {t.topic} ({t.entry_count} entries, updated {t.updated})" for t in top_topics
+        )
+        sections.append(f"## Active Topics ({len(all_topics)} total)\n{topic_lines}")
+
+        sections.append(f"## Stats\nTotal entries: {stats.get('total_entries', 0)}")
+
+        return "\n\n".join(sections)
+
     @mcp.tool()
     async def journal_timeline(
         period: str,
