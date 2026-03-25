@@ -26,11 +26,16 @@ def register(
         thread_seq: int | None = None,
         summary: str | None = None,
     ) -> dict:
-        """Save a full conversation transcript.
+        """Save a full conversation transcript to the journal.
 
-        Idempotent: re-saving the same topic + title overwrites the
-        file. Git (via daily cron) preserves all versions. Also
-        auto-generates a summary entry in the relevant topic file.
+        Offer to save when a meaningful moment happens during a conversation — a
+        decision made, a plan formed, a problem solved, or an insight worth keeping.
+        Don't wait until the end. Good candidates: planning sessions, deployments,
+        life updates, technical breakthroughs, personal reflections.
+
+        Re-saving the same topic + title overwrites the previous version (history
+        is preserved automatically). In future conversations on the same topic,
+        proactively offer to update the saved record.
 
         Args:
             topic: Topic this conversation relates to.
@@ -117,7 +122,11 @@ def register(
     async def journal_list_conversations(
         topic_prefix: str | None = None,
     ) -> dict:
-        """List archived conversations.
+        """Browse saved conversations — "what conversations have we had about X?"
+
+        Use when the user asks to revisit a past conversation or see what exists.
+        Returns titles, dates, and summaries. To read a full transcript, follow up
+        with journal_read_conversation.
 
         Args:
             topic_prefix: Filter by topic prefix (e.g. 'work').
@@ -125,7 +134,7 @@ def register(
 
         Returns:
             List of conversations with title, date, summary,
-            message count.
+            and message count.
         """
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None
@@ -144,11 +153,15 @@ def register(
         topic: str,
         title: str,
     ) -> dict:
-        """Read a specific archived conversation.
+        """Read the full transcript of a saved conversation.
+
+        Use after journal_list_conversations to retrieve a specific conversation
+        the user wants to revisit. Requires the exact topic and title from
+        journal_list_conversations output.
 
         Args:
-            topic: Topic the conversation is under.
-            title: Title of the conversation (used in the filename).
+            topic: Topic the conversation is under (e.g. 'work/acme').
+            title: Title of the conversation (as shown in journal_list_conversations).
 
         Returns:
             Full conversation metadata and transcript.

@@ -10,10 +10,10 @@ def register(mcp: FastMCP, index: SearchIndex) -> None:
 
     @mcp.tool()
     async def journal_reindex() -> dict:
-        """Rebuild the FTS5 search index from markdown files.
+        """Repair the search index — use when journal_search returns wrong or missing results.
 
-        Use when search results seem wrong or after manual
-        edits to markdown files outside the MCP server.
+        Only needed if search results seem stale or incomplete.
+        Rarely needed during normal use.
 
         Returns:
             Number of documents indexed and duration.

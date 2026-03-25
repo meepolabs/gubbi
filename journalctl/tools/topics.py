@@ -15,7 +15,10 @@ def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
-        """List all journal topics with metadata.
+        """Browse all journal topics — "what topics do I have?" or "what do I track?"
+
+        Use when the user asks about their journal structure, or when you need to
+        discover valid topic paths for other tools.
 
         Args:
             topic_prefix: Filter topics under this prefix (e.g. 'work').
@@ -24,7 +27,7 @@ def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
 
         Returns:
             List of topics with title, description, tags,
-            entry_count, created, and updated dates.
+            entry count, and created/updated dates.
         """
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None
@@ -46,7 +49,11 @@ def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
         description: str = "",
         tags: list[str] | None = None,
     ) -> dict:
-        """Create a new journal topic with metadata.
+        """Create a new journal topic for an area of the user's life not yet tracked.
+
+        Only create when no existing topic fits — check journal_list_topics first.
+        journal_append auto-creates topics, so this is mainly useful when you want
+        to set a title, description, and tags upfront.
 
         Args:
             topic: Topic path (e.g. 'hobbies/woodworking').
@@ -56,7 +63,7 @@ def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
             tags: Initial tags.
 
         Returns:
-            Confirmation with the created file path.
+            Confirmation with the created topic path.
         """
         validate_topic(topic)
         title = sanitize_label(title, max_len=100)

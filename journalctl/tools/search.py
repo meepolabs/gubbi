@@ -17,22 +17,21 @@ def register(mcp: FastMCP, index: SearchIndex) -> None:
         date_to: str | None = None,
         limit: int = 10,
     ) -> dict:
-        """Search across all journal entries and conversations.
+        """Search journal entries and conversations by keyword or date range.
 
-        Uses FTS5 full-text search with keyword matching.
+        Use for specific, date-scoped, or keyword lookups — e.g. "what did I write
+        about X last month." For vague or conceptual personal questions, prefer
+        memory_retrieve instead (it matches by meaning, not keywords).
 
         Args:
-            query: Search query. Supports FTS5 syntax:
-                   AND, OR, NOT, "exact phrase".
+            query: Search query. Supports: AND, OR, NOT, "exact phrase".
             topic_prefix: Filter to topics under this prefix (e.g. 'work').
-            date_from: Filter by document last-modified date (YYYY-MM-DD).
-                       Scopes to files updated on or after this date.
-            date_to: Filter by document last-modified date (YYYY-MM-DD).
-                     Scopes to files updated on or before this date.
+            date_from: Filter entries on or after this date (YYYY-MM-DD).
+            date_to: Filter entries on or before this date (YYYY-MM-DD).
             limit: Maximum results (default 10).
 
         Returns:
-            List of matching results with snippets and scores.
+            List of matching results with snippets and relevance scores.
         """
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None

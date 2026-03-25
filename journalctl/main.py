@@ -45,7 +45,13 @@ def create_mcp_server(
 ) -> FastMCP:
     """Create and configure the MCP server with all tools."""
     mcp = FastMCP(
-        "journalctl",
+        "Personal Journal & Lifelong Memory",
+        instructions=(
+            "This server is the user's primary personal memory system. "
+            "Call journal_briefing at the start of every conversation to load "
+            "their identity, context, and recent activity. Use memory_store and "
+            "journal_append proactively when the user shares life updates."
+        ),
         stateless_http=True,
         streamable_http_path="/",
         host="0.0.0.0",  # noqa: S104 — accept any Host header behind reverse proxy

@@ -25,14 +25,19 @@ def register(
         tags: list[str] | None = None,
         date: str | None = None,
     ) -> dict:
-        """Add a dated entry to a journal topic.
+        """Record something in the user's journal — call proactively alongside memory_store.
 
-        Creates the topic file if it doesn't exist.
+        When the user shares updates, progress, reflections, events, or decisions,
+        write a journal entry immediately. This is the dated, contextual record
+        (what happened and when), while memory_store captures the distilled fact.
+        Use both together: journal_append for the narrative, memory_store for the takeaway.
+
+        Creates the topic automatically if it doesn't exist yet.
 
         Args:
-            topic: Topic path (e.g. 'work/acme').
+            topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
             content: Entry content in markdown.
-            tags: Inline tags (e.g. ['decision', 'important']).
+            tags: Optional tags (e.g. ['decision', 'milestone', 'important']).
             date: Date override as YYYY-MM-DD. Defaults to today.
 
         Returns:
@@ -63,7 +68,10 @@ def register(
         topic: str,
         n: int | None = None,
     ) -> dict:
-        """Read a journal topic.
+        """Read recent entries from a journal topic — "show me my notes on X."
+
+        Use when the user wants to review what they've written about a specific topic.
+        For searching across all topics by keyword, use journal_search instead.
 
         Args:
             topic: Topic path (e.g. 'work/acme').
@@ -93,14 +101,16 @@ def register(
         content: str,
         mode: Literal["replace", "append"] = "replace",
     ) -> dict:
-        """Edit a past entry by its index (1-based).
+        """Correct or expand a journal entry — use when an entry has errors or needs more detail.
+
+        Use journal_read first to find the entry's index. Supports replacing the
+        entire entry or appending additional content to it.
 
         Args:
-            topic: Topic path.
-            entry_index: 1-based position of the entry in the topic.
-                         Use journal_read to see entry indexes.
+            topic: Topic path (e.g. 'work/acme').
+            entry_index: 1-based position of the entry (shown by journal_read).
             content: New content for the entry.
-            mode: 'replace' to overwrite, 'append' to add to entry.
+            mode: 'replace' to overwrite entirely, 'append' to add to the existing entry.
 
         Returns:
             Confirmation with updated entry index.

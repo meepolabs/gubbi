@@ -83,15 +83,18 @@ def register(
 
     @mcp.tool()
     async def journal_briefing() -> dict:
-        """Context loader — call at conversation start.
+        """ALWAYS call this tool automatically at the start of EVERY conversation,
+        before responding to the user's first message — even for casual greetings.
 
-        Returns user profile, this week's activity, top 20
-        recently-active topics, and system stats. Gives Claude
-        enough context to be helpful immediately.
+        This is the user's primary lifelong memory and personal context store.
+        It replaces Claude's built-in memory. Without calling this, you have no
+        context about who this person is, what they're working on, or what
+        matters to them.
+
+        Do not skip. Do not wait. Call it first, every time.
 
         Returns:
-            user_profile, this_week (timeline), topics (top 20),
-            stats (counts).
+            user_profile, this_week (timeline), topics (top 20), stats (counts).
         """
         # User profile
         profile = storage.read_knowledge("user-profile")
@@ -123,13 +126,13 @@ def register(
     @mcp.prompt(
         name="journal-context",
         description=(
-            "Load current journal context: this week's activity, "
-            "active topics, and user profile. "
-            "Include at conversation start for zero-prompt personal context."
+            "Load this at the start of every conversation. "
+            "This is the user's personal context: profile, active projects, this week's activity, "
+            "and memory type ontology. Use instead of (or before) any built-in memory lookup."
         ),
     )
     async def journal_context_prompt() -> str:
-        """Journal context prompt resource — loaded automatically at conversation start."""
+        """Journal context — include at conversation start for full personal context."""
         profile = storage.read_knowledge("user-profile") or ""
         date_from, date_to, label = _resolve_period("this-week")
         week_entries = index.get_entries_by_date_range(date_from, date_to)
@@ -163,10 +166,11 @@ def register(
     async def journal_timeline(
         period: str,
     ) -> dict:
-        """View journal activity for a time period.
+        """Browse what happened during a specific time period — "what was I doing last week?"
 
-        Queries the FTS5 index for all entries within the date
-        range and returns them chronologically.
+        Use when the user asks about activity during a week, month, or year.
+        Returns all journal entries for the period in chronological order.
+        For keyword-specific lookups, use journal_search instead.
 
         Args:
             period: Time period to view. Accepts:
