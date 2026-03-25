@@ -1,10 +1,13 @@
 # mcp-memory-service — pinned to exact version with sha256 hash for supply chain safety.
-# Installed with --no-deps (torch/sentence-transformers excluded; lightweight deps
-# are managed by Poetry: onnxruntime, tokenizers, sqlite-vec, numpy, etc.)
 #
-# To upgrade:
-#   1. Check https://pypi.org/pypi/mcp-memory-service/<new-version>/json for new hash
-#   2. Update version and hash below
-#   3. Rebuild Docker image
+# Installed with --no-deps to skip torch (~2.7 GB) and sentence-transformers.
+# All other runtime deps are declared in pyproject.toml under the
+# "mcp-memory-service runtime deps" comment block.
+#
+# Upgrade procedure:
+#   1. Check https://pypi.org/pypi/mcp-memory-service/<new-version>/json for new sha256
+#   2. Compare new version's pyproject.toml deps against ours in pyproject.toml
+#   3. Update version and --hash below
+#   4. Run: poetry lock && docker compose build
 mcp-memory-service==10.26.9 \
     --hash=sha256:ecbc224607d1fd3c717484694fc576b14e6554428a89698158a6eab27e76f4b5

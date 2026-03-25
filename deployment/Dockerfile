@@ -37,17 +37,19 @@ COPY deployment/requirements-memory.txt ./
 RUN pip install --no-deps --require-hashes -r requirements-memory.txt
 
 # Pre-download ONNX embedding model at build time (~80MB).
-# Cached in image layer — no network calls at container startup.
-RUN python -c "from mcp_memory_service.embeddings.onnx_embeddings import ONNXEmbeddingModel; ONNXEmbeddingModel()"
+RUN adduser --disabled-password --gecos "" appuser && \
+    mkdir -p /app/logs /app/journal
 
 # Copy source
 COPY . /src
 WORKDIR /src
 
-# Create non-root user and writable directories.
-RUN adduser --disabled-password --gecos "" appuser && \
-    mkdir -p /app/logs /app/journal && \
-    chown -R appuser:appuser /src /app
+RUN chown -R appuser:appuser /src /app /home/appuser
+
+# Download ONNX model as appuser
+USER appuser
+RUN python -c "from mcp_memory_service.embeddings.onnx_embeddings import ONNXEmbeddingModel; ONNXEmbeddingModel()"
+USER root
 
 # Entrypoint handles permission fixing + privilege drop
 COPY deployment/entrypoint.sh /entrypoint.sh
