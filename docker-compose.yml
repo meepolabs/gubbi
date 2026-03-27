@@ -47,20 +47,5 @@ services:
         reservations:
           memory: 512M    # baseline without cached embeddings
 
-  mkdocs:
-    image: squidfunk/mkdocs-material:latest
-    container_name: journal-mkdocs
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8300:8000"
-    volumes:
-      # Whole journal repo mounted — mkdocs.yml at root, content/ as docs_dir
-      - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH}:/docs
-    environment:
-      # Allow MkDocs dev server to accept requests with any Host header
-      # (needed when behind nginx reverse proxy)
-      - MKDOCS_DEV_ADDR=0.0.0.0:8000
-    command: serve --dev-addr=0.0.0.0:8000 --no-strict
-
 volumes:
   onnx-model-cache:
