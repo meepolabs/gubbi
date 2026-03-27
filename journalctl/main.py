@@ -22,15 +22,15 @@ from journalctl.memory.setup import configure_env, init_service
 from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
 from journalctl.oauth.setup import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
-from journalctl.storage.markdown import MarkdownStorage
 
 
 class CustomFastAPI(FastAPI):
     """Extended FastAPI with journal-specific attributes."""
 
     logger: structlog.BoundLogger
-    storage: MarkdownStorage
+    storage: DatabaseStorage
     index: SearchIndex
     settings: Settings
     mcp: FastMCP
@@ -38,7 +38,7 @@ class CustomFastAPI(FastAPI):
 
 
 def create_mcp_server(
-    storage: MarkdownStorage,
+    storage: DatabaseStorage,
     index: SearchIndex,
     settings: Settings,
     memory_service: MemoryServiceProtocol | None = None,
@@ -72,17 +72,16 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize storage
     app.settings = settings
-    app.storage = MarkdownStorage(settings.journal_root)
-    app.index = SearchIndex(settings.db_path, settings.journal_root)
+    app.storage = DatabaseStorage(settings.db_path, settings.journal_root)
+    app.index = SearchIndex(settings.db_path)
 
-    # Ensure directories exist
-    settings.topics_dir.mkdir(parents=True, exist_ok=True)
-    settings.conversations_dir.mkdir(parents=True, exist_ok=True)
+    # Ensure knowledge directory exists (still file-based)
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
 
-    # Incremental index rebuild on startup
-    count = app.index.incremental_rebuild()
-    await app.logger.info("Index rebuild complete", files_updated=count)
+    # Force schema init on both storage and index
+    _ = app.storage.conn
+    _ = app.index.conn
+    await app.logger.info("Storage initialized", db_path=str(settings.db_path))
 
     # Initialize OAuth storage and register routes
     oauth_storage = OAuthStorage(settings.oauth_db_path)
@@ -165,14 +164,12 @@ def main() -> None:
 
         configure_env()
 
-        storage = MarkdownStorage(settings.journal_root)
-        idx = SearchIndex(settings.db_path, settings.journal_root)
+        storage = DatabaseStorage(settings.db_path, settings.journal_root)
+        idx = SearchIndex(settings.db_path)
 
-        settings.topics_dir.mkdir(parents=True, exist_ok=True)
-        settings.conversations_dir.mkdir(parents=True, exist_ok=True)
         settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-
-        idx.incremental_rebuild()
+        _ = storage.conn
+        _ = idx.conn
         mem_service = asyncio.run(init_service(settings))
 
         mcp = create_mcp_server(storage, idx, settings, memory_service=mem_service)

@@ -91,8 +91,9 @@ def slugify(text: str) -> str:
 
 
 class TopicMeta(BaseModel):
-    """YAML frontmatter for a topic file."""
+    """Metadata for a topic."""
 
+    id: int | None = None  # stable DB row ID
     topic: str
     title: str
     description: str = ""
@@ -108,8 +109,9 @@ class TopicMeta(BaseModel):
 
 
 class ConversationMeta(BaseModel):
-    """YAML frontmatter for a conversation archive."""
+    """Metadata for a conversation archive."""
 
+    id: int | None = None  # stable DB row ID
     type: str = "conversation"
     source: str = "claude"
     title: str
@@ -130,24 +132,29 @@ class ConversationMeta(BaseModel):
 
 
 class Entry(BaseModel):
-    """A single dated entry parsed from a topic file."""
+    """A single dated journal entry."""
 
-    index: int  # 1-based position in the file
-    date: str  # YYYY-MM-DD or YYYY-MM-DD HH:MM
+    id: int | None = None  # stable DB row ID (None for legacy/in-memory entries)
+    index: int  # 1-based position within topic (for display)
+    date: str  # YYYY-MM-DD
     tags: list[str] = []
-    content: str
+    content: str  # what happened (headline)
+    context: str | None = None  # why/reasoning (loaded on demand)
+    conversation_id: int | None = None  # FK to conversations table
 
 
 class SearchResult(BaseModel):
     """A single search result from FTS5."""
 
-    file_path: str
-    doc_type: str  # 'topic' or 'conversation'
+    source_key: str  # 'entry:42', 'conversation:17'
+    doc_type: str  # 'entry' or 'conversation'
     topic: str
     title: str
     snippet: str
     rank: float
     date: str
+    entry_id: int | None = None
+    conversation_id: int | None = None
 
 
 class Message(BaseModel):

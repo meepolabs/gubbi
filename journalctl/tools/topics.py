@@ -3,10 +3,10 @@
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.models.entry import sanitize_freetext, sanitize_label, validate_topic
-from journalctl.storage.markdown import MarkdownStorage
+from journalctl.storage.database import DatabaseStorage
 
 
-def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
+def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
     """Register topic tools on the MCP server."""
 
     @mcp.tool()
@@ -71,7 +71,7 @@ def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
             description = sanitize_freetext(description, max_len=500)
         if tags:
             tags = [sanitize_label(t) for t in tags]
-        path = storage.create_topic(
+        topic_id = storage.create_topic(
             topic=topic,
             title=title,
             description=description,
@@ -80,5 +80,5 @@ def register(mcp: FastMCP, storage: MarkdownStorage) -> None:
         return {
             "status": "created",
             "topic": topic,
-            "path": str(path),
+            "topic_id": topic_id,
         }

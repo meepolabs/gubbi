@@ -4,8 +4,8 @@ from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import Settings
 from journalctl.memory.protocol import MemoryServiceProtocol
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
-from journalctl.storage.markdown import MarkdownStorage
 from journalctl.tools import (
     admin,
     context,
@@ -19,7 +19,7 @@ from journalctl.tools import (
 
 def import_tools(
     mcp: FastMCP,
-    storage: MarkdownStorage,
+    storage: DatabaseStorage,
     index: SearchIndex,
     settings: Settings,
     memory_service: MemoryServiceProtocol | None = None,
@@ -28,7 +28,7 @@ def import_tools(
 
     Args:
         mcp: FastMCP server instance.
-        storage: Markdown storage layer.
+        storage: Canonical database storage layer.
         index: FTS5 search index.
         settings: Application settings.
         memory_service: Optional MemoryService instance for semantic memory tools.
@@ -38,7 +38,7 @@ def import_tools(
     search.register(mcp, index)
     conversations.register(mcp, storage, index)
     context.register(mcp, storage, index, settings)
-    admin.register(mcp, index)
+    admin.register(mcp, index, storage)
 
     if memory_service is not None:
         memory.register(mcp, memory_service)

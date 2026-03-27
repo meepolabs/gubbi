@@ -1,8 +1,10 @@
 """FTS5 SQLite search index.
 
-The index is a disposable acceleration layer. It can be deleted
-and rebuilt from markdown files at any time. Timeline and knowledge
-files are excluded from indexing.
+The index is a disposable acceleration layer over the canonical
+DatabaseStorage tables. It can be deleted and rebuilt from the
+database at any time via rebuild_from_db().
+
+Timeline and knowledge files are excluded from indexing.
 """
 
 import json
@@ -10,8 +12,6 @@ import logging
 import sqlite3
 import time
 from pathlib import Path
-
-import frontmatter
 
 from journalctl.models.entry import SearchResult
 
@@ -23,7 +23,7 @@ PRAGMA journal_mode=WAL;
 
 CREATE TABLE IF NOT EXISTS documents (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    file_path   TEXT NOT NULL UNIQUE,
+    source_key  TEXT NOT NULL UNIQUE,
     doc_type    TEXT NOT NULL,
     topic       TEXT NOT NULL,
     title       TEXT NOT NULL,
@@ -31,7 +31,6 @@ CREATE TABLE IF NOT EXISTS documents (
     tags        TEXT DEFAULT '[]',
     created     TEXT,
     updated     TEXT,
-    entry_count INTEGER DEFAULT 0,
     content     TEXT NOT NULL,
     indexed_at  INTEGER NOT NULL
 );
@@ -59,21 +58,17 @@ CREATE TRIGGER IF NOT EXISTS documents_au AFTER UPDATE ON documents BEGIN
     VALUES (new.id, new.title, new.description, new.tags, new.content);
 END;
 
-CREATE INDEX IF NOT EXISTS idx_documents_topic ON documents(topic);
-CREATE INDEX IF NOT EXISTS idx_documents_doc_type ON documents(doc_type);
+CREATE INDEX IF NOT EXISTS idx_documents_topic   ON documents(topic);
+CREATE INDEX IF NOT EXISTS idx_documents_type    ON documents(doc_type);
 CREATE INDEX IF NOT EXISTS idx_documents_updated ON documents(updated);
 """
 
-# Directories to skip when indexing
-SKIP_DIRS = {"timeline", "knowledge", ".git"}
-
 
 class SearchIndex:
-    """FTS5 SQLite index over journal markdown files."""
+    """FTS5 search index. Disposable — rebuilt from DatabaseStorage."""
 
-    def __init__(self, db_path: Path, journal_root: Path) -> None:
+    def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        self.journal_root = journal_root
         self._conn: sqlite3.Connection | None = None
 
     @property
@@ -84,15 +79,11 @@ class SearchIndex:
                 check_same_thread=False,
             )
             self._conn.row_factory = sqlite3.Row
-            # Allow concurrent writers to retry for up to 5s instead of
-            # failing immediately with SQLITE_BUSY. Needed because
-            # gunicorn runs multiple worker processes sharing this DB.
             self._conn.execute("PRAGMA busy_timeout=5000")
             self._init_schema()
         return self._conn
 
     def _init_schema(self) -> None:
-        """Create tables and indexes if they don't exist."""
         self._conn.executescript(SCHEMA)  # type: ignore[union-attr]
 
     def close(self) -> None:
@@ -101,54 +92,109 @@ class SearchIndex:
             self._conn = None
 
     # ------------------------------------------------------------------
-    # Upsert
+    # Upsert (called after writes to DatabaseStorage)
     # ------------------------------------------------------------------
 
-    def upsert_file(self, file_path: Path) -> None:
-        """Parse a markdown file and upsert it into the index."""
-        rel_path = file_path.relative_to(self.journal_root).as_posix()
-        post = frontmatter.load(str(file_path))
-        meta = post.metadata
-
-        # Determine doc_type from path
-        if rel_path.startswith("topics/"):
-            doc_type = "topic"
-        elif rel_path.startswith("conversations/"):
-            doc_type = "conversation"
-        else:
-            return  # Skip other files
+    def upsert_entry(
+        self,
+        entry_id: int,
+        topic: str,
+        title: str,
+        date: str,
+        content: str,
+        context: str | None,
+        tags: list[str],
+    ) -> None:
+        """Index a single journal entry."""
+        source_key = f"entry:{entry_id}"
+        full_content = content
+        if context:
+            full_content = f"{content}\n\n{context}"
 
         self.conn.execute(
             """
             INSERT INTO documents
-                (file_path, doc_type, topic, title, description,
-                 tags, created, updated, entry_count, content, indexed_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(file_path) DO UPDATE SET
-                doc_type=excluded.doc_type,
+                (source_key, doc_type, topic, title, description,
+                 tags, created, updated, content, indexed_at)
+            VALUES (?, 'entry', ?, ?, '', ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
                 topic=excluded.topic,
                 title=excluded.title,
-                description=excluded.description,
                 tags=excluded.tags,
-                created=excluded.created,
                 updated=excluded.updated,
-                entry_count=excluded.entry_count,
                 content=excluded.content,
                 indexed_at=excluded.indexed_at
             """,
             (
-                rel_path,
-                doc_type,
-                meta.get("topic", ""),
-                meta.get("title", ""),
-                meta.get("description", ""),
-                json.dumps(meta.get("tags", [])),
-                meta.get("created", ""),
-                meta.get("updated", ""),
-                meta.get("entry_count", 0),
-                post.content,
+                source_key,
+                topic,
+                title,
+                json.dumps(tags),
+                date,
+                date,
+                full_content,
                 int(time.time()),
             ),
+        )
+        self.conn.commit()
+
+    def upsert_conversation(
+        self,
+        conversation_id: int,
+        topic: str,
+        title: str,
+        summary: str,
+        tags: list[str],
+        created: str,
+        updated: str,
+        message_content: str,
+    ) -> None:
+        """Index a conversation (summary + concatenated messages)."""
+        source_key = f"conversation:{conversation_id}"
+        full_content = f"{summary}\n\n{message_content}" if summary else message_content
+
+        self.conn.execute(
+            """
+            INSERT INTO documents
+                (source_key, doc_type, topic, title, description,
+                 tags, created, updated, content, indexed_at)
+            VALUES (?, 'conversation', ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_key) DO UPDATE SET
+                topic=excluded.topic,
+                title=excluded.title,
+                description=excluded.description,
+                tags=excluded.tags,
+                updated=excluded.updated,
+                content=excluded.content,
+                indexed_at=excluded.indexed_at
+            """,
+            (
+                source_key,
+                topic,
+                title,
+                summary,
+                json.dumps(tags),
+                created,
+                updated,
+                full_content,
+                int(time.time()),
+            ),
+        )
+        self.conn.commit()
+
+    def remove_entry(self, entry_id: int) -> None:
+        """Remove an entry from the index."""
+        self.conn.execute(
+            "DELETE FROM documents WHERE source_key = ?",
+            (f"entry:{entry_id}",),
+        )
+        self.conn.commit()
+
+    def remove_conversation(self, conversation_id: int) -> None:
+        """Remove a conversation from the index."""
+        self.conn.execute(
+            "DELETE FROM documents WHERE source_key = ?",
+            (f"conversation:{conversation_id}",),
         )
         self.conn.commit()
 
@@ -164,23 +210,19 @@ class SearchIndex:
         date_to: str | None = None,
         limit: int = 10,
     ) -> list[SearchResult]:
-        """Full-text search using FTS5.
-
-        The query is passed to FTS5 MATCH via parameterized binding
-        (safe from SQL injection). Malformed FTS5 syntax (unmatched
-        quotes, invalid operators) raises ValueError.
-        """
+        """Full-text search using FTS5."""
         if not query or not query.strip():
             return []
 
+        query = query.strip()[:500]  # cap to prevent oversized FTS5 expressions
+
         sql = """
             SELECT
-                d.file_path,
+                d.source_key,
                 d.doc_type,
                 d.topic,
                 d.title,
-                snippet(documents_fts, 3, '<mark>', '</mark>', '...', 40)
-                    AS snippet,
+                snippet(documents_fts, 3, '<mark>', '</mark>', '...', 40) AS snippet,
                 rank,
                 d.updated AS date
             FROM documents_fts
@@ -214,151 +256,107 @@ class SearchIndex:
             )
             raise ValueError(msg) from None
 
-        return [
-            SearchResult(
-                file_path=row["file_path"],
-                doc_type=row["doc_type"],
-                topic=row["topic"],
-                title=row["title"],
-                snippet=row["snippet"],
-                rank=row["rank"],
-                date=row["date"],
+        results = []
+        for row in rows:
+            source_key = row["source_key"]
+            entry_id = None
+            conversation_id = None
+            if source_key.startswith("entry:"):
+                entry_id = int(source_key[6:])
+            elif source_key.startswith("conversation:"):
+                conversation_id = int(source_key[13:])
+
+            results.append(
+                SearchResult(
+                    source_key=source_key,
+                    doc_type=row["doc_type"],
+                    topic=row["topic"],
+                    title=row["title"],
+                    snippet=row["snippet"],
+                    rank=row["rank"],
+                    date=row["date"],
+                    entry_id=entry_id,
+                    conversation_id=conversation_id,
+                )
             )
-            for row in rows
-        ]
-
-    # ------------------------------------------------------------------
-    # Timeline queries
-    # ------------------------------------------------------------------
-
-    def get_entries_by_date_range(
-        self,
-        date_from: str,
-        date_to: str,
-    ) -> list[dict[str, str]]:
-        """Get all documents updated within a date range.
-
-        Used by journal_timeline to build dynamic temporal views.
-        """
-        rows = self.conn.execute(
-            """
-            SELECT file_path, doc_type, topic, title, description,
-                   tags, updated
-            FROM documents
-            WHERE updated >= ? AND updated <= ?
-            ORDER BY updated ASC
-            """,
-            (date_from, date_to),
-        ).fetchall()
-
-        return [dict(row) for row in rows]
-
-    # ------------------------------------------------------------------
-    # Stats
-    # ------------------------------------------------------------------
-
-    def get_stats(self) -> dict[str, int]:
-        """Get index statistics."""
-        total = self.conn.execute("SELECT COUNT(*) FROM documents").fetchone()[0]
-        topics = self.conn.execute(
-            "SELECT COUNT(*) FROM documents WHERE doc_type='topic'"
-        ).fetchone()[0]
-        conversations = self.conn.execute(
-            "SELECT COUNT(*) FROM documents WHERE doc_type='conversation'"
-        ).fetchone()[0]
-        return {
-            "total_documents": total,
-            "topics": topics,
-            "conversations": conversations,
-        }
+        return results
 
     # ------------------------------------------------------------------
     # Rebuild
     # ------------------------------------------------------------------
 
-    def rebuild(self) -> dict[str, int | float]:
-        """Full rebuild: drop all data and re-index from markdown.
+    def rebuild_from_db(self, db_storage: "DatabaseStorage") -> dict[str, int | float]:  # type: ignore[name-defined]  # noqa: F821
+        """Full rebuild from canonical DatabaseStorage.
 
-        Returns stats about what was indexed.
+        Clears the FTS5 index and re-indexes all entries and conversations.
         """
+
         start = time.time()
 
-        # Clear existing data (triggers handle FTS cleanup)
         self.conn.execute("DELETE FROM documents")
         self.conn.commit()
 
         count = 0
-        for md_file in self.journal_root.rglob("*.md"):
-            # Skip files in excluded directories
-            rel = md_file.relative_to(self.journal_root)
-            if any(part in SKIP_DIRS for part in rel.parts):
-                continue
 
-            # Only index topics/ and conversations/
-            rel_posix = rel.as_posix()
-            if not (rel_posix.startswith("topics/") or rel_posix.startswith("conversations/")):
-                continue
+        # Index all entries
+        entry_rows = db_storage.conn.execute(
+            """
+            SELECT e.id, e.date, e.content, e.context, e.tags,
+                   t.path AS topic, t.title
+            FROM entries e
+            JOIN topics t ON t.id = e.topic_id
+            """
+        ).fetchall()
+
+        for r in entry_rows:
+            try:
+                self.upsert_entry(
+                    entry_id=r["id"],
+                    topic=r["topic"],
+                    title=r["title"],
+                    date=r["date"],
+                    content=r["content"],
+                    context=r["context"],
+                    tags=json.loads(r["tags"] or "[]"),
+                )
+                count += 1
+            except (sqlite3.Error, KeyError, json.JSONDecodeError, AssertionError) as e:
+                logger.warning("Failed to index entry %s: %s", r["id"], e)
+
+        # Index all conversations (concatenate messages)
+        conv_rows = db_storage.conn.execute(
+            """
+            SELECT c.id, c.title, c.summary, c.tags, c.created_at, c.updated_at,
+                   t.path AS topic
+            FROM conversations c
+            JOIN topics t ON t.id = c.topic_id
+            """
+        ).fetchall()
+
+        for r in conv_rows:
+            msg_rows = db_storage.conn.execute(
+                "SELECT content FROM messages WHERE conversation_id = ? ORDER BY position",
+                (r["id"],),
+            ).fetchall()
+            message_content = "\n\n".join(m["content"] for m in msg_rows)
 
             try:
-                self.upsert_file(md_file)
+                self.upsert_conversation(
+                    conversation_id=r["id"],
+                    topic=r["topic"],
+                    title=r["title"],
+                    summary=r["summary"] or "",
+                    tags=json.loads(r["tags"] or "[]"),
+                    created=r["created_at"],
+                    updated=r["updated_at"],
+                    message_content=message_content,
+                )
                 count += 1
-            except (OSError, ValueError, KeyError) as e:
-                logger.warning("Failed to index %s: %s", md_file, e)
-                continue
+            except Exception as e:  # noqa: BLE001
+                logger.warning("Failed to index conversation %s: %s", r["id"], e)
 
         duration = time.time() - start
         return {
             "documents_indexed": count,
             "duration_seconds": round(duration, 2),
         }
-
-    def incremental_rebuild(self) -> int:
-        """Incremental rebuild: only re-index files newer than indexed_at.
-
-        Returns count of files re-indexed.
-        """
-        count = 0
-        for md_file in self.journal_root.rglob("*.md"):
-            rel = md_file.relative_to(self.journal_root)
-            if any(part in SKIP_DIRS for part in rel.parts):
-                continue
-            rel_posix = rel.as_posix()
-            if not (rel_posix.startswith("topics/") or rel_posix.startswith("conversations/")):
-                continue
-
-            rel_str = rel_posix
-            file_mtime = int(md_file.stat().st_mtime)
-
-            # Check if already indexed and up to date
-            row = self.conn.execute(
-                "SELECT indexed_at FROM documents WHERE file_path = ?",
-                (rel_str,),
-            ).fetchone()
-
-            if row and row["indexed_at"] >= file_mtime:
-                continue
-
-            try:
-                self.upsert_file(md_file)
-                count += 1
-            except (OSError, ValueError, KeyError) as e:
-                logger.warning("Failed to index %s: %s", md_file, e)
-                continue
-
-        # Remove orphaned entries (files that no longer exist)
-        all_paths = self.conn.execute("SELECT file_path FROM documents").fetchall()
-        orphaned = [
-            row["file_path"]
-            for row in all_paths
-            if not (self.journal_root / row["file_path"]).exists()
-        ]
-        if orphaned:
-            placeholders = ",".join("?" * len(orphaned))
-            self.conn.execute(
-                f"DELETE FROM documents WHERE file_path IN ({placeholders})",  # noqa: S608
-                orphaned,
-            )
-            count += len(orphaned)
-
-        self.conn.commit()
-        return count

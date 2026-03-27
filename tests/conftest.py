@@ -8,8 +8,8 @@ import pytest
 
 from journalctl.config import get_settings
 from journalctl.oauth.storage import OAuthStorage
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
-from journalctl.storage.markdown import MarkdownStorage
 
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -18,26 +18,24 @@ TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).dec
 @pytest.fixture
 def tmp_journal(tmp_path: Path) -> Path:
     """Create a temporary journal directory structure."""
-    (tmp_path / "topics").mkdir()
-    (tmp_path / "conversations").mkdir()
     (tmp_path / "knowledge").mkdir()
-    (tmp_path / "timeline").mkdir()
     return tmp_path
 
 
 @pytest.fixture
-def storage(tmp_journal: Path) -> MarkdownStorage:
-    """MarkdownStorage pointed at a temp directory."""
-    return MarkdownStorage(tmp_journal)
+def storage(tmp_journal: Path, tmp_path: Path) -> DatabaseStorage:
+    """DatabaseStorage pointed at a temp directory."""
+    db = DatabaseStorage(tmp_path / "test.db", tmp_journal)
+    _ = db.conn  # Force schema init
+    yield db
+    db.close()
 
 
 @pytest.fixture
-def index(tmp_path: Path, tmp_journal: Path) -> SearchIndex:
-    """SearchIndex with a temp database."""
-    db_path = tmp_path / "test.db"
-    idx = SearchIndex(db_path, tmp_journal)
-    # Force schema init
-    _ = idx.conn
+def index(tmp_path: Path) -> SearchIndex:
+    """SearchIndex with a temp database (shares same db as storage)."""
+    idx = SearchIndex(tmp_path / "test.db")
+    _ = idx.conn  # Force schema init
     yield idx
     idx.close()
 

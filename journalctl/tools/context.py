@@ -5,8 +5,8 @@ from datetime import date, timedelta
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import Settings
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
-from journalctl.storage.markdown import MarkdownStorage
 
 
 def _resolve_period(
@@ -75,7 +75,7 @@ def _resolve_period(
 
 def register(
     mcp: FastMCP,
-    storage: MarkdownStorage,
+    storage: DatabaseStorage,
     index: SearchIndex,
     settings: Settings,
 ) -> None:
@@ -101,14 +101,14 @@ def register(
 
         # This week's timeline
         date_from, date_to, label = _resolve_period("this-week")
-        week_entries = index.get_entries_by_date_range(date_from, date_to)
+        week_entries = storage.get_entries_by_date_range(date_from, date_to)
 
         # Top 20 recently active topics
         all_topics = storage.list_topics()
         top_topics = all_topics[:20]
 
         # Stats
-        stats = index.get_stats()
+        stats = storage.get_stats()
 
         return {
             "user_profile": profile,
@@ -135,10 +135,10 @@ def register(
         """Journal context — include at conversation start for full personal context."""
         profile = storage.read_knowledge("user-profile") or ""
         date_from, date_to, label = _resolve_period("this-week")
-        week_entries = index.get_entries_by_date_range(date_from, date_to)
+        week_entries = storage.get_entries_by_date_range(date_from, date_to)
         all_topics = storage.list_topics()
         top_topics = all_topics[:20]
-        stats = index.get_stats()
+        stats = storage.get_stats()
 
         sections = []
         if profile:
@@ -146,7 +146,7 @@ def register(
 
         if week_entries:
             entry_lines = "\n".join(
-                f"- {e['date']} [{e['topic']}] {str(e.get('content', ''))[:120]}"
+                f"- {e['updated']} [{e['topic']}] {str(e.get('description', ''))[:120]}"
                 for e in week_entries[:15]
             )
             sections.append(f"## This Week ({label})\n{entry_lines}")
@@ -158,7 +158,9 @@ def register(
         )
         sections.append(f"## Active Topics ({len(all_topics)} total)\n{topic_lines}")
 
-        sections.append(f"## Stats\nTotal entries: {stats.get('total_entries', 0)}")
+        n_topics = stats.get("topics", 0)
+        n_convs = stats.get("conversations", 0)
+        sections.append(f"## Stats\nTopics: {n_topics}, Conversations: {n_convs}")
 
         return "\n\n".join(sections)
 
@@ -183,7 +185,7 @@ def register(
             grouped by date and topic.
         """
         date_from, date_to, label = _resolve_period(period)
-        entries = index.get_entries_by_date_range(date_from, date_to)
+        entries = storage.get_entries_by_date_range(date_from, date_to)
 
         return {
             "period": period,

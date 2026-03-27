@@ -2,10 +2,11 @@
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
 
 
-def register(mcp: FastMCP, index: SearchIndex) -> None:
+def register(mcp: FastMCP, index: SearchIndex, storage: DatabaseStorage) -> None:
     """Register admin tools on the MCP server."""
 
     @mcp.tool()
@@ -18,7 +19,7 @@ def register(mcp: FastMCP, index: SearchIndex) -> None:
         Returns:
             Number of documents indexed and duration.
         """
-        result = index.rebuild()
+        result = index.rebuild_from_db(storage)
         return {
             "status": "rebuilt",
             "documents_indexed": result["documents_indexed"],

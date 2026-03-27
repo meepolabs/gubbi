@@ -10,13 +10,13 @@ from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import get_settings
 from journalctl.import_tools import import_tools
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
-from journalctl.storage.markdown import MarkdownStorage
 
 
 @pytest.fixture
 def mcp_server(
-    storage: MarkdownStorage,
+    storage: DatabaseStorage,
     index: SearchIndex,
 ) -> FastMCP:
     """Create an MCP server with all tools registered."""
@@ -48,10 +48,28 @@ class TestAppendAndRead:
         )
         assert result["status"] == "appended"
         assert result["entry_count"] == 1
+        assert "entry_id" in result
 
         result = await tools["journal_read"](topic="work/acme")
         assert result["total_entries"] == 1
         assert "Got the offer today." in result["entries"][0]["content"]
+        assert result["entries"][0]["id"] is not None
+
+    @pytest.mark.asyncio
+    async def test_append_with_context(self, tools: dict) -> None:
+        result = await tools["journal_append"](
+            topic="work/decision",
+            content="Chose SQLite as canonical storage.",
+            context="Markdown has no stable IDs; SQLite enables relationships.",
+            tags=["decision"],
+        )
+        assert result["status"] == "appended"
+
+        read = await tools["journal_read"](topic="work/decision")
+        assert (
+            read["entries"][0]["context"]
+            == "Markdown has no stable IDs; SQLite enables relationships."
+        )
 
     @pytest.mark.asyncio
     async def test_read_recent_entries(self, tools: dict) -> None:
@@ -100,14 +118,14 @@ class TestConversationFlow:
             tags=["work"],
         )
         assert result["status"] == "saved"
-        assert "Q3 Planning Session" in result["summary"]
+        assert result["summary"]  # non-empty auto-generated summary
 
         listed = await tools["journal_list_conversations"](topic_prefix="work")
         assert listed["count"] == 1
 
     @pytest.mark.asyncio
-    async def test_save_creates_topic_summary(self, tools: dict) -> None:
-        await tools["journal_save_conversation"](
+    async def test_save_returns_conversation_id(self, tools: dict) -> None:
+        result = await tools["journal_save_conversation"](
             topic="hobbies/running",
             title="Training Plan",
             messages=[
@@ -115,11 +133,8 @@ class TestConversationFlow:
                 {"role": "assistant", "content": "Start with intervals."},
             ],
         )
-
-        result = await tools["journal_read"](topic="hobbies/running")
-        summary_entry = result["entries"][0]["content"]
-        assert "conversation-summary" in result["entries"][0]["tags"]
-        assert "[[conversations/hobbies/running/training-plan]]" in summary_entry
+        assert "conversation_id" in result
+        assert isinstance(result["conversation_id"], int)
 
     @pytest.mark.asyncio
     async def test_resave_updates(self, tools: dict) -> None:

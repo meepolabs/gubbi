@@ -40,16 +40,12 @@ class Settings(BaseSettings):
     log_dir: Path = Path("./logs")
 
     @property
-    def topics_dir(self) -> Path:
-        return self.journal_root / "topics"
-
-    @property
-    def conversations_dir(self) -> Path:
-        return self.journal_root / "conversations"
-
-    @property
     def knowledge_dir(self) -> Path:
         return self.journal_root / "knowledge"
+
+    @property
+    def conversations_json_dir(self) -> Path:
+        return self.journal_root / "conversations_json"
 
     model_config = {"env_prefix": "JOURNAL_"}
 

@@ -1,16 +1,31 @@
 """MCP tools: journal_save_conversation, journal_list_conversations,
 journal_read_conversation."""
 
+from typing import Final
+
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.models.entry import Message, sanitize_freetext, sanitize_label, validate_topic
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.index import SearchIndex
-from journalctl.storage.markdown import MarkdownStorage
+
+_KEEP_ROLES: Final = {"user", "assistant"}
+_MAX_MSG_CHARS: Final = 10_000  # per message — prevent runaway tool output from bloating storage
+
+
+def _format_messages_as_markdown(title: str, messages: list[Message]) -> str:
+    """Render a list of messages as a readable markdown string."""
+    parts = [f"# {title}\n"]
+    for msg in messages:
+        role_label = "User" if msg.role == "user" else "Assistant"
+        ts = f" ({msg.timestamp})" if msg.timestamp else ""
+        parts.append(f"---\n\n### {role_label}{ts}\n\n{msg.content}")
+    return "\n\n".join(parts)
 
 
 def register(
     mcp: FastMCP,
-    storage: MarkdownStorage,
+    storage: DatabaseStorage,
     index: SearchIndex,
 ) -> None:
     """Register conversation tools on the MCP server."""
@@ -41,8 +56,11 @@ def register(
             topic: Topic this conversation relates to.
             title: Descriptive title for the conversation.
             messages: List of message dicts with keys:
-                      role ('user'/'assistant'), content (str),
+                      role ('user' or 'assistant'), content (str),
                       and optional timestamp (str).
+                      Tool calls, tool results, and system messages
+                      are filtered automatically — only pass the
+                      human-readable turns.
             source: Name of the app or LLM (e.g. 'claude', 'chatgpt').
             tags: Tags for the conversation.
             thread: Thread ID linking related conversations.
@@ -61,14 +79,18 @@ def register(
             tags = [sanitize_label(t) for t in tags]
         if summary:
             summary = sanitize_freetext(summary)
+
+        # Only keep human-readable turns. Tool calls, tool results, and system
+        # messages are infrastructure noise — not part of the conversation record.
         try:
             parsed_messages = [
                 Message(
                     role=m.get("role", "user"),
-                    content=sanitize_freetext(m.get("content", "")),
+                    content=sanitize_freetext(m.get("content", ""))[:_MAX_MSG_CHARS],
                     timestamp=m.get("timestamp"),
                 )
                 for m in messages
+                if m.get("role") in _KEEP_ROLES and m.get("content", "").strip()
             ]
         except (TypeError, AttributeError) as e:
             msg = (
@@ -77,12 +99,17 @@ def register(
             )
             raise ValueError(msg) from e
 
-        # Check if this is an update
-        conv_path = storage.conversation_path(topic, title)
-        is_update = conv_path.exists()
+        if not parsed_messages:
+            raise ValueError("No user/assistant messages found after filtering.")
 
-        # Save the conversation file
-        path, auto_summary = storage.save_conversation(
+        # Check if update
+        existing = storage.list_conversations(topic_prefix=topic)
+        from journalctl.models.entry import slugify  # noqa: PLC0415
+
+        slug = slugify(title)
+        is_update = any(slugify(c.title) == slug for c in existing)
+
+        conv_id, auto_summary = storage.save_conversation(
             topic=topic,
             title=title,
             messages=parsed_messages,
@@ -93,26 +120,25 @@ def register(
             summary=summary,
         )
 
-        # Upsert summary entry in the topic file
-        from datetime import date as date_cls
+        # Update FTS5 index
+        message_content = "\n\n".join(m.content for m in parsed_messages)
+        from datetime import date as date_cls  # noqa: PLC0415
 
-        conv_date = date_cls.today().isoformat()
-        storage.upsert_conversation_summary(
+        today = date_cls.today().isoformat()
+        index.upsert_conversation(
+            conversation_id=conv_id,
             topic=topic,
-            conv_title=title,
+            title=title,
             summary=auto_summary,
-            conv_date=conv_date,
+            tags=tags or [],
+            created=today,
+            updated=today,
+            message_content=message_content,
         )
-
-        # Update FTS5 index for both files
-        index.upsert_file(path)
-        topic_path = storage.topic_path(topic)
-        if topic_path.exists():
-            index.upsert_file(topic_path)
 
         return {
             "status": "updated" if is_update else "saved",
-            "path": str(path),
+            "conversation_id": conv_id,
             "summary": auto_summary,
             "topic": topic,
             "title": title,
@@ -140,9 +166,7 @@ def register(
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
             validate_topic(topic_prefix)
-        conversations = storage.list_conversations(
-            topic_prefix=topic_prefix,
-        )
+        conversations = storage.list_conversations(topic_prefix=topic_prefix)
         return {
             "conversations": [c.model_dump() for c in conversations],
             "count": len(conversations),
@@ -167,7 +191,8 @@ def register(
             Full conversation metadata and transcript.
         """
         validate_topic(topic)
-        meta, content = storage.read_conversation(topic, title)
+        meta, messages = storage.read_conversation(topic, title)
+        content = _format_messages_as_markdown(title, messages)
         return {
             "metadata": meta.model_dump(),
             "content": content,

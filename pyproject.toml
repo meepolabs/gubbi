@@ -66,7 +66,9 @@ ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "PT011", "S105", "S106", "S107"]
-"scripts/**/*.py" = ["T201", "S112"]
+"scripts/**/*.py" = ["T201", "S112", "N806", "E501"]
+"storage/database.py" = ["S101", "E501"]
+"journalctl/storage/database.py" = ["S101", "E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["journalctl"]
