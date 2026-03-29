@@ -29,17 +29,26 @@ def register(
         """Record something in the user's journal — call proactively alongside memory_store.
 
         When the user shares updates, progress, reflections, events, or decisions,
-        write a journal entry immediately. This is the dated, contextual record
-        (what happened and when), while memory_store captures the distilled fact.
-        Use both together: journal_append for the narrative, memory_store for the takeaway.
+        write a journal entry immediately. This is the dated event record (what happened
+        and when). Use alongside memory_store: journal_append captures the event,
+        memory_store captures the distilled fact.
 
-        Creates the topic automatically if it doesn't exist yet.
+        Example: User says "We decided to use PostgreSQL instead of MongoDB."
+        → journal_append(topic="projects/alpha", content="Chose PostgreSQL for the database",
+              context="Mongo had no ACID transactions, team already knows SQL")
+        → memory_store("Project Alpha uses PostgreSQL", tags=["decision"])
+
+        Creates the topic automatically if it doesn't exist yet. Check existing
+        topics from journal_briefing before using a new path — reuse existing topics
+        to avoid duplicates (e.g. don't create 'work/meetings' if 'work/meeting-notes'
+        already exists).
 
         Args:
             topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
-            content: Entry content in markdown. The headline — what happened.
-            context: Optional reasoning, tradeoffs, or background. Loaded on demand,
-                     not included in briefing. Use for decisions and key insights.
+            content: What happened — the headline. Shown in briefing and timeline.
+            context: Why it happened — reasoning, tradeoffs, alternatives considered.
+                     Only use for decisions and key insights. Loaded on demand, not
+                     shown in briefing. Leave empty for simple events and updates.
             tags: Optional tags (e.g. ['decision', 'milestone', 'important']).
             date: Date override as YYYY-MM-DD. Defaults to today.
 
@@ -121,11 +130,10 @@ def register(
     ) -> dict:
         """Correct or expand a journal entry — use when an entry has errors or needs more detail.
 
-        Use journal_read first to get the entry's id field. Supports replacing the
-        entire entry or appending additional content to it.
+        Call journal_read first — each entry has an 'id' field. Pass that as entry_id here.
 
         Args:
-            entry_id: Stable integer ID of the entry (shown in journal_read results).
+            entry_id: The 'id' field from a journal_read result.
             content: New content for the entry.
             context: Updated reasoning/context (optional).
             mode: 'replace' to overwrite entirely, 'append' to add to the existing entry.

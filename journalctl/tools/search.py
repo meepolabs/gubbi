@@ -17,11 +17,13 @@ def register(mcp: FastMCP, index: SearchIndex) -> None:
         date_to: str | None = None,
         limit: int = 10,
     ) -> dict:
-        """Search journal entries and conversations by keyword or date range.
+        """Keyword search across journal entries and conversations.
 
         Use for specific, date-scoped, or keyword lookups — e.g. "what did I write
-        about X last month." For vague or conceptual personal questions, prefer
-        memory_retrieve instead (it matches by meaning, not keywords).
+        about X last month", "find entries about Phase 7", "search for deployment".
+
+        For meaning-based personal questions ("what car do I drive?", "what's my
+        salary?"), use memory_retrieve instead — it matches by meaning, not keywords.
 
         Args:
             query: Search query. Supports: AND, OR, NOT, "exact phrase".

@@ -173,21 +173,17 @@ def register(mcp: FastMCP, memory_service: Any) -> None:
         """Delete a memory that is outdated, wrong, or no longer relevant.
 
         Use when the user asks to forget something or when a memory contradicts
-        newer information. The content_hash identifier is returned by memory_store,
-        memory_retrieve, and memory_list.
+        newer information. Call memory_retrieve or memory_list first to find the
+        content_hash of the memory to delete.
 
         Args:
-            content_hash: Unique identifier of the memory to delete (64-char hex string,
-                          found in output of memory_store, memory_retrieve, or memory_list).
+            content_hash: The 'content_hash' field from a memory_retrieve or memory_list result.
 
         Returns:
             Confirmation of deletion or error message.
         """
         if not _SHA256_PATTERN.match(content_hash):
-            return {
-                "success": False,
-                "error": "Invalid content_hash: must be a 64-char hex SHA256.",
-            }
+            raise ValueError("Invalid content_hash: must be a 64-char hex SHA256.")
         return cast(
             dict[str, Any],
             await memory_service.delete_memory(content_hash=content_hash),

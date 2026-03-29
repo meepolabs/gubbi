@@ -112,7 +112,6 @@ class ConversationMeta(BaseModel):
     """Metadata for a conversation archive."""
 
     id: int | None = None  # stable DB row ID
-    type: str = "conversation"
     source: str = "claude"
     title: str
     topic: str
@@ -122,8 +121,6 @@ class ConversationMeta(BaseModel):
     summary: str = ""
     participants: list[str] = []
     message_count: int = 0
-    thread: str | None = None
-    thread_seq: int | None = None
 
     @field_validator("topic")
     @classmethod
@@ -134,13 +131,12 @@ class ConversationMeta(BaseModel):
 class Entry(BaseModel):
     """A single dated journal entry."""
 
-    id: int | None = None  # stable DB row ID (None for legacy/in-memory entries)
-    index: int  # 1-based position within topic (for display)
+    id: int  # stable DB primary key
     date: str  # YYYY-MM-DD
-    tags: list[str] = []
     content: str  # what happened (headline)
     context: str | None = None  # why/reasoning (loaded on demand)
     conversation_id: int | None = None  # FK to conversations table
+    tags: list[str] = []
 
 
 class SearchResult(BaseModel):

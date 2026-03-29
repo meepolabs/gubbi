@@ -1,6 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings
 
 
@@ -13,6 +14,13 @@ class Settings(BaseSettings):
 
     # Auth
     api_key: str
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, v: str) -> str:
+        if len(v) < 32:
+            raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
+        return v
 
     # OAuth — empty owner_password_hash disables OAuth endpoints
     server_url: str = "http://localhost:8100"

@@ -65,8 +65,6 @@ CREATE TABLE IF NOT EXISTS conversations (
     tags          TEXT DEFAULT '[]',
     participants  TEXT DEFAULT '[]',
     message_count INTEGER DEFAULT 0,
-    thread        TEXT,
-    thread_seq    INTEGER,
     json_path     TEXT,
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL,
@@ -303,14 +301,13 @@ class DatabaseStorage:
         entries = [
             Entry(
                 id=r["id"],
-                index=i + 1,
                 date=r["date"],
                 content=r["content"],
                 context=r["context"],
                 conversation_id=r["conversation_id"],
                 tags=json.loads(r["tags"] or "[]"),
             )
-            for i, r in enumerate(rows)
+            for r in rows
         ]
 
         if n is not None and n > 0:
@@ -471,8 +468,6 @@ class DatabaseStorage:
         messages: list[Message],
         source: str = "claude",
         tags: list[str] | None = None,
-        thread: str | None = None,
-        thread_seq: int | None = None,
         summary: str | None = None,
     ) -> tuple[int, str]:
         """Save a conversation. Idempotent — same topic+title overwrites.
@@ -497,8 +492,6 @@ class DatabaseStorage:
             summary=auto_summary,
             participants=participants,
             message_count=len(messages),
-            thread=thread,
-            thread_seq=thread_seq,
         )
         json_path = self._write_conversation_json(topic, slug, meta, messages)
 
@@ -511,8 +504,6 @@ class DatabaseStorage:
             tags or [],
             participants,
             messages,
-            thread,
-            thread_seq,
             json_path,
             today,
         )
@@ -533,8 +524,6 @@ class DatabaseStorage:
         tags: list[str],
         participants: list[str],
         messages: list[Message],
-        thread: str | None,
-        thread_seq: int | None,
         json_path: str,
         today: str,
     ) -> int:
@@ -550,7 +539,7 @@ class DatabaseStorage:
                 """
                 UPDATE conversations
                 SET source=?, summary=?, tags=?, participants=?, message_count=?,
-                    thread=?, thread_seq=?, json_path=?, updated_at=?
+                    json_path=?, updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -559,8 +548,6 @@ class DatabaseStorage:
                     json.dumps(tags),
                     json.dumps(participants),
                     len(messages),
-                    thread,
-                    thread_seq,
                     json_path,
                     today,
                     conv_id,
@@ -573,8 +560,8 @@ class DatabaseStorage:
             """
             INSERT INTO conversations
                 (topic_id, title, slug, source, summary, tags, participants,
-                 message_count, thread, thread_seq, json_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 message_count, json_path, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 topic_id,
@@ -585,8 +572,6 @@ class DatabaseStorage:
                 json.dumps(tags),
                 json.dumps(participants),
                 len(messages),
-                thread,
-                thread_seq,
                 json_path,
                 today,
                 today,
@@ -651,7 +636,7 @@ class DatabaseStorage:
         """List conversations, optionally filtered by topic prefix."""
         sql = """
             SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
-                   c.participants, c.message_count, c.thread, c.thread_seq,
+                   c.participants, c.message_count,
                    c.created_at, c.updated_at, t.path AS topic
             FROM conversations c
             JOIN topics t ON t.id = c.topic_id
@@ -676,8 +661,6 @@ class DatabaseStorage:
                 summary=r["summary"] or "",
                 participants=json.loads(r["participants"] or "[]"),
                 message_count=r["message_count"],
-                thread=r["thread"],
-                thread_seq=r["thread_seq"],
             )
             for r in rows
         ]
@@ -698,7 +681,7 @@ class DatabaseStorage:
         row = self.conn.execute(
             """
             SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
-                   c.participants, c.message_count, c.thread, c.thread_seq,
+                   c.participants, c.message_count,
                    c.created_at, c.updated_at, t.path AS topic
             FROM conversations c
             JOIN topics t ON t.id = c.topic_id
@@ -722,8 +705,6 @@ class DatabaseStorage:
             summary=row["summary"] or "",
             participants=json.loads(row["participants"] or "[]"),
             message_count=row["message_count"],
-            thread=row["thread"],
-            thread_seq=row["thread_seq"],
         )
 
         msg_rows = self.conn.execute(

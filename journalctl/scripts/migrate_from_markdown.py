@@ -153,9 +153,6 @@ def migrate(journal_root: Path, db_path: Path) -> None:
                 summary = meta.get("summary", "")
                 created = meta.get("created", "2024-01-01")
                 updated = meta.get("updated", created)
-                thread = meta.get("thread")
-                thread_seq = meta.get("thread_seq")
-
                 if not topic:
                     continue
 
@@ -191,8 +188,8 @@ def migrate(journal_root: Path, db_path: Path) -> None:
                     """
                     INSERT OR REPLACE INTO conversations
                         (topic_id, title, slug, source, summary, tags, participants,
-                         message_count, thread, thread_seq, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                         message_count, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         topic_id,
@@ -203,8 +200,6 @@ def migrate(journal_root: Path, db_path: Path) -> None:
                         json.dumps(tags),
                         json.dumps(participants),
                         len(messages),
-                        thread,
-                        thread_seq,
                         created,
                         updated,
                     ),

@@ -37,8 +37,6 @@ def register(
         messages: list[dict],
         source: str = "claude",
         tags: list[str] | None = None,
-        thread: str | None = None,
-        thread_seq: int | None = None,
         summary: str | None = None,
     ) -> dict:
         """Save a full conversation transcript to the journal.
@@ -48,9 +46,8 @@ def register(
         Don't wait until the end. Good candidates: planning sessions, deployments,
         life updates, technical breakthroughs, personal reflections.
 
-        Re-saving the same topic + title overwrites the previous version (history
-        is preserved automatically). In future conversations on the same topic,
-        proactively offer to update the saved record.
+        Re-saving the same topic + title overwrites the previous version.
+        In future conversations on the same topic, proactively offer to update the saved record.
 
         Args:
             topic: Topic this conversation relates to.
@@ -63,15 +60,13 @@ def register(
                       human-readable turns.
             source: Name of the app or LLM (e.g. 'claude', 'chatgpt').
             tags: Tags for the conversation.
-            thread: Thread ID linking related conversations.
-            thread_seq: Sequence number within the thread.
             summary: Optional summary override. Auto-generated
                      if not provided.
 
         Returns:
-            File path, summary, and whether it was a new save
-            or an update.
+            Conversation ID, summary, and whether it was a new save or update.
         """
+
         validate_topic(topic)
         title = sanitize_label(title, max_len=100)
         source = sanitize_label(source)
@@ -115,8 +110,6 @@ def register(
             messages=parsed_messages,
             source=source,
             tags=tags,
-            thread=thread,
-            thread_seq=thread_seq,
             summary=summary,
         )
 
@@ -131,7 +124,6 @@ def register(
             title=title,
             summary=auto_summary,
             tags=tags or [],
-            created=today,
             updated=today,
             message_content=message_content,
         )

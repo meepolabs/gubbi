@@ -29,7 +29,6 @@ CREATE TABLE IF NOT EXISTS documents (
     title       TEXT NOT NULL,
     description TEXT DEFAULT '',
     tags        TEXT DEFAULT '[]',
-    created     TEXT,
     updated     TEXT,
     content     TEXT NOT NULL,
     indexed_at  INTEGER NOT NULL
@@ -115,8 +114,8 @@ class SearchIndex:
             """
             INSERT INTO documents
                 (source_key, doc_type, topic, title, description,
-                 tags, created, updated, content, indexed_at)
-            VALUES (?, 'entry', ?, ?, '', ?, ?, ?, ?, ?)
+                 tags, updated, content, indexed_at)
+            VALUES (?, 'entry', ?, ?, '', ?, ?, ?, ?)
             ON CONFLICT(source_key) DO UPDATE SET
                 topic=excluded.topic,
                 title=excluded.title,
@@ -131,7 +130,6 @@ class SearchIndex:
                 title,
                 json.dumps(tags),
                 date,
-                date,
                 full_content,
                 int(time.time()),
             ),
@@ -145,7 +143,6 @@ class SearchIndex:
         title: str,
         summary: str,
         tags: list[str],
-        created: str,
         updated: str,
         message_content: str,
     ) -> None:
@@ -157,8 +154,8 @@ class SearchIndex:
             """
             INSERT INTO documents
                 (source_key, doc_type, topic, title, description,
-                 tags, created, updated, content, indexed_at)
-            VALUES (?, 'conversation', ?, ?, ?, ?, ?, ?, ?, ?)
+                 tags, updated, content, indexed_at)
+            VALUES (?, 'conversation', ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_key) DO UPDATE SET
                 topic=excluded.topic,
                 title=excluded.title,
@@ -174,7 +171,6 @@ class SearchIndex:
                 title,
                 summary,
                 json.dumps(tags),
-                created,
                 updated,
                 full_content,
                 int(time.time()),
@@ -326,7 +322,7 @@ class SearchIndex:
         # Index all conversations (concatenate messages)
         conv_rows = db_storage.conn.execute(
             """
-            SELECT c.id, c.title, c.summary, c.tags, c.created_at, c.updated_at,
+            SELECT c.id, c.title, c.summary, c.tags, c.updated_at,
                    t.path AS topic
             FROM conversations c
             JOIN topics t ON t.id = c.topic_id
@@ -347,7 +343,6 @@ class SearchIndex:
                     title=r["title"],
                     summary=r["summary"] or "",
                     tags=json.loads(r["tags"] or "[]"),
-                    created=r["created_at"],
                     updated=r["updated_at"],
                     message_content=message_content,
                 )

@@ -96,7 +96,6 @@ class TestIndexing:
             title="Ramen Chat",
             summary=summary,
             tags=[],
-            created="2025-01-01",
             updated="2025-01-01",
             message_content="Best ramen recommendation? Try Jinya in Bellevue.",
         )
