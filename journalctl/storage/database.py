@@ -8,25 +8,88 @@ for MkDocs and git. They are NOT the source of truth.
 
 Conversation JSON archives are written alongside DB rows as the
 archival record (designed for S3 offload).
+
+Conversation CRUD lives in storage/conversations.py (ConversationMixin);
+DatabaseStorage inherits from it so all call sites are unchanged.
 """
 
 import json
 import logging
+import re
 import sqlite3
+import threading
 from datetime import date as date_cls
 from pathlib import Path
 
-from journalctl.models.entry import (
-    ConversationMeta,
-    Entry,
-    Message,
-    TopicMeta,
-    slugify,
-    validate_title,
-    validate_topic,
+from journalctl.storage.constants import (
+    DB_BUSY_TIMEOUT_MS,
+    MAX_KNOWLEDGE_FILE_SIZE,
+    SNIPPET_PREVIEW_LEN,
 )
+from journalctl.storage.conversations import ConversationMixin
+
+_KNOWLEDGE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+
+
+def _escape_like(s: str) -> str:
+    """Escape SQL LIKE metacharacters (!, %, _) using ! as the escape char.
+
+    Use with ``ESCAPE '!'`` in the SQL clause. validate_topic() already
+    prevents wildcards in topic paths; this is a defense-in-depth measure.
+    """
+    return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
+from journalctl.core.validation import validate_topic  # noqa: E402
+from journalctl.models.journal import Entry, TopicMeta  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+def _build_entries_where_clause(
+    topic_id: int,
+    date_from: str | None,
+    date_to: str | None,
+) -> tuple[str, list[str | int]]:
+    """Build the shared WHERE predicate for entries queries.
+
+    All clause fragments are hardcoded constants — user values are bound
+    via parameterized placeholders, so string concatenation here is safe.
+    """
+    clauses = ["topic_id = ?", "deleted_at IS NULL"]
+    params: list[str | int] = [topic_id]
+    if date_from:
+        clauses.append("date >= ?")
+        params.append(date_from)
+    if date_to:
+        clauses.append("date <= ?")
+        params.append(date_to)
+    return " AND ".join(clauses), params
+
+
+def _calculate_pagination(
+    total: int,
+    n: int | None,
+    offset: int,
+    date_from: str | None,
+) -> tuple[int | None, int]:
+    """Return (sql_limit, sql_offset) for a read_entries query.
+
+    "Last n" semantics: when no explicit offset and no date_from filter,
+    skip to the tail of the result set so the n most recent entries are returned.
+    """
+    sql_limit: int | None = None
+    sql_offset: int = 0
+    if n is not None and n > 0:
+        if offset == 0 and not date_from:
+            sql_offset = max(0, total - n)
+            sql_limit = n
+        else:
+            sql_offset = offset
+            sql_limit = n
+    elif offset > 0:
+        sql_offset = offset
+    return sql_limit, sql_offset
 
 
 SCHEMA = """
@@ -52,7 +115,9 @@ CREATE TABLE IF NOT EXISTS entries (
     tags            TEXT DEFAULT '[]',
     position        INTEGER NOT NULL DEFAULT 0,
     created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
+    updated_at      TEXT NOT NULL,
+    deleted_at      TEXT,
+    indexed_at      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS conversations (
@@ -80,9 +145,10 @@ CREATE TABLE IF NOT EXISTS messages (
     position        INTEGER NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS idx_entries_topic    ON entries(topic_id);
-CREATE INDEX IF NOT EXISTS idx_entries_date     ON entries(date);
-CREATE INDEX IF NOT EXISTS idx_entries_conv     ON entries(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_entries_topic      ON entries(topic_id);
+CREATE INDEX IF NOT EXISTS idx_entries_date       ON entries(date);
+CREATE INDEX IF NOT EXISTS idx_entries_conv       ON entries(conversation_id);
+CREATE INDEX IF NOT EXISTS idx_entries_indexed_at ON entries(indexed_at);
 CREATE INDEX IF NOT EXISTS idx_messages_conv    ON messages(conversation_id, position);
 CREATE INDEX IF NOT EXISTS idx_conv_topic       ON conversations(topic_id);
 CREATE INDEX IF NOT EXISTS idx_conv_slug        ON conversations(topic_id, slug);
@@ -90,7 +156,7 @@ CREATE INDEX IF NOT EXISTS idx_topics_updated   ON topics(updated_at DESC);
 """
 
 
-class DatabaseStorage:
+class DatabaseStorage(ConversationMixin):
     """Canonical SQLite storage for all journal data."""
 
     def __init__(self, db_path: Path, journal_root: Path) -> None:
@@ -98,18 +164,21 @@ class DatabaseStorage:
         self.journal_root = journal_root
         self.conversations_json_dir = journal_root / "conversations_json"
         self._conn: sqlite3.Connection | None = None
+        self._conn_lock = threading.Lock()
 
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-            )
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA busy_timeout=5000")
-            self._conn.execute("PRAGMA foreign_keys=ON")
-            self._init_schema()
+            with self._conn_lock:
+                if self._conn is None:
+                    self._conn = sqlite3.connect(
+                        str(self.db_path),
+                        check_same_thread=False,
+                    )
+                    self._conn.row_factory = sqlite3.Row
+                    self._conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+                    self._conn.execute("PRAGMA foreign_keys=ON")
+                    self._init_schema()
         return self._conn
 
     def _init_schema(self) -> None:
@@ -139,19 +208,21 @@ class DatabaseStorage:
         title: str,
         description: str = "",
         tags: list[str] | None = None,
+        created_at: str | None = None,
     ) -> int:
-        """Create a new topic. Returns topic_id. Raises FileExistsError if duplicate."""
+        """Create a new topic. Returns topic_id. Raises ValueError if duplicate."""
         validate_topic(topic)
         today = date_cls.today().isoformat()
+        created = created_at or today
         try:
-            cur = self.conn.execute(
-                """
-                INSERT INTO topics (path, title, description, tags, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (topic, title, description, json.dumps(tags or []), today, today),
-            )
-            self.conn.commit()
+            with self.conn:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO topics (path, title, description, tags, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (topic, title, description, json.dumps(tags or []), created, today),
+                )
             if cur.lastrowid is None:
                 raise RuntimeError("INSERT topics failed: no rowid")
             return cur.lastrowid
@@ -162,6 +233,8 @@ class DatabaseStorage:
     def list_topics(
         self,
         topic_prefix: str | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[TopicMeta]:
         """List topics, sorted by most recently updated."""
         sql = """
@@ -169,15 +242,17 @@ class DatabaseStorage:
                    t.created_at, t.updated_at,
                    COUNT(e.id) AS entry_count
             FROM topics t
-            LEFT JOIN entries e ON e.topic_id = t.id
+            LEFT JOIN entries e ON e.topic_id = t.id AND e.deleted_at IS NULL
         """
-        params: list[str] = []
+        params: list[str | int] = []
         if topic_prefix:
             validate_topic(topic_prefix)
-            # Safe: validate_topic() enforces [a-z0-9/-] — no SQL wildcards possible
-            sql += " WHERE t.path = ? OR t.path LIKE ?"
-            params += [topic_prefix, f"{topic_prefix}/%"]
+            sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
+            params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
         sql += " GROUP BY t.id ORDER BY t.updated_at DESC"
+        if limit is not None:
+            sql += " LIMIT ? OFFSET ?"
+            params.extend([limit, offset])
 
         rows = self.conn.execute(sql, params).fetchall()
         return [
@@ -203,7 +278,7 @@ class DatabaseStorage:
                    t.created_at, t.updated_at,
                    COUNT(e.id) AS entry_count
             FROM topics t
-            LEFT JOIN entries e ON e.topic_id = t.id
+            LEFT JOIN entries e ON e.topic_id = t.id AND e.deleted_at IS NULL
             WHERE t.path = ?
             GROUP BY t.id
             """,
@@ -233,10 +308,14 @@ class DatabaseStorage:
         context: str | None = None,
         tags: list[str] | None = None,
         date: str | None = None,
+        commit: bool = True,
     ) -> tuple[int, int]:
         """Append a dated entry to a topic. Auto-creates topic if needed.
 
         Returns (entry_id, total_entry_count).
+
+        Pass commit=False to defer the commit (e.g. when the caller wants to
+        batch the FTS index write into the same transaction for atomicity).
         """
         validate_topic(topic)
         topic_id = self._get_or_create_topic(topic)
@@ -266,8 +345,9 @@ class DatabaseStorage:
                 "UPDATE topics SET updated_at = ? WHERE id = ?",
                 (d, topic_id),
             )
-            self.conn.commit()
-        except Exception:
+            if commit:
+                self.conn.commit()
+        except (sqlite3.Error, RuntimeError):
             self.conn.rollback()
             raise
 
@@ -281,23 +361,44 @@ class DatabaseStorage:
         self,
         topic: str,
         n: int | None = None,
-    ) -> tuple[TopicMeta, list[Entry]]:
+        date_from: str | None = None,
+        date_to: str | None = None,
+        offset: int = 0,
+    ) -> tuple[TopicMeta, list[Entry], int]:
         """Read entries for a topic, most-recent-last.
 
-        Returns (TopicMeta, entries). Raises FileNotFoundError if topic missing.
+        Returns (TopicMeta, entries, total_matching). Raises FileNotFoundError if topic missing.
         """
         meta = self.get_topic(topic)
         if meta is None:
             msg = f"Topic '{topic}' not found"
             raise FileNotFoundError(msg)
 
-        sql = """
-            SELECT id, date, content, context, conversation_id, tags, position
-            FROM entries WHERE topic_id = ?
-            ORDER BY date ASC, position ASC
-        """
-        rows = self.conn.execute(sql, (meta.id,)).fetchall()
+        if meta.id is None:
+            raise RuntimeError(f"Topic '{topic}' has no database ID — storage may be corrupt")
 
+        where, where_params = _build_entries_where_clause(meta.id, date_from, date_to)
+
+        total: int = self.conn.execute(
+            "SELECT COUNT(*) FROM entries WHERE " + where,  # noqa: S608
+            where_params,
+        ).fetchone()[0]
+
+        sql_limit, sql_offset = _calculate_pagination(total, n, offset, date_from)
+
+        data_sql = (
+            "SELECT id, date, content, context, conversation_id, tags, position"  # noqa: S608
+            " FROM entries WHERE " + where + " ORDER BY date ASC, position ASC"
+        )
+        data_params: list[str | int] = list(where_params)
+        if sql_limit is not None:
+            data_sql += " LIMIT ? OFFSET ?"
+            data_params.extend([sql_limit, sql_offset])
+        elif sql_offset > 0:
+            data_sql += " LIMIT -1 OFFSET ?"
+            data_params.append(sql_offset)
+
+        rows = self.conn.execute(data_sql, data_params).fetchall()
         entries = [
             Entry(
                 id=r["id"],
@@ -310,59 +411,110 @@ class DatabaseStorage:
             for r in rows
         ]
 
-        if n is not None and n > 0:
-            entries = entries[-n:]
-
-        return meta, entries
+        return meta, entries, total
 
     def update_entry(
         self,
         entry_id: int,
-        content: str,
+        content: str | None = None,
         context: str | None = None,
         mode: str = "replace",
+        date: str | None = None,
+        tags: list[str] | None = None,
     ) -> None:
         """Update an entry by its stable ID.
 
         Args:
             entry_id: Stable integer ID from entries table.
-            content: New content string.
+            content: New content string (None = leave unchanged).
             context: New context string (None = leave unchanged).
             mode: 'replace' overwrites content; 'append' adds to it.
+            date: New date string YYYY-MM-DD (None = leave unchanged).
+            tags: New tags list (None = leave unchanged).
         """
         row = self.conn.execute(
-            "SELECT id, content, context, topic_id FROM entries WHERE id = ?",
+            "SELECT id, content, context, topic_id, date, tags FROM entries WHERE id = ? AND deleted_at IS NULL",
             (entry_id,),
         ).fetchone()
         if not row:
             msg = f"Entry id {entry_id} not found"
             raise IndexError(msg)
 
-        if mode == "replace":
-            new_content = content
-            new_context = context if context is not None else row["context"]
-        elif mode == "append":
-            new_content = f"{row['content']}\n\n{content}".strip()
-            new_context = (
-                f"{row['context']}\n\n{context}".strip()
-                if row["context"] and context
-                else context or row["context"]
-            )
+        # Resolve content
+        if content is not None:
+            if mode == "replace":
+                new_content = content
+            elif mode == "append":
+                new_content = f"{row['content']}\n\n{content}".strip()
+            else:
+                msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
+                raise ValueError(msg)
         else:
-            msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
-            raise ValueError(msg)
+            new_content = row["content"]
+
+        # Resolve context
+        if context is not None:
+            if mode == "append" and row["context"]:
+                new_context = f"{row['context']}\n\n{context}".strip()
+            else:
+                new_context = context
+        else:
+            new_context = row["context"]
+
+        new_date = date or row["date"]
+        new_tags = json.dumps(tags) if tags is not None else row["tags"]
+        now = date_cls.today().isoformat()
+
+        with self.conn:
+            self.conn.execute(
+                "UPDATE entries SET content = ?, context = ?, date = ?, tags = ?, updated_at = ? WHERE id = ?",
+                (new_content, new_context, new_date, new_tags, now, entry_id),
+            )
+            self.conn.execute(
+                "UPDATE topics SET updated_at = ? WHERE id = ?",
+                (now, row["topic_id"]),
+            )
+
+    def delete_entry(self, entry_id: int) -> int:
+        """Soft-delete an entry. Returns the topic_id for index cleanup.
+
+        Raises IndexError if entry not found or already deleted.
+        """
+        row = self.conn.execute(
+            "SELECT id, topic_id FROM entries WHERE id = ? AND deleted_at IS NULL",
+            (entry_id,),
+        ).fetchone()
+        if not row:
+            msg = f"Entry id {entry_id} not found"
+            raise IndexError(msg)
 
         now = date_cls.today().isoformat()
-        self.conn.execute(
-            "UPDATE entries SET content = ?, context = ?, updated_at = ? WHERE id = ?",
-            (new_content, new_context, now, entry_id),
-        )
-        # Update topic updated_at
-        self.conn.execute(
-            "UPDATE topics SET updated_at = ? WHERE id = ?",
-            (now, row["topic_id"]),
-        )
-        self.conn.commit()
+        topic_id = row["topic_id"]
+        with self.conn:
+            self.conn.execute(
+                "UPDATE entries SET deleted_at = ?, updated_at = ? WHERE id = ?",
+                (now, now, entry_id),
+            )
+            self.conn.execute(
+                "UPDATE topics SET updated_at = ? WHERE id = ?",
+                (now, topic_id),
+            )
+        return int(topic_id)
+
+    def mark_entry_indexed(self, entry_id: int) -> None:
+        """Stamp indexed_at = today on an entry after a successful embedding.
+
+        Used by journal_append and journal_reindex to track which entries
+        have up-to-date semantic embeddings.  The watermark lets
+        journal_reindex skip already-indexed entries and resume after
+        interruption.
+        """
+        now = date_cls.today().isoformat()
+        with self.conn:
+            self.conn.execute(
+                "UPDATE entries SET indexed_at = ? WHERE id = ?",
+                (now, entry_id),
+            )
 
     def get_entries_by_date_range(
         self,
@@ -380,7 +532,7 @@ class DatabaseStorage:
                    'entry' AS doc_type
             FROM entries e
             JOIN topics t ON t.id = e.topic_id
-            WHERE e.date >= ? AND e.date <= ?
+            WHERE e.date >= ? AND e.date <= ? AND e.deleted_at IS NULL
             ORDER BY e.date ASC, e.position ASC
             """,
             (date_from, date_to),
@@ -406,7 +558,7 @@ class DatabaseStorage:
                     "doc_type": r["doc_type"],
                     "topic": r["topic"],
                     "title": r["title"],
-                    "description": "",
+                    "description": r["content"][:SNIPPET_PREVIEW_LEN] if r["content"] else "",
                     "tags": r["tags"],
                     "updated": r["date"],
                 }
@@ -418,7 +570,7 @@ class DatabaseStorage:
                     "doc_type": r["doc_type"],
                     "topic": r["topic"],
                     "title": r["title"],
-                    "description": r["content"][:120] if r["content"] else "",
+                    "description": r["content"][:SNIPPET_PREVIEW_LEN] if r["content"] else "",
                     "tags": r["tags"],
                     "updated": r["date"],
                 }
@@ -439,320 +591,53 @@ class DatabaseStorage:
         }
 
     # ------------------------------------------------------------------
-    # Conversations
-    # ------------------------------------------------------------------
-
-    def _write_conversation_json(
-        self,
-        topic: str,
-        slug: str,
-        meta: ConversationMeta,
-        messages: list[Message],
-    ) -> str:
-        """Write conversation JSON archive. Returns relative path string."""
-        out_dir = self.conversations_json_dir / topic
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{slug}.json"
-
-        payload = {
-            "meta": meta.model_dump(exclude={"id"}),
-            "messages": [m.model_dump() for m in messages],
-        }
-        out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        return f"conversations_json/{topic}/{slug}.json"
-
-    def save_conversation(
-        self,
-        topic: str,
-        title: str,
-        messages: list[Message],
-        source: str = "claude",
-        tags: list[str] | None = None,
-        summary: str | None = None,
-    ) -> tuple[int, str]:
-        """Save a conversation. Idempotent — same topic+title overwrites.
-
-        Returns (conversation_id, summary).
-        """
-        validate_topic(topic)
-        validate_title(title)
-        slug = slugify(title)
-        topic_id = self._get_or_create_topic(topic)
-        today = date_cls.today().isoformat()
-        auto_summary = summary or self._generate_summary(title, messages)
-        participants = sorted({m.role for m in messages})
-
-        meta = ConversationMeta(
-            source=source,
-            title=title,
-            topic=topic,
-            tags=tags or [],
-            created=today,
-            updated=today,
-            summary=auto_summary,
-            participants=participants,
-            message_count=len(messages),
-        )
-        json_path = self._write_conversation_json(topic, slug, meta, messages)
-
-        conv_id = self._upsert_conversation_record(
-            topic_id,
-            title,
-            slug,
-            source,
-            auto_summary,
-            tags or [],
-            participants,
-            messages,
-            json_path,
-            today,
-        )
-        self._insert_messages(conv_id, messages)
-        self._upsert_linked_entry(topic_id, conv_id, title, auto_summary, today)
-
-        self.conn.execute("UPDATE topics SET updated_at = ? WHERE id = ?", (today, topic_id))
-        self.conn.commit()
-        return conv_id, auto_summary  # type: ignore[return-value]
-
-    def _upsert_conversation_record(
-        self,
-        topic_id: int,
-        title: str,
-        slug: str,
-        source: str,
-        summary: str,
-        tags: list[str],
-        participants: list[str],
-        messages: list[Message],
-        json_path: str,
-        today: str,
-    ) -> int:
-        """Insert or update the conversations row. Returns conversation_id."""
-        existing = self.conn.execute(
-            "SELECT id, created_at FROM conversations WHERE topic_id = ? AND slug = ?",
-            (topic_id, slug),
-        ).fetchone()
-
-        if existing:
-            conv_id: int = existing["id"]
-            self.conn.execute(
-                """
-                UPDATE conversations
-                SET source=?, summary=?, tags=?, participants=?, message_count=?,
-                    json_path=?, updated_at=?
-                WHERE id=?
-                """,
-                (
-                    source,
-                    summary,
-                    json.dumps(tags),
-                    json.dumps(participants),
-                    len(messages),
-                    json_path,
-                    today,
-                    conv_id,
-                ),
-            )
-            self.conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conv_id,))
-            return conv_id
-
-        cur = self.conn.execute(
-            """
-            INSERT INTO conversations
-                (topic_id, title, slug, source, summary, tags, participants,
-                 message_count, json_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                topic_id,
-                title,
-                slug,
-                source,
-                summary,
-                json.dumps(tags),
-                json.dumps(participants),
-                len(messages),
-                json_path,
-                today,
-                today,
-            ),
-        )
-        if cur.lastrowid is None:
-            raise RuntimeError("INSERT conversations failed: no rowid")
-        return cur.lastrowid
-
-    def _insert_messages(self, conv_id: int, messages: list[Message]) -> None:
-        """Insert all messages for a conversation."""
-        self.conn.executemany(
-            """
-            INSERT INTO messages (conversation_id, role, content, timestamp, position)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [(conv_id, m.role, m.content, m.timestamp, i) for i, m in enumerate(messages)],
-        )
-
-    def _upsert_linked_entry(
-        self,
-        topic_id: int,
-        conv_id: int,
-        title: str,
-        summary: str,
-        today: str,
-    ) -> None:
-        """Upsert a linked entry so the conversation appears in journal_read + timeline."""
-        content = f"Conversation saved: {title}\n\n{summary}"
-        existing = self.conn.execute(
-            "SELECT id FROM entries WHERE conversation_id = ?", (conv_id,)
-        ).fetchone()
-
-        if existing:
-            self.conn.execute(
-                "UPDATE entries SET content = ?, updated_at = ? WHERE id = ?",
-                (content, today, existing["id"]),
-            )
-        else:
-            self.conn.execute(
-                """
-                INSERT INTO entries
-                    (topic_id, date, content, conversation_id, tags, position, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, (SELECT COALESCE(MAX(position), 0) + 1 FROM entries WHERE topic_id = ?), ?, ?)
-                """,
-                (
-                    topic_id,
-                    today,
-                    content,
-                    conv_id,
-                    json.dumps(["conversation"]),
-                    topic_id,
-                    today,
-                    today,
-                ),
-            )
-
-    def list_conversations(
-        self,
-        topic_prefix: str | None = None,
-    ) -> list[ConversationMeta]:
-        """List conversations, optionally filtered by topic prefix."""
-        sql = """
-            SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
-                   c.participants, c.message_count,
-                   c.created_at, c.updated_at, t.path AS topic
-            FROM conversations c
-            JOIN topics t ON t.id = c.topic_id
-        """
-        params: list[str] = []
-        if topic_prefix:
-            validate_topic(topic_prefix)
-            sql += " WHERE t.path = ? OR t.path LIKE ?"
-            params += [topic_prefix, f"{topic_prefix}/%"]
-        sql += " ORDER BY c.created_at DESC"
-
-        rows = self.conn.execute(sql, params).fetchall()
-        return [
-            ConversationMeta(
-                id=r["id"],
-                source=r["source"],
-                title=r["title"],
-                topic=r["topic"],
-                tags=json.loads(r["tags"] or "[]"),
-                created=r["created_at"],
-                updated=r["updated_at"],
-                summary=r["summary"] or "",
-                participants=json.loads(r["participants"] or "[]"),
-                message_count=r["message_count"],
-            )
-            for r in rows
-        ]
-
-    def read_conversation(
-        self,
-        topic: str,
-        title: str,
-    ) -> tuple[ConversationMeta, list[Message]]:
-        """Read a conversation and its messages.
-
-        Returns (ConversationMeta, messages list).
-        Raises FileNotFoundError if not found.
-        """
-        validate_topic(topic)
-        slug = slugify(title)
-
-        row = self.conn.execute(
-            """
-            SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
-                   c.participants, c.message_count,
-                   c.created_at, c.updated_at, t.path AS topic
-            FROM conversations c
-            JOIN topics t ON t.id = c.topic_id
-            WHERE t.path = ? AND c.slug = ?
-            """,
-            (topic, slug),
-        ).fetchone()
-
-        if not row:
-            msg = f"Conversation '{title}' not found under '{topic}'"
-            raise FileNotFoundError(msg)
-
-        meta = ConversationMeta(
-            id=row["id"],
-            source=row["source"],
-            title=row["title"],
-            topic=row["topic"],
-            tags=json.loads(row["tags"] or "[]"),
-            created=row["created_at"],
-            updated=row["updated_at"],
-            summary=row["summary"] or "",
-            participants=json.loads(row["participants"] or "[]"),
-            message_count=row["message_count"],
-        )
-
-        msg_rows = self.conn.execute(
-            """
-            SELECT role, content, timestamp FROM messages
-            WHERE conversation_id = ?
-            ORDER BY position ASC
-            """,
-            (row["id"],),
-        ).fetchall()
-
-        messages = [
-            Message(role=r["role"], content=r["content"], timestamp=r["timestamp"])
-            for r in msg_rows
-        ]
-
-        return meta, messages
-
-    # ------------------------------------------------------------------
     # Knowledge (still file-based)
     # ------------------------------------------------------------------
 
     def read_knowledge(self, name: str) -> str:
         """Read a knowledge file (e.g. user-profile). Still file-based."""
+        if not _KNOWLEDGE_NAME_PATTERN.match(name):
+            raise ValueError(f"Invalid knowledge file name: {name!r}")
         path = self.journal_root / "knowledge" / f"{name}.md"
         if not path.exists():
             return ""
+        if path.stat().st_size > MAX_KNOWLEDGE_FILE_SIZE:
+            raise ValueError(
+                f"Knowledge file '{name}' exceeds size limit ({MAX_KNOWLEDGE_FILE_SIZE // (1024 * 1024)} MB)"
+            )
         return path.read_text(encoding="utf-8")
 
     # ------------------------------------------------------------------
-    # Helpers
+    # Query helpers used by tool layer (keeps SQL out of tools/)
     # ------------------------------------------------------------------
 
-    def _generate_summary(self, title: str, messages: list[Message]) -> str:
-        """Generate a simple summary from first user message."""
-        first_user = next(
-            (m.content for m in messages if m.role == "user"),
-            "",
-        )
-        if not first_user:
-            return title
+    def get_entry_content(self, entry_id: int) -> str | None:
+        """Return content of a non-deleted entry, or None if not found."""
+        row = self.conn.execute(
+            "SELECT content FROM entries WHERE id = ? AND deleted_at IS NULL",
+            (entry_id,),
+        ).fetchone()
+        return row["content"] if row else None
 
-        # Truncate at sentence boundary within 200 chars
-        truncated = first_user[:200]
-        for punct in (".", "!", "?", "\n"):
-            idx = truncated.find(punct)
-            if 0 < idx < 180:
-                truncated = truncated[: idx + 1]
-                break
+    def get_entry_with_topic(self, entry_id: int) -> sqlite3.Row | None:
+        """Return entry + topic columns needed for FTS/embedding re-sync."""
+        return self.conn.execute(  # type: ignore[no-any-return]
+            "SELECT e.content, e.context, e.date, e.tags, t.path, t.title "
+            "FROM entries e JOIN topics t ON t.id = e.topic_id WHERE e.id = ?",
+            (entry_id,),
+        ).fetchone()
 
-        return f"Q: {truncated.strip()}"
+    def get_unindexed_entries(self, last_id: int, batch_size: int) -> list[sqlite3.Row]:
+        """Return a cursor-paginated batch of entries needing semantic indexing."""
+        return self.conn.execute(
+            """
+            SELECT e.id, e.content, e.tags
+            FROM entries e
+            WHERE e.deleted_at IS NULL
+              AND (e.indexed_at IS NULL OR e.indexed_at < e.updated_at)
+              AND e.id > ?
+            ORDER BY e.id
+            LIMIT ?
+            """,
+            (last_id, batch_size),
+        ).fetchall()

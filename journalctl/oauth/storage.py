@@ -18,6 +18,8 @@ from pathlib import Path
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
 
+from journalctl.storage.constants import DB_BUSY_TIMEOUT_MS
+
 SCHEMA = """
 PRAGMA journal_mode=WAL;
 
@@ -73,7 +75,7 @@ class OAuthStorage:
                 check_same_thread=False,
             )
             self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA busy_timeout=5000")
+            self._conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
             self._init_schema()
         return self._conn
 
@@ -228,14 +230,34 @@ class OAuthStorage:
     # Cleanup
     # ------------------------------------------------------------------
 
-    _CLEANUP_TABLES = {"auth_codes", "access_tokens", "refresh_tokens"}
-    _CLEANUP_KEY_COLS = {"code", "token"}
-    _CLEANUP_PAIRED_COLS = {"access_token", "refresh_token"}
+    # Pre-built queries keyed by table name — no f-string interpolation needed.
+    # Each entry: (key_column_name, SELECT sql, DELETE sql)
+    _CLEANUP_QUERIES: dict[str, tuple[str, str, str]] = {
+        "auth_codes": (
+            "code",
+            "SELECT code, data FROM auth_codes",
+            "DELETE FROM auth_codes WHERE code = ?",
+        ),
+        "access_tokens": (
+            "token",
+            "SELECT token, data FROM access_tokens",
+            "DELETE FROM access_tokens WHERE token = ?",
+        ),
+        "refresh_tokens": (
+            "token",
+            "SELECT token, data FROM refresh_tokens",
+            "DELETE FROM refresh_tokens WHERE token = ?",
+        ),
+    }
+
+    _CLEANUP_PAIR_DELETE: dict[str, str] = {
+        "access_token": "DELETE FROM token_pairs WHERE access_token = ?",
+        "refresh_token": "DELETE FROM token_pairs WHERE refresh_token = ?",
+    }
 
     def _cleanup_table(
         self,
         table: str,
-        key_col: str,
         paired_col: str | None = None,
         *,
         default_expired: bool = False,
@@ -243,22 +265,20 @@ class OAuthStorage:
         """Delete rows where JSON data.expires_at < now.
 
         Args:
-            table: Table name — must be in _CLEANUP_TABLES whitelist.
-            key_col: Primary key column — must be in _CLEANUP_KEY_COLS.
+            table: Table name — must be a key in _CLEANUP_QUERIES.
             paired_col: If set, also deletes from token_pairs on this column.
             default_expired: If True, treat missing/None expires_at as expired
                 (used for auth_codes which must always have an expiry).
         """
-        if table not in self._CLEANUP_TABLES:
-            raise ValueError(f"Invalid table: {table}")
-        if key_col not in self._CLEANUP_KEY_COLS:
-            raise ValueError(f"Invalid key column: {key_col}")
-        if paired_col is not None and paired_col not in self._CLEANUP_PAIRED_COLS:
-            raise ValueError(f"Invalid paired column: {paired_col}")
+        if table not in self._CLEANUP_QUERIES:
+            raise ValueError(f"Invalid table: {table!r}")
+        if paired_col is not None and paired_col not in self._CLEANUP_PAIR_DELETE:
+            raise ValueError(f"Invalid paired column: {paired_col!r}")
 
+        key_col, select_sql, delete_sql = self._CLEANUP_QUERIES[table]
         now = int(time.time())
         deleted = 0
-        rows = self.conn.execute(f"SELECT {key_col}, data FROM {table}").fetchall()  # noqa: S608 — whitelisted above
+        rows = self.conn.execute(select_sql).fetchall()
         for row in rows:
             expires_at = json.loads(row["data"]).get("expires_at")
             is_expired = (
@@ -267,12 +287,9 @@ class OAuthStorage:
                 else expires_at is not None and expires_at < now
             )
             if is_expired:
-                self.conn.execute(f"DELETE FROM {table} WHERE {key_col} = ?", (row[key_col],))  # noqa: S608
+                self.conn.execute(delete_sql, (row[key_col],))
                 if paired_col:
-                    self.conn.execute(
-                        f"DELETE FROM token_pairs WHERE {paired_col} = ?",  # noqa: S608 — whitelisted above
-                        (row[key_col],),
-                    )
+                    self.conn.execute(self._CLEANUP_PAIR_DELETE[paired_col], (row[key_col],))
                 deleted += 1
         return deleted
 
@@ -301,9 +318,9 @@ class OAuthStorage:
         Returns the number of records deleted.
         """
         deleted = 0
-        deleted += self._cleanup_table("auth_codes", "code", default_expired=True)
-        deleted += self._cleanup_table("access_tokens", "token", "access_token")
+        deleted += self._cleanup_table("auth_codes", default_expired=True)
+        deleted += self._cleanup_table("access_tokens", "access_token")
         deleted += self._cascade_expired_refresh_to_access()
-        deleted += self._cleanup_table("refresh_tokens", "token", "refresh_token")
+        deleted += self._cleanup_table("refresh_tokens", "refresh_token")
         self.conn.commit()
         return deleted

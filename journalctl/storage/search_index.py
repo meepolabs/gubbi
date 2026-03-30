@@ -10,13 +10,34 @@ Timeline and knowledge files are excluded from indexing.
 import json
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING, Final
 
-from journalctl.models.entry import SearchResult
+from journalctl.storage.constants import DB_BUSY_TIMEOUT_MS
+
+
+def _escape_like(s: str) -> str:
+    """Escape SQL LIKE metacharacters (!, %, _) using ! as the escape char.
+
+    Use with ``ESCAPE '!'`` in the SQL clause.
+    """
+    return s.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+
+
+from journalctl.core.validation import validate_topic  # noqa: E402
+from journalctl.models.search import SearchResult  # noqa: E402
+
+if TYPE_CHECKING:
+    from journalctl.storage.database import DatabaseStorage
 
 logger = logging.getLogger(__name__)
 
+# Column ordinal for 'content' in the documents_fts virtual table.
+# Must match the column order in CREATE VIRTUAL TABLE below:
+# title=0, description=1, tags=2, content=3.
+_FTS5_CONTENT_COL: Final = 3
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -69,17 +90,20 @@ class SearchIndex:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
         self._conn: sqlite3.Connection | None = None
+        self._conn_lock = threading.Lock()
 
     @property
     def conn(self) -> sqlite3.Connection:
         if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-            )
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute("PRAGMA busy_timeout=5000")
-            self._init_schema()
+            with self._conn_lock:
+                if self._conn is None:
+                    self._conn = sqlite3.connect(
+                        str(self.db_path),
+                        check_same_thread=False,
+                    )
+                    self._conn.row_factory = sqlite3.Row
+                    self._conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+                    self._init_schema()
         return self._conn
 
     def _init_schema(self) -> None:
@@ -105,12 +129,31 @@ class SearchIndex:
         tags: list[str],
     ) -> None:
         """Index a single journal entry."""
+        self.upsert_entry_on_conn(self.conn, entry_id, topic, title, date, content, context, tags)
+        self.conn.commit()
+
+    def upsert_entry_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        entry_id: int,
+        topic: str,
+        title: str,
+        date: str,
+        content: str,
+        context: str | None,
+        tags: list[str],
+    ) -> None:
+        """Index a single journal entry on the provided connection.
+
+        Does NOT commit — the caller is responsible. Use this when batching
+        the FTS write into the same transaction as the DB write for atomicity.
+        """
         source_key = f"entry:{entry_id}"
         full_content = content
         if context:
             full_content = f"{content}\n\n{context}"
 
-        self.conn.execute(
+        conn.execute(
             """
             INSERT INTO documents
                 (source_key, doc_type, topic, title, description,
@@ -134,7 +177,6 @@ class SearchIndex:
                 int(time.time()),
             ),
         )
-        self.conn.commit()
 
     def upsert_conversation(
         self,
@@ -210,15 +252,16 @@ class SearchIndex:
         if not query or not query.strip():
             return []
 
-        query = query.strip()[:500]  # cap to prevent oversized FTS5 expressions
+        query = query.strip()[:1000]  # cap to prevent oversized FTS5 expressions
 
-        sql = """
+        sql = f"""
             SELECT
                 d.source_key,
                 d.doc_type,
                 d.topic,
                 d.title,
-                snippet(documents_fts, 3, '<mark>', '</mark>', '...', 40) AS snippet,
+                snippet(documents_fts, {_FTS5_CONTENT_COL},
+                        '<mark>', '</mark>', '...', 40) AS snippet,
                 rank,
                 d.updated AS date
             FROM documents_fts
@@ -228,8 +271,9 @@ class SearchIndex:
         params: list[str | int] = [query]
 
         if topic_prefix:
-            sql += " AND d.topic LIKE ?"
-            params.append(f"{topic_prefix}%")
+            validate_topic(topic_prefix)
+            sql += " AND d.topic LIKE ? ESCAPE '!'"
+            params.append(f"{_escape_like(topic_prefix)}%")
 
         if date_from:
             sql += " AND d.updated >= ?"
@@ -281,30 +325,36 @@ class SearchIndex:
     # Rebuild
     # ------------------------------------------------------------------
 
-    def rebuild_from_db(self, db_storage: "DatabaseStorage") -> dict[str, int | float]:  # type: ignore[name-defined]  # noqa: F821
+    def rebuild_from_db(self, db_storage: "DatabaseStorage") -> dict[str, int | float]:
         """Full rebuild from canonical DatabaseStorage.
 
         Clears the FTS5 index and re-indexes all entries and conversations.
         """
-
         start = time.time()
-
         self.conn.execute("DELETE FROM documents")
         self.conn.commit()
 
-        count = 0
+        count = self._rebuild_entries(db_storage) + self._rebuild_conversations(db_storage)
 
-        # Index all entries
-        entry_rows = db_storage.conn.execute(
+        return {
+            "documents_indexed": count,
+            "duration_seconds": round(time.time() - start, 2),
+        }
+
+    def _rebuild_entries(self, db_storage: "DatabaseStorage") -> int:
+        """Re-index all non-deleted entries. Returns count indexed."""
+        rows = db_storage.conn.execute(
             """
             SELECT e.id, e.date, e.content, e.context, e.tags,
                    t.path AS topic, t.title
             FROM entries e
             JOIN topics t ON t.id = e.topic_id
+            WHERE e.deleted_at IS NULL
             """
         ).fetchall()
 
-        for r in entry_rows:
+        count = 0
+        for r in rows:
             try:
                 self.upsert_entry(
                     entry_id=r["id"],
@@ -318,9 +368,11 @@ class SearchIndex:
                 count += 1
             except (sqlite3.Error, KeyError, json.JSONDecodeError, AssertionError) as e:
                 logger.warning("Failed to index entry %s: %s", r["id"], e)
+        return count
 
-        # Index all conversations (concatenate messages)
-        conv_rows = db_storage.conn.execute(
+    def _rebuild_conversations(self, db_storage: "DatabaseStorage") -> int:
+        """Re-index all conversations with concatenated messages. Returns count indexed."""
+        rows = db_storage.conn.execute(
             """
             SELECT c.id, c.title, c.summary, c.tags, c.updated_at,
                    t.path AS topic
@@ -329,7 +381,8 @@ class SearchIndex:
             """
         ).fetchall()
 
-        for r in conv_rows:
+        count = 0
+        for r in rows:
             msg_rows = db_storage.conn.execute(
                 "SELECT content FROM messages WHERE conversation_id = ? ORDER BY position",
                 (r["id"],),
@@ -347,11 +400,6 @@ class SearchIndex:
                     message_content=message_content,
                 )
                 count += 1
-            except Exception as e:  # noqa: BLE001
+            except (sqlite3.Error, KeyError, json.JSONDecodeError, ValueError) as e:
                 logger.warning("Failed to index conversation %s: %s", r["id"], e)
-
-        duration = time.time() - start
-        return {
-            "documents_indexed": count,
-            "duration_seconds": round(duration, 2),
-        }
+        return count

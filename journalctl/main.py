@@ -5,6 +5,7 @@ stdio (local development). Based on fastapi_template
 patterns: CustomFastAPI subclass, lifespan, structlog.
 """
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -16,14 +17,14 @@ from starlette.middleware import Middleware
 
 from journalctl.config import Settings, get_settings
 from journalctl.core.logger import initialize_logger
-from journalctl.import_tools import import_tools
-from journalctl.memory.protocol import MemoryServiceProtocol
-from journalctl.memory.setup import configure_env, init_service
+from journalctl.memory.bootstrap import configure_env, init_service
+from journalctl.memory.client import MemoryServiceProtocol
 from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
-from journalctl.oauth.setup import register_oauth_routes
+from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.index import SearchIndex
+from journalctl.storage.search_index import SearchIndex
+from journalctl.tools.registry import register_tools
 
 
 class CustomFastAPI(FastAPI):
@@ -34,14 +35,14 @@ class CustomFastAPI(FastAPI):
     index: SearchIndex
     settings: Settings
     mcp: FastMCP
-    memory_service: MemoryServiceProtocol | None
+    memory_service: MemoryServiceProtocol
 
 
 def create_mcp_server(
     storage: DatabaseStorage,
     index: SearchIndex,
     settings: Settings,
-    memory_service: MemoryServiceProtocol | None = None,
+    memory_service: MemoryServiceProtocol,
 ) -> FastMCP:
     """Create and configure the MCP server with all tools."""
     mcp = FastMCP(
@@ -49,14 +50,14 @@ def create_mcp_server(
         instructions=(
             "This server is the user's primary personal memory system. "
             "Call journal_briefing at the start of every conversation to load "
-            "their identity, context, and recent activity. Use memory_store and "
-            "journal_append proactively when the user shares life updates."
+            "their identity, context, and recent activity. Use journal_append "
+            "proactively when the user shares life updates."
         ),
         stateless_http=True,
         streamable_http_path="/",
-        host="0.0.0.0",  # noqa: S104 — accept any Host header behind reverse proxy
+        host=settings.host,
     )
-    import_tools(mcp, storage, index, settings, memory_service=memory_service)
+    register_tools(mcp, storage, index, settings, memory_service=memory_service)
     return mcp
 
 
@@ -96,9 +97,13 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     # Initialize memory service
     configure_env()
-    app.memory_service = await init_service(settings)
-    if app.memory_service is not None:
-        await app.logger.info("Memory service initialized", db_path=str(settings.memory_db_path))
+    memory_service = await init_service(settings)
+    if memory_service is None:
+        raise RuntimeError(
+            "Memory service failed to initialize — check mcp-memory-service is installed"
+        )
+    app.memory_service = memory_service
+    await app.logger.info("Memory service initialized", db_path=str(settings.memory_db_path))
 
     # Create MCP server and mount on FastAPI
     app.mcp = create_mcp_server(app.storage, app.index, settings, memory_service=app.memory_service)
@@ -112,8 +117,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await app.logger.info("Server shutting down")
-        if app.memory_service is not None:
-            await app.memory_service.close()
+        await app.memory_service.close()
         app.index.close()
         oauth_storage.close()
 
@@ -160,20 +164,25 @@ def main() -> None:
     settings = get_settings()
 
     if settings.transport == "stdio":
-        import asyncio  # noqa: PLC0415
-
         configure_env()
 
         storage = DatabaseStorage(settings.db_path, settings.journal_root)
         idx = SearchIndex(settings.db_path)
+        try:
+            settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
+            _ = storage.conn
+            _ = idx.conn
+            mem_service = asyncio.run(init_service(settings))
+            if mem_service is None:
+                raise RuntimeError(
+                    "Memory service failed to initialize — check mcp-memory-service is installed"
+                )
 
-        settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-        _ = storage.conn
-        _ = idx.conn
-        mem_service = asyncio.run(init_service(settings))
-
-        mcp = create_mcp_server(storage, idx, settings, memory_service=mem_service)
-        mcp.run(transport="stdio")
+            mcp = create_mcp_server(storage, idx, settings, memory_service=mem_service)
+            mcp.run(transport="stdio")
+        finally:
+            idx.close()
+            storage.close()
     else:
         import uvicorn  # noqa: PLC0415
 

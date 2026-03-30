@@ -22,12 +22,13 @@ from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
+from journalctl.oauth.constants import CSRF_COOKIE_NAME
 from journalctl.oauth.storage import OAuthStorage
-from journalctl.oauth.templates import CSRF_COOKIE_NAME, render_login_page
+from journalctl.oauth.templates import render_login_page
 
 LoginHandler = Callable[[Request], Coroutine[Any, Any, Response]]
 
-logger = logging.getLogger("journalctl.oauth.login")
+logger = logging.getLogger("journalctl.oauth.forms")
 
 
 def create_login_handler(
@@ -105,11 +106,7 @@ def create_login_handler(
         storage.save_auth_code(code, auth_code)
 
         client_host = request.client.host if request.client else "unknown"
-        logger.info(
-            "Authorization code issued for client_id=%s from %s",
-            client_id,
-            client_host,
-        )
+        logger.info("Authorization code issued from %s", client_host)
 
         # Redirect back to client, clear CSRF cookie
         callback = construct_redirect_uri(

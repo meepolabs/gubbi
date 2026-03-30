@@ -1,6 +1,7 @@
 """Integration tests for MCP tools — end-to-end through the tool layer."""
 
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -9,9 +10,34 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import get_settings
-from journalctl.import_tools import import_tools
 from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.index import SearchIndex
+from journalctl.storage.search_index import SearchIndex
+from journalctl.tools.registry import register_tools
+
+
+class _StubMemoryService:
+    """Minimal stub for memory_service in tool tests."""
+
+    async def store_memory(self, content: str, **kwargs: Any) -> dict[str, Any]:
+        return {"content_hash": "a" * 64, "status": "stored"}
+
+    async def retrieve_memories(self, query: str, **kwargs: Any) -> dict[str, Any]:
+        return {"memories": []}
+
+    async def search_by_tag(self, tags: Any, **kwargs: Any) -> dict[str, Any]:
+        return {"memories": []}
+
+    async def list_memories(self, **kwargs: Any) -> dict[str, Any]:
+        return {"memories": [], "total": 0}
+
+    async def delete_memory(self, content_hash: str, **kwargs: Any) -> dict[str, Any]:
+        return {"status": "deleted"}
+
+    async def health_check(self) -> dict[str, Any]:
+        return {"status": "ok"}
+
+    async def close(self) -> None:
+        pass
 
 
 @pytest.fixture
@@ -22,7 +48,7 @@ def mcp_server(
     """Create an MCP server with all tools registered."""
     settings = get_settings()
     mcp = FastMCP("test-journalctl")
-    import_tools(mcp, storage, index, settings)
+    register_tools(mcp, storage, index, settings, memory_service=_StubMemoryService())
     return mcp
 
 
@@ -51,7 +77,7 @@ class TestAppendAndRead:
         assert "entry_id" in result
 
         result = await tools["journal_read"](topic="work/acme")
-        assert result["total_entries"] == 1
+        assert result["total"] == 1
         assert "Got the offer today." in result["entries"][0]["content"]
         assert result["entries"][0]["id"] is not None
 
@@ -78,8 +104,8 @@ class TestAppendAndRead:
         await tools["journal_append"](topic="test/recent", content="Entry 3", date="2025-01-01")
 
         result = await tools["journal_read"](topic="test/recent", n=2)
-        assert result["showing"] == 2
-        assert result["total_entries"] == 3
+        assert len(result["entries"]) == 2
+        assert result["total"] == 3
 
 
 class TestSearch:
@@ -94,13 +120,30 @@ class TestSearch:
         )
 
         result = await tools["journal_search"](query="promotion Q3")
-        assert result["count"] >= 1
+        assert result["total"] >= 1
         assert any("work/acme" in r["topic"] for r in result["results"])
 
     @pytest.mark.asyncio
     async def test_search_no_results(self, tools: dict) -> None:
         result = await tools["journal_search"](query="xyznonexistent123")
-        assert result["count"] == 0
+        assert result["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_search_rejects_invalid_date_from(self, tools: dict) -> None:
+        result = await tools["journal_search"](query="anything", date_from="not-a-date")
+        assert result.get("error_code") == "INVALID_DATE"
+
+    @pytest.mark.asyncio
+    async def test_search_rejects_invalid_date_to(self, tools: dict) -> None:
+        # "2025-13-01" passes the YYYY-MM-DD regex but fails strptime (month 13 is invalid)
+        result = await tools["journal_search"](query="anything", date_to="2025-13-01")
+        assert result.get("error_code") == "INVALID_DATE"
+
+    @pytest.mark.asyncio
+    async def test_search_limit_is_capped(self, tools: dict) -> None:
+        result = await tools["journal_search"](query="anything", limit=99999)
+        # Should not raise; limit is silently capped
+        assert isinstance(result["results"], list)
 
 
 class TestConversationFlow:
@@ -115,13 +158,14 @@ class TestConversationFlow:
                 {"role": "user", "content": "What should we focus on?"},
                 {"role": "assistant", "content": "Focus on impact."},
             ],
+            summary="Discussed Q3 planning priorities.",
             tags=["work"],
         )
         assert result["status"] == "saved"
-        assert result["summary"]  # non-empty auto-generated summary
+        assert result["summary"]
 
         listed = await tools["journal_list_conversations"](topic_prefix="work")
-        assert listed["count"] == 1
+        assert listed["total"] == 1
 
     @pytest.mark.asyncio
     async def test_save_returns_conversation_id(self, tools: dict) -> None:
@@ -132,6 +176,7 @@ class TestConversationFlow:
                 {"role": "user", "content": "How should I train?"},
                 {"role": "assistant", "content": "Start with intervals."},
             ],
+            summary="Training plan discussion.",
         )
         assert "conversation_id" in result
         assert isinstance(result["conversation_id"], int)
@@ -149,13 +194,18 @@ class TestConversationFlow:
             {"role": "assistant", "content": "V2 answer"},
         ]
 
-        r1 = await tools["journal_save_conversation"]("test/resave", "Same Chat", msgs_v1)
+        r1 = await tools["journal_save_conversation"](
+            "test/resave", "Same Chat", msgs_v1, summary="V1 chat."
+        )
         assert r1["status"] == "saved"
 
-        r2 = await tools["journal_save_conversation"]("test/resave", "Same Chat", msgs_v2)
+        r2 = await tools["journal_save_conversation"](
+            "test/resave", "Same Chat", msgs_v2, summary="V2 chat."
+        )
         assert r2["status"] == "updated"
 
-        read = await tools["journal_read_conversation"](topic="test/resave", title="Same Chat")
+        conv_id = r2["conversation_id"]
+        read = await tools["journal_read_conversation"](conversation_id=conv_id)
         assert read["metadata"]["message_count"] == 4
 
 

@@ -1,6 +1,6 @@
 """Generate a bcrypt hash for the journal owner password.
 
-Usage: python -m journalctl.oauth.hash_password
+Usage: python -m journalctl.oauth.crypto
 """
 
 import getpass

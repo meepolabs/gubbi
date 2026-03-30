@@ -2,7 +2,7 @@
 
 import pytest
 
-from journalctl.models.entry import Message
+from journalctl.models.conversation import Message
 from journalctl.storage.database import DatabaseStorage
 
 
@@ -80,7 +80,7 @@ class TestEntries:
             context="Markdown has no stable IDs. SQLite allows relationships and namespaces.",
             tags=["decision"],
         )
-        _, entries = storage.read_entries("projects/alpha")
+        _, entries, _ = storage.read_entries("projects/alpha")
         assert (
             entries[0].context
             == "Markdown has no stable IDs. SQLite allows relationships and namespaces."
@@ -92,7 +92,7 @@ class TestEntries:
         storage.append_entry("test/stable", "Entry 1", date="2025-01-01")
         storage.append_entry("test/stable", "Entry 2", date="2025-02-01")
 
-        meta, entries = storage.read_entries("test/stable")
+        meta, entries, _ = storage.read_entries("test/stable")
         assert len(entries) == 2
         assert all(e.id is not None for e in entries)
         # IDs are distinct
@@ -104,7 +104,7 @@ class TestEntries:
         storage.append_entry("test/recent", "Entry 2", date="2025-06-01")
         storage.append_entry("test/recent", "Entry 3", date="2025-12-01")
 
-        meta, entries = storage.read_entries("test/recent", n=2)
+        meta, entries, _ = storage.read_entries("test/recent", n=2)
         assert len(entries) == 2
         assert "Entry 2" in entries[0].content
         assert "Entry 3" in entries[1].content
@@ -114,7 +114,7 @@ class TestEntries:
 
         storage.update_entry(entry_id, "Updated content.", mode="replace")
 
-        _, entries = storage.read_entries("test/update")
+        _, entries, _ = storage.read_entries("test/update")
         assert entries[0].content == "Updated content."
 
     def test_update_entry_append(self, storage: DatabaseStorage) -> None:
@@ -122,7 +122,7 @@ class TestEntries:
 
         storage.update_entry(entry_id, "Added more.", mode="append")
 
-        _, entries = storage.read_entries("test/update")
+        _, entries, _ = storage.read_entries("test/update")
         assert "Original." in entries[0].content
         assert "Added more." in entries[0].content
 
@@ -141,12 +141,12 @@ class TestEntries:
         )
         storage.update_entry(entry_id, "Decision made.", context="Updated reasoning.")
 
-        _, entries = storage.read_entries("test/ctx")
+        _, entries, _ = storage.read_entries("test/ctx")
         assert entries[0].context == "Updated reasoning."
 
     def test_entry_has_conversation_id_field(self, storage: DatabaseStorage) -> None:
         entry_id, _ = storage.append_entry("test/conv-ref", "Something happened.")
-        _, entries = storage.read_entries("test/conv-ref")
+        _, entries, _ = storage.read_entries("test/conv-ref")
         assert entries[0].conversation_id is None  # None by default
 
 
@@ -162,11 +162,12 @@ class TestConversations:
             topic="work/acme",
             title="Planning Session",
             messages=msgs,
+            summary="Discussion about project approach",
             source="claude",
             tags=["planning"],
         )
         assert isinstance(conv_id, int)
-        assert "How should we approach" in summary or "Planning Session" in summary
+        assert summary == "Discussion about project approach"
 
         meta, messages = storage.read_conversation("work/acme", "Planning Session")
         assert meta.title == "Planning Session"
@@ -184,8 +185,8 @@ class TestConversations:
             Message(role="user", content="Q2"),
             Message(role="assistant", content="A2"),
         ]
-        id1, _ = storage.save_conversation("test/idem", "Chat", msgs_v1)
-        id2, _ = storage.save_conversation("test/idem", "Chat", msgs_v2)
+        id1, _ = storage.save_conversation("test/idem", "Chat", msgs_v1, summary="v1")
+        id2, _ = storage.save_conversation("test/idem", "Chat", msgs_v2, summary="v2")
 
         # Same conversation — same ID
         assert id1 == id2
@@ -196,23 +197,26 @@ class TestConversations:
 
     def test_save_preserves_created_date(self, storage: DatabaseStorage) -> None:
         msgs = [Message(role="user", content="Hello")]
-        id1, _ = storage.save_conversation("test/dates", "Chat", msgs)
+        id1, _ = storage.save_conversation("test/dates", "Chat", msgs, summary="test")
 
         meta1, _ = storage.read_conversation("test/dates", "Chat")
         original_created = meta1.created
 
         # Re-save
         storage.save_conversation(
-            "test/dates", "Chat", msgs + [Message(role="assistant", content="Hi")]
+            "test/dates",
+            "Chat",
+            msgs + [Message(role="assistant", content="Hi")],
+            summary="test updated",
         )
         meta2, _ = storage.read_conversation("test/dates", "Chat")
         assert meta2.created == original_created
 
     def test_list_conversations(self, storage: DatabaseStorage) -> None:
         msgs = [Message(role="user", content="Content")]
-        storage.save_conversation("work/acme", "Chat 1", msgs)
-        storage.save_conversation("work/acme", "Chat 2", msgs)
-        storage.save_conversation("hobbies/running", "Run Chat", msgs)
+        storage.save_conversation("work/acme", "Chat 1", msgs, summary="chat 1")
+        storage.save_conversation("work/acme", "Chat 2", msgs, summary="chat 2")
+        storage.save_conversation("hobbies/running", "Run Chat", msgs, summary="run chat")
 
         all_convs = storage.list_conversations()
         assert len(all_convs) == 3
@@ -226,7 +230,9 @@ class TestConversations:
 
     def test_conversation_json_archive_written(self, storage: DatabaseStorage) -> None:
         msgs = [Message(role="user", content="Test message")]
-        conv_id, _ = storage.save_conversation("test/archive", "Archive Test", msgs)
+        conv_id, _ = storage.save_conversation(
+            "test/archive", "Archive Test", msgs, summary="archive test"
+        )
 
         json_dir = storage.conversations_json_dir / "test" / "archive"
         json_files = list(json_dir.glob("*.json"))
@@ -267,7 +273,7 @@ class TestStats:
     def test_stats_with_data(self, storage: DatabaseStorage) -> None:
         storage.append_entry("work/acme", "Entry 1.")
         msgs = [Message(role="user", content="Hello")]
-        storage.save_conversation("work/acme", "Chat", msgs)
+        storage.save_conversation("work/acme", "Chat", msgs, summary="test")
 
         stats = storage.get_stats()
         assert stats["topics"] == 1

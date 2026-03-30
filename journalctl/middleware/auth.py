@@ -19,6 +19,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from journalctl.config import get_settings
+from journalctl.oauth.constants import MAX_BEARER_TOKEN_LEN
 
 
 class BearerAuthMiddleware:
@@ -59,7 +60,7 @@ class BearerAuthMiddleware:
 
         token = auth_header[7:]  # Strip "Bearer "
 
-        if len(token) > 256:
+        if len(token) > MAX_BEARER_TOKEN_LEN:
             response = JSONResponse(
                 {"error": "Invalid token"},
                 status_code=401,

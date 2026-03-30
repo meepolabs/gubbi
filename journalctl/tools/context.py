@@ -1,12 +1,30 @@
 """MCP tools: journal_briefing, journal_timeline."""
 
+import logging
 from datetime import date, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import Settings
+from journalctl.memory.client import MemoryServiceProtocol
+from journalctl.storage.constants import SNIPPET_PREVIEW_LEN
 from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.index import SearchIndex
+from journalctl.storage.search_index import SearchIndex
+from journalctl.tools.constants import (
+    BRIEFING_KEY_FACTS_COUNT,
+    BRIEFING_KEY_FACTS_QUERY,
+    BRIEFING_MAX_TOPICS,
+    BRIEFING_MAX_WEEK_ENTRIES,
+)
+
+logger = logging.getLogger(__name__)
+
+
+def _month_end(year: int, month: int) -> date:
+    """Return the last day of the given month."""
+    if month == 12:
+        return date(year + 1, 1, 1) - timedelta(days=1)
+    return date(year, month + 1, 1) - timedelta(days=1)
 
 
 def _resolve_period(
@@ -19,58 +37,65 @@ def _resolve_period(
     """
     today = date.today()
 
+    if period == "today":
+        s = today.isoformat()
+        return s, s, f"Today ({s})"
+
     if period == "this-week":
-        # ISO week: Monday = 0
         start = today - timedelta(days=today.weekday())
         end = start + timedelta(days=6)
-        label = f"Week {today.isocalendar()[1]}, {today.year}"
-    elif period == "last-week":
+        return start.isoformat(), end.isoformat(), f"Week {today.isocalendar()[1]}, {today.year}"
+
+    if period == "last-week":
         start = today - timedelta(days=today.weekday() + 7)
         end = start + timedelta(days=6)
-        label = f"Week {start.isocalendar()[1]}, {start.year}"
-    elif period == "this-month":
+        return start.isoformat(), end.isoformat(), f"Week {start.isocalendar()[1]}, {start.year}"
+
+    if period == "this-month":
         start = today.replace(day=1)
-        # Last day of month
-        if today.month == 12:
-            end = today.replace(year=today.year + 1, month=1, day=1) - timedelta(days=1)
-        else:
-            end = today.replace(month=today.month + 1, day=1) - timedelta(days=1)
-        label = f"{today.strftime('%B %Y')}"
-    elif period == "last-month":
-        first_this_month = today.replace(day=1)
-        end = first_this_month - timedelta(days=1)
+        end = _month_end(today.year, today.month)
+        return start.isoformat(), end.isoformat(), today.strftime("%B %Y")
+
+    if period == "last-month":
+        end = today.replace(day=1) - timedelta(days=1)
         start = end.replace(day=1)
-        label = f"{start.strftime('%B %Y')}"
-    elif len(period) == 4 and period.isdigit():
+        return start.isoformat(), end.isoformat(), start.strftime("%B %Y")
+
+    if len(period) == 4 and period.isdigit():
         # Year: YYYY
-        start = date(int(period), 1, 1)
-        end = date(int(period), 12, 31)
-        label = period
-    elif len(period) == 7 and period[4] == "-" and period[5:].isdigit():
+        try:
+            year = int(period)
+            return date(year, 1, 1).isoformat(), date(year, 12, 31).isoformat(), period
+        except ValueError:
+            pass
+
+    if len(period) == 7 and period[4] == "-" and period[5:].isdigit():
         # Month: YYYY-MM
-        year, month = int(period[:4]), int(period[5:])
-        start = date(year, month, 1)
-        if month == 12:
-            end = date(year + 1, 1, 1) - timedelta(days=1)
-        else:
-            end = date(year, month + 1, 1) - timedelta(days=1)
-        label = f"{start.strftime('%B %Y')}"
-    elif "-W" in period:
+        try:
+            year, month = int(period[:4]), int(period[5:])
+            start = date(year, month, 1)
+            end = _month_end(year, month)
+            return start.isoformat(), end.isoformat(), start.strftime("%B %Y")
+        except ValueError:
+            pass
+
+    if "-W" in period:
         # ISO week: YYYY-WNN
         parts = period.split("-W")
-        year, week = int(parts[0]), int(parts[1])
-        start = date.fromisocalendar(year, week, 1)
-        end = start + timedelta(days=6)
-        label = f"Week {week}, {year}"
-    else:
-        msg = (
-            f"Invalid period '{period}'. Use: 'YYYY', 'YYYY-MM', "
-            "'YYYY-WNN', 'this-week', 'last-week', 'this-month', "
-            "'last-month'."
-        )
-        raise ValueError(msg)
+        if len(parts) == 2 and parts[0] and parts[1].isdigit():  # noqa: SIM102
+            try:
+                year, week = int(parts[0]), int(parts[1])
+                start = date.fromisocalendar(year, week, 1)
+                end = start + timedelta(days=6)
+                return start.isoformat(), end.isoformat(), f"Week {week}, {year}"
+            except ValueError:
+                pass
 
-    return start.isoformat(), end.isoformat(), label
+    msg = (
+        f"Invalid period '{period}'. Use: 'today', 'YYYY', 'YYYY-MM', "
+        "'YYYY-WNN', 'this-week', 'last-week', 'this-month', 'last-month'."
+    )
+    raise ValueError(msg)
 
 
 def register(
@@ -78,23 +103,23 @@ def register(
     storage: DatabaseStorage,
     index: SearchIndex,
     settings: Settings,
+    memory_service: MemoryServiceProtocol | None = None,
 ) -> None:
     """Register context tools on the MCP server."""
 
     @mcp.tool()
     async def journal_briefing() -> dict:
-        """ALWAYS call this tool automatically at the start of EVERY conversation,
-        before responding to the user's first message — even for casual greetings.
+        """Load the user's personal context at the start of every conversation,
+        before responding to the first message.
 
-        This is the user's primary lifelong memory and personal context store.
-        It replaces Claude's built-in memory. Without calling this, you have no
-        context about who this person is, what they're working on, or what
-        matters to them.
+        Returns who this person is (profile, key facts), what happened recently
+        (this week's entries), and what topics they track. Without calling this,
+        you have no memory of who this person is or what they care about.
 
-        Do not skip. Do not wait. Call it first, every time.
+        Always call this first. Do not respond without it.
 
         Returns:
-            user_profile, this_week (timeline), topics (top 20), stats (counts).
+            user_profile, key_facts, this_week (recent activity), topics, stats.
         """
         # User profile
         profile = storage.read_knowledge("user-profile")
@@ -103,20 +128,65 @@ def register(
         date_from, date_to, label = _resolve_period("this-week")
         week_entries = storage.get_entries_by_date_range(date_from, date_to)
 
-        # Top 20 recently active topics
+        # Clean entries — remove internal file_path, expose IDs
+        clean_entries = []
+        for e in week_entries:
+            entry = {
+                "doc_type": e.get("doc_type", ""),
+                "topic": e.get("topic", ""),
+                "title": e.get("title", ""),
+                "snippet": e.get("description", "")[:SNIPPET_PREVIEW_LEN]
+                if e.get("description")
+                else e.get("content", "")[:SNIPPET_PREVIEW_LEN],
+                "date": e.get("updated", ""),
+                "tags": e.get("tags", "[]"),
+            }
+            # Parse entry/conversation ID from file_path like "entry:42"
+            fp = e.get("file_path", "")
+            if fp.startswith("entry:"):
+                entry["entry_id"] = int(fp[6:])
+            elif fp.startswith("conversation:"):
+                entry["conversation_id"] = int(fp[13:])
+            clean_entries.append(entry)
+
+        # Most recent entries first; drop oldest when the week is very active
+        clean_entries = clean_entries[-BRIEFING_MAX_WEEK_ENTRIES:][::-1]
+
         all_topics = storage.list_topics()
-        top_topics = all_topics[:20]
+        top_topics = all_topics[:BRIEFING_MAX_TOPICS]
 
         # Stats
         stats = storage.get_stats()
 
+        # Key facts — top semantic matches for user identity/preferences/status
+        key_facts: list[dict] = []
+        if memory_service is not None:
+            try:
+                mem_response = await memory_service.retrieve_memories(
+                    query=BRIEFING_KEY_FACTS_QUERY,
+                    n_results=BRIEFING_KEY_FACTS_COUNT,
+                )
+                memories = mem_response.get("memories", [])
+                if isinstance(memories, list):
+                    key_facts = [
+                        {
+                            "content": m.get("content", ""),
+                            "similarity": round(float(m.get("similarity", 0.0)), 3),
+                        }
+                        for m in memories
+                        if isinstance(m, dict) and m.get("content")
+                    ]
+            except Exception:
+                logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
+
         return {
             "user_profile": profile,
+            "key_facts": key_facts,
             "this_week": {
                 "label": label,
                 "date_from": date_from,
                 "date_to": date_to,
-                "entries": week_entries,
+                "entries": clean_entries,
             },
             "topics": [t.model_dump() for t in top_topics],
             "topic_count": len(all_topics),
@@ -137,7 +207,7 @@ def register(
         date_from, date_to, label = _resolve_period("this-week")
         week_entries = storage.get_entries_by_date_range(date_from, date_to)
         all_topics = storage.list_topics()
-        top_topics = all_topics[:20]
+        top_topics = all_topics[:BRIEFING_MAX_TOPICS]
         stats = storage.get_stats()
 
         sections = []
@@ -145,9 +215,11 @@ def register(
             sections.append(f"## Profile\n{profile.strip()}")
 
         if week_entries:
+            recent = week_entries[-BRIEFING_MAX_WEEK_ENTRIES:][::-1]
             entry_lines = "\n".join(
-                f"- {e['updated']} [{e['topic']}] {str(e.get('description', ''))[:120]}"
-                for e in week_entries[:15]
+                f"- {e['updated']} [{e['topic']}] "
+                f"{str(e.get('description', ''))[:SNIPPET_PREVIEW_LEN]}"
+                for e in recent
             )
             sections.append(f"## This Week ({label})\n{entry_lines}")
         else:
@@ -168,17 +240,19 @@ def register(
     async def journal_timeline(
         period: str,
     ) -> dict:
-        """Browse what happened during a specific time period — "what was I doing last week?"
+        """Browse what happened during a time period — "what was I doing last week?"
+        or "show me this month."
 
-        Use when the user asks about activity during a week, month, or year.
-        Returns all journal entries for the period in chronological order.
-        For keyword-specific lookups, use journal_search instead.
+        Use when the user asks about activity during a day, week, month, or year.
+        Returns entries and conversations in chronological order.
+
+        Do NOT use for keyword search — use journal_search instead.
 
         Args:
-            period: Time period to view. Accepts:
-                    'YYYY' (year), 'YYYY-MM' (month),
-                    'YYYY-WNN' (ISO week), 'this-week',
-                    'last-week', 'this-month', 'last-month'.
+            period: Time period. Accepts:
+                    'today', 'this-week', 'last-week', 'this-month', 'last-month',
+                    'YYYY' (e.g. '2026'), 'YYYY-MM' (e.g. '2026-03'),
+                    'YYYY-WNN' (e.g. '2026-W14').
 
         Returns:
             Chronological list of entries for the period,

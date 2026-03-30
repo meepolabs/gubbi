@@ -10,7 +10,7 @@ import secrets
 
 from starlette.responses import HTMLResponse
 
-CSRF_COOKIE_NAME = "_journal_csrf"
+from journalctl.oauth.constants import CSRF_COOKIE_NAME
 
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">

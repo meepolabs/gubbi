@@ -1,7 +1,7 @@
-"""Memory service setup — environment configuration and initialization factory.
+"""Memory service bootstrap — environment configuration and initialization factory.
 
-Mirrors the oauth/setup.py pattern: one module owns the lifecycle of the
-optional mcp-memory-service integration so main.py stays thin.
+One module owns the lifecycle of the optional mcp-memory-service integration
+so main.py stays thin.
 """
 
 import logging
@@ -9,7 +9,7 @@ import os
 from typing import cast
 
 from journalctl.config import Settings
-from journalctl.memory.protocol import MemoryServiceProtocol
+from journalctl.memory.client import MemoryServiceProtocol
 
 logger = logging.getLogger(__name__)
 

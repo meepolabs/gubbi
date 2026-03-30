@@ -3,7 +3,7 @@
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from journalctl.memory.setup import configure_env, init_service
+from journalctl.memory.bootstrap import configure_env, init_service
 
 _TEST_DB = "memory_test.db"  # relative path, no /tmp
 

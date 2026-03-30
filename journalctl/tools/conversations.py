@@ -1,16 +1,27 @@
 """MCP tools: journal_save_conversation, journal_list_conversations,
 journal_read_conversation."""
 
-from typing import Final
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.models.entry import Message, sanitize_freetext, sanitize_label, validate_topic
+from journalctl.core.validation import (
+    sanitize_freetext,
+    sanitize_label,
+    validate_date,
+    validate_topic,
+)
+from journalctl.models.conversation import Message
 from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.index import SearchIndex
-
-_KEEP_ROLES: Final = {"user", "assistant"}
-_MAX_MSG_CHARS: Final = 10_000  # per message — prevent runaway tool output from bloating storage
+from journalctl.storage.search_index import SearchIndex
+from journalctl.tools.constants import (
+    DEFAULT_CONVERSATIONS_LIMIT,
+    KEEP_ROLES,
+    MAX_CONVERSATIONS_RESULTS,
+    MAX_MESSAGES_PER_CONVERSATION,
+    MAX_MSG_CHARS,
+)
+from journalctl.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 
 
 def _format_messages_as_markdown(title: str, messages: list[Message]) -> str:
@@ -35,19 +46,18 @@ def register(
         topic: str,
         title: str,
         messages: list[dict],
+        summary: str,
         source: str = "claude",
         tags: list[str] | None = None,
-        summary: str | None = None,
-    ) -> dict:
-        """Save a full conversation transcript to the journal.
+        date: str | None = None,
+    ) -> dict[str, Any]:
+        """Save a conversation transcript to the journal — "save this chat" or
+        "remember what we discussed."
 
-        Offer to save when a meaningful moment happens during a conversation — a
-        decision made, a plan formed, a problem solved, or an insight worth keeping.
-        Don't wait until the end. Good candidates: planning sessions, deployments,
-        life updates, technical breakthroughs, personal reflections.
+        Call when the user asks to save, or offer during meaningful moments:
+        decisions, plans, breakthroughs, or reflections.
 
-        Re-saving the same topic + title overwrites the previous version.
-        In future conversations on the same topic, proactively offer to update the saved record.
+        Re-saving the same topic + title updates the previous version.
 
         Args:
             topic: Topic this conversation relates to.
@@ -55,25 +65,34 @@ def register(
             messages: List of message dicts with keys:
                       role ('user' or 'assistant'), content (str),
                       and optional timestamp (str).
-                      Tool calls, tool results, and system messages
-                      are filtered automatically — only pass the
-                      human-readable turns.
+            summary: A concise summary of the conversation (1-3 sentences).
             source: Name of the app or LLM (e.g. 'claude', 'chatgpt').
             tags: Tags for the conversation.
-            summary: Optional summary override. Auto-generated
-                     if not provided.
+            date: When the conversation happened (YYYY-MM-DD). Defaults to today.
 
         Returns:
             Conversation ID, summary, and whether it was a new save or update.
         """
 
-        validate_topic(topic)
+        try:
+            validate_topic(topic)
+        except ValueError as e:
+            return invalid_topic(topic, str(e))
         title = sanitize_label(title, max_len=100)
         source = sanitize_label(source)
+        summary = sanitize_freetext(summary)
         if tags:
             tags = [sanitize_label(t) for t in tags]
-        if summary:
-            summary = sanitize_freetext(summary)
+        if date:
+            try:
+                validate_date(date)
+            except ValueError:
+                return invalid_date(date)
+
+        if len(messages) > MAX_MESSAGES_PER_CONVERSATION:
+            return validation_error(
+                f"Too many messages: max {MAX_MESSAGES_PER_CONVERSATION}, got {len(messages)}"
+            )
 
         # Only keep human-readable turns. Tool calls, tool results, and system
         # messages are infrastructure noise — not part of the conversation record.
@@ -81,11 +100,11 @@ def register(
             parsed_messages = [
                 Message(
                     role=m.get("role", "user"),
-                    content=sanitize_freetext(m.get("content", ""))[:_MAX_MSG_CHARS],
+                    content=sanitize_freetext(m.get("content", ""))[:MAX_MSG_CHARS],
                     timestamp=m.get("timestamp"),
                 )
                 for m in messages
-                if m.get("role") in _KEEP_ROLES and m.get("content", "").strip()
+                if m.get("role") in KEEP_ROLES and m.get("content", "").strip()
             ]
         except (TypeError, AttributeError) as e:
             msg = (
@@ -95,22 +114,23 @@ def register(
             raise ValueError(msg) from e
 
         if not parsed_messages:
-            raise ValueError("No user/assistant messages found after filtering.")
+            return validation_error("No user/assistant messages found after filtering.")
 
         # Check if update
         existing = storage.list_conversations(topic_prefix=topic)
-        from journalctl.models.entry import slugify  # noqa: PLC0415
+        from journalctl.core.validation import slugify  # noqa: PLC0415
 
         slug = slugify(title)
         is_update = any(slugify(c.title) == slug for c in existing)
 
-        conv_id, auto_summary = storage.save_conversation(
+        conv_id, saved_summary = storage.save_conversation(
             topic=topic,
             title=title,
             messages=parsed_messages,
+            summary=summary,
             source=source,
             tags=tags,
-            summary=summary,
+            date=date,
         )
 
         # Update FTS5 index
@@ -122,16 +142,16 @@ def register(
             conversation_id=conv_id,
             topic=topic,
             title=title,
-            summary=auto_summary,
+            summary=saved_summary,
             tags=tags or [],
-            updated=today,
+            updated=date or today,
             message_content=message_content,
         )
 
         return {
             "status": "updated" if is_update else "saved",
             "conversation_id": conv_id,
-            "summary": auto_summary,
+            "summary": saved_summary,
             "topic": topic,
             "title": title,
         }
@@ -139,53 +159,73 @@ def register(
     @mcp.tool()
     async def journal_list_conversations(
         topic_prefix: str | None = None,
-    ) -> dict:
+        limit: int = DEFAULT_CONVERSATIONS_LIMIT,
+        offset: int = 0,
+    ) -> dict[str, Any]:
         """Browse saved conversations — "what conversations have we had about X?"
 
         Use when the user asks to revisit a past conversation or see what exists.
-        Returns titles, dates, and summaries. To read a full transcript, follow up
-        with journal_read_conversation.
+        Returns titles, dates, summaries, and conversation IDs.
+
+        To read a full transcript, pass the 'id' field to journal_read_conversation.
 
         Args:
             topic_prefix: Filter by topic prefix (e.g. 'work').
                           If omitted, lists all conversations.
+            limit: Maximum conversations to return (default 50, max 200).
+            offset: Number of conversations to skip for pagination.
 
         Returns:
-            List of conversations with title, date, summary,
+            List of conversations with id, title, date, summary,
             and message count.
         """
+        limit = max(1, min(limit, MAX_CONVERSATIONS_RESULTS))
+        offset = max(0, offset)
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
-            validate_topic(topic_prefix)
-        conversations = storage.list_conversations(topic_prefix=topic_prefix)
+            try:
+                validate_topic(topic_prefix)
+            except ValueError as e:
+                return invalid_topic(topic_prefix, str(e))
+        conversations = storage.list_conversations(
+            topic_prefix=topic_prefix, limit=limit, offset=offset
+        )
         return {
             "conversations": [c.model_dump() for c in conversations],
-            "count": len(conversations),
+            "total": len(conversations),
+            "limit": limit,
+            "offset": offset,
         }
 
     @mcp.tool()
     async def journal_read_conversation(
-        topic: str,
-        title: str,
-    ) -> dict:
+        conversation_id: int,
+        preview: bool = False,
+    ) -> dict[str, Any]:
         """Read the full transcript of a saved conversation.
 
-        Use after journal_list_conversations to retrieve a specific conversation
-        the user wants to revisit. Requires the exact topic and title from
-        journal_list_conversations output.
+        Use the 'id' from journal_list_conversations or journal_search results.
 
         Args:
-            topic: Topic the conversation is under (e.g. 'work/acme').
-            title: Title of the conversation (as shown in journal_list_conversations).
+            conversation_id: The conversation's ID (from list or search results).
+            preview: If True, return only first and last 3 messages instead of
+                     the full transcript. Use for long conversations to avoid
+                     consuming the entire context window.
 
         Returns:
             Full conversation metadata and transcript.
         """
-        validate_topic(topic)
-        meta, messages = storage.read_conversation(topic, title)
-        content = _format_messages_as_markdown(title, messages)
+
+        try:
+            meta, messages = storage.read_conversation_by_id(conversation_id, preview=preview)
+        except FileNotFoundError:
+            return not_found("Conversation", conversation_id)
+        content = _format_messages_as_markdown(meta.title, messages)
         return {
             "metadata": meta.model_dump(),
             "content": content,
+            "preview": preview,
+            "messages_shown": len(messages),
+            "messages_total": meta.message_count,
         }

@@ -1,7 +1,7 @@
 """OAuth route registration for the FastAPI application.
 
-Mirrors the import_tools.py pattern: a single function that wires
-all OAuth endpoints onto the app, keeping main.py:lifespan() clean.
+A single function wires all OAuth endpoints onto the app,
+keeping main.py:lifespan() clean.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from pydantic import AnyHttpUrl
 from starlette.routing import Route
 
 from journalctl.config import Settings
-from journalctl.oauth.login import create_login_handler
+from journalctl.oauth.forms import create_login_handler
 from journalctl.oauth.provider import JournalOAuthProvider
 from journalctl.oauth.storage import OAuthStorage
 

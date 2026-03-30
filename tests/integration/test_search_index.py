@@ -1,8 +1,8 @@
-"""Tests for storage/index.py — FTS5 search and indexing."""
+"""Tests for storage/search_index.py — FTS5 search and indexing."""
 
-from journalctl.models.entry import Message
+from journalctl.models.conversation import Message
 from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.index import SearchIndex
+from journalctl.storage.search_index import SearchIndex
 
 
 class TestIndexing:
@@ -89,7 +89,9 @@ class TestIndexing:
             Message(role="user", content="Best ramen recommendation?"),
             Message(role="assistant", content="Try Jinya in Bellevue."),
         ]
-        conv_id, summary = storage.save_conversation("hobbies/food", "Ramen Chat", msgs)
+        conv_id, summary = storage.save_conversation(
+            "hobbies/food", "Ramen Chat", msgs, summary="Ramen recommendations in Bellevue"
+        )
         index.upsert_conversation(
             conversation_id=conv_id,
             topic="hobbies/food",

@@ -1,9 +1,17 @@
 """MCP tools: journal_list_topics, journal_create_topic."""
 
+from typing import Any
+
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.models.entry import sanitize_freetext, sanitize_label, validate_topic
+from journalctl.core.validation import (
+    sanitize_freetext,
+    sanitize_label,
+    validate_date,
+    validate_topic,
+)
 from journalctl.storage.database import DatabaseStorage
+from journalctl.tools.errors import already_exists, invalid_date, invalid_topic
 
 
 def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
@@ -14,7 +22,7 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         topic_prefix: str | None = None,
         limit: int = 50,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Browse all journal topics — "what topics do I have?" or "what do I track?"
 
         Use when the user asks about their journal structure, or when you need to
@@ -32,7 +40,10 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
-            validate_topic(topic_prefix)
+            try:
+                validate_topic(topic_prefix)
+            except ValueError as e:
+                return invalid_topic(topic_prefix, str(e))
         topics = storage.list_topics(topic_prefix=topic_prefix)
         page = topics[offset : offset + limit]
         return {
@@ -48,7 +59,8 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         title: str,
         description: str = "",
         tags: list[str] | None = None,
-    ) -> dict:
+        created_at: str | None = None,
+    ) -> dict[str, Any]:
         """Create a new journal topic for an area of the user's life not yet tracked.
 
         Only create when no existing topic fits — check journal_list_topics first.
@@ -61,22 +73,35 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
             title: Human-readable title.
             description: One-line description of this topic.
             tags: Initial tags.
+            created_at: Optional creation date (ISO 8601 format).
 
         Returns:
             Confirmation with the created topic path.
         """
-        validate_topic(topic)
+        try:
+            validate_topic(topic)
+        except ValueError as e:
+            return invalid_topic(topic, str(e))
         title = sanitize_label(title, max_len=100)
         if description:
             description = sanitize_freetext(description, max_len=500)
         if tags:
             tags = [sanitize_label(t) for t in tags]
-        topic_id = storage.create_topic(
-            topic=topic,
-            title=title,
-            description=description,
-            tags=tags,
-        )
+        if created_at:
+            try:
+                validate_date(created_at)
+            except ValueError:
+                return invalid_date(created_at)
+        try:
+            topic_id = storage.create_topic(
+                topic=topic,
+                title=title,
+                description=description,
+                tags=tags,
+                created_at=created_at,
+            )
+        except ValueError:
+            return already_exists(topic)
         return {
             "status": "created",
             "topic": topic,

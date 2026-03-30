@@ -1,7 +1,7 @@
+"""Input validation and sanitization utilities."""
+
 import re
 from datetime import datetime
-
-from pydantic import BaseModel, field_validator
 
 # Sanitization
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -88,74 +88,3 @@ def slugify(text: str) -> str:
     slug = text.lower().strip()
     slug = SLUG_PATTERN.sub("-", slug)
     return slug.strip("-")
-
-
-class TopicMeta(BaseModel):
-    """Metadata for a topic."""
-
-    id: int | None = None  # stable DB row ID
-    topic: str
-    title: str
-    description: str = ""
-    tags: list[str] = []
-    created: str  # YYYY-MM-DD
-    updated: str  # YYYY-MM-DD
-    entry_count: int = 0
-
-    @field_validator("topic")
-    @classmethod
-    def check_topic(cls, v: str) -> str:
-        return validate_topic(v)
-
-
-class ConversationMeta(BaseModel):
-    """Metadata for a conversation archive."""
-
-    id: int | None = None  # stable DB row ID
-    source: str = "claude"
-    title: str
-    topic: str
-    tags: list[str] = []
-    created: str  # YYYY-MM-DD
-    updated: str  # YYYY-MM-DD
-    summary: str = ""
-    participants: list[str] = []
-    message_count: int = 0
-
-    @field_validator("topic")
-    @classmethod
-    def check_topic(cls, v: str) -> str:
-        return validate_topic(v)
-
-
-class Entry(BaseModel):
-    """A single dated journal entry."""
-
-    id: int  # stable DB primary key
-    date: str  # YYYY-MM-DD
-    content: str  # what happened (headline)
-    context: str | None = None  # why/reasoning (loaded on demand)
-    conversation_id: int | None = None  # FK to conversations table
-    tags: list[str] = []
-
-
-class SearchResult(BaseModel):
-    """A single search result from FTS5."""
-
-    source_key: str  # 'entry:42', 'conversation:17'
-    doc_type: str  # 'entry' or 'conversation'
-    topic: str
-    title: str
-    snippet: str
-    rank: float
-    date: str
-    entry_id: int | None = None
-    conversation_id: int | None = None
-
-
-class Message(BaseModel):
-    """A single message in a conversation."""
-
-    role: str  # 'user' or 'assistant'
-    content: str
-    timestamp: str | None = None

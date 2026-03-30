@@ -13,7 +13,7 @@ from starlette.routing import Route
 from starlette.testclient import TestClient
 
 from journalctl.config import get_settings
-from journalctl.oauth.login import create_login_handler
+from journalctl.oauth.forms import create_login_handler
 from journalctl.oauth.provider import JournalOAuthProvider
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.oauth.templates import CSRF_COOKIE_NAME

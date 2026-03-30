@@ -1,6 +1,7 @@
 """Shared test fixtures."""
 
 import os
+from collections.abc import Iterator
 from pathlib import Path
 
 import bcrypt
@@ -9,7 +10,7 @@ import pytest
 from journalctl.config import get_settings
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.index import SearchIndex
+from journalctl.storage.search_index import SearchIndex
 
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -40,19 +41,35 @@ def index(tmp_path: Path) -> SearchIndex:
     idx.close()
 
 
+_TEST_ENV: dict[str, str] = {
+    "JOURNAL_API_KEY": "test-api-key-for-unit-tests-only",  # must be >= 32 chars
+    "JOURNAL_TRANSPORT": "stdio",
+    "JOURNAL_SERVER_URL": "http://localhost:8100",
+    "JOURNAL_OAUTH_ACCESS_TOKEN_TTL": "3600",
+    "JOURNAL_OAUTH_REFRESH_TOKEN_TTL": "2592000",
+    "JOURNAL_OAUTH_AUTH_CODE_TTL": "300",
+}
+
+
 @pytest.fixture(autouse=True)
-def _set_env(tmp_journal: Path, tmp_path: Path) -> None:
-    """Set environment variables for tests and clear settings cache."""
-    os.environ["JOURNAL_API_KEY"] = "test-key"
-    os.environ["JOURNAL_JOURNAL_ROOT"] = str(tmp_journal)
-    os.environ["JOURNAL_DB_PATH"] = str(tmp_path / "test.db")
-    os.environ["JOURNAL_TRANSPORT"] = "stdio"
-    os.environ["JOURNAL_SERVER_URL"] = "http://localhost:8100"
-    os.environ["JOURNAL_OWNER_PASSWORD_HASH"] = TEST_PASSWORD_HASH
-    os.environ["JOURNAL_OAUTH_DB_PATH"] = str(tmp_path / "oauth.db")
-    os.environ["JOURNAL_OAUTH_ACCESS_TOKEN_TTL"] = "3600"
-    os.environ["JOURNAL_OAUTH_REFRESH_TOKEN_TTL"] = "2592000"
-    os.environ["JOURNAL_OAUTH_AUTH_CODE_TTL"] = "300"
+def _set_env(tmp_journal: Path, tmp_path: Path) -> Iterator[None]:
+    """Set environment variables for tests and restore them on teardown."""
+    env = {
+        **_TEST_ENV,
+        "JOURNAL_JOURNAL_ROOT": str(tmp_journal),
+        "JOURNAL_DB_PATH": str(tmp_path / "test.db"),
+        "JOURNAL_OWNER_PASSWORD_HASH": TEST_PASSWORD_HASH,
+        "JOURNAL_OAUTH_DB_PATH": str(tmp_path / "oauth.db"),
+    }
+    old = {k: os.environ.get(k) for k in env}
+    os.environ.update(env)
+    get_settings.cache_clear()
+    yield
+    for k, v in old.items():
+        if v is None:
+            os.environ.pop(k, None)
+        else:
+            os.environ[k] = v
     get_settings.cache_clear()
 
 

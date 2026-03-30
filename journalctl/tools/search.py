@@ -1,12 +1,26 @@
-"""MCP tool: journal_search."""
+"""MCP tool: journal_search (unified FTS5 + semantic)."""
+
+import logging
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.models.entry import validate_topic
-from journalctl.storage.index import SearchIndex
+from journalctl.core.validation import sanitize_freetext, validate_date, validate_topic
+from journalctl.memory.client import MemoryServiceProtocol
+from journalctl.models.search import SearchResult
+from journalctl.storage.constants import SUMMARY_TRUNCATE_LEN
+from journalctl.storage.search_index import SearchIndex
+from journalctl.tools.constants import MAX_QUERY_LEN, MAX_SEARCH_RESULTS, MEMORY_HASH_PREVIEW_LEN
+from journalctl.tools.errors import invalid_date, invalid_topic, validation_error
+
+logger = logging.getLogger(__name__)
 
 
-def register(mcp: FastMCP, index: SearchIndex) -> None:
+def register(
+    mcp: FastMCP,
+    index: SearchIndex,
+    memory_service: MemoryServiceProtocol,
+) -> None:
     """Register search tool on the MCP server."""
 
     @mcp.tool()
@@ -16,38 +30,122 @@ def register(mcp: FastMCP, index: SearchIndex) -> None:
         date_from: str | None = None,
         date_to: str | None = None,
         limit: int = 10,
-    ) -> dict:
-        """Keyword search across journal entries and conversations.
+    ) -> dict[str, Any]:
+        """Search your journal by keyword or meaning — the primary search tool.
 
-        Use for specific, date-scoped, or keyword lookups — e.g. "what did I write
-        about X last month", "find entries about Phase 7", "search for deployment".
+        Handles both exact keyword lookups ("deployment Phase 7") and conceptual
+        questions ("what car do I drive?", "what's my salary?"). Searches across
+        all topics, entries, and conversations.
 
-        For meaning-based personal questions ("what car do I drive?", "what's my
-        salary?"), use memory_retrieve instead — it matches by meaning, not keywords.
+        Do NOT use for browsing a single topic — use journal_read instead.
+        Do NOT use for time-based browsing — use journal_timeline instead.
 
         Args:
-            query: Search query. Supports: AND, OR, NOT, "exact phrase".
+            query: Search query — keywords, phrases, or natural language questions.
             topic_prefix: Filter to topics under this prefix (e.g. 'work').
             date_from: Filter entries on or after this date (YYYY-MM-DD).
             date_to: Filter entries on or before this date (YYYY-MM-DD).
             limit: Maximum results (default 10).
 
         Returns:
-            List of matching results with snippets and relevance scores.
+            List of matching results with snippets, relevance scores,
+            and entry_id/conversation_id for follow-up calls.
         """
+        limit = max(1, min(limit, MAX_SEARCH_RESULTS))
+        if len(query) > MAX_QUERY_LEN:
+            return validation_error(
+                f"Query too long: max {MAX_QUERY_LEN} characters, got {len(query)}"
+            )
+
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
-            validate_topic(topic_prefix)
-        results = index.search(
+            try:
+                validate_topic(topic_prefix)
+            except ValueError as e:
+                return invalid_topic(topic_prefix, str(e))
+        if date_from:
+            try:
+                validate_date(date_from)
+            except ValueError:
+                return invalid_date(date_from)
+        if date_to:
+            try:
+                validate_date(date_to)
+            except ValueError:
+                return invalid_date(date_to)
+
+        # Run FTS5 keyword search
+        fts_results = index.search(
             query=query,
             topic_prefix=topic_prefix,
             date_from=date_from,
             date_to=date_to,
             limit=limit,
         )
+
+        # Run semantic search in parallel
+        semantic_results: list[SearchResult] = []
+        semantic_available = True
+        try:
+            sanitized_query = sanitize_freetext(query)
+            mem_response = await memory_service.retrieve_memories(
+                query=sanitized_query,
+                n_results=limit,
+            )
+            # Convert memory results to SearchResult format
+            memories = mem_response.get("memories", [])
+            if isinstance(memories, list):
+                for mem in memories:
+                    if isinstance(mem, dict):
+                        content = mem.get("content", "")
+                        metadata = mem.get("metadata", {}) or {}
+                        entry_id = metadata.get("entry_id")
+                        similarity = mem.get("similarity", 0.0)
+                        src_key = f"memory:{mem.get('content_hash', '')[:MEMORY_HASH_PREVIEW_LEN]}"
+                        semantic_results.append(
+                            SearchResult(
+                                source_key=src_key,
+                                doc_type="entry" if entry_id else "memory",
+                                topic=metadata.get("topic", ""),
+                                title="",
+                                snippet=content[:SUMMARY_TRUNCATE_LEN],
+                                rank=float(similarity) * -1,  # Lower rank = better in FTS5
+                                date=metadata.get("date", ""),
+                                entry_id=int(entry_id) if entry_id else None,
+                                conversation_id=None,
+                            )
+                        )
+        except Exception:
+            logger.warning("Semantic search failed, using FTS5 only", exc_info=True)
+            semantic_available = False
+
+        # Merge and deduplicate
+        seen_ids: set[str] = set()
+        merged: list[SearchResult] = []
+
+        for r in fts_results:
+            key = r.source_key
+            if key not in seen_ids:
+                seen_ids.add(key)
+                merged.append(r)
+
+        for r in semantic_results:
+            # Deduplicate by entry_id if it matches an FTS5 result
+            if r.entry_id:
+                entry_key = f"entry:{r.entry_id}"
+                if entry_key in seen_ids:
+                    continue
+                seen_ids.add(entry_key)
+            merged.append(r)
+
+        # Sort by rank (lower is better in FTS5), limit
+        merged.sort(key=lambda r: r.rank)
+        merged = merged[:limit]
+
         return {
-            "results": [r.model_dump() for r in results],
-            "count": len(results),
+            "results": [r.model_dump() for r in merged],
+            "total": len(merged),
             "query": query,
+            "semantic_available": semantic_available,
         }

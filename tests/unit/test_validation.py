@@ -2,7 +2,7 @@
 
 import pytest
 
-from journalctl.models.entry import (
+from journalctl.core.validation import (
     sanitize_freetext,
     sanitize_label,
     slugify,
