@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import sqlite3
+from datetime import date as date_cls
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
@@ -99,7 +100,7 @@ def register(
         if reasoning:
             reasoning = sanitize_freetext(reasoning)
         if tags:
-            tags = [sanitize_label(t) for t in tags]
+            tags = [s for t in tags if (s := sanitize_label(t))]
         if date:
             try:
                 validate_date(date)
@@ -121,12 +122,13 @@ def register(
         # Write FTS5 index on the same connection, then commit both atomically
         meta = storage.get_topic(topic)
         try:
+            resolved_date = date or date_cls.today().isoformat()
             index.upsert_entry_on_conn(
                 storage.conn,
                 entry_id=entry_id,
                 topic=topic,
                 title=meta.title if meta else topic,
-                date=date or "today",
+                date=resolved_date,
                 content=content,
                 reasoning=reasoning,
                 tags=tags or [],
@@ -143,7 +145,7 @@ def register(
         return {
             "status": "appended",
             "topic": topic,
-            "date": date or "today",
+            "date": resolved_date,
             "entry_id": entry_id,
             "entry_count": count,
         }
@@ -191,10 +193,8 @@ def register(
                 validate_date(date_to)
             except ValueError:
                 return invalid_date(date_to)
-        if limit is not None and limit <= 0:
-            return validation_error(f"limit must be a positive integer, got {limit}")
-        if limit is not None and limit > MAX_READ_ENTRIES:
-            return validation_error(f"limit cannot exceed {MAX_READ_ENTRIES}, got {limit}")
+        if limit is not None:
+            limit = max(1, min(limit, MAX_READ_ENTRIES))
         count = limit if limit is not None else DEFAULT_ENTRIES_LIMIT
         try:
             meta, entries, total = storage.read_entries(
@@ -251,7 +251,11 @@ def register(
             except ValueError:
                 return invalid_date(date)
         if tags:
-            tags = [sanitize_label(t) for t in tags]
+            tags = [s for t in tags if (s := sanitize_label(t))]
+
+        # Fetch old content before update so we can remove the stale embedding
+        old_row = storage.get_entry_with_topic(entry_id)
+        old_content = old_row["content"] if old_row else None
 
         try:
             storage.update_entry(
@@ -265,7 +269,7 @@ def register(
         except IndexError:
             return not_found("Entry", entry_id)
 
-        # Re-index (read back the updated entry for current content)
+        # Re-index with updated content
         row = storage.get_entry_with_topic(entry_id)
         if row:
             index.upsert_entry(
@@ -277,8 +281,9 @@ def register(
                 reasoning=row["reasoning"],
                 tags=json.loads(row["tags"] or "[]"),
             )
-            # Update semantic embedding; stamp indexed_at on success
-            await _remove_embedding(row["content"])
+            # Remove old embedding, store new one
+            if old_content:
+                await _remove_embedding(old_content)
             if await _embed_entry(entry_id, row["content"], json.loads(row["tags"] or "[]")):
                 storage.mark_entry_indexed(entry_id)
 

@@ -56,16 +56,12 @@ class TestTopicCRUD:
 class TestEntries:
     """Append, read, and update entries."""
 
-    def test_append_creates_topic_if_missing(self, storage: DatabaseStorage) -> None:
-        entry_id, count = storage.append_entry(
-            topic="life/food",
-            content="Tried a new restaurant downtown.",
-        )
-        assert isinstance(entry_id, int)
-        assert count == 1
-
-        meta = storage.get_topic("life/food")
-        assert meta is not None
+    def test_append_raises_if_topic_missing(self, storage: DatabaseStorage) -> None:
+        with pytest.raises(TopicNotFoundError):
+            storage.append_entry(
+                topic="life/food",
+                content="Tried a new restaurant downtown.",
+            )
 
     def test_append_multiple_entries(self, storage: DatabaseStorage) -> None:
         storage.create_topic("hobbies/running", "Running")
@@ -75,6 +71,7 @@ class TestEntries:
         assert count == 3
 
     def test_append_with_reasoning(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("projects/alpha", "Projects Alpha")
         entry_id, _ = storage.append_entry(
             topic="projects/alpha",
             content="Decided to use SQLite as canonical storage.",
@@ -105,12 +102,13 @@ class TestEntries:
         storage.append_entry("test/recent", "Entry 2", date="2025-06-01")
         storage.append_entry("test/recent", "Entry 3", date="2025-12-01")
 
-        meta, entries, _ = storage.read_entries("test/recent", n=2)
+        meta, entries, _ = storage.read_entries("test/recent", limit=2)
         assert len(entries) == 2
         assert "Entry 2" in entries[0].content
         assert "Entry 3" in entries[1].content
 
     def test_update_entry_replace(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/update", "Test Update")
         entry_id, _ = storage.append_entry("test/update", "Original content.")
 
         storage.update_entry(entry_id, "Updated content.", mode="replace")
@@ -119,6 +117,7 @@ class TestEntries:
         assert entries[0].content == "Updated content."
 
     def test_update_entry_append(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/update", "Test Update")
         entry_id, _ = storage.append_entry("test/update", "Original.")
 
         storage.update_entry(entry_id, "Added more.", mode="append")
@@ -128,6 +127,7 @@ class TestEntries:
         assert "Added more." in entries[0].content
 
     def test_update_entry_invalid_mode(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/update", "Test Update")
         entry_id, _ = storage.append_entry("test/update", "Content.")
         with pytest.raises(ValueError, match="Invalid mode"):
             storage.update_entry(entry_id, "New", mode="invalid")
@@ -137,6 +137,7 @@ class TestEntries:
             storage.update_entry(99999, "Content.")
 
     def test_update_reasoning(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/ctx", "Test Ctx")
         entry_id, _ = storage.append_entry(
             "test/ctx", "Decision made.", reasoning="Initial reasoning."
         )
@@ -146,6 +147,7 @@ class TestEntries:
         assert entries[0].reasoning == "Updated reasoning."
 
     def test_entry_has_conversation_id_field(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/conv-ref", "Test Conv Ref")
         entry_id, _ = storage.append_entry("test/conv-ref", "Something happened.")
         _, entries, _ = storage.read_entries("test/conv-ref")
         assert entries[0].conversation_id is None  # None by default
@@ -155,11 +157,12 @@ class TestConversations:
     """Save and read conversations."""
 
     def test_save_and_read_conversation(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("work/acme", "Acme Corp Notes")
         msgs = [
             Message(role="user", content="How should we approach this?"),
             Message(role="assistant", content="Start with the simplest solution."),
         ]
-        conv_id, summary = storage.save_conversation(
+        conv_id, summary, _ = storage.save_conversation(
             topic="work/acme",
             title="Planning Session",
             messages=msgs,
@@ -179,6 +182,7 @@ class TestConversations:
         assert messages[1].role == "assistant"
 
     def test_save_idempotent(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/idem", "Test Idem")
         msgs_v1 = [Message(role="user", content="Q1"), Message(role="assistant", content="A1")]
         msgs_v2 = [
             Message(role="user", content="Q1"),
@@ -186,8 +190,8 @@ class TestConversations:
             Message(role="user", content="Q2"),
             Message(role="assistant", content="A2"),
         ]
-        id1, _ = storage.save_conversation("test/idem", "Chat", msgs_v1, summary="v1")
-        id2, _ = storage.save_conversation("test/idem", "Chat", msgs_v2, summary="v2")
+        id1, _, _2 = storage.save_conversation("test/idem", "Chat", msgs_v1, summary="v1")
+        id2, _, _3 = storage.save_conversation("test/idem", "Chat", msgs_v2, summary="v2")
 
         # Same conversation — same ID
         assert id1 == id2
@@ -197,8 +201,9 @@ class TestConversations:
         assert len(messages) == 4
 
     def test_save_preserves_created_date(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/dates", "Test Dates")
         msgs = [Message(role="user", content="Hello")]
-        id1, _ = storage.save_conversation("test/dates", "Chat", msgs, summary="test")
+        id1, _, _2 = storage.save_conversation("test/dates", "Chat", msgs, summary="test")
 
         meta1, _ = storage.read_conversation("test/dates", "Chat")
         original_created = meta1.created
@@ -214,6 +219,8 @@ class TestConversations:
         assert meta2.created == original_created
 
     def test_list_conversations(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("work/acme", "Acme")
+        storage.create_topic("hobbies/running", "Running")
         msgs = [Message(role="user", content="Content")]
         storage.save_conversation("work/acme", "Chat 1", msgs, summary="chat 1")
         storage.save_conversation("work/acme", "Chat 2", msgs, summary="chat 2")
@@ -230,13 +237,13 @@ class TestConversations:
             storage.read_conversation("test/nope", "Missing Chat")
 
     def test_conversation_json_archive_written(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("test/archive", "Test Archive")
         msgs = [Message(role="user", content="Test message")]
-        conv_id, _ = storage.save_conversation(
+        conv_id, _, _2 = storage.save_conversation(
             "test/archive", "Archive Test", msgs, summary="archive test"
         )
 
-        json_dir = storage.conversations_json_dir / "test" / "archive"
-        json_files = list(json_dir.glob("*.json"))
+        json_files = list(storage.conversations_json_dir.glob("*.json"))
         assert len(json_files) == 1
 
         import json  # noqa: PLC0415
@@ -272,6 +279,7 @@ class TestStats:
         assert stats["conversations"] == 0
 
     def test_stats_with_data(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("work/acme", "Acme")
         storage.append_entry("work/acme", "Entry 1.")
         msgs = [Message(role="user", content="Hello")]
         storage.save_conversation("work/acme", "Chat", msgs, summary="test")
@@ -283,6 +291,9 @@ class TestStats:
         assert stats["total_documents"] == 3
 
     def test_entries_by_date_range(self, storage: DatabaseStorage) -> None:
+        storage.create_topic("work/acme", "Acme")
+        storage.create_topic("hobbies/running", "Running")
+        storage.create_topic("test/march", "March")
         storage.append_entry("work/acme", "Jan entry.", date="2025-01-15")
         storage.append_entry("hobbies/running", "Feb entry.", date="2025-02-10")
         storage.append_entry("test/march", "Mar entry.", date="2025-03-05")

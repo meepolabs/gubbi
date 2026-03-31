@@ -33,22 +33,22 @@ def configure_env() -> None:
     os.environ.setdefault("MCP_QUALITY_BOOST_ENABLED", "false")
 
 
-async def init_service(settings: Settings) -> MemoryServiceProtocol | None:
-    """Initialize and return a MemoryService, or None if disabled / unavailable.
+async def init_service(settings: Settings) -> MemoryServiceProtocol:
+    """Initialize and return a MemoryService. Raises RuntimeError if unavailable.
 
     ``configure_env()`` must be called before this function.
 
     Args:
-        settings: Application settings (checks memory_enabled, memory_db_path).
+        settings: Application settings (uses memory_db_path).
 
     Returns:
-        Initialized MemoryService, or None on failure / disabled.
-    """
-    if not settings.memory_enabled:
-        return None
+        Initialized MemoryService.
 
+    Raises:
+        RuntimeError: If mcp-memory-service is not installed or init fails.
+    """
     try:
-        # Late import — mcp_memory_service is optional (--no-deps install)
+        # Late import — mcp_memory_service must be installed
         from mcp_memory_service.services.memory_service import (
             MemoryService,  # type: ignore[import-not-found]  # noqa: PLC0415
         )
@@ -59,9 +59,7 @@ async def init_service(settings: Settings) -> MemoryServiceProtocol | None:
         storage = SqliteVecMemoryStorage(db_path=str(settings.memory_db_path))
         await storage.initialize()
         return cast(MemoryServiceProtocol, MemoryService(storage))
-    except ImportError:
-        logger.warning("Memory service unavailable: mcp-memory-service not installed")
-        return None
-    except Exception:
-        logger.exception("Memory service initialization failed, continuing without it")
-        return None
+    except ImportError as e:
+        raise RuntimeError("Memory service unavailable: mcp-memory-service is not installed") from e
+    except Exception as e:
+        raise RuntimeError(f"Memory service initialization failed: {e}") from e

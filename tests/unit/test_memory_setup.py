@@ -3,6 +3,8 @@
 import os
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from journalctl.memory.bootstrap import configure_env, init_service
 
 _TEST_DB = "memory_test.db"  # relative path, no /tmp
@@ -47,31 +49,28 @@ class TestConfigureEnv:
 # ──────────────────────────────────────────────────────────────────────────────
 
 
-def _mock_settings(*, enabled: bool = True, db_path: str = _TEST_DB) -> MagicMock:
+def _mock_settings(*, db_path: str = _TEST_DB) -> MagicMock:
     settings = MagicMock()
-    settings.memory_enabled = enabled
     settings.memory_db_path = db_path
     return settings
 
 
 class TestInitService:
-    async def test_returns_none_when_disabled(self) -> None:
-        result = await init_service(_mock_settings(enabled=False))
-        assert result is None
-
-    async def test_returns_none_on_import_error(self) -> None:
-        with patch.dict(
-            "sys.modules",
-            {
-                "mcp_memory_service": None,
-                "mcp_memory_service.services": None,
-                "mcp_memory_service.services.memory_service": None,
-            },
+    async def test_raises_on_import_error(self) -> None:
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "mcp_memory_service": None,
+                    "mcp_memory_service.services": None,
+                    "mcp_memory_service.services.memory_service": None,
+                },
+            ),
+            pytest.raises(RuntimeError, match="not installed"),
         ):
-            result = await init_service(_mock_settings())
-        assert result is None
+            await init_service(_mock_settings())
 
-    async def test_returns_none_on_storage_init_error(self) -> None:
+    async def test_raises_on_storage_init_error(self) -> None:
         mock_storage = MagicMock()
         mock_storage.initialize = AsyncMock(side_effect=RuntimeError("db error"))
         mock_storage_cls = MagicMock(return_value=mock_storage)
@@ -81,15 +80,17 @@ class TestInitService:
         mock_storage_mod = MagicMock()
         mock_storage_mod.SqliteVecMemoryStorage = mock_storage_cls
 
-        with patch.dict(
-            "sys.modules",
-            {
-                "mcp_memory_service.services.memory_service": mock_mem_mod,
-                "mcp_memory_service.storage.sqlite_vec": mock_storage_mod,
-            },
+        with (
+            patch.dict(
+                "sys.modules",
+                {
+                    "mcp_memory_service.services.memory_service": mock_mem_mod,
+                    "mcp_memory_service.storage.sqlite_vec": mock_storage_mod,
+                },
+            ),
+            pytest.raises(RuntimeError, match="db error"),
         ):
-            result = await init_service(_mock_settings())
-        assert result is None
+            await init_service(_mock_settings())
 
     async def test_returns_service_on_success(self) -> None:
         mock_storage = MagicMock()

@@ -12,11 +12,11 @@ def sanitize_label(value: str, max_len: int = 50) -> str:
     """Sanitize a short label (source, tag) for safe use in frontmatter.
 
     Strips control characters, restricts to alphanumeric + space/dot/hyphen,
-    and enforces a length limit.  Returns 'unknown' if the result is empty.
+    and enforces a length limit. Returns empty string if nothing remains.
     """
     value = _CONTROL_CHARS.sub("", value).strip()
     value = _SAFE_LABEL.sub("", value)
-    return value[:max_len] or "unknown"
+    return value[:max_len]
 
 
 def sanitize_freetext(value: str, max_len: int = 1_000_000) -> str:
@@ -32,8 +32,10 @@ def sanitize_freetext(value: str, max_len: int = 1_000_000) -> str:
 # Matches 1-2 level paths: "work", "work/acme", "hobbies/my-project"
 # Prevents path traversal, requires lowercase alphanumeric with hyphens
 TOPIC_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?$")
-# Matches titles 1-100 chars, alphanumeric with spaces/hyphens/underscores
+# Matches titles 1-100 chars after sanitization
 TITLE_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9 _-]{0,98}[a-zA-Z0-9]$|^[a-zA-Z0-9]$")
+# Chars to strip from titles before validation
+_TITLE_STRIP = re.compile(r"[^a-zA-Z0-9 _-]")
 # Matches any non-alphanumeric sequence for slug conversion
 SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
 # Date format: YYYY-MM-DD
@@ -41,11 +43,12 @@ DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def validate_topic(value: str) -> str:
-    """Validate topic path. Prevents path traversal.
+    """Validate topic path. Prevents path traversal. Auto-lowercases input.
 
-    Valid: 'work/acme', 'hobbies', 'projects/my-app'
-    Invalid: '../etc/passwd', '/absolute', 'CAPS', 'a/b/c/d'
+    Valid: 'work/acme', 'hobbies', 'projects/my-app', 'Work/Acme' (lowercased)
+    Invalid: '../etc/passwd', '/absolute', 'a/b/c/d'
     """
+    value = value.lower()
     if not TOPIC_PATTERN.match(value):
         msg = (
             f"Invalid topic '{value}'. Must be 1-2 levels of "
@@ -56,11 +59,20 @@ def validate_topic(value: str) -> str:
 
 
 def validate_title(value: str) -> str:
-    """Validate conversation title."""
-    if not TITLE_PATTERN.match(value):
+    """Sanitize and validate a conversation title.
+
+    Strips leading/trailing whitespace, removes disallowed punctuation
+    (e.g. colons, parentheses, apostrophes), and enforces 1-100 chars.
+    """
+    value = value.strip()
+    value = _TITLE_STRIP.sub("", value).strip()
+    # Collapse multiple spaces
+    value = re.sub(r" {2,}", " ", value)
+    value = value[:100]
+    if not value or not TITLE_PATTERN.match(value):
         msg = (
-            f"Invalid title '{value}'. Must be alphanumeric with "
-            "spaces, hyphens, underscores (max 100 chars)."
+            "Title could not be sanitized to a valid value. "
+            "Use alphanumeric characters with spaces, hyphens, or underscores."
         )
         raise ValueError(msg)
     return value

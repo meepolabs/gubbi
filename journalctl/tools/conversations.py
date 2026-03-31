@@ -85,7 +85,7 @@ def register(
         source = sanitize_label(source)
         summary = sanitize_freetext(summary)
         if tags:
-            tags = [sanitize_label(t) for t in tags]
+            tags = [s for t in tags if (s := sanitize_label(t))]
         if date:
             try:
                 validate_date(date)

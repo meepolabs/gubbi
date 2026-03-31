@@ -13,6 +13,7 @@ class TestIndexing:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("work/acme", "Acme Corp Notes")
         entry_id, _ = storage.append_entry("work/acme", "Got the promotion.", date="2025-06-01")
         index.upsert_entry(
             entry_id=entry_id,
@@ -20,7 +21,7 @@ class TestIndexing:
             title="Acme Corp Notes",
             date="2025-06-01",
             content="Got the promotion.",
-            context=None,
+            reasoning=None,
             tags=[],
         )
 
@@ -38,6 +39,8 @@ class TestIndexing:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("work/acme", "Acme")
+        storage.create_topic("hobbies/running", "Running")
         id1, _ = storage.append_entry("work/acme", "Acme work.", date="2025-01-01")
         id2, _ = storage.append_entry("hobbies/running", "Running is fun.", date="2025-01-01")
 
@@ -55,6 +58,7 @@ class TestIndexing:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("test/dates", "Test Dates")
         entry_id, _ = storage.append_entry("test/dates", "Old entry.", date="2020-01-01")
         index.upsert_entry(entry_id, "test/dates", "Dates", "2020-01-01", "Old entry.", None, [])
 
@@ -72,6 +76,7 @@ class TestIndexing:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("test/idem", "Test Idem")
         entry_id, _ = storage.append_entry("test/idem", "Content.", date="2025-01-01")
 
         for _ in range(3):
@@ -85,11 +90,12 @@ class TestIndexing:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("hobbies/food", "Food")
         msgs = [
             Message(role="user", content="Best ramen recommendation?"),
             Message(role="assistant", content="Try Jinya in Bellevue."),
         ]
-        conv_id, summary = storage.save_conversation(
+        conv_id, summary, _ = storage.save_conversation(
             "hobbies/food", "Ramen Chat", msgs, summary="Ramen recommendations in Bellevue"
         )
         index.upsert_conversation(
@@ -112,10 +118,10 @@ class TestIndexing:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("test/context", "Test Context")
         entry_id, _ = storage.append_entry(
             "test/context",
             "Chose SQLite.",
-            context="Reason: markdown has no stable IDs",
             date="2025-01-01",
         )
         index.upsert_entry(
@@ -140,6 +146,8 @@ class TestRebuild:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("work/acme", "Acme")
+        storage.create_topic("hobbies/running", "Running")
         storage.append_entry("work/acme", "Entry 1.", date="2025-01-01")
         storage.append_entry("hobbies/running", "Entry 2.", date="2025-02-01")
 
@@ -154,6 +162,7 @@ class TestRebuild:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("test/stale", "Test Stale")
         entry_id, _ = storage.append_entry("test/stale", "Ghost entry.", date="2025-01-01")
         index.upsert_entry(entry_id, "test/stale", "Test", "2025-01-01", "Ghost entry.", None, [])
 
@@ -179,6 +188,7 @@ class TestStats:
         storage: DatabaseStorage,
         index: SearchIndex,
     ) -> None:
+        storage.create_topic("work/acme", "Acme")
         entry_id, _ = storage.append_entry("work/acme", "Entry.")
         index.upsert_entry(entry_id, "work/acme", "Acme", "2025-01-01", "Entry.", None, [])
 

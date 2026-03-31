@@ -30,7 +30,7 @@ def register_tools(
         storage: Canonical database storage layer.
         index: FTS5 search index.
         settings: Application settings.
-        memory_service: MemoryService for internal embedding/retrieval.
+        memory_service: MemoryService for semantic embedding/retrieval.
     """
     topics.register(mcp, storage)
     entries.register(mcp, storage, index, memory_service=memory_service)

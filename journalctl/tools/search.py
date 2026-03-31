@@ -79,13 +79,16 @@ def register(
                 return invalid_date(date_to)
 
         # Run FTS5 keyword search
-        fts_results = index.search(
-            query=query,
-            topic_prefix=topic_prefix,
-            date_from=date_from,
-            date_to=date_to,
-            limit=limit,
-        )
+        try:
+            fts_results = index.search(
+                query=query,
+                topic_prefix=topic_prefix,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
+            )
+        except ValueError as e:
+            return validation_error(str(e))
 
         # Run semantic search in parallel
         semantic_results: list[SearchResult] = []

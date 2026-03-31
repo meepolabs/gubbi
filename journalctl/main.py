@@ -98,10 +98,6 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # Initialize memory service
     configure_env()
     memory_service = await init_service(settings)
-    if memory_service is None:
-        raise RuntimeError(
-            "Memory service failed to initialize — check mcp-memory-service is installed"
-        )
     app.memory_service = memory_service
     await app.logger.info("Memory service initialized", db_path=str(settings.memory_db_path))
 

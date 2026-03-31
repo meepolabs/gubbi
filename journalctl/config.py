@@ -40,7 +40,6 @@ class Settings(BaseSettings):
     transport: str = "streamable-http"  # or "stdio"
 
     # Memory service (semantic memory via mcp-memory-service)
-    memory_enabled: bool = True
     memory_db_path: Path = Path("./memory.db")
 
     # Logging

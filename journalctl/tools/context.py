@@ -1,6 +1,8 @@
 """MCP tools: journal_briefing, journal_timeline."""
 
+import json
 import logging
+import re
 from datetime import date, timedelta
 
 from mcp.server.fastmcp import FastMCP
@@ -27,6 +29,11 @@ def _month_end(year: int, month: int) -> date:
     return date(year, month + 1, 1) - timedelta(days=1)
 
 
+def _normalize_period(period: str) -> str:
+    """Normalize period string — lowercase, collapse spaces/underscores to hyphens."""
+    return re.sub(r"[\s_]+", "-", period.strip().lower())
+
+
 def _resolve_period(
     period: str,
 ) -> tuple[str, str, str]:
@@ -34,7 +41,9 @@ def _resolve_period(
 
     Supports: 'YYYY', 'YYYY-MM', 'YYYY-WNN',
               'this-week', 'last-week', 'this-month', 'last-month'.
+    Input is auto-normalized (case-insensitive, spaces/underscores become hyphens).
     """
+    period = _normalize_period(period)
     today = date.today()
 
     if period == "today":
@@ -103,7 +112,7 @@ def register(
     storage: DatabaseStorage,
     index: SearchIndex,
     settings: Settings,
-    memory_service: MemoryServiceProtocol | None = None,
+    memory_service: MemoryServiceProtocol,
 ) -> None:
     """Register context tools on the MCP server."""
 
@@ -137,7 +146,7 @@ def register(
                 "title": e.get("title", ""),
                 "snippet": e.get("description", "")[:SNIPPET_PREVIEW_LEN],
                 "date": e.get("updated", ""),
-                "tags": e.get("tags", "[]"),
+                "tags": json.loads(e.get("tags") or "[]"),
             }
             if e.get("entry_id") is not None:
                 entry["entry_id"] = e["entry_id"]
@@ -156,24 +165,23 @@ def register(
 
         # Key facts — top semantic matches for user identity/preferences/status
         key_facts: list[dict] = []
-        if memory_service is not None:
-            try:
-                mem_response = await memory_service.retrieve_memories(
-                    query=BRIEFING_KEY_FACTS_QUERY,
-                    n_results=BRIEFING_KEY_FACTS_COUNT,
-                )
-                memories = mem_response.get("memories", [])
-                if isinstance(memories, list):
-                    key_facts = [
-                        {
-                            "content": m.get("content", ""),
-                            "similarity": round(float(m.get("similarity", 0.0)), 3),
-                        }
-                        for m in memories
-                        if isinstance(m, dict) and m.get("content")
-                    ]
-            except Exception:
-                logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
+        try:
+            mem_response = await memory_service.retrieve_memories(
+                query=BRIEFING_KEY_FACTS_QUERY,
+                n_results=BRIEFING_KEY_FACTS_COUNT,
+            )
+            memories = mem_response.get("memories", [])
+            if isinstance(memories, list):
+                key_facts = [
+                    {
+                        "content": m.get("content", ""),
+                        "similarity": round(float(m.get("similarity", 0.0)), 3),
+                    }
+                    for m in memories
+                    if isinstance(m, dict) and m.get("content")
+                ]
+        except Exception:
+            logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
 
         return {
             "user_profile": profile,

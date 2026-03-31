@@ -31,9 +31,9 @@ class TestTopicValidation:
         with pytest.raises(ValueError):
             validate_topic("/etc/passwd")
 
-    def test_reject_uppercase(self) -> None:
-        with pytest.raises(ValueError):
-            validate_topic("Work/Acme")
+    def test_lowercase_uppercase(self) -> None:
+        assert validate_topic("Work/Acme") == "work/acme"
+        assert validate_topic("HEALTH") == "health"
 
     def test_reject_three_levels(self) -> None:
         with pytest.raises(ValueError):
@@ -72,17 +72,25 @@ class TestTitleValidation:
     def test_valid_single_char(self) -> None:
         assert validate_title("X") == "X"
 
+    def test_strips_punctuation(self) -> None:
+        assert validate_title("Q3 Planning (2025)") == "Q3 Planning 2025"
+        assert validate_title("Project: Alpha") == "Project Alpha"
+        assert validate_title("Team's Decision") == "Teams Decision"
+
     def test_reject_empty(self) -> None:
         with pytest.raises(ValueError):
             validate_title("")
 
-    def test_reject_too_long(self) -> None:
+    def test_reject_all_punctuation(self) -> None:
         with pytest.raises(ValueError):
-            validate_title("A" * 200)
+            validate_title("!!!")
 
-    def test_reject_special_start(self) -> None:
-        with pytest.raises(ValueError):
-            validate_title(" Leading space")
+    def test_truncates_too_long(self) -> None:
+        result = validate_title("A" * 200)
+        assert len(result) <= 100
+
+    def test_strips_leading_space(self) -> None:
+        assert validate_title(" Leading space") == "Leading space"
 
 
 class TestSanitizeLabel:
@@ -106,14 +114,14 @@ class TestSanitizeLabel:
     def test_custom_max_length(self) -> None:
         assert sanitize_label("a" * 200, max_len=100) == "a" * 100
 
-    def test_empty_after_strip_returns_unknown(self) -> None:
-        assert sanitize_label("!@#$%") == "unknown"
+    def test_empty_after_strip_returns_empty(self) -> None:
+        assert sanitize_label("!@#$%") == ""
 
-    def test_empty_string_returns_unknown(self) -> None:
-        assert sanitize_label("") == "unknown"
+    def test_empty_string_returns_empty(self) -> None:
+        assert sanitize_label("") == ""
 
-    def test_whitespace_only_returns_unknown(self) -> None:
-        assert sanitize_label("   ") == "unknown"
+    def test_whitespace_only_returns_empty(self) -> None:
+        assert sanitize_label("   ") == ""
 
 
 class TestSanitizeFreetext:

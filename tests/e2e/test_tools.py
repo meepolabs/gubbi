@@ -66,6 +66,7 @@ class TestAppendAndRead:
 
     @pytest.mark.asyncio
     async def test_append_and_read(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         result = await tools["journal_append"](
             topic="work/acme",
             content="Got the offer today.",
@@ -83,6 +84,7 @@ class TestAppendAndRead:
 
     @pytest.mark.asyncio
     async def test_append_with_reasoning(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="work/decision", title="Work Decisions")
         result = await tools["journal_append"](
             topic="work/decision",
             content="Chose SQLite as canonical storage.",
@@ -99,11 +101,12 @@ class TestAppendAndRead:
 
     @pytest.mark.asyncio
     async def test_read_recent_entries(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="test/recent", title="Test Recent")
         await tools["journal_append"](topic="test/recent", content="Entry 1", date="2024-01-01")
         await tools["journal_append"](topic="test/recent", content="Entry 2", date="2024-06-01")
         await tools["journal_append"](topic="test/recent", content="Entry 3", date="2025-01-01")
 
-        result = await tools["journal_read"](topic="test/recent", n=2)
+        result = await tools["journal_read"](topic="test/recent", limit=2)
         assert len(result["entries"]) == 2
         assert result["total"] == 3
 
@@ -113,6 +116,7 @@ class TestSearch:
 
     @pytest.mark.asyncio
     async def test_search_finds_entry(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         await tools["journal_append"](
             topic="work/acme",
             content="Promotion confirmed for Q3.",
@@ -151,6 +155,7 @@ class TestConversationFlow:
 
     @pytest.mark.asyncio
     async def test_save_and_list(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         result = await tools["journal_save_conversation"](
             topic="work/acme",
             title="Q3 Planning Session",
@@ -169,6 +174,7 @@ class TestConversationFlow:
 
     @pytest.mark.asyncio
     async def test_save_returns_conversation_id(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="hobbies/running", title="Running")
         result = await tools["journal_save_conversation"](
             topic="hobbies/running",
             title="Training Plan",
@@ -183,6 +189,7 @@ class TestConversationFlow:
 
     @pytest.mark.asyncio
     async def test_resave_updates(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="test/resave", title="Test Resave")
         msgs_v1 = [
             {"role": "user", "content": "V1 question"},
             {"role": "assistant", "content": "V1 answer"},
@@ -235,6 +242,7 @@ class TestTimeline:
 
     @pytest.mark.asyncio
     async def test_timeline_this_week(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="test/timeline", title="Test Timeline")
         await tools["journal_append"](topic="test/timeline", content="Today's entry.")
 
         result = await tools["journal_timeline"](period="this-week")
@@ -242,6 +250,7 @@ class TestTimeline:
 
     @pytest.mark.asyncio
     async def test_briefing(self, tools: dict, tmp_journal: Path) -> None:
+        await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         await tools["journal_append"](topic="work/acme", content="Working on the project.")
 
         profile_path = tmp_journal / "knowledge" / "user-profile.md"
@@ -261,6 +270,7 @@ class TestReindex:
 
     @pytest.mark.asyncio
     async def test_reindex(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="test/reindex", title="Test Reindex")
         await tools["journal_append"](topic="test/reindex", content="Indexed entry.")
 
         result = await tools["journal_reindex"]()

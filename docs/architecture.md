@@ -16,7 +16,7 @@ The journal stores data in three tiers, each serving a different purpose:
 
 **Tier 2 — Warm data** (entry.reasoning, ~200-500 tokens). Reasoning and background context, loaded on-demand when reading a specific topic via `journal_read`. Stored in the `entries` table alongside content.
 
-**Tier 3 — Cold data** (conversation JSON, 5k-100k tokens). Full chat transcripts archived in separate `conversations_json/{topic}/{slug}.json` files. Messages stored in the `messages` table. Rarely accessed; designed for archival and eventual S3 backup.
+**Tier 3 — Cold data** (conversation JSON, 5k-100k tokens). Full chat transcripts archived in separate `conversations_json/{id}.json` files (flat by conversation ID). Messages stored in the `messages` table. Rarely accessed; designed for archival and eventual S3 backup.
 
 ## Storage architecture
 
@@ -35,7 +35,7 @@ messages      -- id, conversation_id, role, content, timestamp, position
 
 ### Archival storage: Markdown + JSON files
 
-Markdown files exist as **readable archival copies** inside `conversations_json/{topic}/{slug}.json`:
+JSON files exist as **readable archival copies** inside `conversations_json/{id}.json` (keyed by conversation ID):
 
 ```json
 {

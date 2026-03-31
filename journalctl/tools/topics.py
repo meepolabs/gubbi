@@ -86,7 +86,7 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         if description:
             description = sanitize_freetext(description, max_len=500)
         if tags:
-            tags = [sanitize_label(t) for t in tags]
+            tags = [s for t in tags if (s := sanitize_label(t))]
         if created_at:
             try:
                 validate_date(created_at)

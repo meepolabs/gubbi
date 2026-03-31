@@ -6,7 +6,7 @@ All conversation CRUD lives here; DatabaseStorage inherits via:
 The mixin relies on the host providing:
   - self.conn  (sqlite3.Connection, via DatabaseStorage.conn property)
   - self.conversations_json_dir  (Path)
-  - self._get_or_create_topic(topic) -> int
+  - self._get_topic_id(topic) -> int  (raises TopicNotFoundError if missing)
 """
 
 from __future__ import annotations
