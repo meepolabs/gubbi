@@ -248,8 +248,8 @@ class DatabaseStorage(ConversationMixin):
         params: list[str | int] = []
         if topic_prefix:
             topic_prefix = validate_topic(topic_prefix)
-            sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
-            params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
+            sql += " WHERE t.path LIKE ? ESCAPE '!'"
+            params += [f"{_escape_like(topic_prefix)}%"]
         sql += " GROUP BY t.id ORDER BY t.updated_at DESC"
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
@@ -276,8 +276,8 @@ class DatabaseStorage(ConversationMixin):
         params: list[str | int] = []
         if topic_prefix:
             topic_prefix = validate_topic(topic_prefix)
-            sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
-            params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
+            sql += " WHERE t.path LIKE ? ESCAPE '!'"
+            params += [f"{_escape_like(topic_prefix)}%"]
         return int(self.conn.execute(sql, params).fetchone()[0])
 
     def get_topic(self, topic: str) -> TopicMeta | None:

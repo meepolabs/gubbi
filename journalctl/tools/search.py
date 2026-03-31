@@ -107,7 +107,7 @@ def register(
                         content = mem.get("content", "")
                         metadata = mem.get("metadata", {}) or {}
                         entry_id = metadata.get("entry_id")
-                        similarity = float(mem.get("similarity", 0.0))
+                        similarity = float(mem.get("similarity_score", 0.0))
                         src_key = f"memory:{mem.get('content_hash', '')[:MEMORY_HASH_PREVIEW_LEN]}"
                         semantic_results.append(
                             SearchResult(
@@ -146,6 +146,20 @@ def register(
                         r.date = meta["date"]
                     if not r.title:
                         r.title = meta["title"]
+
+        # Post-filter semantic results by topic and date (memory service
+        # doesn't support these filters natively, so we apply them here
+        # after enrichment has filled in the DB metadata).
+        if topic_prefix:
+            semantic_results = [
+                r
+                for r in semantic_results
+                if r.topic == topic_prefix or r.topic.startswith(topic_prefix + "/")
+            ]
+        if date_from:
+            semantic_results = [r for r in semantic_results if r.date >= date_from]
+        if date_to:
+            semantic_results = [r for r in semantic_results if r.date <= date_to]
 
         # Merge and deduplicate
         seen_ids: set[str] = set()

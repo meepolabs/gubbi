@@ -273,8 +273,8 @@ class ConversationMixin:
         params: list[str | int] = []
         if topic_prefix:
             topic_prefix = validate_topic(topic_prefix)
-            sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
-            params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
+            sql += " WHERE t.path LIKE ? ESCAPE '!'"
+            params += [f"{_escape_like(topic_prefix)}%"]
         sql += " ORDER BY c.created_at DESC"
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"

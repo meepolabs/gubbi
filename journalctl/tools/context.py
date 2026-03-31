@@ -1,6 +1,5 @@
 """MCP tools: journal_briefing, journal_timeline."""
 
-import json
 import logging
 import re
 from datetime import date, timedelta
@@ -89,9 +88,9 @@ def _resolve_period(
         except ValueError:
             pass
 
-    if "-W" in period:
-        # ISO week: YYYY-WNN
-        parts = period.split("-W")
+    if "-w" in period:
+        # ISO week: YYYY-WNN (already lowercased by _normalize_period)
+        parts = period.split("-w")
         if len(parts) == 2 and parts[0] and parts[1].isdigit():  # noqa: SIM102
             try:
                 year, week = int(parts[0]), int(parts[1])
@@ -147,7 +146,7 @@ def register(
                 "title": e.get("title", ""),
                 "snippet": e.get("description", "")[:SNIPPET_PREVIEW_LEN],
                 "date": e.get("updated", ""),
-                "tags": json.loads(e.get("tags") or "[]"),
+                "tags": e.get("tags", []),
             }
             if e.get("entry_id") is not None:
                 entry["entry_id"] = e["entry_id"]

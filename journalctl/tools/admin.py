@@ -1,6 +1,7 @@
 """MCP tool: journal_reindex."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import sqlite3
@@ -61,6 +62,19 @@ def register(
 
                     for r in batch:
                         try:
+                            # Remove stale embedding before storing updated one.
+                            # Hash must match mcp-memory-service's generate_content_hash():
+                            # sha256 of content.strip().lower().encode('utf-8').
+                            old_content = storage.get_entry_content(r["id"])
+                            if old_content:
+                                try:
+                                    old_hash = hashlib.sha256(
+                                        old_content.strip().lower().encode("utf-8")
+                                    ).hexdigest()
+                                    await memory_service.delete_memory(content_hash=old_hash)
+                                except Exception:  # noqa: S110
+                                    pass
+
                             first_line = (r["content"] or "").split("\n", 1)[0][:80]
                             await memory_service.store_memory(
                                 content=r["content"],

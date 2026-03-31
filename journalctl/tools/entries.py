@@ -62,9 +62,14 @@ def register(
             return False
 
     async def _remove_embedding(content: str) -> None:
-        """Remove an embedding by content hash. Internal — best-effort."""
+        """Remove an embedding by content hash. Internal — best-effort.
+
+        Hash must match mcp-memory-service's generate_content_hash():
+        sha256 of content.strip().lower().encode('utf-8').
+        """
         try:
-            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            normalized = content.strip().lower()
+            content_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
             await memory_service.delete_memory(content_hash=content_hash)
         except Exception:
             logger.warning("Could not remove embedding for content hash", exc_info=True)
