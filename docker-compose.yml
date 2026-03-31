@@ -1,9 +1,9 @@
 # Host environment must provide:
-#   JOURNAL_HOST_PATH  — absolute path to journal repo on host
 #   JOURNAL_API_KEY    — Bearer token for MCP auth
 #   JOURNAL_TIMEZONE   — e.g. America/Los_Angeles
 #
 # Set these via Doppler, .env file, or export before running docker compose.
+# Journal data (journal.db, memory.db, conversations_json/) lives in ./data/
 
 services:
   journalctl:
@@ -17,7 +17,7 @@ services:
       - "127.0.0.1:8100:8100"
     environment:
       - JOURNAL_API_KEY
-      - JOURNAL_JOURNAL_ROOT=/app/journal/content
+      - JOURNAL_JOURNAL_ROOT=/app/journal
       - JOURNAL_DB_PATH=/app/journal/journal.db
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
@@ -32,7 +32,7 @@ services:
       - JOURNAL_MEMORY_DB_PATH=/app/journal/memory.db
       - MCP_CUSTOM_MEMORY_TYPES
     volumes:
-      - ${JOURNAL_HOST_PATH:?Set JOURNAL_HOST_PATH to your journal repo}:/app/journal
+      - ./data:/app/journal
       - ./logs:/app/logs
       - onnx-model-cache:/home/appuser/.cache/mcp_memory
     healthcheck:

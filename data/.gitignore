@@ -1,0 +1,6 @@
+# Ignore all runtime data — only the knowledge placeholder is tracked
+*
+!.gitignore
+!knowledge/
+!knowledge/user-profile.md
+conversations_json/
