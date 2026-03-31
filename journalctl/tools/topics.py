@@ -11,6 +11,7 @@ from journalctl.core.validation import (
     validate_topic,
 )
 from journalctl.storage.database import DatabaseStorage
+from journalctl.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
 from journalctl.tools.errors import already_exists, invalid_date, invalid_topic
 
 
@@ -20,7 +21,7 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
     @mcp.tool()
     async def journal_list_topics(
         topic_prefix: str | None = None,
-        limit: int = 50,
+        limit: int = DEFAULT_TOPICS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
         """Browse all journal topics — "what topics do I have?" or "what do I track?"
@@ -37,18 +38,20 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
             List of topics with title, description, tags,
             entry count, and created/updated dates.
         """
+        limit = max(1, min(limit, MAX_TOPICS_RESULTS))
+        offset = max(0, offset)
         if topic_prefix:
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
             try:
-                validate_topic(topic_prefix)
+                topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
-        topics = storage.list_topics(topic_prefix=topic_prefix)
-        page = topics[offset : offset + limit]
+        total = storage.count_topics(topic_prefix=topic_prefix)
+        page = storage.list_topics(topic_prefix=topic_prefix, limit=limit, offset=offset)
         return {
             "topics": [t.model_dump() for t in page],
-            "total": len(topics),
+            "total": total,
             "offset": offset,
             "limit": limit,
         }
@@ -73,13 +76,13 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
             title: Human-readable title.
             description: One-line description of this topic.
             tags: Initial tags.
-            created_at: Optional creation date (ISO 8601 format).
+            created_at: Optional creation date (YYYY-MM-DD format).
 
         Returns:
             Confirmation with the created topic path.
         """
         try:
-            validate_topic(topic)
+            topic = validate_topic(topic)
         except ValueError as e:
             return invalid_topic(topic, str(e))
         title = sanitize_label(title, max_len=100)

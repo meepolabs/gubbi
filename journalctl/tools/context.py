@@ -18,6 +18,7 @@ from journalctl.tools.constants import (
     BRIEFING_MAX_TOPICS,
     BRIEFING_MAX_WEEK_ENTRIES,
 )
+from journalctl.tools.errors import validation_error
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +263,10 @@ def register(
             Chronological list of entries for the period,
             grouped by date and topic.
         """
-        date_from, date_to, label = _resolve_period(period)
+        try:
+            date_from, date_to, label = _resolve_period(period)
+        except ValueError as e:
+            return validation_error(str(e))
         entries = storage.get_entries_by_date_range(date_from, date_to)
 
         return {

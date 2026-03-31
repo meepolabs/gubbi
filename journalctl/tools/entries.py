@@ -33,14 +33,25 @@ def register(
 ) -> None:
     """Register entry tools on the MCP server."""
 
-    async def _embed_entry(entry_id: int, content: str, tags: list[str] | None = None) -> bool:
+    async def _embed_entry(
+        entry_id: int,
+        content: str,
+        topic: str = "",
+        date: str = "",
+        tags: list[str] | None = None,
+    ) -> bool:
         """Store an embedding for a journal entry. Returns True on success.
         Internal — not exposed to LLM."""
         try:
             await memory_service.store_memory(
                 content=content,
                 tags=tags,
-                metadata={"entry_id": entry_id, "source": "journal_entry"},
+                metadata={
+                    "entry_id": entry_id,
+                    "source": "journal_entry",
+                    "topic": topic,
+                    "date": date,
+                },
             )
             return True
         except Exception as e:
@@ -91,7 +102,7 @@ def register(
         """
 
         try:
-            validate_topic(topic)
+            topic = validate_topic(topic)
         except ValueError as e:
             return invalid_topic(topic, str(e))
         content = sanitize_freetext(content)
@@ -134,12 +145,15 @@ def register(
                 tags=tags or [],
             )
             storage.conn.commit()
-        except sqlite3.Error:
+        except sqlite3.Error as e:
             storage.conn.rollback()
-            raise
+            logger.error("Failed to write FTS index for entry %s: %s", entry_id, e, exc_info=True)
+            return validation_error(
+                "Failed to save entry due to an internal storage error. Please try again."
+            )
 
         # Auto-embed for semantic search; stamp indexed_at on success
-        if await _embed_entry(entry_id, content, tags):
+        if await _embed_entry(entry_id, content, topic=topic, date=resolved_date, tags=tags):
             storage.mark_entry_indexed(entry_id)
 
         return {
@@ -180,7 +194,7 @@ def register(
         """
 
         try:
-            validate_topic(topic)
+            topic = validate_topic(topic)
         except ValueError as e:
             return invalid_topic(topic, str(e))
         if date_from:
@@ -195,6 +209,7 @@ def register(
                 return invalid_date(date_to)
         if limit is not None:
             limit = max(1, min(limit, MAX_READ_ENTRIES))
+        offset = max(0, offset)
         count = limit if limit is not None else DEFAULT_ENTRIES_LIMIT
         try:
             meta, entries, total = storage.read_entries(
@@ -284,7 +299,13 @@ def register(
             # Remove old embedding, store new one
             if old_content:
                 await _remove_embedding(old_content)
-            if await _embed_entry(entry_id, row["content"], json.loads(row["tags"] or "[]")):
+            if await _embed_entry(
+                entry_id,
+                row["content"],
+                topic=row["path"],
+                date=row["date"],
+                tags=json.loads(row["tags"] or "[]"),
+            ):
                 storage.mark_entry_indexed(entry_id)
 
         return {

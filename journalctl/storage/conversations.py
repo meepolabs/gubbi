@@ -84,8 +84,8 @@ class ConversationMixin:
 
         Returns (conversation_id, summary, is_update).
         """
-        validate_topic(topic)
-        validate_title(title)
+        topic = validate_topic(topic)
+        title = validate_title(title)
         slug = slugify(title)
         topic_id = self._get_topic_id(topic)
         conversation_date = date or date_cls.today().isoformat()
@@ -272,7 +272,7 @@ class ConversationMixin:
         """
         params: list[str | int] = []
         if topic_prefix:
-            validate_topic(topic_prefix)
+            topic_prefix = validate_topic(topic_prefix)
             sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
             params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
         sql += " ORDER BY c.created_at DESC"
@@ -306,7 +306,7 @@ class ConversationMixin:
 
         Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
         """
-        validate_topic(topic)
+        topic = validate_topic(topic)
         slug = slugify(title)
 
         row = self.conn.execute(

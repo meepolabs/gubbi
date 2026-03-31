@@ -64,7 +64,12 @@ def register(
                             await memory_service.store_memory(
                                 content=r["content"],
                                 tags=json.loads(r["tags"] or "[]"),
-                                metadata={"entry_id": r["id"], "source": "journal_entry"},
+                                metadata={
+                                    "entry_id": r["id"],
+                                    "source": "journal_entry",
+                                    "topic": r["topic"],
+                                    "date": r["date"],
+                                },
                             )
                             storage.mark_entry_indexed(r["id"])
                             embeddings_generated += 1

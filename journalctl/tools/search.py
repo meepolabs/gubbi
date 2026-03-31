@@ -64,7 +64,7 @@ def register(
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
             try:
-                validate_topic(topic_prefix)
+                topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
         if date_from:

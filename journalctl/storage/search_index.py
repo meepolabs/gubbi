@@ -290,7 +290,7 @@ class SearchIndex:
         params: list[str | int] = [query]
 
         if topic_prefix:
-            validate_topic(topic_prefix)
+            topic_prefix = validate_topic(topic_prefix)
             escaped = _escape_like(topic_prefix)
             sql += " AND (d.topic = ? OR d.topic LIKE ? ESCAPE '!')"
             params.extend([topic_prefix, f"{escaped}/%"])

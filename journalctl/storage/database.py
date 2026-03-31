@@ -196,7 +196,7 @@ class DatabaseStorage(ConversationMixin):
 
     def _get_topic_id(self, topic: str) -> int:
         """Return topic_id. Raises TopicNotFoundError if the topic does not exist."""
-        validate_topic(topic)
+        topic = validate_topic(topic)
         row = self.conn.execute("SELECT id FROM topics WHERE path = ?", (topic,)).fetchone()
         if row:
             return int(row["id"])
@@ -212,7 +212,7 @@ class DatabaseStorage(ConversationMixin):
         created_at: str | None = None,
     ) -> int:
         """Create a new topic. Returns topic_id. Raises ValueError if duplicate."""
-        validate_topic(topic)
+        topic = validate_topic(topic)
         today = date_cls.today().isoformat()
         created = created_at or today
         try:
@@ -247,7 +247,7 @@ class DatabaseStorage(ConversationMixin):
         """
         params: list[str | int] = []
         if topic_prefix:
-            validate_topic(topic_prefix)
+            topic_prefix = validate_topic(topic_prefix)
             sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
             params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
         sql += " GROUP BY t.id ORDER BY t.updated_at DESC"
@@ -270,9 +270,19 @@ class DatabaseStorage(ConversationMixin):
             for r in rows
         ]
 
+    def count_topics(self, topic_prefix: str | None = None) -> int:
+        """Return total topic count, optionally filtered by prefix."""
+        sql = "SELECT COUNT(*) FROM topics t"
+        params: list[str | int] = []
+        if topic_prefix:
+            topic_prefix = validate_topic(topic_prefix)
+            sql += " WHERE t.path = ? OR t.path LIKE ? ESCAPE '!'"
+            params += [topic_prefix, f"{_escape_like(topic_prefix)}/%"]
+        return int(self.conn.execute(sql, params).fetchone()[0])
+
     def get_topic(self, topic: str) -> TopicMeta | None:
         """Get a single topic by path."""
-        validate_topic(topic)
+        topic = validate_topic(topic)
         row = self.conn.execute(
             """
             SELECT t.id, t.path, t.title, t.description, t.tags,
@@ -645,8 +655,9 @@ class DatabaseStorage(ConversationMixin):
         """Return a cursor-paginated batch of entries needing semantic indexing."""
         return self.conn.execute(
             """
-            SELECT e.id, e.content, e.tags
+            SELECT e.id, e.content, e.tags, e.date, t.path AS topic, t.title
             FROM entries e
+            JOIN topics t ON t.id = e.topic_id
             WHERE e.deleted_at IS NULL
               AND (e.indexed_at IS NULL OR e.indexed_at < e.updated_at)
               AND e.id > ?

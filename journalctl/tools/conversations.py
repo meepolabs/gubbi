@@ -78,7 +78,7 @@ def register(
         """
 
         try:
-            validate_topic(topic)
+            topic = validate_topic(topic)
         except ValueError as e:
             return invalid_topic(topic, str(e))
         title = sanitize_label(title, max_len=100)
@@ -110,11 +110,10 @@ def register(
                 if m.get("role") in KEEP_ROLES and m.get("content", "").strip()
             ]
         except (TypeError, AttributeError) as e:
-            msg = (
+            return validation_error(
                 "Invalid message format — each message"
-                + f" must be a dict with 'role' and 'content': {e}"
+                f" must be a dict with 'role' and 'content': {e}"
             )
-            raise ValueError(msg) from e
 
         if not parsed_messages:
             return validation_error("No user/assistant messages found after filtering.")
@@ -184,7 +183,7 @@ def register(
             topic_prefix = topic_prefix.rstrip("/") or None
         if topic_prefix:
             try:
-                validate_topic(topic_prefix)
+                topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
         conversations = storage.list_conversations(

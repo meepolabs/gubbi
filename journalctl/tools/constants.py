@@ -31,6 +31,7 @@ DEFAULT_CONVERSATIONS_LIMIT: Final = 50
 
 # Upper-bound caps for unbounded list/search parameters
 MAX_SEARCH_RESULTS: Final = 100
+MAX_TOPICS_RESULTS: Final = 200
 MAX_CONVERSATIONS_RESULTS: Final = 200
 
 # Search query input guard — truncate before FTS5 or embedding call
