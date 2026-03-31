@@ -307,17 +307,22 @@ def register(
                 reasoning=row["reasoning"],
                 tags=json.loads(row["tags"] or "[]"),
             )
-            # Remove old embedding, store new one
-            if old_content:
-                await _remove_embedding(old_content)
-            if await _embed_entry(
-                entry_id,
-                row["content"],
-                topic=row["path"],
-                date=row["date"],
-                tags=json.loads(row["tags"] or "[]"),
-            ):
-                storage.mark_entry_indexed(entry_id)
+            # Re-embed only when content changed. Deleting then re-inserting
+            # the same content hits a UNIQUE constraint in the memory service
+            # (soft-delete tombstone blocks the INSERT). Metadata (date/tags)
+            # staleness in the embedding store is harmless — search enriches
+            # semantic results with fresh DB metadata.
+            new_content = row["content"]
+            if old_content != new_content:
+                await _remove_embedding(old_content or "")
+                if await _embed_entry(
+                    entry_id,
+                    new_content,
+                    topic=row["path"],
+                    date=row["date"],
+                    tags=json.loads(row["tags"] or "[]"),
+                ):
+                    storage.mark_entry_indexed(entry_id)
 
         result: dict[str, Any] = {
             "status": "updated",
