@@ -172,10 +172,26 @@ def register(
             )
             memories = mem_response.get("memories", [])
             if isinstance(memories, list):
+                # Collect entry_ids so we can filter out orphaned embeddings
+                # (entries that were deleted but whose embeddings persist).
+                candidate_facts = []
+                entry_ids_to_check: set[int] = set()
+                for m in memories:
+                    if not isinstance(m, dict) or not m.get("content"):
+                        continue
+                    metadata = m.get("metadata", {}) or {}
+                    eid = metadata.get("entry_id")
+                    candidate_facts.append(
+                        {"content": m["content"], "entry_id": int(eid) if eid else None}
+                    )
+                    if eid:
+                        entry_ids_to_check.add(int(eid))
+
+                active_ids = storage.get_active_entry_ids(entry_ids_to_check)
                 key_facts = [
-                    {"content": m.get("content", "")}
-                    for m in memories
-                    if isinstance(m, dict) and m.get("content")
+                    {"content": f["content"]}
+                    for f in candidate_facts
+                    if not f["entry_id"] or f["entry_id"] in active_ids
                 ]
         except Exception:
             logger.warning("Key facts retrieval failed, continuing without", exc_info=True)

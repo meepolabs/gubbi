@@ -526,6 +526,11 @@ class DatabaseStorage(ConversationMixin):
                 (now, entry_id),
             )
 
+    def reset_all_indexed_at(self) -> None:
+        """Clear indexed_at on all entries so reindex re-embeds everything."""
+        with self.conn:
+            self.conn.execute("UPDATE entries SET indexed_at = NULL WHERE deleted_at IS NULL")
+
     def get_entries_by_date_range(
         self,
         date_from: str,

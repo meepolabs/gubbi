@@ -45,10 +45,14 @@ def register(
         async with _reindex_lock:
             result = index.rebuild_from_db(storage)
 
-            # Rebuild semantic embeddings for entries whose indexed_at is stale or absent.
-            # Processes in batches using an id-cursor so we advance even when individual
-            # embeddings fail (preventing infinite retries within a run).
-            # The indexed_at watermark makes this resumable across invocations.
+            # Reset all indexed_at so every entry is re-embedded from scratch.
+            # journal_reindex is an explicit repair action — incremental skipping
+            # via the indexed_at watermark is only useful for routine indexing,
+            # not for repair.  Both indexed_at and updated_at use date-only
+            # precision (YYYY-MM-DD), so same-day update+index looks "up to date"
+            # and would otherwise cause the reindex to skip stale entries.
+            storage.reset_all_indexed_at()
+
             embeddings_generated = 0
             last_id = 0
             semantic_status = "ok"
