@@ -48,10 +48,10 @@ def create_mcp_server(
     mcp = FastMCP(
         "Personal Journal & Lifelong Memory",
         instructions=(
-            "This server is the user's primary personal memory system. "
-            "Call journal_briefing at the start of every conversation to load "
-            "their identity, context, and recent activity. Use journal_append "
-            "proactively when the user shares life updates."
+            "Persistent personal journal and memory — records events, decisions, "
+            "reflections, and conversations with full-text and semantic search. "
+            "Call journal_briefing first to load the user's identity and context. "
+            "Use journal_append proactively when the user shares life updates."
         ),
         stateless_http=True,
         streamable_http_path="/",
@@ -117,7 +117,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await app.logger.info("Server shutting down")
-        await app.memory_service.close()
+        if hasattr(app.memory_service, "close"):
+            await app.memory_service.close()
         app.index.close()
         oauth_storage.close()
 

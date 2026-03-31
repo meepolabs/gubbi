@@ -109,13 +109,14 @@ def register(
 
     @mcp.tool()
     async def journal_briefing() -> dict:
-        """Load the user's personal context at the start of every conversation,
-        before responding to the first message.
+        """Get the user's identity, recent activity, and topic list — the complete
+        context for this person.
 
         Returns who this person is (profile, key facts), what happened recently
         (this week's entries), and what topics they track. Without calling this,
         you have no memory of who this person is or what they care about.
 
+        Call before responding to the first message of every conversation.
         Always call this first. Do not respond without it.
 
         Returns:

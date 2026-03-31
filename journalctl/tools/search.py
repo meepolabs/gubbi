@@ -9,6 +9,7 @@ from journalctl.core.validation import sanitize_freetext, validate_date, validat
 from journalctl.memory.client import MemoryServiceProtocol
 from journalctl.models.search import SearchResult
 from journalctl.storage.constants import SUMMARY_TRUNCATE_LEN
+from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.search_index import SearchIndex
 from journalctl.tools.constants import MAX_QUERY_LEN, MAX_SEARCH_RESULTS, MEMORY_HASH_PREVIEW_LEN
 from journalctl.tools.errors import invalid_date, invalid_topic, validation_error
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 
 def register(
     mcp: FastMCP,
+    storage: DatabaseStorage,
     index: SearchIndex,
     memory_service: MemoryServiceProtocol,
 ) -> None:
@@ -119,6 +121,13 @@ def register(
         except Exception:
             logger.warning("Semantic search failed, using FTS5 only", exc_info=True)
             semantic_available = False
+
+        # Filter orphaned semantic results (deleted entries still in vector index)
+        semantic_entry_ids = {r.entry_id for r in semantic_results if r.entry_id}
+        active_ids = storage.get_active_entry_ids(semantic_entry_ids)
+        semantic_results = [
+            r for r in semantic_results if not r.entry_id or r.entry_id in active_ids
+        ]
 
         # Merge and deduplicate
         seen_ids: set[str] = set()

@@ -73,16 +73,16 @@ class TestEntries:
         entry_id, count = storage.append_entry("hobbies/running", "Marathon registered.")
         assert count == 3
 
-    def test_append_with_context(self, storage: DatabaseStorage) -> None:
+    def test_append_with_reasoning(self, storage: DatabaseStorage) -> None:
         entry_id, _ = storage.append_entry(
             topic="projects/alpha",
             content="Decided to use SQLite as canonical storage.",
-            context="Markdown has no stable IDs. SQLite allows relationships and namespaces.",
+            reasoning="Markdown has no stable IDs. SQLite allows relationships and namespaces.",
             tags=["decision"],
         )
         _, entries, _ = storage.read_entries("projects/alpha")
         assert (
-            entries[0].context
+            entries[0].reasoning
             == "Markdown has no stable IDs. SQLite allows relationships and namespaces."
         )
         assert entries[0].id == entry_id
@@ -135,14 +135,14 @@ class TestEntries:
         with pytest.raises(IndexError):
             storage.update_entry(99999, "Content.")
 
-    def test_update_context(self, storage: DatabaseStorage) -> None:
+    def test_update_reasoning(self, storage: DatabaseStorage) -> None:
         entry_id, _ = storage.append_entry(
-            "test/ctx", "Decision made.", context="Initial reasoning."
+            "test/ctx", "Decision made.", reasoning="Initial reasoning."
         )
-        storage.update_entry(entry_id, "Decision made.", context="Updated reasoning.")
+        storage.update_entry(entry_id, "Decision made.", reasoning="Updated reasoning.")
 
         _, entries, _ = storage.read_entries("test/ctx")
-        assert entries[0].context == "Updated reasoning."
+        assert entries[0].reasoning == "Updated reasoning."
 
     def test_entry_has_conversation_id_field(self, storage: DatabaseStorage) -> None:
         entry_id, _ = storage.append_entry("test/conv-ref", "Something happened.")

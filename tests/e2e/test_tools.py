@@ -82,18 +82,18 @@ class TestAppendAndRead:
         assert result["entries"][0]["id"] is not None
 
     @pytest.mark.asyncio
-    async def test_append_with_context(self, tools: dict) -> None:
+    async def test_append_with_reasoning(self, tools: dict) -> None:
         result = await tools["journal_append"](
             topic="work/decision",
             content="Chose SQLite as canonical storage.",
-            context="Markdown has no stable IDs; SQLite enables relationships.",
+            reasoning="Markdown has no stable IDs; SQLite enables relationships.",
             tags=["decision"],
         )
         assert result["status"] == "appended"
 
         read = await tools["journal_read"](topic="work/decision")
         assert (
-            read["entries"][0]["context"]
+            read["entries"][0]["reasoning"]
             == "Markdown has no stable IDs; SQLite enables relationships."
         )
 

@@ -125,11 +125,11 @@ class SearchIndex:
         title: str,
         date: str,
         content: str,
-        context: str | None,
+        reasoning: str | None,
         tags: list[str],
     ) -> None:
         """Index a single journal entry."""
-        self.upsert_entry_on_conn(self.conn, entry_id, topic, title, date, content, context, tags)
+        self.upsert_entry_on_conn(self.conn, entry_id, topic, title, date, content, reasoning, tags)
         self.conn.commit()
 
     def upsert_entry_on_conn(
@@ -140,7 +140,7 @@ class SearchIndex:
         title: str,
         date: str,
         content: str,
-        context: str | None,
+        reasoning: str | None,
         tags: list[str],
     ) -> None:
         """Index a single journal entry on the provided connection.
@@ -150,8 +150,8 @@ class SearchIndex:
         """
         source_key = f"entry:{entry_id}"
         full_content = content
-        if context:
-            full_content = f"{content}\n\n{context}"
+        if reasoning:
+            full_content = f"{content}\n\n{reasoning}"
 
         conn.execute(
             """
@@ -345,7 +345,7 @@ class SearchIndex:
         """Re-index all non-deleted entries. Returns count indexed."""
         rows = db_storage.conn.execute(
             """
-            SELECT e.id, e.date, e.content, e.context, e.tags,
+            SELECT e.id, e.date, e.content, e.reasoning, e.tags,
                    t.path AS topic, t.title
             FROM entries e
             JOIN topics t ON t.id = e.topic_id
@@ -362,7 +362,7 @@ class SearchIndex:
                     title=r["title"],
                     date=r["date"],
                     content=r["content"],
-                    context=r["context"],
+                    reasoning=r["reasoning"],
                     tags=json.loads(r["tags"] or "[]"),
                 )
                 count += 1

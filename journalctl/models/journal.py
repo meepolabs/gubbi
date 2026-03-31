@@ -29,6 +29,6 @@ class Entry(BaseModel):
     id: int  # stable DB primary key
     date: str  # YYYY-MM-DD
     content: str  # what happened (headline)
-    context: str | None = None  # why/reasoning (loaded on demand)
+    reasoning: str | None = None  # why it happened (loaded on demand)
     conversation_id: int | None = None  # FK to conversations table
     tags: list[str] = []

@@ -57,7 +57,7 @@ def register(
     async def journal_append(
         topic: str,
         content: str,
-        context: str | None = None,
+        reasoning: str | None = None,
         tags: list[str] | None = None,
         date: str | None = None,
     ) -> dict[str, Any]:
@@ -69,7 +69,7 @@ def register(
 
         Example: User says "We decided to use PostgreSQL instead of MongoDB."
         → journal_append(topic="projects/alpha", content="Chose PostgreSQL for the database",
-              context="Mongo had no ACID transactions, team already knows SQL")
+              reasoning="Mongo had no ACID transactions, team already knows SQL")
 
         Auto-creates the topic if it doesn't exist. Reuse existing topic paths
         from the briefing to avoid duplicates (e.g. use 'work/meeting-notes'
@@ -80,8 +80,8 @@ def register(
         Args:
             topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
             content: What happened — the headline. Shown in briefing and timeline.
-            context: Why it happened — reasoning or tradeoffs. Use for decisions
-                     and key insights; leave empty for routine events.
+            reasoning: Why it happened — reasoning or tradeoffs. Only loaded when
+                       the entry is read in full; leave empty for routine events.
             tags: Optional tags (e.g. ['decision', 'milestone', 'important']).
             date: Date override as YYYY-MM-DD. Defaults to today.
 
@@ -96,8 +96,8 @@ def register(
         content = sanitize_freetext(content)
         if not content.strip():
             return validation_error("Content cannot be empty")
-        if context:
-            context = sanitize_freetext(context)
+        if reasoning:
+            reasoning = sanitize_freetext(reasoning)
         if tags:
             tags = [sanitize_label(t) for t in tags]
         if date:
@@ -109,7 +109,7 @@ def register(
         entry_id, count = storage.append_entry(
             topic=topic,
             content=content,
-            context=context,
+            reasoning=reasoning,
             tags=tags,
             date=date,
             commit=False,  # deferred — commit after FTS write for atomicity
@@ -125,7 +125,7 @@ def register(
                 title=meta.title if meta else topic,
                 date=date or "today",
                 content=content,
-                context=context,
+                reasoning=reasoning,
                 tags=tags or [],
             )
             storage.conn.commit()
@@ -148,7 +148,7 @@ def register(
     @mcp.tool()
     async def journal_read(
         topic: str,
-        n: int | None = None,
+        limit: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         offset: int = 0,
@@ -157,20 +157,20 @@ def register(
         "what did I write about work?"
 
         Use when the user wants to review a specific topic's entries.
-        Returns entries in chronological order with content and context.
+        Returns entries in chronological order with content and reasoning.
 
         Do NOT use for keyword search across topics — use journal_search instead.
         Do NOT use for time-based browsing — use journal_timeline instead.
 
         Args:
             topic: Topic path (e.g. 'work/acme').
-            n: Max entries to return (default 10). Use a large number for more history.
+            limit: Max entries to return (default 10). Use a large number for more history.
             date_from: Only entries on or after this date (YYYY-MM-DD).
             date_to: Only entries on or before this date (YYYY-MM-DD).
             offset: Skip first N entries for pagination (default 0).
 
         Returns:
-            Topic metadata and entries (including context if set).
+            Topic metadata and entries (including reasoning if set).
         """
 
         try:
@@ -187,15 +187,15 @@ def register(
                 validate_date(date_to)
             except ValueError:
                 return invalid_date(date_to)
-        if n is not None and n <= 0:
-            return validation_error(f"n must be a positive integer, got {n}")
-        if n is not None and n > MAX_READ_ENTRIES:
-            return validation_error(f"n cannot exceed {MAX_READ_ENTRIES}, got {n}")
-        count = n if n is not None else DEFAULT_ENTRIES_LIMIT
+        if limit is not None and limit <= 0:
+            return validation_error(f"limit must be a positive integer, got {limit}")
+        if limit is not None and limit > MAX_READ_ENTRIES:
+            return validation_error(f"limit cannot exceed {MAX_READ_ENTRIES}, got {limit}")
+        count = limit if limit is not None else DEFAULT_ENTRIES_LIMIT
         try:
             meta, entries, total = storage.read_entries(
                 topic,
-                n=count,
+                limit=count,
                 date_from=date_from,
                 date_to=date_to,
                 offset=offset,
@@ -215,7 +215,7 @@ def register(
     async def journal_update(
         entry_id: int,
         content: str | None = None,
-        context: str | None = None,
+        reasoning: str | None = None,
         mode: Literal["replace", "append"] = "replace",
         date: str | None = None,
         tags: list[str] | None = None,
@@ -229,7 +229,7 @@ def register(
         Args:
             entry_id: The entry's 'id' (from read, search, or timeline results).
             content: New content for the entry (optional — omit to only change date/tags).
-            context: Updated reasoning/context (optional).
+            reasoning: Updated reasoning (optional).
             mode: 'replace' to overwrite content, 'append' to add to existing entry.
             date: Correct the entry's date (YYYY-MM-DD). Omit to keep current date.
             tags: Replace the entry's tags. Omit to keep current tags.
@@ -239,8 +239,8 @@ def register(
         """
         if content:
             content = sanitize_freetext(content)
-        if context:
-            context = sanitize_freetext(context)
+        if reasoning:
+            reasoning = sanitize_freetext(reasoning)
         if date:
             try:
                 validate_date(date)
@@ -253,7 +253,7 @@ def register(
             storage.update_entry(
                 entry_id=entry_id,
                 content=content,
-                context=context,
+                reasoning=reasoning,
                 mode=mode,
                 date=date,
                 tags=tags,
@@ -270,7 +270,7 @@ def register(
                 title=row["title"],
                 date=row["date"],
                 content=row["content"],
-                context=row["context"],
+                reasoning=row["reasoning"],
                 tags=json.loads(row["tags"] or "[]"),
             )
             # Update semantic embedding; stamp indexed_at on success

@@ -69,24 +69,24 @@ def _build_entries_where_clause(
 
 def _calculate_pagination(
     total: int,
-    n: int | None,
+    limit: int | None,
     offset: int,
     date_from: str | None,
 ) -> tuple[int | None, int]:
     """Return (sql_limit, sql_offset) for a read_entries query.
 
-    "Last n" semantics: when no explicit offset and no date_from filter,
-    skip to the tail of the result set so the n most recent entries are returned.
+    "Last N" semantics: when no explicit offset and no date_from filter,
+    skip to the tail of the result set so the N most recent entries are returned.
     """
     sql_limit: int | None = None
     sql_offset: int = 0
-    if n is not None and n > 0:
+    if limit is not None and limit > 0:
         if offset == 0 and not date_from:
-            sql_offset = max(0, total - n)
-            sql_limit = n
+            sql_offset = max(0, total - limit)
+            sql_limit = limit
         else:
             sql_offset = offset
-            sql_limit = n
+            sql_limit = limit
     elif offset > 0:
         sql_offset = offset
     return sql_limit, sql_offset
@@ -110,7 +110,7 @@ CREATE TABLE IF NOT EXISTS entries (
     topic_id        INTEGER NOT NULL REFERENCES topics(id),
     date            TEXT NOT NULL,
     content         TEXT NOT NULL,
-    context         TEXT,
+    reasoning       TEXT,
     conversation_id INTEGER REFERENCES conversations(id),
     tags            TEXT DEFAULT '[]',
     position        INTEGER NOT NULL DEFAULT 0,
@@ -305,7 +305,7 @@ class DatabaseStorage(ConversationMixin):
         self,
         topic: str,
         content: str,
-        context: str | None = None,
+        reasoning: str | None = None,
         tags: list[str] | None = None,
         date: str | None = None,
         commit: bool = True,
@@ -332,10 +332,10 @@ class DatabaseStorage(ConversationMixin):
         try:
             cur = self.conn.execute(
                 """
-                INSERT INTO entries (topic_id, date, content, context, tags, position, created_at, updated_at)
+                INSERT INTO entries (topic_id, date, content, reasoning, tags, position, created_at, updated_at)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (topic_id, d, content, context, json.dumps(tags or []), position, now, now),
+                (topic_id, d, content, reasoning, json.dumps(tags or []), position, now, now),
             )
             if cur.lastrowid is None:
                 raise RuntimeError("INSERT entries failed: no rowid")
@@ -360,7 +360,7 @@ class DatabaseStorage(ConversationMixin):
     def read_entries(
         self,
         topic: str,
-        n: int | None = None,
+        limit: int | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
         offset: int = 0,
@@ -384,10 +384,10 @@ class DatabaseStorage(ConversationMixin):
             where_params,
         ).fetchone()[0]
 
-        sql_limit, sql_offset = _calculate_pagination(total, n, offset, date_from)
+        sql_limit, sql_offset = _calculate_pagination(total, limit, offset, date_from)
 
         data_sql = (
-            "SELECT id, date, content, context, conversation_id, tags, position"  # noqa: S608
+            "SELECT id, date, content, reasoning, conversation_id, tags, position"  # noqa: S608
             " FROM entries WHERE " + where + " ORDER BY date ASC, position ASC"
         )
         data_params: list[str | int] = list(where_params)
@@ -404,7 +404,7 @@ class DatabaseStorage(ConversationMixin):
                 id=r["id"],
                 date=r["date"],
                 content=r["content"],
-                context=r["context"],
+                reasoning=r["reasoning"],
                 conversation_id=r["conversation_id"],
                 tags=json.loads(r["tags"] or "[]"),
             )
@@ -417,7 +417,7 @@ class DatabaseStorage(ConversationMixin):
         self,
         entry_id: int,
         content: str | None = None,
-        context: str | None = None,
+        reasoning: str | None = None,
         mode: str = "replace",
         date: str | None = None,
         tags: list[str] | None = None,
@@ -427,13 +427,13 @@ class DatabaseStorage(ConversationMixin):
         Args:
             entry_id: Stable integer ID from entries table.
             content: New content string (None = leave unchanged).
-            context: New context string (None = leave unchanged).
+            reasoning: New reasoning string (None = leave unchanged).
             mode: 'replace' overwrites content; 'append' adds to it.
             date: New date string YYYY-MM-DD (None = leave unchanged).
             tags: New tags list (None = leave unchanged).
         """
         row = self.conn.execute(
-            "SELECT id, content, context, topic_id, date, tags FROM entries WHERE id = ? AND deleted_at IS NULL",
+            "SELECT id, content, reasoning, topic_id, date, tags FROM entries WHERE id = ? AND deleted_at IS NULL",
             (entry_id,),
         ).fetchone()
         if not row:
@@ -452,14 +452,14 @@ class DatabaseStorage(ConversationMixin):
         else:
             new_content = row["content"]
 
-        # Resolve context
-        if context is not None:
-            if mode == "append" and row["context"]:
-                new_context = f"{row['context']}\n\n{context}".strip()
+        # Resolve reasoning
+        if reasoning is not None:
+            if mode == "append" and row["reasoning"]:
+                new_reasoning = f"{row['reasoning']}\n\n{reasoning}".strip()
             else:
-                new_context = context
+                new_reasoning = reasoning
         else:
-            new_context = row["context"]
+            new_reasoning = row["reasoning"]
 
         new_date = date or row["date"]
         new_tags = json.dumps(tags) if tags is not None else row["tags"]
@@ -467,8 +467,8 @@ class DatabaseStorage(ConversationMixin):
 
         with self.conn:
             self.conn.execute(
-                "UPDATE entries SET content = ?, context = ?, date = ?, tags = ?, updated_at = ? WHERE id = ?",
-                (new_content, new_context, new_date, new_tags, now, entry_id),
+                "UPDATE entries SET content = ?, reasoning = ?, date = ?, tags = ?, updated_at = ? WHERE id = ?",
+                (new_content, new_reasoning, new_date, new_tags, now, entry_id),
             )
             self.conn.execute(
                 "UPDATE topics SET updated_at = ? WHERE id = ?",
@@ -524,7 +524,7 @@ class DatabaseStorage(ConversationMixin):
         """Get entries and conversations updated within a date range.
 
         Used by journal_briefing and journal_timeline.
-        Returns lightweight dicts (no context field for brevity).
+        Returns lightweight dicts (no reasoning field for brevity).
         """
         entry_rows = self.conn.execute(
             """
@@ -611,6 +611,18 @@ class DatabaseStorage(ConversationMixin):
     # Query helpers used by tool layer (keeps SQL out of tools/)
     # ------------------------------------------------------------------
 
+    def get_active_entry_ids(self, entry_ids: set[int]) -> set[int]:
+        """Return the subset of entry_ids that exist and are not soft-deleted."""
+        if not entry_ids:
+            return set()
+        placeholders = ",".join("?" * len(entry_ids))
+        rows = self.conn.execute(
+            "SELECT id FROM entries"  # noqa: S608
+            f" WHERE id IN ({placeholders}) AND deleted_at IS NULL",
+            list(entry_ids),
+        ).fetchall()
+        return {r["id"] for r in rows}
+
     def get_entry_content(self, entry_id: int) -> str | None:
         """Return content of a non-deleted entry, or None if not found."""
         row = self.conn.execute(
@@ -622,7 +634,7 @@ class DatabaseStorage(ConversationMixin):
     def get_entry_with_topic(self, entry_id: int) -> sqlite3.Row | None:
         """Return entry + topic columns needed for FTS/embedding re-sync."""
         return self.conn.execute(  # type: ignore[no-any-return]
-            "SELECT e.content, e.context, e.date, e.tags, t.path, t.title "
+            "SELECT e.content, e.reasoning, e.date, e.tags, t.path, t.title "
             "FROM entries e JOIN topics t ON t.id = e.topic_id WHERE e.id = ?",
             (entry_id,),
         ).fetchone()

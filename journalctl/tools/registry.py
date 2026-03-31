@@ -34,7 +34,7 @@ def register_tools(
     """
     topics.register(mcp, storage)
     entries.register(mcp, storage, index, memory_service=memory_service)
-    search.register(mcp, index, memory_service=memory_service)
+    search.register(mcp, storage, index, memory_service=memory_service)
     conversations.register(mcp, storage, index)
     context.register(mcp, storage, index, settings, memory_service=memory_service)
     admin.register(mcp, index, storage, memory_service=memory_service)
