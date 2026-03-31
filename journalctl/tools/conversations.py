@@ -13,6 +13,7 @@ from journalctl.core.validation import (
 )
 from journalctl.models.conversation import Message
 from journalctl.storage.database import DatabaseStorage
+from journalctl.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
 from journalctl.storage.search_index import SearchIndex
 from journalctl.tools.constants import (
     DEFAULT_CONVERSATIONS_LIMIT,
@@ -55,7 +56,8 @@ def register(
         "remember what we discussed."
 
         Call when the user asks to save, or offer during meaningful moments:
-        decisions, plans, breakthroughs, or reflections.
+        decisions, plans, breakthroughs, or reflections. The topic must already
+        exist — check the briefing, or create one with journal_create_topic.
 
         Re-saving the same topic + title updates the previous version.
 
@@ -116,22 +118,18 @@ def register(
         if not parsed_messages:
             return validation_error("No user/assistant messages found after filtering.")
 
-        # Check if update
-        existing = storage.list_conversations(topic_prefix=topic)
-        from journalctl.core.validation import slugify  # noqa: PLC0415
-
-        slug = slugify(title)
-        is_update = any(slugify(c.title) == slug for c in existing)
-
-        conv_id, saved_summary = storage.save_conversation(
-            topic=topic,
-            title=title,
-            messages=parsed_messages,
-            summary=summary,
-            source=source,
-            tags=tags,
-            date=date,
-        )
+        try:
+            conv_id, saved_summary, is_update = storage.save_conversation(
+                topic=topic,
+                title=title,
+                messages=parsed_messages,
+                summary=summary,
+                source=source,
+                tags=tags,
+                date=date,
+            )
+        except TopicNotFoundError:
+            return not_found("Topic", topic)
 
         # Update FTS5 index
         message_content = "\n\n".join(m.content for m in parsed_messages)
@@ -219,7 +217,7 @@ def register(
 
         try:
             meta, messages = storage.read_conversation_by_id(conversation_id, preview=preview)
-        except FileNotFoundError:
+        except ConversationNotFoundError:
             return not_found("Conversation", conversation_id)
         content = _format_messages_as_markdown(meta.title, messages)
         return {

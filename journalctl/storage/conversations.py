@@ -19,6 +19,7 @@ from pathlib import Path
 
 from journalctl.core.validation import slugify, validate_title, validate_topic
 from journalctl.models.conversation import ConversationMeta, Message
+from journalctl.storage.exceptions import ConversationNotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ class ConversationMixin:
 
     conversations_json_dir: Path
 
-    def _get_or_create_topic(self, topic: str) -> int:  # pragma: no cover
+    def _get_topic_id(self, topic: str) -> int:  # pragma: no cover
         raise NotImplementedError
 
     # ------------------------------------------------------------------
@@ -50,22 +51,20 @@ class ConversationMixin:
 
     def _write_conversation_json(
         self,
-        topic: str,
-        slug: str,
+        conv_id: int,
         meta: ConversationMeta,
         messages: list[Message],
     ) -> str:
         """Write conversation JSON archive. Returns relative path string."""
-        out_dir = self.conversations_json_dir / topic
-        out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"{slug}.json"
+        self.conversations_json_dir.mkdir(parents=True, exist_ok=True)
+        out_path = self.conversations_json_dir / f"{conv_id}.json"
 
         payload = {
             "meta": meta.model_dump(exclude={"id"}),
             "messages": [m.model_dump() for m in messages],
         }
         out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
-        return f"conversations_json/{topic}/{slug}.json"
+        return f"conversations_json/{conv_id}.json"
 
     # ------------------------------------------------------------------
     # Save
@@ -80,15 +79,15 @@ class ConversationMixin:
         source: str = "claude",
         tags: list[str] | None = None,
         date: str | None = None,
-    ) -> tuple[int, str]:
+    ) -> tuple[int, str, bool]:
         """Save a conversation. Idempotent — same topic+title overwrites.
 
-        Returns (conversation_id, summary).
+        Returns (conversation_id, summary, is_update).
         """
         validate_topic(topic)
         validate_title(title)
         slug = slugify(title)
-        topic_id = self._get_or_create_topic(topic)
+        topic_id = self._get_topic_id(topic)
         conversation_date = date or date_cls.today().isoformat()
         today = date_cls.today().isoformat()
         participants = sorted({m.role for m in messages})
@@ -104,9 +103,8 @@ class ConversationMixin:
             participants=participants,
             message_count=len(messages),
         )
-        json_path = self._write_conversation_json(topic, slug, meta, messages)
-
-        conv_id = self._upsert_conversation_record(
+        # Upsert DB record first to get the stable conv_id
+        conv_id, is_update = self._upsert_conversation_record(
             topic_id,
             title,
             slug,
@@ -115,9 +113,15 @@ class ConversationMixin:
             tags or [],
             participants,
             messages,
-            json_path,
             conversation_date,
         )
+
+        # Write JSON archive keyed by ID (flat, no folder structure)
+        json_path = self._write_conversation_json(conv_id, meta, messages)
+        self.conn.execute(
+            "UPDATE conversations SET json_path = ? WHERE id = ?", (json_path, conv_id)
+        )
+
         self._insert_messages(conv_id, messages)
         self._upsert_linked_entry(topic_id, conv_id, title, summary, conversation_date)
 
@@ -125,7 +129,7 @@ class ConversationMixin:
             "UPDATE topics SET updated_at = ? WHERE id = ?", (conversation_date, topic_id)
         )
         self.conn.commit()
-        return conv_id, summary
+        return conv_id, summary, is_update
 
     def _upsert_conversation_record(
         self,
@@ -137,10 +141,12 @@ class ConversationMixin:
         tags: list[str],
         participants: list[str],
         messages: list[Message],
-        json_path: str,
         conversation_date: str,
-    ) -> int:
-        """Insert or update the conversations row. Returns conversation_id."""
+    ) -> tuple[int, bool]:
+        """Insert or update the conversations row. Returns (conversation_id, is_update).
+
+        json_path is set separately after writing the archive file.
+        """
         today = date_cls.today().isoformat()
         existing = self.conn.execute(
             "SELECT id, created_at FROM conversations WHERE topic_id = ? AND slug = ?",
@@ -153,7 +159,7 @@ class ConversationMixin:
                 """
                 UPDATE conversations
                 SET source=?, summary=?, tags=?, participants=?, message_count=?,
-                    json_path=?, updated_at=?
+                    updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -162,20 +168,19 @@ class ConversationMixin:
                     json.dumps(tags),
                     json.dumps(participants),
                     len(messages),
-                    json_path,
                     today,
                     conv_id,
                 ),
             )
             self.conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conv_id,))
-            return conv_id
+            return conv_id, True
 
         cur = self.conn.execute(
             """
             INSERT INTO conversations
                 (topic_id, title, slug, source, summary, tags, participants,
-                 message_count, json_path, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 message_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 topic_id,
@@ -186,14 +191,13 @@ class ConversationMixin:
                 json.dumps(tags),
                 json.dumps(participants),
                 len(messages),
-                json_path,
                 conversation_date,
                 today,
             ),
         )
         if cur.lastrowid is None:
             raise RuntimeError("INSERT conversations failed: no rowid")
-        return cur.lastrowid
+        return cur.lastrowid, False
 
     def _insert_messages(self, conv_id: int, messages: list[Message]) -> None:
         """Insert all messages for a conversation."""
@@ -300,7 +304,7 @@ class ConversationMixin:
     ) -> tuple[ConversationMeta, list[Message]]:
         """Read a conversation by topic + title slug.
 
-        Returns (ConversationMeta, messages). Raises FileNotFoundError if not found.
+        Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
         """
         validate_topic(topic)
         slug = slugify(title)
@@ -319,7 +323,7 @@ class ConversationMixin:
 
         if not row:
             msg = f"Conversation '{title}' not found under '{topic}'"
-            raise FileNotFoundError(msg)
+            raise ConversationNotFoundError(msg)
 
         meta = ConversationMeta(
             id=row["id"],
@@ -359,7 +363,7 @@ class ConversationMixin:
             conversation_id: Database primary key.
             preview: If True, return only first 3 and last 3 messages.
 
-        Returns (ConversationMeta, messages). Raises FileNotFoundError if not found.
+        Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
         """
         row = self.conn.execute(
             """
@@ -375,7 +379,7 @@ class ConversationMixin:
 
         if not row:
             msg = f"Conversation id {conversation_id} not found"
-            raise FileNotFoundError(msg)
+            raise ConversationNotFoundError(msg)
 
         meta = ConversationMeta(
             id=row["id"],

@@ -62,10 +62,10 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         created_at: str | None = None,
     ) -> dict[str, Any]:
         """Create a new journal topic for an area of the user's life not yet tracked.
+        e.g., "I want to start tracking my fitness" or "make a topic for the house renovation."
 
-        Only create when no existing topic fits — check journal_list_topics first.
-        journal_append auto-creates topics, so this is mainly useful when you want
-        to set a title, description, and tags upfront.
+        Required before writing entries or conversations to a new topic.
+        Check journal_list_topics or the briefing first to avoid duplicates.
 
         Args:
             topic: Topic path (e.g. 'hobbies/woodworking').

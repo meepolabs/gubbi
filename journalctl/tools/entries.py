@@ -16,6 +16,7 @@ from journalctl.core.validation import (
 )
 from journalctl.memory.client import MemoryServiceProtocol
 from journalctl.storage.database import DatabaseStorage
+from journalctl.storage.exceptions import TopicNotFoundError
 from journalctl.storage.search_index import SearchIndex
 from journalctl.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
 from journalctl.tools.errors import invalid_date, invalid_topic, not_found, validation_error
@@ -61,19 +62,17 @@ def register(
         tags: list[str] | None = None,
         date: str | None = None,
     ) -> dict[str, Any]:
-        """Record something in the user's journal.
+        """Record a life event, decision, or update — "remember this",
+        "note that we decided X", or "I just did Y."
 
         When the user shares updates, progress, reflections, events, or decisions,
         write a journal entry immediately. This is the dated event record (what happened
-        and when).
+        and when). The topic must already exist — check the briefing for
+        existing topics, or create one with journal_create_topic first.
 
         Example: User says "We decided to use PostgreSQL instead of MongoDB."
         → journal_append(topic="projects/alpha", content="Chose PostgreSQL for the database",
-              reasoning="Mongo had no ACID transactions, team already knows SQL")
-
-        Auto-creates the topic if it doesn't exist. Reuse existing topic paths
-        from the briefing to avoid duplicates (e.g. use 'work/meeting-notes'
-        if it already exists, don't create 'work/meetings').
+            reasoning="Mongo had no ACID transactions, team already knows SQL")
 
         Do NOT use for searching or reading — use journal_search or journal_read.
 
@@ -81,7 +80,7 @@ def register(
             topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
             content: What happened — the headline. Shown in briefing and timeline.
             reasoning: Why it happened — reasoning or tradeoffs. Only loaded when
-                       the entry is read in full; leave empty for routine events.
+                        the entry is read in full; leave empty for routine events.
             tags: Optional tags (e.g. ['decision', 'milestone', 'important']).
             date: Date override as YYYY-MM-DD. Defaults to today.
 
@@ -106,14 +105,17 @@ def register(
             except ValueError:
                 return invalid_date(date)
 
-        entry_id, count = storage.append_entry(
-            topic=topic,
-            content=content,
-            reasoning=reasoning,
-            tags=tags,
-            date=date,
-            commit=False,  # deferred — commit after FTS write for atomicity
-        )
+        try:
+            entry_id, count = storage.append_entry(
+                topic=topic,
+                content=content,
+                reasoning=reasoning,
+                tags=tags,
+                date=date,
+                commit=False,  # deferred — commit after FTS write for atomicity
+            )
+        except TopicNotFoundError:
+            return not_found("Topic", topic)
 
         # Write FTS5 index on the same connection, then commit both atomically
         meta = storage.get_topic(topic)
@@ -200,7 +202,7 @@ def register(
                 date_to=date_to,
                 offset=offset,
             )
-        except FileNotFoundError:
+        except TopicNotFoundError:
             return not_found("Topic", topic)
 
         return {

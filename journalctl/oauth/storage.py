@@ -80,8 +80,7 @@ class OAuthStorage:
         return self._conn
 
     def _init_schema(self) -> None:
-        assert self._conn is not None  # noqa: S101
-        self._conn.executescript(SCHEMA)
+        self._conn.executescript(SCHEMA)  # type: ignore[union-attr]
 
     def close(self) -> None:
         if self._conn:

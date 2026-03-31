@@ -4,6 +4,7 @@ import pytest
 
 from journalctl.models.conversation import Message
 from journalctl.storage.database import DatabaseStorage
+from journalctl.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
 
 
 class TestTopicCRUD:
@@ -34,7 +35,7 @@ class TestTopicCRUD:
         assert storage.get_topic("nonexistent/topic") is None
 
     def test_read_entries_nonexistent_raises(self, storage: DatabaseStorage) -> None:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(TopicNotFoundError):
             storage.read_entries("nonexistent/topic")
 
     def test_list_topics_empty(self, storage: DatabaseStorage) -> None:
@@ -225,7 +226,7 @@ class TestConversations:
         assert len(work_convs) == 2
 
     def test_read_nonexistent_conversation_raises(self, storage: DatabaseStorage) -> None:
-        with pytest.raises(FileNotFoundError):
+        with pytest.raises(ConversationNotFoundError):
             storage.read_conversation("test/nope", "Missing Chat")
 
     def test_conversation_json_archive_written(self, storage: DatabaseStorage) -> None:

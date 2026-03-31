@@ -117,7 +117,6 @@ def register(
         you have no memory of who this person is or what they care about.
 
         Call before responding to the first message of every conversation.
-        Always call this first. Do not respond without it.
 
         Returns:
             user_profile, key_facts, this_week (recent activity), topics, stats.
@@ -129,25 +128,21 @@ def register(
         date_from, date_to, label = _resolve_period("this-week")
         week_entries = storage.get_entries_by_date_range(date_from, date_to)
 
-        # Clean entries — remove internal file_path, expose IDs
+        # Clean entries for briefing output
         clean_entries = []
         for e in week_entries:
             entry = {
                 "doc_type": e.get("doc_type", ""),
                 "topic": e.get("topic", ""),
                 "title": e.get("title", ""),
-                "snippet": e.get("description", "")[:SNIPPET_PREVIEW_LEN]
-                if e.get("description")
-                else e.get("content", "")[:SNIPPET_PREVIEW_LEN],
+                "snippet": e.get("description", "")[:SNIPPET_PREVIEW_LEN],
                 "date": e.get("updated", ""),
                 "tags": e.get("tags", "[]"),
             }
-            # Parse entry/conversation ID from file_path like "entry:42"
-            fp = e.get("file_path", "")
-            if fp.startswith("entry:"):
-                entry["entry_id"] = int(fp[6:])
-            elif fp.startswith("conversation:"):
-                entry["conversation_id"] = int(fp[13:])
+            if e.get("entry_id") is not None:
+                entry["entry_id"] = e["entry_id"]
+            if e.get("conversation_id") is not None:
+                entry["conversation_id"] = e["conversation_id"]
             clean_entries.append(entry)
 
         # Most recent entries first; drop oldest when the week is very active

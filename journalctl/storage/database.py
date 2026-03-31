@@ -27,6 +27,7 @@ from journalctl.storage.constants import (
     SNIPPET_PREVIEW_LEN,
 )
 from journalctl.storage.conversations import ConversationMixin
+from journalctl.storage.exceptions import TopicNotFoundError
 
 _KNOWLEDGE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 
@@ -193,14 +194,14 @@ class DatabaseStorage(ConversationMixin):
     # Topics
     # ------------------------------------------------------------------
 
-    def _get_or_create_topic(self, topic: str) -> int:
-        """Return topic_id, creating the topic if it doesn't exist."""
+    def _get_topic_id(self, topic: str) -> int:
+        """Return topic_id. Raises TopicNotFoundError if the topic does not exist."""
         validate_topic(topic)
         row = self.conn.execute("SELECT id FROM topics WHERE path = ?", (topic,)).fetchone()
         if row:
             return int(row["id"])
-        title = topic.split("/")[-1].replace("-", " ").title()
-        return self.create_topic(topic, title)
+        msg = f"Topic '{topic}' not found — create it first with journal_create_topic"
+        raise TopicNotFoundError(msg)
 
     def create_topic(
         self,
@@ -310,15 +311,14 @@ class DatabaseStorage(ConversationMixin):
         date: str | None = None,
         commit: bool = True,
     ) -> tuple[int, int]:
-        """Append a dated entry to a topic. Auto-creates topic if needed.
+        """Append a dated entry to a topic. Raises TopicNotFoundError if topic missing.
 
         Returns (entry_id, total_entry_count).
 
         Pass commit=False to defer the commit (e.g. when the caller wants to
         batch the FTS index write into the same transaction for atomicity).
         """
-        validate_topic(topic)
-        topic_id = self._get_or_create_topic(topic)
+        topic_id = self._get_topic_id(topic)
         d = date or date_cls.today().isoformat()
 
         # Determine position (max position in this topic + 1)
@@ -367,12 +367,12 @@ class DatabaseStorage(ConversationMixin):
     ) -> tuple[TopicMeta, list[Entry], int]:
         """Read entries for a topic, most-recent-last.
 
-        Returns (TopicMeta, entries, total_matching). Raises FileNotFoundError if topic missing.
+        Returns (TopicMeta, entries, total_matching). Raises TopicNotFoundError if topic missing.
         """
         meta = self.get_topic(topic)
         if meta is None:
             msg = f"Topic '{topic}' not found"
-            raise FileNotFoundError(msg)
+            raise TopicNotFoundError(msg)
 
         if meta.id is None:
             raise RuntimeError(f"Topic '{topic}' has no database ID — storage may be corrupt")
@@ -554,7 +554,8 @@ class DatabaseStorage(ConversationMixin):
         for r in entry_rows:
             results.append(
                 {
-                    "file_path": f"entry:{r['id']}",
+                    "entry_id": r["id"],
+                    "conversation_id": None,
                     "doc_type": r["doc_type"],
                     "topic": r["topic"],
                     "title": r["title"],
@@ -566,7 +567,8 @@ class DatabaseStorage(ConversationMixin):
         for r in conv_rows:
             results.append(
                 {
-                    "file_path": f"conversation:{r['id']}",
+                    "entry_id": None,
+                    "conversation_id": r["id"],
                     "doc_type": r["doc_type"],
                     "topic": r["topic"],
                     "title": r["title"],

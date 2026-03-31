@@ -189,10 +189,30 @@ class SearchIndex:
         message_content: str,
     ) -> None:
         """Index a conversation (summary + concatenated messages)."""
+        self.upsert_conversation_on_conn(
+            self.conn, conversation_id, topic, title, summary, tags, updated, message_content
+        )
+        self.conn.commit()
+
+    def upsert_conversation_on_conn(
+        self,
+        conn: sqlite3.Connection,
+        conversation_id: int,
+        topic: str,
+        title: str,
+        summary: str,
+        tags: list[str],
+        updated: str,
+        message_content: str,
+    ) -> None:
+        """Index a conversation on the provided connection.
+
+        Does NOT commit — the caller is responsible.
+        """
         source_key = f"conversation:{conversation_id}"
         full_content = f"{summary}\n\n{message_content}" if summary else message_content
 
-        self.conn.execute(
+        conn.execute(
             """
             INSERT INTO documents
                 (source_key, doc_type, topic, title, description,
@@ -218,7 +238,6 @@ class SearchIndex:
                 int(time.time()),
             ),
         )
-        self.conn.commit()
 
     def remove_entry(self, entry_id: int) -> None:
         """Remove an entry from the index."""
@@ -356,7 +375,8 @@ class SearchIndex:
         count = 0
         for r in rows:
             try:
-                self.upsert_entry(
+                self.upsert_entry_on_conn(
+                    self.conn,
                     entry_id=r["id"],
                     topic=r["topic"],
                     title=r["title"],
@@ -366,8 +386,9 @@ class SearchIndex:
                     tags=json.loads(r["tags"] or "[]"),
                 )
                 count += 1
-            except (sqlite3.Error, KeyError, json.JSONDecodeError, AssertionError) as e:
+            except (sqlite3.Error, KeyError, json.JSONDecodeError) as e:
                 logger.warning("Failed to index entry %s: %s", r["id"], e)
+        self.conn.commit()
         return count
 
     def _rebuild_conversations(self, db_storage: "DatabaseStorage") -> int:
@@ -390,7 +411,8 @@ class SearchIndex:
             message_content = "\n\n".join(m["content"] for m in msg_rows)
 
             try:
-                self.upsert_conversation(
+                self.upsert_conversation_on_conn(
+                    self.conn,
                     conversation_id=r["id"],
                     topic=r["topic"],
                     title=r["title"],
@@ -402,4 +424,5 @@ class SearchIndex:
                 count += 1
             except (sqlite3.Error, KeyError, json.JSONDecodeError, ValueError) as e:
                 logger.warning("Failed to index conversation %s: %s", r["id"], e)
+        self.conn.commit()
         return count
