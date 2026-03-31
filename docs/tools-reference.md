@@ -1,6 +1,6 @@
 # Tools Reference
 
-journalctl exposes 12 MCP tools. The connected LLM calls these automatically during conversation based on context — you don't need to invoke them manually.
+journalctl exposes 13 MCP tools. The connected LLM calls these automatically during conversation based on context — you don't need to invoke them manually.
 
 ## Context tools
 
@@ -10,7 +10,7 @@ Context loader. Call at conversation start to give the LLM enough background to 
 
 **Parameters:** None.
 
-**Returns:** User profile (from `knowledge/user-profile.md`), this week's timeline, top 20 recently-active topics, and document counts.
+**Returns:** User profile, key facts (top semantic memory matches), this week's timeline, top 20 recently-active topics, and document counts.
 
 **When it's used:** Automatically at the start of a new conversation, or when the LLM needs to orient itself ("what have I been working on?").
 
@@ -22,7 +22,7 @@ View all journal activity within a time period.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `period` | string | yes | Time window. Accepts: `YYYY` (year), `YYYY-MM` (month), `YYYY-WNN` (ISO week), `this-week`, `last-week`, `this-month`, `last-month` |
+| `period` | string | yes | Time window. Accepts: `today`, `this-week`, `last-week`, `this-month`, `last-month`, `YYYY` (e.g. `2026`), `YYYY-MM` (e.g. `2026-03`), `YYYY-WNN` (e.g. `2026-W14`) |
 
 **Returns:** Chronological list of all entries and conversations updated within the period.
 
@@ -51,7 +51,7 @@ Create a new topic with metadata. Topics are organized as 1–2 level paths (e.g
 
 **Returns:** Confirmation with the created file path.
 
-**Note:** You don't always need to call this explicitly — `journal_append` auto-creates topics on the fly if the topic file doesn't exist yet.
+**Note:** Must be called before writing entries or conversations to a new topic. `journal_append` does **not** auto-create topics.
 
 ---
 
@@ -79,12 +79,13 @@ Add a dated entry to a topic. This is the primary write operation — most journ
 |-----------|------|----------|-------------|
 | `topic` | string | yes | Topic path (e.g. `projects/homelab`) |
 | `content` | string | yes | Entry content in markdown |
+| `reasoning` | string | no | Optional reasoning/background context (stored separately from content) |
 | `tags` | string[] | no | Inline tags (e.g. `["decision", "milestone"]`) |
 | `date` | string | no | Date override as `YYYY-MM-DD`. Defaults to today. |
 
-**Returns:** Confirmation with topic, date, and entry count.
+**Returns:** Confirmation with topic, date, entry_id, and entry count.
 
-**Behavior:** If the topic file doesn't exist, it's created automatically. If `date` is provided, the entry uses that date instead of today — useful for backdating entries.
+**Behavior:** The topic must already exist — use `journal_create_topic` first if needed. If `date` is provided, the entry uses that date instead of today — useful for backdating entries.
 
 ---
 
@@ -92,32 +93,44 @@ Add a dated entry to a topic. This is the primary write operation — most journ
 
 Read a topic's metadata and content.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `topic` | string | yes | Topic path |
-| `n` | integer | no | If provided, return only the last N entries as structured data. If omitted, return the full topic content as raw markdown. |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `topic` | string | yes | — | Topic path |
+| `limit` | integer | no | 10 | Max entries to return (max 500). |
+| `date_from` | string | no | — | Filter from this date (`YYYY-MM-DD`). |
+| `date_to` | string | no | — | Filter to this date (`YYYY-MM-DD`). |
+| `offset` | integer | no | 0 | Skip first N entries for pagination. |
 
-**Returns:**
-
-- Without `n`: `{ metadata, content }` — full markdown string.
-- With `n`: `{ metadata, entries[], total_entries, showing }` — structured entry objects with index, date, tags, and content.
-
-**Note:** The return shape changes depending on whether `n` is provided. When using `n`, each entry includes its 1-based index for use with `journal_update`.
+**Returns:** `{ metadata, entries[], total, limit, offset }` — structured entry objects with id, date, content, reasoning, and tags. Each entry includes its database ID for use with `journal_update`.
 
 ---
 
 ### journal_update
 
-Edit an existing entry by its 1-based index.
+Edit an existing entry by its database ID.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `topic` | string | yes | — | Topic path |
-| `entry_index` | integer | yes | — | 1-based position of the entry. Use `journal_read` to see indexes. |
-| `content` | string | yes | — | New content |
-| `mode` | string | no | `replace` | `replace` to overwrite the entire entry, `append` to add content to the end |
+| `entry_id` | integer | yes | — | Database ID of the entry. Get this from `journal_read` or `journal_search` results. |
+| `content` | string | no | — | New entry content. Omit to leave unchanged. |
+| `reasoning` | string | no | — | New reasoning/background context. Omit to keep current. |
+| `mode` | string | no | `replace` | `replace` to overwrite content, `append` to add to the end. |
+| `date` | string | no | — | Override the entry date as `YYYY-MM-DD`. Omit to keep current. |
+| `tags` | string[] | no | — | Replace entry tags. Omit to keep current. |
 
-**Returns:** Confirmation with updated entry index and mode.
+**Returns:** Confirmation with updated entry ID and mode.
+
+---
+
+### journal_delete
+
+Soft-delete an existing entry by its database ID. Deleted entries are marked as deleted in the database and excluded from reads/searches, but preserved in git history.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `entry_id` | integer | yes | Database ID of the entry. Get this from `journal_read(topic, n=...)` response, or from `journal_search` results. |
+
+**Returns:** Confirmation with deleted entry ID.
 
 ---
 
@@ -125,7 +138,7 @@ Edit an existing entry by its 1-based index.
 
 ### journal_search
 
-Full-text search across all journal entries and conversations using FTS5.
+Hybrid search across all journal entries and conversations — FTS5 keyword matching merged with semantic (vector) search.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -135,7 +148,7 @@ Full-text search across all journal entries and conversations using FTS5.
 | `date_to` | string | no | — | Filter to this date (`YYYY-MM-DD`). Same caveat as `date_from`. |
 | `limit` | integer | no | 10 | Max results |
 
-**Returns:** List of results with file path, topic, title, snippet (with `<mark>` highlighting), relevance score, and date.
+**Returns:** List of results with `doc_type`, `topic`, `title`, snippet, relevance score, date, and `entry_id`/`conversation_id` for follow-up calls.
 
 **Examples:**
 ```
@@ -145,28 +158,23 @@ journal_search("budget OR cost", date_from="2026-01-01")       → date-filtered
 journal_search("\"half marathon\"")                            → exact phrase match
 ```
 
-**Known limitation:** The `date_from`/`date_to` filters operate on the document's `updated` metadata field, not on individual entry dates within a file. A backdated entry inside a recently-updated file will match date ranges based on the file's update date, not the entry's date.
-
 ---
 
 ## Conversation tools
 
 ### journal_save_conversation
 
-Save a full chat transcript. Idempotent — re-saving the same topic + title overwrites the file. Git preserves all versions via daily cron. Also auto-generates a summary entry in the parent topic file.
+Save a full chat transcript. Idempotent — re-saving the same topic + title overwrites the previous version.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
 | `topic` | string | yes | — | Topic this conversation relates to |
-| `title` | string | yes | — | Descriptive title (becomes the filename) |
+| `title` | string | yes | — | Descriptive title for the conversation |
 | `messages` | object[] | yes | — | List of messages. Each should have `role` (`"user"` or `"assistant"`), `content` (string), and optional `timestamp` (string). |
+| `summary` | string | yes | — | Concise summary of the conversation (1-3 sentences). |
 | `source` | string | no | `claude` | Origin: `claude`, `chatgpt`, `manual`, or any string |
 | `tags` | string[] | no | — | Tags for the conversation |
-| `summary` | string | no | — | Summary override. Auto-generated if not provided. |
-| `thread` | string | no | — | Thread ID linking related conversations |
-| `thread_seq` | integer | no | — | Sequence number within the thread |
-
-**Returns:** File path, summary text, topic, and title.
+**Returns:** `status` (`"saved"` or `"updated"`), `conversation_id`, `summary`, `topic`, `title`.
 
 ---
 
@@ -174,11 +182,13 @@ Save a full chat transcript. Idempotent — re-saving the same topic + title ove
 
 List all archived conversations, optionally filtered by topic.
 
-| Parameter | Type | Required | Description |
-|-----------|------|----------|-------------|
-| `topic` | string | no | Filter by topic prefix. Omit to list all conversations. |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `topic_prefix` | string | no | — | Filter by topic prefix. Omit to list all conversations. |
+| `limit` | integer | no | 50 | Max conversations to return (max 200). |
+| `offset` | integer | no | 0 | Skip first N conversations for pagination. |
 
-**Returns:** List of conversations with title, topic, tags, created/updated dates, summary, message count, participant list, and thread info.
+**Returns:** List of conversations with id, title, topic, tags, date, summary, and message count.
 
 ---
 
@@ -188,10 +198,10 @@ Read a specific archived conversation's full transcript.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `topic` | string | yes | Topic the conversation is under |
-| `title` | string | yes | Title of the conversation (matches the filename) |
+| `conversation_id` | integer | yes | Database ID of the conversation. Get this from `journal_list_conversations` response. |
+| `preview` | boolean | no | If true, return only the first and last 3 messages instead of the full transcript. |
 
-**Returns:** Full conversation metadata (frontmatter) and transcript content.
+**Returns:** Full conversation metadata and transcript content (or preview if requested).
 
 ---
 
@@ -199,10 +209,10 @@ Read a specific archived conversation's full transcript.
 
 ### journal_reindex
 
-Rebuild the FTS5 search index from scratch by scanning all markdown files. Use when search results seem wrong, or after manually editing markdown files outside the MCP server.
+Rebuild the FTS5 search index and repair semantic embeddings from the SQLite database. Use when search results seem wrong or stale.
 
 **Parameters:** None.
 
-**Returns:** Number of documents indexed and duration in seconds.
+**Returns:** Number of documents indexed, embeddings generated, and duration in seconds.
 
-**When to use:** After manual edits to files on disk, after restoring from git, or if search results seem stale or incomplete.
+**When to use:** If search results seem stale or incomplete.

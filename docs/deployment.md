@@ -25,15 +25,12 @@ All configuration is via `JOURNAL_*` environment variables, managed through Dopp
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `JOURNAL_API_KEY` | Static Bearer token for API key auth | `sk-journal-...` |
-| `JOURNAL_HOST_PATH` | Absolute path to journal content on host | `/home/user/journal` |
-| `JOURNAL_JOURNAL_ROOT` | Content root inside container | `/app/journal/content` |
-| `JOURNAL_DB_PATH` | FTS5 database path inside container | `/app/journal/journal.db` |
 | `JOURNAL_TIMEZONE` | Timezone for date handling | `America/New_York` |
-| `HOST_UID` | UID of the bind mount owner on host | `1000` |
-| `HOST_GID` | GID of the bind mount owner on host | `1000` |
 | `JOURNAL_OAUTH_DB_PATH` | OAuth database path | `/app/journal/oauth.db` |
 | `JOURNAL_OWNER_PASSWORD_HASH` | Bcrypt hash for OAuth login | `$2b$12$...` |
 | `JOURNAL_SERVER_URL` | Public HTTPS URL | `https://journal.yourdomain.com` |
+
+Journal data (`journal.db`, `memory.db`, `conversations_json/`) lives in `./data/` — a directory inside the repo, mounted as a Docker bind mount. Edit `data/knowledge/user-profile.md` to set your identity profile.
 
 ## Docker Compose
 
@@ -44,24 +41,20 @@ services:
     ports:
       - "127.0.0.1:8100:8100"
     volumes:
-      - ${JOURNAL_HOST_PATH}:/app/journal
+      - ./data:/app/journal
       - ./logs:/app/logs
+      - onnx-model-cache:/home/appuser/.cache/mcp_memory
     environment:
-      - JOURNAL_JOURNAL_ROOT=/app/journal/content
       - JOURNAL_DB_PATH=/app/journal/journal.db
+      - JOURNAL_MEMORY_DB_PATH=/app/journal/memory.db
       - JOURNAL_OAUTH_DB_PATH=/app/journal/oauth.db
       # OAuth (optional)
       - JOURNAL_SERVER_URL
       - JOURNAL_OWNER_PASSWORD_HASH
     # env_file: .env  # or use Doppler: doppler run -- docker compose up
 
-  mkdocs:
-    image: squidfunk/mkdocs-material
-    ports:
-      - "8300:8000"
-    volumes:
-      - ${JOURNAL_HOST_PATH}:/docs
-    command: serve --dev-addr 0.0.0.0:8000
+volumes:
+  onnx-model-cache:
 ```
 
 ### Docker permissions (the gosu pattern)
@@ -214,25 +207,6 @@ Client  → MCP calls with Bearer    → works
 ```
 
 OAuth state (clients, auth codes, tokens) lives in `oauth.db`, separate from the disposable FTS5 index.
-
-## Daily sync cron
-
-Set up a cron job to auto-commit and push journal changes:
-
-```bash
-# crontab -e
-0 3 * * * /path/to/journalctl/scripts/daily_sync.sh >> /var/log/journal-sync.log 2>&1
-```
-
-`daily_sync.sh` runs:
-1. `python scripts/generate_timeline.py` — generates timeline pages for MkDocs
-2. `cd ~/journal && git add -A && git commit -m "daily sync $(date +%Y-%m-%d)" && git push`
-
-## MkDocs (browsable journal)
-
-MkDocs Material runs as a separate container, serving the same journal markdown as a searchable website. Access it at `https://journal.yourdomain.com/` behind HTTP basic auth.
-
-**Current limitation:** The MkDocs dev server doesn't detect cross-container file changes via inotify. The planned fix is to replace the dev server with a static build (`mkdocs build`) served directly by nginx, rebuilt on a cron schedule.
 
 ## Memory requirements
 

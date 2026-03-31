@@ -2,112 +2,101 @@
 
 ## System overview
 
-journalctl is a FastAPI application that exposes 12 MCP tools over streamable HTTP. Any MCP-compatible client connects via the MCP protocol, authenticates with Bearer tokens or OAuth 2.0, and reads/writes markdown files that form the journal.
+journalctl is a FastAPI application that exposes 13 MCP tools over streamable HTTP. Any MCP-compatible client connects via the MCP protocol, authenticates with Bearer tokens or OAuth 2.0, and reads/writes to a canonical SQLite database that stores all journal data with markdown files as archival record.
 
 ![System architecture](diagrams/system-architecture.svg)
 
-## Three-layer data model
+## Three-tier data model
 
-The journal stores data in three layers, each serving a different purpose:
+The journal stores data in three tiers, each serving a different purpose:
 
 ![Data model](diagrams/data-model.svg)
 
-**Layer 1 — Curated entries** (`topics/**/*.md`). Dated entries organized by topic. Each entry is a decision, milestone, update, or reflection. This is what you browse when you want to see the progression of something.
+**Tier 1 — Hot data** (entry.content, ~50-100 tokens). Headline/summary always loaded with briefings and searches. Stored in the `entries` table.
 
-**Layer 2 — Full transcripts** (`conversations/**/*.md`). Complete chat archives saved explicitly. Not every conversation gets saved — only substantive ones. Each saved conversation auto-generates a summary entry in the parent topic, so the topic file stays readable while the full transcript is available for deep reference.
+**Tier 2 — Warm data** (entry.reasoning, ~200-500 tokens). Reasoning and background context, loaded on-demand when reading a specific topic via `journal_read`. Stored in the `entries` table alongside content.
 
-**Layer 3 — Temporal views** (dynamic from FTS5). Timeline queries served on-demand — "show me everything from this week" or "what happened in March." These aren't static files; they're assembled at query time from the FTS5 index.
+**Tier 3 — Cold data** (conversation JSON, 5k-100k tokens). Full chat transcripts archived in separate `conversations_json/{topic}/{slug}.json` files. Messages stored in the `messages` table. Rarely accessed; designed for archival and eventual S3 backup.
 
-## Markdown file format
+## Storage architecture
 
-### Topic file
+### Canonical storage: SQLite database
 
-```markdown
----
-topic: hobbies/running
-title: Running Log
-description: Training progress and race goals
-tags: [running, fitness, outdoors]
-created: 2025-01-15
-updated: 2026-03-23
-entry_count: 42
----
-# Running Log
+All data is stored in `journal.db` (canonical source of truth):
 
-Training progress and race goals
-
----
-
-## 2025-01-15
-
-#milestone
-
-First run of the year. 5K in 28 minutes. Starting slow.
-
----
-
-## 2026-03-23
-
-#milestone
-
-Finished first half marathon! 1:52:30.
+```sql
+topics        -- id, path, title, description, tags, created_at, updated_at
+entries       -- id, topic_id, date, content, reasoning, conversation_id, tags, position,
+              --  created_at, updated_at, deleted_at, indexed_at
+conversations -- id, topic_id, title, slug, source, summary, tags, message_count,
+              --  json_path, created_at, updated_at
+messages      -- id, conversation_id, role, content, timestamp, position
 ```
 
-Entries are separated by `## YYYY-MM-DD` headers (not `---` dividers, which are ambiguous with YAML frontmatter). Inline tags use the `#tag` format within entry content.
+### Archival storage: Markdown + JSON files
 
-### Conversation file
+Markdown files exist as **readable archival copies** inside `conversations_json/{topic}/{slug}.json`:
 
-```markdown
----
-type: conversation
-source: claude
-title: Half Marathon Training Plan
-topic: hobbies/running
-tags: [running, training]
-created: 2026-02-10
-summary: Designed a 12-week half marathon training plan...
-message_count: 12
----
-# Half Marathon Training Plan
-
----
-
-### User (2026-02-10 14:30:00)
-
-I want to train for a half marathon in April. Can you help me plan?
-
----
-
-### Assistant (2026-02-10 14:30:15)
-
-Let's build a 12-week plan based on your current fitness level...
+```json
+{
+  "meta": {
+    "type": "conversation",
+    "source": "claude",
+    "title": "Half Marathon Training Plan",
+    "topic": "hobbies/running",
+    "tags": ["running", "training"],
+    "created": "2026-02-10",
+    "summary": "Designed a 12-week half marathon training plan...",
+    "message_count": 12
+  },
+  "messages": [
+    {
+      "role": "user",
+      "content": "I want to train for a half marathon in April. Can you help me plan?",
+      "timestamp": "2026-02-10T14:30:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": "Let's build a 12-week plan based on your current fitness level...",
+      "timestamp": "2026-02-10T14:30:15Z"
+    }
+  ]
+}
 ```
 
-Saving a conversation is idempotent — re-saving the same topic + title overwrites the file. Git (via daily cron) preserves every version.
+The JSON files are the archival record — rebuildable source for the database. Designed to be shipped to S3 for long-term storage. Saving a conversation is idempotent — re-saving overwrites the file.
 
 ## Data flow
 
 ![Data flow](diagrams/data-flow.svg)
 
-### Write path
+### Write path (journal_append)
 
-The LLM calls `journal_append` → input is validated (path traversal prevention, content sanitization) → a filelock is acquired → the entry is appended with a `## YYYY-MM-DD` header → the file is written and lock released → the FTS5 index is updated.
+Input is validated (path traversal prevention) → entry is inserted into the `entries` table with date, content, and reasoning → the FTS5 index is updated → both writes are committed atomically via SQLite WAL.
 
-### Read path
+### Read path (journal_read)
 
-The LLM calls `journal_read` → the markdown file is loaded → YAML frontmatter is parsed → the body is split on `## YYYY-MM-DD` headers → entries are returned as structured objects.
+The tool queries the `entries` table for the given topic, sorted by date → optionally filters by date_from/date_to → optionally limits to last N entries with offset pagination (capped at 500) → returns as structured objects with id, date, content, reasoning, tags.
 
-### Search path
+### Update path (journal_update)
 
-The LLM calls `journal_search` → an FTS5 MATCH query is built with optional topic and date filters → results are returned with `<mark>` highlighted snippets and relevance scores.
+Entry ID is looked up in the `entries` table → content/reasoning/tags/date are updated → FTS5 index is refreshed and semantic embedding is re-stored.
 
-### Conversation save path
+### Delete path (journal_delete)
 
-The LLM calls `journal_save_conversation` → the transcript is written to `conversations/{topic}/{title}.md` → a summary entry is upserted in the parent topic file with a `[[wikilink]]` → both files are indexed in FTS5.
+Entry ID is marked as deleted (soft delete) in the `entries` table → excluded from future reads/searches but preserved in database for git backup.
 
-### Briefing path
+### Search path (journal_search)
 
-The LLM calls `journal_briefing` → user profile is read from `knowledge/user-profile.md` → this week's timeline is queried from FTS5 → top 20 recently-active topics are listed → document counts are gathered → all returned as a single context payload.
+An FTS5 keyword query runs in parallel with semantic vector search → results are merged and deduplicated by entry ID → returned with snippets and relevance scores. Limit capped at 100 results.
+
+### Conversation save path (journal_save_conversation)
+
+Message count validated (max 1000) → conversation JSON archived to `conversations_json/{id}.json` → conversation record inserted into the `conversations` table → all messages inserted into the `messages` table → FTS5 index updated. Re-saving the same topic + title updates the existing record in place.
+
+### Briefing path (journal_briefing)
+
+User profile is read from `knowledge/user-profile.md` → key facts retrieved from semantic memory (top matches for identity/preferences) → this week's entries queried from the database (most-recent-first, capped at 25) → top 20 recently-active topics listed → document counts gathered → all returned as a single context payload.
 
 ## Concurrency model
 
@@ -115,9 +104,9 @@ The server runs multiple gunicorn workers sharing the same filesystem and SQLite
 
 | Mechanism | What | Why |
 |-----------|------|-----|
-| `filelock` | Per-file write locks (`.{name}.lock`) | Multiple workers may write the same topic file simultaneously |
 | WAL mode | SQLite Write-Ahead Logging | Allows concurrent readers alongside a single writer |
 | `busy_timeout=5000` | 5-second retry on SQLITE_BUSY | Workers retry instead of crashing on lock contention |
+| `asyncio.Lock` | Reindex lock (in-process) | Prevents concurrent reindex runs from corrupting the FTS5 virtual table |
 | ASGI middleware | Raw scope/receive/send passthrough | BaseHTTPMiddleware buffers responses, which breaks SSE streaming |
 | `secrets.compare_digest` | Timing-safe token comparison | Prevents token-guessing via timing side channels |
 
@@ -138,6 +127,6 @@ Incoming request with Bearer token
 
 ## What the journal is not
 
-The journal is a **ledger** — it records what happened. It doesn't store quick-recall facts, entity relationships, or current-state preferences. That's the job of a separate **memory service**, which would use semantic embeddings for fuzzy matching. The LLM orchestrates between both services, routing "what happened?" to the journal and "what is?" to memory.
+The journal is a **ledger** — it records what happened. It doesn't store quick-recall facts, entity relationships, or current-state preferences. That's the job of the **memory service**, which uses a local ONNX embedding model for semantic fuzzy matching and runs on the same server. The LLM orchestrates between both services, routing "what happened?" to the journal and "what is?" to memory.
 
 ![Journal vs Memory](diagrams/journal-vs-memory.svg)

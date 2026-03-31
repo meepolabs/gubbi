@@ -4,33 +4,24 @@ How to organize your journal topics for a system that grows with your life.
 
 ## Topic structure
 
-Topics use 1–2 level paths: `category/subject`. The first level is the **life domain**, the second is the **specific thing**.
+Topics use 1–2 level paths: `category/subject`. The first level is the **life domain**, the second is the **specific thing**. Topics are stored in SQLite — the paths below represent the namespace, not files on disk.
 
 ```
-topics/
-├── hobbies/
-│   ├── running.md
-│   ├── woodworking.md
-│   └── photography.md
-├── projects/
-│   ├── homelab.md
-│   ├── side-project.md
-│   └── open-source.md
-├── health/
-│   ├── fitness.md
-│   ├── nutrition.md
-│   └── medical.md
-├── career/
-│   └── current-role.md
-├── finance/
-│   ├── planning.md
-│   └── investments.md
-├── learning/
-│   └── rust-lang.md
-├── creative/
-│   └── blog.md
-└── travel/
-    └── trips.md
+hobbies/running
+hobbies/woodworking
+hobbies/photography
+projects/homelab
+projects/side-project
+projects/open-source
+health/fitness
+health/nutrition
+health/medical
+career/current-role
+finance/planning
+finance/investments
+learning/rust-lang
+creative/blog
+travel/trips
 ```
 
 ## Naming conventions
@@ -106,9 +97,9 @@ For each active project or ongoing topic:
 For the rest of your conversation history:
 
 1. Export your data from the previous provider (most offer JSON exports).
-2. Parse the export and convert to markdown files matching the conversation format.
-3. Map original folders/projects to journal topic categories.
-4. Write the files to `conversations/` and run `journal_reindex`.
+2. Parse the export and save each conversation via `journal_save_conversation`.
+3. Map original projects to journal topic categories.
+4. Run `journal_reindex` to ensure the search index is up to date.
 
 The bulk archive doesn't need careful curation — it's just making old conversations searchable. The important context was captured in Phase 1.
 
@@ -128,10 +119,10 @@ Previous LLM Project "Side Project"
 
 Your taxonomy will evolve. New hobbies appear, projects end, interests shift. That's fine — the two-level structure handles this naturally:
 
-- **New subtopic:** Just append to a new file. `journal_append` auto-creates topics.
+- **New subtopic:** Create the topic first with `journal_create_topic`, then start appending entries.
 - **Topic gets huge:** It's still one file. FTS5 searches within it. `journal_read(topic, n=5)` shows the most recent entries. Don't split unless the subtopics are genuinely different areas.
 - **Topic goes dormant:** Leave it. It's an append-only ledger. Old topics are historical records.
-- **Wrong category:** Move the file in the filesystem, run `journal_reindex`. Git tracks the rename.
+- **Wrong category:** Topic paths live in SQLite — there's no built-in rename. Create a new topic, re-enter key entries, and let the old topic go dormant.
 - **New category:** Just start using it. Create `travel/europe-2026` and it exists.
 
-The taxonomy is a filesystem. It's as flexible as `mkdir` and `mv`.
+The taxonomy is a namespace. Adding topics is instant — create one and start appending.

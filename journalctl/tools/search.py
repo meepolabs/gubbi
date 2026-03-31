@@ -45,6 +45,7 @@ def register(
         Args:
             query: Search query — keywords, phrases, or natural language questions.
             topic_prefix: Filter to topics under this prefix (e.g. 'work').
+                          Must be a valid topic path if provided.
             date_from: Filter entries on or after this date (YYYY-MM-DD).
             date_to: Filter entries on or before this date (YYYY-MM-DD).
             limit: Maximum results (default 10).

@@ -6,7 +6,7 @@ If you use LLMs as a daily companion for life decisions, project planning, hobbi
 
 Some LLMs offer built-in memory, but it's a black box: you don't control what's remembered, can't browse it, can't port it, and can't use it across different providers. Your context is locked inside one vendor's product.
 
-journalctl is the escape hatch. It gives any MCP-compatible LLM persistent, structured memory that you own — stored as plain markdown files on your own server, browsable as a website, versioned in git, and portable to any future client that supports MCP.
+journalctl is the escape hatch. It gives any MCP-compatible LLM persistent, structured memory that you own — stored in a SQLite database on your own server, with conversation transcripts archived as JSON files, and portable to any future client that supports MCP.
 
 ## Journal is a ledger, not a brain
 
@@ -16,7 +16,7 @@ This is a deliberate constraint. A ledger has three properties that matter:
 
 1. **Complete history.** Nothing is lost. You can always go back and see exactly what you decided and why.
 2. **Chronological structure.** Entries are dated. Time is the natural index for a human life — you remember things by when they happened.
-3. **Readable without tools.** Every file is plain markdown. You can open it in a text editor, browse it in MkDocs, or read it on GitHub. No database query required.
+3. **Durable and portable.** All data lives in SQLite on infrastructure you control. Conversation transcripts are archived as JSON files alongside the database. No external service, no vendor lock-in.
 
 If the journal were a "brain" that consolidated and compressed, you'd lose the timeline, the nuance, and the ability to see how your thinking evolved. A brain is lossy. A ledger is not.
 
@@ -56,7 +56,7 @@ journalctl is **not** a RAG system, and doesn't need to be:
 
 **No infrastructure overhead.** RAG requires an embedding model, a vector database, a chunking pipeline, and an ingestion process. journalctl needs one SQLite file.
 
-The useful part of RAG — semantic search for fuzzy matching when you don't know the exact keywords — belongs in the memory service, which is designed for exactly that kind of query.
+The useful part of RAG — semantic search for fuzzy matching when you don't know the exact keywords — is handled by the integrated memory service. `journal_search` runs both FTS5 keyword search and semantic vector search in parallel, merging and deduplicating results. The memory service uses a local ONNX embedding model (no external API) to power the semantic half.
 
 ## Why markdown
 
@@ -72,10 +72,10 @@ FTS5 (Full-Text Search 5) is SQLite's built-in full-text search engine. It's the
 
 1. **Keyword precision.** When you search for a specific term, you want results containing that term — not semantically similar concepts. FTS5 gives exact matches.
 2. **Zero infrastructure.** It's a single `.db` file. No separate service, no ports, no connection strings.
-3. **Disposable.** The FTS5 index can be deleted and rebuilt from the markdown files in under a second. The markdown is the source of truth; the database is acceleration.
+3. **Rebuildable.** The FTS5 virtual table inside `journal.db` can be dropped and rebuilt from the entries table at any time using `journal_reindex`. SQLite is the canonical store; the FTS5 virtual table is the search acceleration layer.
 4. **Good enough.** For a personal journal with hundreds or even thousands of entries, FTS5 with snippet highlighting, date filtering, and prefix matching covers the vast majority of queries.
 
-Semantic search (embeddings + vector similarity) is genuinely useful for questions where you don't know the exact keywords. That capability belongs in the memory service, not the journal.
+Semantic search (embeddings + vector similarity) is genuinely useful for questions where you don't know the exact keywords. `journal_search` handles this by running FTS5 and semantic search in parallel — the ONNX memory service provides the vector half, while FTS5 provides the precise keyword half.
 
 ## Why append-only
 
@@ -85,7 +85,7 @@ This matters because:
 
 - **Decisions have context.** A decision is only useful if you can also see *why* — which means the research, the alternatives considered, and the reasoning all need to persist.
 - **Opinions change.** Your March assessment of something might differ from your June assessment. Both are valuable. An append-only log preserves the evolution.
-- **Git is your safety net.** Even when entries are updated, git (via daily cron) preserves every previous version.
+- **Soft deletes preserve history.** Even when entries are deleted, they're marked as deleted in the database, not physically removed. SQLite backups preserve every version.
 
 ## Why self-hosted
 

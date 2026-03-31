@@ -62,7 +62,8 @@ def register(
         Re-saving the same topic + title updates the previous version.
 
         Args:
-            topic: Topic this conversation relates to.
+            topic: Topic this conversation relates to — lowercase alphanumeric
+                   with hyphens, max 2 levels (e.g. 'work/acme').
             title: Descriptive title for the conversation.
             messages: List of message dicts with keys:
                       role ('user' or 'assistant'), content (str),

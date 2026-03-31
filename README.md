@@ -1,6 +1,6 @@
 # journalctl
 
-A self-hosted [MCP](https://modelcontextprotocol.io/) server that gives any LLM a persistent, searchable journal — your life's chronological record, stored as plain markdown on your own infrastructure.
+A self-hosted [MCP](https://modelcontextprotocol.io/) server that gives any LLM a persistent, searchable journal — a personal memory infrastructure layer for AI, stored in SQLite on your own infrastructure.
 
 **Works with any MCP-compatible client** — not tied to any specific LLM provider. Any chat app or CLI tool that supports MCP servers via Bearer token or OAuth 2.0 can connect.
 
@@ -22,7 +22,7 @@ If you use LLMs across multiple clients — CLI tools, desktop apps, browser, mo
 
 journalctl solves this by providing a **persistent memory layer** accessible from any MCP-compatible client. Every client connects to the same journal, so you pick up exactly where you left off — whether that's a coding project, a hobby log, a fitness plan, or a reading list.
 
-The journal is an **append-only ledger**, not a brain. It faithfully stores everything — decisions, conversations, milestones, research — and never compresses, forgets, or consolidates. Your data stays as readable markdown files in a git repo on your own server.
+The journal is an **append-only ledger**, not a brain. It faithfully stores everything — decisions, conversations, milestones, research — and never compresses, forgets, or consolidates. No data leaves your infrastructure.
 
 ## Quick start
 
@@ -57,36 +57,26 @@ For browser-based clients, the server supports OAuth 2.0 with PKCE — connect v
 | `journal_briefing` | Loads your profile, this week's activity, and recent topics at conversation start |
 | `journal_append` | Adds a dated entry to any topic |
 | `journal_read` | Reads a topic's full history or last N entries |
-| `journal_search` | Full-text search across everything with keyword highlighting |
-| `journal_save_conversation` | Archives a full chat transcript with auto-generated summary |
+| `journal_search` | Hybrid FTS5 + semantic search across everything |
+| `journal_save_conversation` | Archives a full chat transcript with summary |
 | `journal_timeline` | Shows all activity for a week, month, or year |
 
-Plus 6 more tools for topic management, conversation browsing, entry editing, and index maintenance. See [docs/tools-reference.md](docs/tools-reference.md) for the complete reference.
+Plus 7 more tools for topic management, conversation browsing, entry editing, deletion, and index maintenance. See [docs/tools-reference.md](docs/tools-reference.md) for the complete reference.
 
 ## How data is organized
 
 ```
-journal/content/
-├── topics/                          # Curated entries
-│   ├── hobbies/
-│   │   ├── running.md               #   Dated entries, decisions, milestones
-│   │   └── woodworking.md
-│   ├── projects/
-│   │   └── homelab.md
-│   └── health/
-│       └── fitness.md
-│
-├── conversations/                   # Full transcripts
-│   ├── hobbies/running/
-│   │   └── marathon-training-plan.md
-│   └── projects/homelab/
-│       └── network-setup-session.md
-│
-└── knowledge/                       # Reference docs
-    └── user-profile.md
+data/
+├── journal.db                       # Canonical store — topics, entries, conversations, FTS5 index
+├── memory.db                        # Semantic embeddings (ONNX, sqlite-vec)
+├── oauth.db                         # OAuth tokens/clients (if OAuth enabled)
+├── conversations_json/              # Archived conversation transcripts (JSON)
+│   └── {id}.json
+└── knowledge/
+    └── user-profile.md              # Your identity profile, loaded by journal_briefing
 ```
 
-Everything is plain markdown with YAML frontmatter. The FTS5 search index is disposable — delete `journal.db` anytime and rebuild with `journal_reindex`.
+All journal data lives in `journal.db` (SQLite — canonical store). Semantic search uses `memory.db` with a local ONNX embedding model. The FTS5 index is rebuildable at any time using `journal_reindex`.
 
 See [docs/taxonomy-guide.md](docs/taxonomy-guide.md) for guidance on organizing topics.
 
@@ -101,9 +91,9 @@ See [docs/architecture.md](docs/architecture.md) for the full system design.
 | Doc | What's in it |
 |-----|-------------|
 | [Architecture](docs/architecture.md) | System design, data model, deployment stack, data flow |
-| [Tools Reference](docs/tools-reference.md) | All 12 MCP tools with parameters, return values, examples |
+| [Tools Reference](docs/tools-reference.md) | All 13 MCP tools with parameters, return values, examples |
 | [Deployment Guide](docs/deployment.md) | Docker, nginx, SSL, secrets, OAuth setup |
-| [Design Philosophy](docs/philosophy.md) | Why append-only markdown, why not RAG, journal vs memory |
+| [Design Philosophy](docs/philosophy.md) | Why append-only, why not RAG, FTS5 + semantic search |
 | [Taxonomy Guide](docs/taxonomy-guide.md) | How to organize topics, naming conventions, migration strategy |
 
 ## Project structure
@@ -111,31 +101,31 @@ See [docs/architecture.md](docs/architecture.md) for the full system design.
 ```
 journalctl/
 ├── journalctl/                # Python package
-│   ├── main.py                #   FastAPI app, MCP mount, stdio/http modes
+│   ├── main.py                #   FastAPI app, MCP mount, OAuth wiring
 │   ├── config.py              #   Pydantic settings (JOURNAL_* env vars)
 │   ├── middleware/             #   ASGI auth + path normalization
-│   ├── storage/               #   Markdown CRUD + FTS5 index
+│   ├── storage/               #   SQLite canonical storage + FTS5 index
 │   ├── models/                #   Pydantic models + input validation
-│   ├── tools/                 #   All 12 MCP tool implementations
+│   ├── tools/                 #   13 MCP tool implementations
+│   ├── memory/                #   ONNX embeddings + sqlite-vec integration
 │   └── oauth/                 #   OAuth 2.0 provider for browser clients
-├── tests/                     # 68+ tests (pytest-asyncio)
-├── deployment/                # Dockerfile, entrypoint.sh, nginx.conf
-└── scripts/                   # Daily git sync, timeline generation
+├── tests/                     # 156 tests (pytest-asyncio)
+└── deployment/                # Dockerfile, entrypoint.sh, nginx.conf
 ```
 
 ## Key design decisions
 
-- **Markdown is source of truth.** SQLite FTS5 is a disposable acceleration layer.
+- **SQLite is the canonical store.** `journal.db` holds all topics, entries, and conversations. The FTS5 virtual table inside it is rebuildable with `journal_reindex`.
 - **Append-only.** No compaction, compression, or auto-deletion. Git preserves every version.
 - **Raw ASGI auth middleware.** BaseHTTPMiddleware buffers responses and breaks SSE streaming.
 - **OAuth 2.0 + API keys.** CLI/desktop clients use Bearer tokens. Browser/mobile clients use OAuth.
-- **External git only.** Daily cron handles commits. No in-process git, no cross-process locking.
+- **No in-process git.** No GitPython, no cross-process locking. Backup strategy is your choice.
 - **gosu Docker pattern.** Container starts as root, detects bind mount owner UID, drops to non-root.
-- **LLM-agnostic.** Any MCP-compatible client can connect.
+- **Cross-platform neutral.** Any MCP-compatible client connects — Claude, Gemini, ChatGPT (via REST wrapper). Provider-neutral memory infrastructure.
 
 ## Stack
 
-Python 3.12 · FastAPI · FastMCP · SQLite FTS5 (WAL mode) · Docker · nginx · MkDocs Material
+Python 3.12 · FastAPI · FastMCP · SQLite FTS5 (WAL mode) · ONNX embeddings · sqlite-vec · Docker · nginx
 
 ## License
 

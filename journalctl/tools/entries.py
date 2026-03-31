@@ -77,7 +77,8 @@ def register(
         Do NOT use for searching or reading — use journal_search or journal_read.
 
         Args:
-            topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
+            topic: Topic path — lowercase alphanumeric with hyphens, max 2 levels
+                   (e.g. 'work/acme', 'health', 'hobbies/woodworking').
             content: What happened — the headline. Shown in briefing and timeline.
             reasoning: Why it happened — reasoning or tradeoffs. Only loaded when
                         the entry is read in full; leave empty for routine events.
@@ -165,7 +166,8 @@ def register(
         Do NOT use for time-based browsing — use journal_timeline instead.
 
         Args:
-            topic: Topic path (e.g. 'work/acme').
+            topic: Topic path — lowercase alphanumeric with hyphens, max 2 levels
+                   (e.g. 'work/acme').
             limit: Max entries to return (default 10). Use a large number for more history.
             date_from: Only entries on or after this date (YYYY-MM-DD).
             date_to: Only entries on or before this date (YYYY-MM-DD).
@@ -231,7 +233,7 @@ def register(
         Args:
             entry_id: The entry's 'id' (from read, search, or timeline results).
             content: New content for the entry (optional — omit to only change date/tags).
-            reasoning: Updated reasoning (optional).
+            reasoning: Updated reasoning (optional). Omit to keep current reasoning.
             mode: 'replace' to overwrite content, 'append' to add to existing entry.
             date: Correct the entry's date (YYYY-MM-DD). Omit to keep current date.
             tags: Replace the entry's tags. Omit to keep current tags.
