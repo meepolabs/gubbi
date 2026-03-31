@@ -1,6 +1,7 @@
 """Input validation and sanitization utilities."""
 
 import re
+from datetime import date as date_cls
 from datetime import datetime
 
 # Sanitization
@@ -93,6 +94,11 @@ def validate_date(value: str) -> str:
         msg = f"Invalid calendar date '{value}'."
         raise
     return value
+
+
+def is_future_date(value: str) -> bool:
+    """Return True if the YYYY-MM-DD string is after today."""
+    return datetime.strptime(value, "%Y-%m-%d").date() > date_cls.today()
 
 
 def slugify(text: str) -> str:

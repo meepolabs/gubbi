@@ -61,6 +61,7 @@ def register(
 
                     for r in batch:
                         try:
+                            first_line = (r["content"] or "").split("\n", 1)[0][:80]
                             await memory_service.store_memory(
                                 content=r["content"],
                                 tags=json.loads(r["tags"] or "[]"),
@@ -69,6 +70,7 @@ def register(
                                     "source": "journal_entry",
                                     "topic": r["topic"],
                                     "date": r["date"],
+                                    "title": first_line,
                                 },
                             )
                             storage.mark_entry_indexed(r["id"])

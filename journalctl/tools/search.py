@@ -107,16 +107,16 @@ def register(
                         content = mem.get("content", "")
                         metadata = mem.get("metadata", {}) or {}
                         entry_id = metadata.get("entry_id")
-                        similarity = mem.get("similarity", 0.0)
+                        similarity = float(mem.get("similarity", 0.0))
                         src_key = f"memory:{mem.get('content_hash', '')[:MEMORY_HASH_PREVIEW_LEN]}"
                         semantic_results.append(
                             SearchResult(
                                 source_key=src_key,
                                 doc_type="entry" if entry_id else "memory",
                                 topic=metadata.get("topic", ""),
-                                title="",
+                                title=metadata.get("title", ""),
                                 snippet=content[:SUMMARY_TRUNCATE_LEN],
-                                rank=float(similarity) * -1,  # Lower rank = better in FTS5
+                                rank=-similarity if similarity else 0.0,
                                 date=metadata.get("date", ""),
                                 entry_id=int(entry_id) if entry_id else None,
                                 conversation_id=None,
@@ -132,6 +132,20 @@ def register(
         semantic_results = [
             r for r in semantic_results if not r.entry_id or r.entry_id in active_ids
         ]
+
+        # Enrich semantic results with DB metadata (topic, date, title)
+        enrichable_ids = {r.entry_id for r in semantic_results if r.entry_id}
+        if enrichable_ids:
+            brief = storage.get_entries_brief(enrichable_ids)
+            for r in semantic_results:
+                if r.entry_id and r.entry_id in brief:
+                    meta = brief[r.entry_id]
+                    if not r.topic:
+                        r.topic = meta["topic"]
+                    if not r.date:
+                        r.date = meta["date"]
+                    if not r.title:
+                        r.title = meta["title"]
 
         # Merge and deduplicate
         seen_ids: set[str] = set()

@@ -10,6 +10,7 @@ from typing import Any, Literal
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.validation import (
+    is_future_date,
     sanitize_freetext,
     sanitize_label,
     validate_date,
@@ -43,6 +44,7 @@ def register(
         """Store an embedding for a journal entry. Returns True on success.
         Internal — not exposed to LLM."""
         try:
+            first_line = content.split("\n", 1)[0][:80]
             await memory_service.store_memory(
                 content=content,
                 tags=tags,
@@ -51,6 +53,7 @@ def register(
                     "source": "journal_entry",
                     "topic": topic,
                     "date": date,
+                    "title": first_line,
                 },
             )
             return True
@@ -156,13 +159,16 @@ def register(
         if await _embed_entry(entry_id, content, topic=topic, date=resolved_date, tags=tags):
             storage.mark_entry_indexed(entry_id)
 
-        return {
+        result: dict[str, Any] = {
             "status": "appended",
             "topic": topic,
             "date": resolved_date,
             "entry_id": entry_id,
             "entry_count": count,
         }
+        if date and is_future_date(date):
+            result["note"] = "Date is in the future"
+        return result
 
     @mcp.tool()
     async def journal_read(
@@ -308,11 +314,14 @@ def register(
             ):
                 storage.mark_entry_indexed(entry_id)
 
-        return {
+        result: dict[str, Any] = {
             "status": "updated",
             "entry_id": entry_id,
             "mode": mode,
         }
+        if date and is_future_date(date):
+            result["note"] = "Date is in the future"
+        return result
 
     @mcp.tool()
     async def journal_delete(

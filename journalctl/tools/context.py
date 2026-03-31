@@ -174,10 +174,7 @@ def register(
             memories = mem_response.get("memories", [])
             if isinstance(memories, list):
                 key_facts = [
-                    {
-                        "content": m.get("content", ""),
-                        "similarity": round(float(m.get("similarity", 0.0)), 3),
-                    }
+                    {"content": m.get("content", "")}
                     for m in memories
                     if isinstance(m, dict) and m.get("content")
                 ]

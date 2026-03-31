@@ -543,6 +543,7 @@ class DatabaseStorage(ConversationMixin):
             FROM entries e
             JOIN topics t ON t.id = e.topic_id
             WHERE e.date >= ? AND e.date <= ? AND e.deleted_at IS NULL
+                  AND e.conversation_id IS NULL
             ORDER BY e.date ASC, e.position ASC
             """,
             (date_from, date_to),
@@ -562,15 +563,17 @@ class DatabaseStorage(ConversationMixin):
 
         results = []
         for r in entry_rows:
+            content = r["content"] or ""
+            first_line = content.split("\n", 1)[0][:80]
             results.append(
                 {
                     "entry_id": r["id"],
                     "conversation_id": None,
                     "doc_type": r["doc_type"],
                     "topic": r["topic"],
-                    "title": r["title"],
-                    "description": r["content"][:SNIPPET_PREVIEW_LEN] if r["content"] else "",
-                    "tags": r["tags"],
+                    "title": first_line if first_line else r["title"],
+                    "description": content[:SNIPPET_PREVIEW_LEN],
+                    "tags": json.loads(r["tags"] or "[]"),
                     "updated": r["date"],
                 }
             )
@@ -583,12 +586,19 @@ class DatabaseStorage(ConversationMixin):
                     "topic": r["topic"],
                     "title": r["title"],
                     "description": r["content"][:SNIPPET_PREVIEW_LEN] if r["content"] else "",
-                    "tags": r["tags"],
+                    "tags": json.loads(r["tags"] or "[]"),
                     "updated": r["date"],
                 }
             )
 
-        results.sort(key=lambda x: x["updated"])
+        results.sort(
+            key=lambda x: (
+                x["updated"],
+                x["doc_type"],
+                x.get("entry_id") or 0,
+                x.get("conversation_id") or 0,
+            ),
+        )
         return results
 
     def get_stats(self) -> dict[str, int]:
@@ -634,6 +644,31 @@ class DatabaseStorage(ConversationMixin):
             list(entry_ids),
         ).fetchall()
         return {r["id"] for r in rows}
+
+    def get_entries_brief(self, entry_ids: set[int]) -> dict[int, dict[str, str]]:
+        """Return topic, date, and first line of content for a batch of entries.
+
+        Used to enrich semantic search results with metadata from the DB.
+        """
+        if not entry_ids:
+            return {}
+        placeholders = ",".join("?" * len(entry_ids))
+        rows = self.conn.execute(
+            "SELECT e.id, t.path AS topic, e.date, e.content"  # noqa: S608
+            f" FROM entries e JOIN topics t ON t.id = e.topic_id"
+            f" WHERE e.id IN ({placeholders}) AND e.deleted_at IS NULL",
+            list(entry_ids),
+        ).fetchall()
+        result: dict[int, dict[str, str]] = {}
+        for r in rows:
+            content = r["content"] or ""
+            first_line = content.split("\n", 1)[0][:80]
+            result[r["id"]] = {
+                "topic": r["topic"],
+                "date": r["date"],
+                "title": first_line,
+            }
+        return result
 
     def get_entry_content(self, entry_id: int) -> str | None:
         """Return content of a non-deleted entry, or None if not found."""

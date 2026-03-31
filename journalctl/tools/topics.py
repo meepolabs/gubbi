@@ -81,6 +81,7 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         Returns:
             Confirmation with the created topic path.
         """
+        original_topic = topic
         try:
             topic = validate_topic(topic)
         except ValueError as e:
@@ -105,8 +106,11 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
             )
         except ValueError:
             return already_exists(topic)
-        return {
+        result: dict[str, Any] = {
             "status": "created",
             "topic": topic,
             "topic_id": topic_id,
         }
+        if original_topic != topic:
+            result["normalized_from"] = original_topic
+        return result
