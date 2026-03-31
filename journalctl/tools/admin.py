@@ -7,7 +7,7 @@ import sqlite3
 
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.memory.client import MemoryServiceProtocol
+from journalctl.memory.client import MemoryServiceProtocol, hard_delete_by_entry_id
 from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.search_index import SearchIndex
 from journalctl.tools.constants import REINDEX_BATCH_SIZE
@@ -65,9 +65,16 @@ def register(
 
                     for r in batch:
                         try:
-                            first_line = (r["content"] or "").split("\n", 1)[0][:80]
-                            resp = await memory_service.store_memory(
-                                content=r["content"],
+                            # Purge ALL embeddings for this entry_id (current
+                            # + stale from prior content) so store_memory()
+                            # won't hit the UNIQUE constraint (#644) and old
+                            # content embeddings are cleaned up.
+                            hard_delete_by_entry_id(memory_service, r["id"])
+
+                            content = r["content"] or ""
+                            first_line = content.split("\n", 1)[0][:80]
+                            await memory_service.store_memory(
+                                content=content,
                                 tags=json.loads(r["tags"] or "[]"),
                                 metadata={
                                     "entry_id": r["id"],
@@ -77,21 +84,8 @@ def register(
                                     "title": first_line,
                                 },
                             )
-                            # Treat duplicates as success — the embedding
-                            # already exists with the correct content.
-                            # mcp-memory-service returns "Duplicate content"
-                            # for hash matches and "UNIQUE constraint" when a
-                            # soft-deleted tombstone blocks re-insertion.
-                            err = resp.get("error", "")
-                            if resp.get("success") or "uplicate" in err or "UNIQUE" in err:
-                                storage.mark_entry_indexed(r["id"])
-                                embeddings_generated += 1
-                            else:
-                                logger.warning(
-                                    "Failed to embed entry %s: %s",
-                                    r["id"],
-                                    resp.get("error", "unknown"),
-                                )
+                            storage.mark_entry_indexed(r["id"])
+                            embeddings_generated += 1
                         except Exception as e:
                             logger.warning(
                                 "Failed to embed entry %s during reindex: %s",

@@ -1,6 +1,5 @@
 """MCP tools: journal_append, journal_read, journal_update, journal_delete."""
 
-import hashlib
 import json
 import logging
 import sqlite3
@@ -16,7 +15,7 @@ from journalctl.core.validation import (
     validate_date,
     validate_topic,
 )
-from journalctl.memory.client import MemoryServiceProtocol
+from journalctl.memory.client import MemoryServiceProtocol, hard_delete_by_entry_id
 from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.exceptions import TopicNotFoundError
 from journalctl.storage.search_index import SearchIndex
@@ -60,19 +59,6 @@ def register(
         except Exception as e:
             logger.warning("Failed to embed entry %s: %s", entry_id, e, exc_info=True)
             return False
-
-    async def _remove_embedding(content: str) -> None:
-        """Remove an embedding by content hash. Internal — best-effort.
-
-        Hash must match mcp-memory-service's generate_content_hash():
-        sha256 of content.strip().lower().encode('utf-8').
-        """
-        try:
-            normalized = content.strip().lower()
-            content_hash = hashlib.sha256(normalized.encode("utf-8")).hexdigest()
-            await memory_service.delete_memory(content_hash=content_hash)
-        except Exception:
-            logger.warning("Could not remove embedding for content hash", exc_info=True)
 
     @mcp.tool()
     async def journal_append(
@@ -279,10 +265,6 @@ def register(
         if tags:
             tags = [s for t in tags if (s := sanitize_label(t))]
 
-        # Fetch old content before update so we can remove the stale embedding
-        old_row = storage.get_entry_with_topic(entry_id)
-        old_content = old_row["content"] if old_row else None
-
         try:
             storage.update_entry(
                 entry_id=entry_id,
@@ -307,22 +289,17 @@ def register(
                 reasoning=row["reasoning"],
                 tags=json.loads(row["tags"] or "[]"),
             )
-            # Re-embed only when content changed. Deleting then re-inserting
-            # the same content hits a UNIQUE constraint in the memory service
-            # (soft-delete tombstone blocks the INSERT). Metadata (date/tags)
-            # staleness in the embedding store is harmless — search enriches
-            # semantic results with fresh DB metadata.
-            new_content = row["content"]
-            if old_content != new_content:
-                await _remove_embedding(old_content or "")
-                if await _embed_entry(
-                    entry_id,
-                    new_content,
-                    topic=row["path"],
-                    date=row["date"],
-                    tags=json.loads(row["tags"] or "[]"),
-                ):
-                    storage.mark_entry_indexed(entry_id)
+            # Remove all embeddings for this entry (current + stale from
+            # prior content), then store fresh embedding.
+            hard_delete_by_entry_id(memory_service, entry_id)
+            if await _embed_entry(
+                entry_id,
+                row["content"],
+                topic=row["path"],
+                date=row["date"],
+                tags=json.loads(row["tags"] or "[]"),
+            ):
+                storage.mark_entry_indexed(entry_id)
 
         result: dict[str, Any] = {
             "status": "updated",
@@ -349,9 +326,6 @@ def register(
         Returns:
             Confirmation with deleted entry_id.
         """
-        # Read content before delete for embedding cleanup
-        content_before_delete = storage.get_entry_content(entry_id)
-
         try:
             storage.delete_entry(entry_id)
         except IndexError:
@@ -360,9 +334,8 @@ def register(
         # Remove from FTS5 index
         index.remove_entry(entry_id)
 
-        # Remove semantic embedding
-        if content_before_delete:
-            await _remove_embedding(content_before_delete)
+        # Remove all semantic embeddings for this entry (current + stale)
+        hard_delete_by_entry_id(memory_service, entry_id)
 
         return {
             "status": "deleted",
