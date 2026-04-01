@@ -28,31 +28,6 @@ def _get_memory_conn(memory_service: MemoryServiceProtocol) -> Any:
     return getattr(getattr(memory_service, "storage", None), "conn", None)
 
 
-async def hard_delete_memory(
-    memory_service: MemoryServiceProtocol,
-    content_hash: str,
-) -> None:
-    """Delete a memory and purge the soft-delete tombstone.
-
-    mcp-memory-service delete_memory() only soft-deletes (sets deleted_at),
-    leaving the row in the memories table.  A subsequent store_memory() with
-    the same content_hash then fails on the UNIQUE constraint
-    (upstream issue doobidoo/mcp-memory-service#644).
-
-    This helper calls delete_memory() first (removes the embedding vector),
-    then hard-deletes the tombstone row via the underlying storage connection.
-    """
-    await memory_service.delete_memory(content_hash=content_hash)
-
-    conn = _get_memory_conn(memory_service)
-    if conn is not None:
-        conn.execute(
-            "DELETE FROM memories WHERE content_hash = ? AND deleted_at IS NOT NULL",
-            (content_hash,),
-        )
-        conn.commit()
-
-
 def hard_delete_by_entry_id(
     memory_service: MemoryServiceProtocol,
     entry_id: int,
@@ -60,8 +35,8 @@ def hard_delete_by_entry_id(
     """Hard-delete ALL memories whose metadata contains a given entry_id.
 
     Removes both the embedding vectors and the memory rows. This cleans up
-    stale embeddings left behind when entry content was updated (the old
-    content produced a different hash, so hard_delete_memory() can't find it).
+    stale embeddings left behind when entry content was updated (old content
+    produces a different hash, so deleting by current hash alone is insufficient).
 
     Returns the number of rows deleted.
     """

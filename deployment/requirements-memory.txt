@@ -9,6 +9,6 @@
 #   2. Compare new version's pyproject.toml deps against ours in pyproject.toml
 #   3. Update version and --hash below
 #   4. Run: poetry lock && docker compose build
-mcp-memory-service==10.31.0 \
-    --hash=sha256:8aca0d66c145571f3f5024db4fdf1437fde14318dc463a1a19f26225d18efe13 \
-    --hash=sha256:5e6e968cec41c4ac53a3c925a02536ad3279b1d7448988583f42ae7d1cf95353
+mcp-memory-service==10.31.1 \
+    --hash=sha256:ed271f161782bb7dc17ce02bac223d03af03712f630976ecb92168bca9dfad01 \
+    --hash=sha256:36bde24814ddf060d2d658774829f5fba386521a7c9e38894b7f9bbe6a0eae00
