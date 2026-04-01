@@ -101,7 +101,6 @@ CREATE TABLE IF NOT EXISTS topics (
     path        TEXT UNIQUE NOT NULL,
     title       TEXT NOT NULL,
     description TEXT DEFAULT '',
-    tags        TEXT DEFAULT '[]',
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
 );
