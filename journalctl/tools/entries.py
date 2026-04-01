@@ -89,7 +89,7 @@ def register(
         - reasoning: Capture the WHY — tradeoffs, context, constraints. Omit for routine events.
           This field is only loaded on full read, so it's the place for detail.
         - tags: Use any relevant tags for filtering and categorization
-          (e.g. 'finance', 'car', 'important').
+          (e.g. 'finance', 'idea', 'important').
         - date: Only override if the user is recording or planning something for a different day.
 
         Args:
@@ -97,11 +97,12 @@ def register(
             content: What happened — the headline. Shown in briefing and timeline.
             reasoning: Why it happened — reasoning or tradeoffs. Only loaded when
                         the entry is read in full; leave empty for routine events.
-            tags: Optional tags (e.g. ['decision', 'milestone', 'important']).
-            date: Date override as YYYY-MM-DD. Defaults to today.
+            tags: Tags relevant to the entry (e.g. ['finance', 'idea', 'important']).
+            date: Date of the entry as YYYY-MM-DD. Defaults to today.
 
         Returns:
-            Confirmation with topic, date, entry_id, and entry count.
+            Confirmation with entry_id, topic, date, and topic entry count
+            (total entries in that topic).
         """
 
         try:
@@ -196,7 +197,8 @@ def register(
             offset: Skip first N entries for pagination (default 0).
 
         Returns:
-            Topic metadata and entries (including reasoning if set).
+            metadata (topic info), entries (list with content and reasoning),
+            total (total matching entries), limit, offset.
         """
 
         try:

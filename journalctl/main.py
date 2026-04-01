@@ -54,7 +54,7 @@ def create_mcp_server(
             and semantic search.
 
             DATA MODEL
-            Topic — A category or area of life (e.g. 'work/amazon', 'cars/golf-r').
+            Topic — A category or area of life (e.g. 'project/mcp', 'cars/toyota').
                     Topics are containers. All entries and conversations live under a topic.
                     Topic paths are permanent, lowercase, max 2 levels deep.
             Entry — A dated record within a topic: a decision, event, milestone, or reflection.

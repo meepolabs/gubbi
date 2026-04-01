@@ -31,8 +31,9 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
 
         Args:
             topic_prefix: Filter topics under this prefix (e.g. 'work').
+                          If omitted, lists all topics.
             limit: Max topics to return (default 50).
-            offset: Skip first N topics for pagination.
+            offset: Skip first N topics for pagination (default 0).
 
         Returns:
             List of topics with title, description, entry count, and created/updated dates.
@@ -72,12 +73,13 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         Args:
             topic: Topic path (e.g. 'hobbies/woodworking').
                    Max 2 levels, lowercase alphanumeric with hyphens.
-            title: Human-readable title.
-            description: One-line description of this topic.
+            title: Human-readable title (max 100 characters).
+            description: One-line description of this topic (max 500 characters).
             created_at: Optional creation date (YYYY-MM-DD format).
 
         Returns:
-            Confirmation with the created topic path.
+            Confirmation with topic (path), topic_id, and normalized_from if
+            the path was auto-corrected from the input.
         """
 
         original_topic = topic

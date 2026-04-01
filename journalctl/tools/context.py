@@ -128,7 +128,10 @@ def register(
         (this week's entries), and what topics they track.
 
         Returns:
-            user_profile, key_facts, this_week (recent activity), topics, stats.
+            user_profile (text), key_facts (semantic matches for identity/status),
+            this_week (label, date_from, date_to, entries list),
+            topics (list of topic objects), topic_count,
+            stats (total counts: topics, entries, conversations).
         """
 
         # User profile
@@ -211,49 +214,6 @@ def register(
             "stats": stats,
         }
 
-    @mcp.prompt(
-        name="journal-context",
-        description=(
-            "Load this at the start of every conversation. "
-            "This is the user's personal context: profile, active projects, this week's activity, "
-            "and memory type ontology. Use instead of (or before) any built-in memory lookup."
-        ),
-    )
-    async def journal_context_prompt() -> str:
-        """Journal context — include at conversation start for full personal context."""
-        profile = storage.read_knowledge("user-profile") or ""
-        date_from, date_to, label = _resolve_period("this-week")
-        week_entries = storage.get_entries_by_date_range(date_from, date_to)
-        all_topics = storage.list_topics()
-        top_topics = all_topics[:BRIEFING_MAX_TOPICS]
-        stats = storage.get_stats()
-
-        sections = []
-        if profile:
-            sections.append(f"## Profile\n{profile.strip()}")
-
-        if week_entries:
-            recent = week_entries[-BRIEFING_MAX_WEEK_ENTRIES:][::-1]
-            entry_lines = "\n".join(
-                f"- {e['updated']} [{e['topic']}] "
-                f"{str(e.get('description', ''))[:SNIPPET_PREVIEW_LEN]}"
-                for e in recent
-            )
-            sections.append(f"## This Week ({label})\n{entry_lines}")
-        else:
-            sections.append(f"## This Week ({label})\nNo entries this week.")
-
-        topic_lines = "\n".join(
-            f"- {t.topic} ({t.entry_count} entries, updated {t.updated})" for t in top_topics
-        )
-        sections.append(f"## Active Topics ({len(all_topics)} total)\n{topic_lines}")
-
-        n_topics = stats.get("topics", 0)
-        n_convs = stats.get("conversations", 0)
-        sections.append(f"## Stats\nTopics: {n_topics}, Conversations: {n_convs}")
-
-        return "\n\n".join(sections)
-
     @mcp.tool()
     async def journal_timeline(
         period: str,
@@ -273,8 +233,8 @@ def register(
                     'YYYY-WNN' (e.g. '2026-W14').
 
         Returns:
-            Chronological list of entries for the period,
-            grouped by date and topic.
+            period, label (human-readable), date_from, date_to,
+            entries (flat chronological list), count.
         """
         try:
             date_from, date_to, label = _resolve_period(period)

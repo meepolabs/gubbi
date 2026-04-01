@@ -86,8 +86,9 @@ def register(
             messages: List of messages, each with role ('user' or 'assistant'),
                       content (str), and optional timestamp (str).
             summary: A concise summary of the conversation (1-3 sentences).
-            source: Name of the app or LLM (e.g. 'claude', 'chatgpt').
-            tags: Tags for the conversation.
+            source: Name of the app or LLM (e.g. 'claude', 'chatgpt'). Defaults to 'claude'.
+            tags: Use any relevant tags for filtering and categorization
+            (e.g. ['finance', 'car', 'decision']).
             date: When the conversation happened (YYYY-MM-DD). Defaults to today.
 
         Returns:
@@ -191,7 +192,7 @@ def register(
             topic_prefix: Filter by topic prefix (e.g. 'work').
                           If omitted, lists all conversations.
             limit: Maximum conversations to return (default 50, max 200).
-            offset: Number of conversations to skip for pagination.
+            offset: Number of conversations to skip for pagination (default 0).
 
         Returns:
             List of conversations with id, title, date, summary,
@@ -234,7 +235,8 @@ def register(
                      consuming the entire context window.
 
         Returns:
-            Full conversation metadata and transcript.
+            metadata (title, topic, summary, dates, participants),
+            content (full transcript as markdown), messages_shown, messages_total.
         """
 
         try:
