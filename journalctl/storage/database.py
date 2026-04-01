@@ -208,7 +208,6 @@ class DatabaseStorage(ConversationMixin):
         topic: str,
         title: str,
         description: str = "",
-        tags: list[str] | None = None,
         created_at: str | None = None,
     ) -> int:
         """Create a new topic. Returns topic_id. Raises ValueError if duplicate."""
@@ -219,10 +218,10 @@ class DatabaseStorage(ConversationMixin):
             with self.conn:
                 cur = self.conn.execute(
                     """
-                    INSERT INTO topics (path, title, description, tags, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    INSERT INTO topics (path, title, description, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
                     """,
-                    (topic, title, description, json.dumps(tags or []), created, today),
+                    (topic, title, description, created, today),
                 )
             if cur.lastrowid is None:
                 raise RuntimeError("INSERT topics failed: no rowid")
@@ -239,7 +238,7 @@ class DatabaseStorage(ConversationMixin):
     ) -> list[TopicMeta]:
         """List topics, sorted by most recently updated."""
         sql = """
-            SELECT t.id, t.path, t.title, t.description, t.tags,
+            SELECT t.id, t.path, t.title, t.description,
                    t.created_at, t.updated_at,
                    COUNT(e.id) AS entry_count
             FROM topics t
@@ -262,7 +261,6 @@ class DatabaseStorage(ConversationMixin):
                 topic=r["path"],
                 title=r["title"],
                 description=r["description"] or "",
-                tags=json.loads(r["tags"] or "[]"),
                 created=r["created_at"],
                 updated=r["updated_at"],
                 entry_count=r["entry_count"],
@@ -285,7 +283,7 @@ class DatabaseStorage(ConversationMixin):
         topic = validate_topic(topic)
         row = self.conn.execute(
             """
-            SELECT t.id, t.path, t.title, t.description, t.tags,
+            SELECT t.id, t.path, t.title, t.description,
                    t.created_at, t.updated_at,
                    COUNT(e.id) AS entry_count
             FROM topics t
@@ -302,7 +300,6 @@ class DatabaseStorage(ConversationMixin):
             topic=row["path"],
             title=row["title"],
             description=row["description"] or "",
-            tags=json.loads(row["tags"] or "[]"),
             created=row["created_at"],
             updated=row["updated_at"],
             entry_count=row["entry_count"],
@@ -674,14 +671,6 @@ class DatabaseStorage(ConversationMixin):
                 "title": first_line,
             }
         return result
-
-    def get_entry_content(self, entry_id: int) -> str | None:
-        """Return content of a non-deleted entry, or None if not found."""
-        row = self.conn.execute(
-            "SELECT content FROM entries WHERE id = ? AND deleted_at IS NULL",
-            (entry_id,),
-        ).fetchone()
-        return row["content"] if row else None
 
     def get_entry_with_topic(self, entry_id: int) -> sqlite3.Row | None:
         """Return entry + topic columns needed for FTS/embedding re-sync."""

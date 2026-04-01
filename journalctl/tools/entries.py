@@ -70,7 +70,7 @@ def register(
         date: str | None = None,
     ) -> dict[str, Any]:
         """Record a life event, decision, or update — "remember this",
-        "note that we decided X", or "I just did Y.". Call roactively when the
+        "note that we decided X", or "I just did Y.". Call proactively when the
         user shares significant news, decisions, progress, or milestones.
 
         The topic must already exist — check the briefing for recently used topics,
@@ -173,7 +173,7 @@ def register(
     @mcp.tool()
     async def journal_read_topic(
         topic: str,
-        limit: int | None = None,
+        limit: int = DEFAULT_ENTRIES_LIMIT,
         date_from: str | None = None,
         date_to: str | None = None,
         offset: int = 0,
@@ -213,10 +213,9 @@ def register(
                 validate_date(date_to)
             except ValueError:
                 return invalid_date(date_to)
-        if limit is not None:
-            limit = max(1, min(limit, MAX_READ_ENTRIES))
+        limit = max(1, min(limit, MAX_READ_ENTRIES))
         offset = max(0, offset)
-        count = limit if limit is not None else DEFAULT_ENTRIES_LIMIT
+        count = limit
         try:
             meta, entries, total = storage.read_entries(
                 topic,

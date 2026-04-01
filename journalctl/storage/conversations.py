@@ -256,6 +256,16 @@ class ConversationMixin:
     # List / Read
     # ------------------------------------------------------------------
 
+    def count_conversations(self, topic_prefix: str | None = None) -> int:
+        """Return total conversation count, optionally filtered by topic prefix."""
+        sql = "SELECT COUNT(*) FROM conversations c JOIN topics t ON t.id = c.topic_id"
+        params: list[str | int] = []
+        if topic_prefix:
+            topic_prefix = validate_topic(topic_prefix)
+            sql += " WHERE t.path LIKE ? ESCAPE '!'"
+            params += [f"{_escape_like(topic_prefix)}%"]
+        return int(self.conn.execute(sql, params).fetchone()[0])
+
     def list_conversations(
         self,
         topic_prefix: str | None = None,

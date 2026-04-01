@@ -12,7 +12,6 @@ class TopicMeta(BaseModel):
     topic: str
     title: str
     description: str = ""
-    tags: list[str] = []
     created: str  # YYYY-MM-DD
     updated: str  # YYYY-MM-DD
     entry_count: int = 0

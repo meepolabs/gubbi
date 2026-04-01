@@ -35,8 +35,7 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
             offset: Skip first N topics for pagination.
 
         Returns:
-            List of topics with title, description, tags,
-            entry count, and created/updated dates.
+            List of topics with title, description, entry count, and created/updated dates.
         """
         limit = max(1, min(limit, MAX_TOPICS_RESULTS))
         offset = max(0, offset)
@@ -61,7 +60,6 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         topic: str,
         title: str,
         description: str = "",
-        tags: list[str] | None = None,
         created_at: str | None = None,
     ) -> dict[str, Any]:
         """Create a new journal topic for an area of the user's life not yet tracked.
@@ -69,18 +67,19 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
 
         Required before writing entries or conversations to a new topic.
         Check journal_list_topics or the briefing first to avoid duplicates.
+        Topic paths are permanent and cannot be renamed after creation — choose carefully.
 
         Args:
             topic: Topic path (e.g. 'hobbies/woodworking').
                    Max 2 levels, lowercase alphanumeric with hyphens.
             title: Human-readable title.
             description: One-line description of this topic.
-            tags: Initial tags.
             created_at: Optional creation date (YYYY-MM-DD format).
 
         Returns:
             Confirmation with the created topic path.
         """
+
         original_topic = topic
         try:
             topic = validate_topic(topic)
@@ -89,8 +88,6 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         title = sanitize_label(title, max_len=100)
         if description:
             description = sanitize_freetext(description, max_len=500)
-        if tags:
-            tags = [s for t in tags if (s := sanitize_label(t))]
         if created_at:
             try:
                 validate_date(created_at)
@@ -101,7 +98,6 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
                 topic=topic,
                 title=title,
                 description=description,
-                tags=tags,
                 created_at=created_at,
             )
         except ValueError:

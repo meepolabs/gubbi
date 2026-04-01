@@ -1,7 +1,7 @@
 """MCP tools: journal_save_conversation, journal_list_conversations,
 journal_read_conversation."""
 
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
@@ -25,6 +25,14 @@ from journalctl.tools.constants import (
 from journalctl.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 
 
+class MessageInput(TypedDict):
+    """Schema for a single conversation message."""
+
+    role: str
+    content: str
+    timestamp: NotRequired[str]
+
+
 def _format_messages_as_markdown(title: str, messages: list[Message]) -> str:
     """Render a list of messages as a readable markdown string."""
     parts = [f"# {title}\n"]
@@ -46,7 +54,7 @@ def register(
     async def journal_save_conversation(
         topic: str,
         title: str,
-        messages: list[dict],
+        messages: list[MessageInput],
         summary: str,
         source: str = "claude",
         tags: list[str] | None = None,
@@ -62,16 +70,21 @@ def register(
         Re-saving the same topic + title updates the previous version.
 
         Quality guidelines:
-        - title: Specific and scannable. "Rubix caching strategy discussion", not "Chat about work."
+        - title: Specific and scannable. "MCP caching strategy discussion", not "Chat about work."
         - summary: 1-3 sentences capturing the essence of the entire conversation.
         - messages: Include the entire conversation, not just few messages.
+
+        Example: journal_save_conversation(topic='project/mcp',
+            title='MCP caching strategy',
+            summary='Decided to cache agent state in Redis with 50ms latency budget.',
+            messages=[{"role": "user", "content": "Should we cache agent state?"},
+                      {"role": "assistant", "content": "Yes, here is why..."}])
 
         Args:
             topic: Topic this conversation relates to (e.g. 'work/acme').
             title: Descriptive title for the conversation.
-            messages: List of message dicts with keys:
-                      role ('user' or 'assistant'), content (str),
-                      and optional timestamp (str).
+            messages: List of messages, each with role ('user' or 'assistant'),
+                      content (str), and optional timestamp (str).
             summary: A concise summary of the conversation (1-3 sentences).
             source: Name of the app or LLM (e.g. 'claude', 'chatgpt').
             tags: Tags for the conversation.
@@ -194,12 +207,13 @@ def register(
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
+        total = storage.count_conversations(topic_prefix=topic_prefix)
         conversations = storage.list_conversations(
             topic_prefix=topic_prefix, limit=limit, offset=offset
         )
         return {
             "conversations": [c.model_dump() for c in conversations],
-            "total": len(conversations),
+            "total": total,
             "limit": limit,
             "offset": offset,
         }

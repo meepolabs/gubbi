@@ -11,7 +11,12 @@ from journalctl.models.search import SearchResult
 from journalctl.storage.constants import SUMMARY_TRUNCATE_LEN
 from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.search_index import SearchIndex
-from journalctl.tools.constants import MAX_QUERY_LEN, MAX_SEARCH_RESULTS, MEMORY_HASH_PREVIEW_LEN
+from journalctl.tools.constants import (
+    DEFAULT_SEARCH_LIMIT,
+    MAX_QUERY_LEN,
+    MAX_SEARCH_RESULTS,
+    MEMORY_HASH_PREVIEW_LEN,
+)
 from journalctl.tools.errors import invalid_date, invalid_topic, validation_error
 
 logger = logging.getLogger(__name__)
@@ -31,7 +36,7 @@ def register(
         topic_prefix: str | None = None,
         date_from: str | None = None,
         date_to: str | None = None,
-        limit: int = 10,
+        limit: int = DEFAULT_SEARCH_LIMIT,
     ) -> dict[str, Any]:
         """Search your journal by keyword or meaning — the primary search tool.
 

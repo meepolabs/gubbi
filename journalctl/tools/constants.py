@@ -8,12 +8,6 @@ KEEP_ROLES: Final = frozenset({"user", "assistant"})
 # Per-message character cap — prevents runaway tool output from bloating storage
 MAX_MSG_CHARS: Final = 20_000
 
-# Memory tool limits
-MAX_MEMORY_RESULTS: Final = 100
-MAX_MEMORY_TAGS: Final = 50
-MAX_METADATA_KEYS: Final = 20
-MAX_METADATA_VALUE_LEN: Final = 500
-
 # Briefing / context tool display limits
 BRIEFING_MAX_TOPICS: Final = 20
 BRIEFING_MAX_WEEK_ENTRIES: Final = 25
