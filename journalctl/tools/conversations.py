@@ -61,9 +61,13 @@ def register(
 
         Re-saving the same topic + title updates the previous version.
 
+        Quality guidelines:
+        - title: Specific and scannable. "Rubix caching strategy discussion", not "Chat about work."
+        - summary: 1-3 sentences capturing the essence of the entire conversation.
+        - messages: Include the entire conversation, not just few messages.
+
         Args:
-            topic: Topic this conversation relates to — lowercase alphanumeric
-                   with hyphens, max 2 levels (e.g. 'work/acme').
+            topic: Topic this conversation relates to (e.g. 'work/acme').
             title: Descriptive title for the conversation.
             messages: List of message dicts with keys:
                       role ('user' or 'assistant'), content (str),
@@ -160,10 +164,13 @@ def register(
         limit: int = DEFAULT_CONVERSATIONS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Browse saved conversations — "what conversations have we had about X?"
+        """Browse saved conversations by topic — 'what conversations have we had about X?'
 
-        Use when the user asks to revisit a past conversation or see what exists.
-        Returns titles, dates, summaries, and conversation IDs.
+        Use this tool when the user wants to browse a list of chats, not find
+        specific content within them. For keyword search across both entries AND
+        conversations, use journal_search instead.
+
+        Returns titles, dates, and summaries.
 
         To read a full transcript, pass the 'id' field to journal_read_conversation.
 
@@ -177,6 +184,7 @@ def register(
             List of conversations with id, title, date, summary,
             and message count.
         """
+
         limit = max(1, min(limit, MAX_CONVERSATIONS_RESULTS))
         offset = max(0, offset)
         if topic_prefix:

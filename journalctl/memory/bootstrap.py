@@ -24,7 +24,7 @@ def configure_env() -> None:
 
     - ONNX over sentence-transformers: ~80 MB vs ~2.7 GB
     - sqlite_vec: single file, zero external dependencies
-    - auto_split disabled: content is already chunked via journal_append
+    - auto_split disabled: content is already chunked via journal_append_entry
     - quality_boost disabled: baseline embeddings sufficient, avoids background tasks
     """
     os.environ.setdefault("MCP_MEMORY_USE_ONNX", "true")

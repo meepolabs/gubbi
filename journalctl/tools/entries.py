@@ -1,4 +1,5 @@
-"""MCP tools: journal_append, journal_read, journal_update, journal_delete."""
+"""MCP tools: journal_append_entry, journal_read_topic, journal_update_entry,
+journal_delete_entry."""
 
 import json
 import logging
@@ -61,7 +62,7 @@ def register(
             return False
 
     @mcp.tool()
-    async def journal_append(
+    async def journal_append_entry(
         topic: str,
         content: str,
         reasoning: str | None = None,
@@ -69,22 +70,30 @@ def register(
         date: str | None = None,
     ) -> dict[str, Any]:
         """Record a life event, decision, or update — "remember this",
-        "note that we decided X", or "I just did Y."
+        "note that we decided X", or "I just did Y.". Call roactively when the
+        user shares significant news, decisions, progress, or milestones.
 
-        When the user shares updates, progress, reflections, events, or decisions,
-        write a journal entry immediately. This is the dated event record (what happened
-        and when). The topic must already exist — check the briefing for
-        existing topics, or create one with journal_create_topic first.
+        The topic must already exist — check the briefing for recently used topics,
+        journal_list_topics to see all available topics, or create one with journal_create_topic.
 
         Example: User says "We decided to use PostgreSQL instead of MongoDB."
-        → journal_append(topic="projects/alpha", content="Chose PostgreSQL for the database",
+        → journal_append_entry(topic="projects/alpha", content="Chose PostgreSQL for the database",
             reasoning="Mongo had no ACID transactions, team already knows SQL")
 
-        Do NOT use for searching or reading — use journal_search or journal_read.
+        Do NOT use for searching or reading — use journal_search or journal_read_topic.
+
+        Quality guidelines:
+        - content: Write a clear, scannable headline — this appears in briefings and timelines.
+          Good: "Chose PostgreSQL over MongoDB for Project Alpha"
+          Bad:  "Database decision" or the user's full paragraph pasted verbatim.
+        - reasoning: Capture the WHY — tradeoffs, context, constraints. Omit for routine events.
+          This field is only loaded on full read, so it's the place for detail.
+        - tags: Use any relevant tags for filtering and categorization
+          (e.g. 'finance', 'car', 'important').
+        - date: Only override if the user is recording or planning something for a different day.
 
         Args:
-            topic: Topic path — lowercase alphanumeric with hyphens, max 2 levels
-                   (e.g. 'work/acme', 'health', 'hobbies/woodworking').
+            topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
             content: What happened — the headline. Shown in briefing and timeline.
             reasoning: Why it happened — reasoning or tradeoffs. Only loaded when
                         the entry is read in full; leave empty for routine events.
@@ -162,7 +171,7 @@ def register(
         return result
 
     @mcp.tool()
-    async def journal_read(
+    async def journal_read_topic(
         topic: str,
         limit: int | None = None,
         date_from: str | None = None,
@@ -228,7 +237,7 @@ def register(
         }
 
     @mcp.tool()
-    async def journal_update(
+    async def journal_update_entry(
         entry_id: int,
         content: str | None = None,
         reasoning: str | None = None,
@@ -238,21 +247,24 @@ def register(
     ) -> dict[str, Any]:
         """Correct or expand a journal entry — "fix that entry" or "add more detail."
 
-        Use the entry's 'id' from journal_read, journal_search, or journal_timeline results.
+        Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
-        Do NOT use to remove an entry — use journal_delete instead.
+        Do NOT use to remove an entry — use journal_delete_entry instead.
 
         Args:
             entry_id: The entry's 'id' (from read, search, or timeline results).
             content: New content for the entry (optional — omit to only change date/tags).
             reasoning: Updated reasoning (optional). Omit to keep current reasoning.
-            mode: 'replace' to overwrite content, 'append' to add to existing entry.
+            mode: 'replace' overwrites the entire entry content (use for corrections or rewrites).
+                  'append' adds new text to the end (use for follow-up notes or addenda).
+                  Default: 'replace'.
             date: Correct the entry's date (YYYY-MM-DD). Omit to keep current date.
             tags: Replace the entry's tags. Omit to keep current tags.
 
         Returns:
             Confirmation with updated entry_id.
         """
+
         if content:
             content = sanitize_freetext(content)
         if reasoning:
@@ -311,14 +323,15 @@ def register(
         return result
 
     @mcp.tool()
-    async def journal_delete(
+    async def journal_delete_entry(
         entry_id: int,
     ) -> dict[str, Any]:
-        """Remove a journal entry — wrong data, duplicate, or mistake.
+        """Remove a journal entry permanently — wrong data, duplicate, or mistake.
+        Trigger: 'delete that', 'forget that', 'undo that', 'scratch that', 'that was wrong.'
 
-        Use the entry's 'id' from journal_read, journal_search, or journal_timeline results.
+        Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
-        Do NOT use to correct an entry — use journal_update instead.
+        Do NOT use to correct an entry — use journal_update_entry instead.
 
         Args:
             entry_id: The entry's 'id' (from read, search, or timeline results).
@@ -326,6 +339,7 @@ def register(
         Returns:
             Confirmation with deleted entry_id.
         """
+
         try:
             storage.delete_entry(entry_id)
         except IndexError:

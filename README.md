@@ -55,8 +55,8 @@ For browser-based clients, the server supports OAuth 2.0 with PKCE — connect v
 | Tool | What it does |
 |------|-------------|
 | `journal_briefing` | Loads your profile, this week's activity, and recent topics at conversation start |
-| `journal_append` | Adds a dated entry to any topic |
-| `journal_read` | Reads a topic's full history or last N entries |
+| `journal_append_entry` | Adds a dated entry to any topic |
+| `journal_read_topic` | Reads a topic's full history or last N entries |
 | `journal_search` | Hybrid FTS5 + semantic search across everything |
 | `journal_save_conversation` | Archives a full chat transcript with summary |
 | `journal_timeline` | Shows all activity for a week, month, or year |

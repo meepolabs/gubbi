@@ -217,7 +217,7 @@ class ConversationMixin:
         summary: str,
         today: str,
     ) -> None:
-        """Upsert a linked entry so the conversation appears in journal_read + timeline."""
+        """Upsert a linked entry so the conversation appears in journal_read_topic + timeline."""
         content = f"Conversation saved: {title}\n\n{summary}"
         existing = self.conn.execute(
             "SELECT id FROM entries WHERE conversation_id = ?", (conv_id,)

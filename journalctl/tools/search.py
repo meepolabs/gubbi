@@ -39,7 +39,7 @@ def register(
         questions ("what car do I drive?", "what's my salary?"). Searches across
         all topics, entries, and conversations.
 
-        Do NOT use for browsing a single topic — use journal_read instead.
+        Do NOT use for browsing a single topic — use journal_read_topic instead.
         Do NOT use for time-based browsing — use journal_timeline instead.
 
         Args:

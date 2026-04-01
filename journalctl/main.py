@@ -6,6 +6,7 @@ patterns: CustomFastAPI subclass, lifespan, structlog.
 """
 
 import asyncio
+import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -47,12 +48,38 @@ def create_mcp_server(
     """Create and configure the MCP server with all tools."""
     mcp = FastMCP(
         "Personal Journal & Lifelong Memory",
-        instructions=(
-            "Persistent personal journal and memory — records events, decisions, "
-            "reflections, and conversations with full-text and semantic search. "
-            "Call journal_briefing first to load the user's identity and context. "
-            "Use journal_append proactively when the user shares life updates."
-        ),
+        instructions=textwrap.dedent("""\
+            Journal is the user's persistent memory layer across conversations.
+            It records events, decisions, reflections, and conversations with full-text
+            and semantic search.
+
+            DATA MODEL
+            Topic — A category or area of life (e.g. 'work/amazon', 'cars/golf-r').
+                    Topics are containers. All entries and conversations live under a topic.
+                    Topic paths are permanent, lowercase, max 2 levels deep.
+            Entry — A dated record within a topic: a decision, event, milestone, or reflection.
+                    Has content (the headline) and optional reasoning (the why).
+                    Created with journal_append_entry, read with journal_read_topic.
+            Conversation — A saved chat transcript within a topic.
+                    Has messages, a summary, and a title.
+                    Created with journal_save_conversation, browsed with journal_list_conversations.
+
+            Hierarchy: Topic contains → Entries + Conversations
+            journal_search spans both topics and conversations.
+            journal_read_topic returns all entries the topic.
+            journal_list_conversations returns all conversations of the topic.
+
+            STARTUP
+            Call journal_briefing before responding to the user's first message.
+            Every conversation. No exceptions.
+
+            PROACTIVE JOURNALING
+            When the user shares a decision, milestone, life event, progress update, plan, setback,
+            or idea worth preserving call journal_append_entry. Do not wait for 'remember this.'
+            At the end of substantive conversations, offer to save with journal_save_conversation.
+
+            TOPIC SAFETY
+            Before writing, confirm the topic exists (check briefing)"""),
         stateless_http=True,
         streamable_http_path="/",
         host=settings.host,

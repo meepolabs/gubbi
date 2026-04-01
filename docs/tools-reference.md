@@ -51,7 +51,7 @@ Create a new topic with metadata. Topics are organized as 1–2 level paths (e.g
 
 **Returns:** Confirmation with the created file path.
 
-**Note:** Must be called before writing entries or conversations to a new topic. `journal_append` does **not** auto-create topics.
+**Note:** Must be called before writing entries or conversations to a new topic. `journal_append_entry` does **not** auto-create topics.
 
 ---
 
@@ -71,7 +71,7 @@ List all topics with metadata. Supports pagination and prefix filtering.
 
 ## Entry tools
 
-### journal_append
+### journal_append_entry
 
 Add a dated entry to a topic. This is the primary write operation — most journal updates go through this tool.
 
@@ -89,7 +89,7 @@ Add a dated entry to a topic. This is the primary write operation — most journ
 
 ---
 
-### journal_read
+### journal_read_topic
 
 Read a topic's metadata and content.
 
@@ -101,17 +101,17 @@ Read a topic's metadata and content.
 | `date_to` | string | no | — | Filter to this date (`YYYY-MM-DD`). |
 | `offset` | integer | no | 0 | Skip first N entries for pagination. |
 
-**Returns:** `{ metadata, entries[], total, limit, offset }` — structured entry objects with id, date, content, reasoning, and tags. Each entry includes its database ID for use with `journal_update`.
+**Returns:** `{ metadata, entries[], total, limit, offset }` — structured entry objects with id, date, content, reasoning, and tags. Each entry includes its database ID for use with `journal_update_entry`.
 
 ---
 
-### journal_update
+### journal_update_entry
 
 Edit an existing entry by its database ID.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `entry_id` | integer | yes | — | Database ID of the entry. Get this from `journal_read` or `journal_search` results. |
+| `entry_id` | integer | yes | — | Database ID of the entry. Get this from `journal_read_topic` or `journal_search` results. |
 | `content` | string | no | — | New entry content. Omit to leave unchanged. |
 | `reasoning` | string | no | — | New reasoning/background context. Omit to keep current. |
 | `mode` | string | no | `replace` | `replace` to overwrite content, `append` to add to the end. |
@@ -122,13 +122,13 @@ Edit an existing entry by its database ID.
 
 ---
 
-### journal_delete
+### journal_delete_entry
 
 Soft-delete an existing entry by its database ID. Deleted entries are marked as deleted in the database and excluded from reads/searches, but preserved in git history.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `entry_id` | integer | yes | Database ID of the entry. Get this from `journal_read(topic, n=...)` response, or from `journal_search` results. |
+| `entry_id` | integer | yes | Database ID of the entry. Get this from `journal_read_topic(topic, n=...)` response, or from `journal_search` results. |
 
 **Returns:** Confirmation with deleted entry ID.
 

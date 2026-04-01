@@ -79,7 +79,7 @@ Semantic search (embeddings + vector similarity) is genuinely useful for questio
 
 ## Why append-only
 
-Entries are never deleted or modified in place (except through the explicit `journal_update` tool). New information is appended. Old information stays.
+Entries are never deleted or modified in place (except through the explicit `journal_update_entry` tool). New information is appended. Old information stays.
 
 This matters because:
 

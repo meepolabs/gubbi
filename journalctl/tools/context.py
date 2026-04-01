@@ -121,15 +121,16 @@ def register(
         """Get the user's identity, recent activity, and topic list — the complete
         context for this person.
 
-        Returns who this person is (profile, key facts), what happened recently
-        (this week's entries), and what topics they track. Without calling this,
-        you have no memory of who this person is or what they care about.
+        Call this FIRST in every new conversation before responding.
+        Without calling this, you have no memory of who this person is or what they care about.
 
-        Call before responding to the first message of every conversation.
+        Returns who this person is (profile, key facts), what happened recently
+        (this week's entries), and what topics they track.
 
         Returns:
             user_profile, key_facts, this_week (recent activity), topics, stats.
         """
+
         # User profile
         profile = storage.read_knowledge("user-profile")
 

@@ -120,7 +120,7 @@ Previous LLM Project "Side Project"
 Your taxonomy will evolve. New hobbies appear, projects end, interests shift. That's fine — the two-level structure handles this naturally:
 
 - **New subtopic:** Create the topic first with `journal_create_topic`, then start appending entries.
-- **Topic gets huge:** It's still one file. FTS5 searches within it. `journal_read(topic, n=5)` shows the most recent entries. Don't split unless the subtopics are genuinely different areas.
+- **Topic gets huge:** It's still one file. FTS5 searches within it. `journal_read_topic(topic, limit=5)` shows the most recent entries. Don't split unless the subtopics are genuinely different areas.
 - **Topic goes dormant:** Leave it. It's an append-only ledger. Old topics are historical records.
 - **Wrong category:** Topic paths live in SQLite — there's no built-in rename. Create a new topic, re-enter key entries, and let the old topic go dormant.
 - **New category:** Just start using it. Create `travel/europe-2026` and it exists.

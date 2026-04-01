@@ -514,7 +514,7 @@ class DatabaseStorage(ConversationMixin):
     def mark_entry_indexed(self, entry_id: int) -> None:
         """Stamp indexed_at = today on an entry after a successful embedding.
 
-        Used by journal_append and journal_reindex to track which entries
+        Used by journal_append_entry and journal_reindex to track which entries
         have up-to-date semantic embeddings.  The watermark lets
         journal_reindex skip already-indexed entries and resume after
         interruption.

@@ -62,12 +62,12 @@ def tools(mcp_server: FastMCP) -> dict:
 
 
 class TestAppendAndRead:
-    """journal_append and journal_read round-trip."""
+    """journal_append_entry and journal_read_topic round-trip."""
 
     @pytest.mark.asyncio
     async def test_append_and_read(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
-        result = await tools["journal_append"](
+        result = await tools["journal_append_entry"](
             topic="work/acme",
             content="Got the offer today.",
             tags=["decision", "milestone"],
@@ -77,7 +77,7 @@ class TestAppendAndRead:
         assert result["entry_count"] == 1
         assert "entry_id" in result
 
-        result = await tools["journal_read"](topic="work/acme")
+        result = await tools["journal_read_topic"](topic="work/acme")
         assert result["total"] == 1
         assert "Got the offer today." in result["entries"][0]["content"]
         assert result["entries"][0]["id"] is not None
@@ -85,7 +85,7 @@ class TestAppendAndRead:
     @pytest.mark.asyncio
     async def test_append_with_reasoning(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/decision", title="Work Decisions")
-        result = await tools["journal_append"](
+        result = await tools["journal_append_entry"](
             topic="work/decision",
             content="Chose SQLite as canonical storage.",
             reasoning="Markdown has no stable IDs; SQLite enables relationships.",
@@ -93,7 +93,7 @@ class TestAppendAndRead:
         )
         assert result["status"] == "appended"
 
-        read = await tools["journal_read"](topic="work/decision")
+        read = await tools["journal_read_topic"](topic="work/decision")
         assert (
             read["entries"][0]["reasoning"]
             == "Markdown has no stable IDs; SQLite enables relationships."
@@ -102,11 +102,17 @@ class TestAppendAndRead:
     @pytest.mark.asyncio
     async def test_read_recent_entries(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/recent", title="Test Recent")
-        await tools["journal_append"](topic="test/recent", content="Entry 1", date="2024-01-01")
-        await tools["journal_append"](topic="test/recent", content="Entry 2", date="2024-06-01")
-        await tools["journal_append"](topic="test/recent", content="Entry 3", date="2025-01-01")
+        await tools["journal_append_entry"](
+            topic="test/recent", content="Entry 1", date="2024-01-01"
+        )
+        await tools["journal_append_entry"](
+            topic="test/recent", content="Entry 2", date="2024-06-01"
+        )
+        await tools["journal_append_entry"](
+            topic="test/recent", content="Entry 3", date="2025-01-01"
+        )
 
-        result = await tools["journal_read"](topic="test/recent", limit=2)
+        result = await tools["journal_read_topic"](topic="test/recent", limit=2)
         assert len(result["entries"]) == 2
         assert result["total"] == 3
 
@@ -117,7 +123,7 @@ class TestSearch:
     @pytest.mark.asyncio
     async def test_search_finds_entry(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
-        await tools["journal_append"](
+        await tools["journal_append_entry"](
             topic="work/acme",
             content="Promotion confirmed for Q3.",
             date="2025-06-01",
@@ -243,7 +249,7 @@ class TestTimeline:
     @pytest.mark.asyncio
     async def test_timeline_this_week(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/timeline", title="Test Timeline")
-        await tools["journal_append"](topic="test/timeline", content="Today's entry.")
+        await tools["journal_append_entry"](topic="test/timeline", content="Today's entry.")
 
         result = await tools["journal_timeline"](period="this-week")
         assert result["count"] >= 1
@@ -251,7 +257,7 @@ class TestTimeline:
     @pytest.mark.asyncio
     async def test_briefing(self, tools: dict, tmp_journal: Path) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
-        await tools["journal_append"](topic="work/acme", content="Working on the project.")
+        await tools["journal_append_entry"](topic="work/acme", content="Working on the project.")
 
         profile_path = tmp_journal / "knowledge" / "user-profile.md"
         profile_path.write_text(
@@ -271,7 +277,7 @@ class TestReindex:
     @pytest.mark.asyncio
     async def test_reindex(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/reindex", title="Test Reindex")
-        await tools["journal_append"](topic="test/reindex", content="Indexed entry.")
+        await tools["journal_append_entry"](topic="test/reindex", content="Indexed entry.")
 
         result = await tools["journal_reindex"]()
         assert result["status"] == "rebuilt"

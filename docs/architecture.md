@@ -14,7 +14,7 @@ The journal stores data in three tiers, each serving a different purpose:
 
 **Tier 1 — Hot data** (entry.content, ~50-100 tokens). Headline/summary always loaded with briefings and searches. Stored in the `entries` table.
 
-**Tier 2 — Warm data** (entry.reasoning, ~200-500 tokens). Reasoning and background context, loaded on-demand when reading a specific topic via `journal_read`. Stored in the `entries` table alongside content.
+**Tier 2 — Warm data** (entry.reasoning, ~200-500 tokens). Reasoning and background context, loaded on-demand when reading a specific topic via `journal_read_topic`. Stored in the `entries` table alongside content.
 
 **Tier 3 — Cold data** (conversation JSON, 5k-100k tokens). Full chat transcripts archived in separate `conversations_json/{id}.json` files (flat by conversation ID). Messages stored in the `messages` table. Rarely accessed; designed for archival and eventual S3 backup.
 
@@ -70,19 +70,19 @@ The JSON files are the archival record — rebuildable source for the database. 
 
 ![Data flow](diagrams/data-flow.svg)
 
-### Write path (journal_append)
+### Write path (journal_append_entry)
 
 Input is validated (path traversal prevention) → entry is inserted into the `entries` table with date, content, and reasoning → the FTS5 index is updated → both writes are committed atomically via SQLite WAL.
 
-### Read path (journal_read)
+### Read path (journal_read_topic)
 
 The tool queries the `entries` table for the given topic, sorted by date → optionally filters by date_from/date_to → optionally limits to last N entries with offset pagination (capped at 500) → returns as structured objects with id, date, content, reasoning, tags.
 
-### Update path (journal_update)
+### Update path (journal_update_entry)
 
 Entry ID is looked up in the `entries` table → content/reasoning/tags/date are updated → FTS5 index is refreshed and semantic embedding is re-stored.
 
-### Delete path (journal_delete)
+### Delete path (journal_delete_entry)
 
 Entry ID is marked as deleted (soft delete) in the `entries` table → excluded from future reads/searches but preserved in database for git backup.
 
