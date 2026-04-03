@@ -403,13 +403,24 @@ class SearchIndex:
             """
         ).fetchall()
 
+        if not rows:
+            return 0
+
+        # Batch-fetch all messages in one query to avoid N+1
+        conv_ids = [r["id"] for r in rows]
+        placeholders = ",".join("?" * len(conv_ids))
+        all_msg_rows = db_storage.conn.execute(
+            f"SELECT conversation_id, content FROM messages"  # noqa: S608
+            f" WHERE conversation_id IN ({placeholders}) ORDER BY conversation_id, position",
+            conv_ids,
+        ).fetchall()
+        messages_by_conv: dict[int, list[str]] = {}
+        for m in all_msg_rows:
+            messages_by_conv.setdefault(m["conversation_id"], []).append(m["content"])
+
         count = 0
         for r in rows:
-            msg_rows = db_storage.conn.execute(
-                "SELECT content FROM messages WHERE conversation_id = ? ORDER BY position",
-                (r["id"],),
-            ).fetchall()
-            message_content = "\n\n".join(m["content"] for m in msg_rows)
+            message_content = "\n\n".join(messages_by_conv.get(r["id"], []))
 
             try:
                 self.upsert_conversation_on_conn(

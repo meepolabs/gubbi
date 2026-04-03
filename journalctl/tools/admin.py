@@ -53,6 +53,7 @@ def register(
             storage.reset_all_indexed_at()
 
             embeddings_generated = 0
+            embeddings_failed = 0
             last_id = 0
             semantic_status = "ok"
 
@@ -87,6 +88,7 @@ def register(
                             storage.mark_entry_indexed(r["id"])
                             embeddings_generated += 1
                         except Exception as e:
+                            embeddings_failed += 1
                             logger.warning(
                                 "Failed to embed entry %s during reindex: %s",
                                 r["id"],
@@ -100,10 +102,14 @@ def register(
                 logger.warning("Semantic reindex failed", exc_info=True)
                 semantic_status = "failed"
 
+            if embeddings_failed and semantic_status == "ok":
+                semantic_status = "partial"
+
             return {
                 "status": "rebuilt",
                 "semantic_status": semantic_status,
                 "documents_indexed": result["documents_indexed"],
                 "embeddings_generated": embeddings_generated,
+                "embeddings_failed": embeddings_failed,
                 "duration_seconds": result["duration_seconds"],
             }

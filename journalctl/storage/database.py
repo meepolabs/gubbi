@@ -3,9 +3,6 @@
 Replaces MarkdownStorage as the source of truth. All journal data
 (topics, entries, conversations, messages) lives in journal.db.
 
-Markdown files are generated views — produced by storage/export.py
-for MkDocs and git. They are NOT the source of truth.
-
 Conversation JSON archives are written alongside DB rows as the
 archival record (designed for S3 offload).
 
@@ -358,7 +355,8 @@ class DatabaseStorage(ConversationMixin):
             raise
 
         count: int = self.conn.execute(
-            "SELECT COUNT(*) FROM entries WHERE topic_id = ?", (topic_id,)
+            "SELECT COUNT(*) FROM entries WHERE topic_id = ? AND deleted_at IS NULL",
+            (topic_id,),
         ).fetchone()[0]
 
         return entry_id, count
@@ -604,7 +602,9 @@ class DatabaseStorage(ConversationMixin):
 
     def get_stats(self) -> dict[str, int]:
         """Return counts for briefing."""
-        total_entries = self.conn.execute("SELECT COUNT(*) FROM entries").fetchone()[0]
+        total_entries = self.conn.execute(
+            "SELECT COUNT(*) FROM entries WHERE deleted_at IS NULL"
+        ).fetchone()[0]
         topics = self.conn.execute("SELECT COUNT(*) FROM topics").fetchone()[0]
         conversations = self.conn.execute("SELECT COUNT(*) FROM conversations").fetchone()[0]
         return {

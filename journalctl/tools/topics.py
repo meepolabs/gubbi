@@ -12,7 +12,7 @@ from journalctl.core.validation import (
 )
 from journalctl.storage.database import DatabaseStorage
 from journalctl.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
-from journalctl.tools.errors import already_exists, invalid_date, invalid_topic
+from journalctl.tools.errors import already_exists, invalid_date, invalid_topic, validation_error
 
 
 def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
@@ -88,6 +88,8 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         except ValueError as e:
             return invalid_topic(topic, str(e))
         title = sanitize_label(title, max_len=100)
+        if not title:
+            return validation_error("title cannot be empty after sanitization")
         if description:
             description = sanitize_freetext(description, max_len=500)
         if created_at:

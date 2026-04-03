@@ -128,7 +128,7 @@ Soft-delete an existing entry by its database ID. Deleted entries are marked as 
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `entry_id` | integer | yes | Database ID of the entry. Get this from `journal_read_topic(topic, n=...)` response, or from `journal_search` results. |
+| `entry_id` | integer | yes | Database ID of the entry. Get this from a `journal_read_topic(topic, limit=...)` response, or from `journal_search` results. |
 
 **Returns:** Confirmation with deleted entry ID.
 

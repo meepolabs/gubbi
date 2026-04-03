@@ -197,11 +197,6 @@ def main() -> None:
             _ = storage.conn
             _ = idx.conn
             mem_service = asyncio.run(init_service(settings))
-            if mem_service is None:
-                raise RuntimeError(
-                    "Memory service failed to initialize — check mcp-memory-service is installed"
-                )
-
             mcp = create_mcp_server(storage, idx, settings, memory_service=mem_service)
             mcp.run(transport="stdio")
         finally:

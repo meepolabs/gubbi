@@ -92,12 +92,20 @@ class ConversationMixin:
         today = date_cls.today().isoformat()
         participants = sorted({m.role for m in messages})
 
+        # Preserve created_at from the DB on re-saves so the JSON archive
+        # doesn't drift from the canonical DB value.
+        existing_row = self.conn.execute(
+            "SELECT created_at FROM conversations WHERE topic_id = ? AND slug = ?",
+            (topic_id, slug),
+        ).fetchone()
+        canonical_created = existing_row["created_at"] if existing_row else conversation_date
+
         meta = ConversationMeta(
             source=source,
             title=title,
             topic=topic,
             tags=tags or [],
-            created=conversation_date,
+            created=canonical_created,
             updated=today,
             summary=summary,
             participants=participants,

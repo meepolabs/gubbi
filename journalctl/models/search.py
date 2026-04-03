@@ -1,13 +1,20 @@
 """Search result model."""
 
+from typing import Literal
+
 from pydantic import BaseModel
 
 
 class SearchResult(BaseModel):
-    """A single search result from FTS5."""
+    """A single search result from search backends.
 
-    source_key: str  # 'entry:42', 'conversation:17'
-    doc_type: str  # 'entry' or 'conversation'
+    ``doc_type="memory"`` represents a semantic-only result with no matching
+    journal entry or conversation record. In that case both ``entry_id`` and
+    ``conversation_id`` may be ``None``.
+    """
+
+    source_key: str  # e.g. 'entry:42', 'conversation:17', or a memory hash key
+    doc_type: Literal["entry", "conversation", "memory"]
     topic: str
     title: str
     snippet: str

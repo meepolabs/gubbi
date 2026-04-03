@@ -9,6 +9,7 @@ from journalctl.core.validation import (
     sanitize_freetext,
     sanitize_label,
     validate_date,
+    validate_title,
     validate_topic,
 )
 from journalctl.models.conversation import Message
@@ -99,7 +100,10 @@ def register(
             topic = validate_topic(topic)
         except ValueError as e:
             return invalid_topic(topic, str(e))
-        title = sanitize_label(title, max_len=100)
+        try:
+            title = validate_title(title)
+        except ValueError as e:
+            return validation_error(str(e))
         source = sanitize_label(source)
         summary = sanitize_freetext(summary)
         if tags:
