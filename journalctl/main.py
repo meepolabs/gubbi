@@ -178,9 +178,10 @@ async def general_exception_handler(
 
 # Health check (unprotected)
 @server.get("/health")
-async def health() -> dict:
-    """Health check endpoint."""
-    return {"status": "ok", "service": "journalctl"}
+@server.get("/mcp/")
+async def mcp_health() -> dict:
+    """Liveness probe for the MCP endpoint."""
+    return {"status": "ok", "service": "journalctl-mcp"}
 
 
 def main() -> None:
