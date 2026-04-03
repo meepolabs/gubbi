@@ -44,8 +44,6 @@ RAG (Retrieval-Augmented Generation) is the standard approach to giving LLMs acc
 
 journalctl is **not** a RAG system, and doesn't need to be:
 
-![Comparison](diagrams/journal-vs-memory-vs-rag.svg)
-
 **RAG solves the wrong problem.** RAG is designed for large, passive document corpora where the LLM needs to "search and find" relevant context. Your journal isn't a corpus to be searched — it's a structured, curated record that the LLM actively writes to. The LLM knows where things are because it put them there.
 
 **No chunking problem.** RAG's biggest headache is chunking: split too small and you lose context, too big and retrieval gets noisy. Journal entries are naturally chunked — each entry is a coherent unit written by a human or by the LLM, separated by date headers.

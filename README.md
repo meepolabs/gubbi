@@ -129,4 +129,4 @@ Python 3.12 · FastAPI · FastMCP · SQLite FTS5 (WAL mode) · ONNX embeddings �
 
 ## License
 
-MIT
+AGPL-3.0-or-later

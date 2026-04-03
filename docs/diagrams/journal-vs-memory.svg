@@ -1,57 +1,74 @@
-<svg width="720" viewBox="0 0 720 340" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: transparent;">
+<svg width="100%" viewBox="0 0 680 480" xmlns="http://www.w3.org/2000/svg" style="font-family: system-ui, -apple-system, sans-serif;">
   <style>
-    .box-teal { fill: #e0f2f1; stroke: #80cbc4; stroke-width: 1; }
-    .box-purple { fill: #f3e5f5; stroke: #ce93d8; stroke-width: 1; }
-    .box-amber { fill: #fff8e1; stroke: #ffcc80; stroke-width: 1; }
-    .box { fill: #f8f9fa; stroke: #dee2e6; stroke-width: 1; }
-    .title { font-size: 14px; font-weight: 600; fill: #212529; }
-    .subtitle { font-size: 12px; fill: #6c757d; }
-    .arr { stroke: #adb5bd; stroke-width: 1.2; marker-end: url(#arrow); }
+    @media (prefers-color-scheme: light) {
+      .n-purple { fill: #EEEDFE; stroke: #534AB7; } .n-purple text { fill: #3C3489; } .n-purple text.sub { fill: #534AB7; }
+      .c-journal { fill: #E1F5EE; stroke: #0F6E56; } .c-journal text { fill: #085041; } .c-journal text.sub { fill: #0F6E56; }
+      .c-memory { fill: #FAECE7; stroke: #993C1D; } .c-memory text { fill: #712B13; } .c-memory text.sub { fill: #993C1D; }
+      .n-blue { fill: #E6F1FB; stroke: #185FA5; } .n-blue text { fill: #0C447C; }
+      .n-amber { fill: #FAEEDA; stroke: #854F0B; } .n-amber text { fill: #633806; }
+      .n-gray { fill: #F1EFE8; stroke: #5F5E5A; } .n-gray text { fill: #444441; }
+      .label { fill: #888780; } .arrow { stroke: #888780; }
+    }
+    @media (prefers-color-scheme: dark) {
+      .n-purple { fill: #26215C; stroke: #AFA9EC; } .n-purple text { fill: #CECBF6; } .n-purple text.sub { fill: #AFA9EC; }
+      .c-journal { fill: #04342C; stroke: #5DCAA5; } .c-journal text { fill: #9FE1CB; } .c-journal text.sub { fill: #5DCAA5; }
+      .c-memory { fill: #4A1B0C; stroke: #F0997B; } .c-memory text { fill: #F5C4B3; } .c-memory text.sub { fill: #F0997B; }
+      .n-blue { fill: #042C53; stroke: #85B7EB; } .n-blue text { fill: #B5D4F4; }
+      .n-amber { fill: #412402; stroke: #EF9F27; } .n-amber text { fill: #FAC775; }
+      .n-gray { fill: #2C2C2A; stroke: #B4B2A9; } .n-gray text { fill: #D3D1C7; }
+      .label { fill: #B4B2A9; } .arrow { stroke: #B4B2A9; }
+    }
+    text { font-size: 14px; font-weight: 500; }
+    text.sub { font-size: 12px; font-weight: 400; }
   </style>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
 
-  <!-- Journal column -->
-  <rect class="box-teal" x="40" y="20" width="300" height="240" rx="12"/>
-  <text class="title" x="190" y="48" text-anchor="middle">Journal (journalctl)</text>
-  <text class="subtitle" x="190" y="68" text-anchor="middle">Historical record</text>
+  <!-- MCP Tools at top -->
+  <rect class="n-purple" x="190" y="30" width="300" height="56" rx="12" stroke-width="0.5"/>
+  <text class="n-purple" x="340" y="48" text-anchor="middle" dominant-baseline="central">MCP tools</text>
+  <text class="n-purple sub" x="340" y="70" text-anchor="middle" dominant-baseline="central">Write to both · Search across both</text>
 
-  <text class="subtitle" x="60" y="100">Stores:</text>
-  <text class="subtitle" x="60" y="118">  Full conversations, dated entries,</text>
-  <text class="subtitle" x="60" y="136">  decisions, reflections, research</text>
+  <!-- Left arrow -->
+  <path d="M270 86 L270 115 L170 115 L170 150" fill="none" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="label" x="128" y="108" text-anchor="end">Topics, entries,</text>
+  <text class="label" x="128" y="122" text-anchor="end">full conversations</text>
 
-  <text class="subtitle" x="60" y="164">Search: FTS5 keyword (precise)</text>
+  <!-- Right arrow -->
+  <path d="M410 86 L410 115 L510 115 L510 150" fill="none" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <text class="label" x="548" y="108">Topics, entries,</text>
+  <text class="label" x="548" y="122">reasoning</text>
 
-  <text class="subtitle" x="60" y="192">Grows: Forever, never compacts</text>
+  <!-- Journal DB container -->
+  <rect class="c-journal" x="40" y="155" width="270" height="240" rx="16" stroke-width="0.5"/>
+  <text class="c-journal" x="175" y="183" text-anchor="middle" dominant-baseline="central">Journal DB (SQLite)</text>
+  <text class="c-journal sub" x="175" y="200" text-anchor="middle" dominant-baseline="central">Canonical store</text>
 
-  <text class="subtitle" x="60" y="220">Answers:</text>
-  <text class="subtitle" x="60" y="238">  "What happened? What did I decide?"</text>
+  <rect class="n-blue" x="65" y="215" width="220" height="44" rx="8" stroke-width="0.5"/>
+  <text class="n-blue" x="175" y="237" text-anchor="middle" dominant-baseline="central">entries + conversations</text>
+  <rect class="n-blue" x="65" y="272" width="220" height="44" rx="8" stroke-width="0.5"/>
+  <text class="n-blue" x="175" y="294" text-anchor="middle" dominant-baseline="central">FTS5 full-text search</text>
+  <rect class="n-blue" x="65" y="328" width="220" height="44" rx="8" stroke-width="0.5"/>
+  <text class="n-blue" x="175" y="350" text-anchor="middle" dominant-baseline="central">JSON archival files</text>
 
-  <!-- Memory column -->
-  <rect class="box-purple" x="380" y="20" width="300" height="240" rx="12"/>
-  <text class="title" x="530" y="48" text-anchor="middle">Memory service (future)</text>
-  <text class="subtitle" x="530" y="68" text-anchor="middle">Quick-recall facts</text>
+  <!-- Memory container -->
+  <rect class="c-memory" x="370" y="155" width="270" height="240" rx="16" stroke-width="0.5"/>
+  <text class="c-memory" x="505" y="183" text-anchor="middle" dominant-baseline="central">Semantic memory</text>
+  <text class="c-memory sub" x="505" y="200" text-anchor="middle" dominant-baseline="central">mcp-memory service</text>
 
-  <text class="subtitle" x="400" y="100">Stores:</text>
-  <text class="subtitle" x="400" y="118">  Facts, preferences, entity</text>
-  <text class="subtitle" x="400" y="136">  relationships, patterns</text>
+  <rect class="n-amber" x="395" y="215" width="220" height="44" rx="8" stroke-width="0.5"/>
+  <text class="n-amber" x="505" y="237" text-anchor="middle" dominant-baseline="central">ONNX embeddings</text>
+  <rect class="n-amber" x="395" y="272" width="220" height="44" rx="8" stroke-width="0.5"/>
+  <text class="n-amber" x="505" y="294" text-anchor="middle" dominant-baseline="central">Vector similarity search</text>
+  <rect class="n-amber" x="395" y="318" width="220" height="44" rx="8" stroke-width="0.5"/>
+  <text class="n-amber" x="505" y="340" text-anchor="middle" dominant-baseline="central">Entity facts + prefs</text>
 
-  <text class="subtitle" x="400" y="164">Search: Semantic (embeddings)</text>
-
-  <text class="subtitle" x="400" y="192">Grows: Consolidates, updates,</text>
-  <text class="subtitle" x="400" y="207">  replaces outdated facts</text>
-
-  <text class="subtitle" x="400" y="235">Answers:</text>
-  <text class="subtitle" x="400" y="253">  "What is X? What do I prefer?"</text>
-
-  <!-- LLM orchestrator -->
-  <rect class="box-amber" x="120" y="280" width="480" height="42" rx="8"/>
-  <text class="title" x="360" y="305" text-anchor="middle">LLM (orchestrator — routes queries to journal or memory)</text>
-
-  <!-- Arrows -->
-  <line x1="240" y1="260" x2="240" y2="278" class="arr"/>
-  <line x1="480" y1="260" x2="480" y2="278" class="arr"/>
+  <!-- Search spans both -->
+  <rect class="n-gray" x="100" y="420" width="480" height="44" rx="8" stroke-width="0.5" stroke-dasharray="6 3"/>
+  <text class="n-gray" x="340" y="442" text-anchor="middle" dominant-baseline="central">Search spans both: FTS5 keywords + semantic vectors</text>
+  <line x1="175" y1="395" x2="175" y2="418" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="505" y1="395" x2="505" y2="418" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
 </svg>

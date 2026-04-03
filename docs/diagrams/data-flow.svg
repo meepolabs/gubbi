@@ -1,97 +1,120 @@
-<svg width="720" viewBox="0 0 720 480" xmlns="http://www.w3.org/2000/svg" style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: transparent;">
+<svg width="100%" viewBox="0 0 680 680" xmlns="http://www.w3.org/2000/svg" style="font-family: system-ui, -apple-system, sans-serif;">
   <style>
-    .box { fill: #f8f9fa; stroke: #dee2e6; stroke-width: 1; }
-    .box-teal { fill: #e0f2f1; stroke: #80cbc4; stroke-width: 1; }
-    .box-blue { fill: #e8f4fd; stroke: #90caf9; stroke-width: 1; }
-    .box-green { fill: #e8f5e9; stroke: #81c784; stroke-width: 1; }
-    .box-amber { fill: #fff8e1; stroke: #ffcc80; stroke-width: 1; }
-    .title { font-size: 13px; font-weight: 600; fill: #212529; }
-    .subtitle { font-size: 11px; fill: #6c757d; }
-    .heading { font-size: 14px; font-weight: 600; fill: #212529; }
-    .arr { stroke: #adb5bd; stroke-width: 1.2; marker-end: url(#arrow); }
+    @media (prefers-color-scheme: light) {
+      .n-gray { fill: #F1EFE8; stroke: #5F5E5A; } .n-gray text { fill: #444441; }
+      .n-purple { fill: #EEEDFE; stroke: #534AB7; } .n-purple text { fill: #3C3489; }
+      .n-teal { fill: #E1F5EE; stroke: #0F6E56; } .n-teal text { fill: #085041; }
+      .n-blue { fill: #E6F1FB; stroke: #185FA5; } .n-blue text { fill: #0C447C; }
+      .n-coral { fill: #FAECE7; stroke: #993C1D; } .n-coral text { fill: #712B13; }
+      .n-amber { fill: #FAEEDA; stroke: #854F0B; } .n-amber text { fill: #633806; }
+      .n-teal text.sub { fill: #0F6E56; } .n-amber text.sub { fill: #854F0B; }
+      .n-gray text.sub { fill: #5F5E5A; } .n-purple text.sub { fill: #534AB7; }
+      .n-blue text.sub { fill: #185FA5; } .n-coral text.sub { fill: #993C1D; }
+      .heading { fill: #2C2C2A; } .label { fill: #888780; } .arrow { stroke: #888780; }
+    }
+    @media (prefers-color-scheme: dark) {
+      .n-gray { fill: #2C2C2A; stroke: #B4B2A9; } .n-gray text { fill: #D3D1C7; }
+      .n-purple { fill: #26215C; stroke: #AFA9EC; } .n-purple text { fill: #CECBF6; }
+      .n-teal { fill: #04342C; stroke: #5DCAA5; } .n-teal text { fill: #9FE1CB; }
+      .n-blue { fill: #042C53; stroke: #85B7EB; } .n-blue text { fill: #B5D4F4; }
+      .n-coral { fill: #4A1B0C; stroke: #F0997B; } .n-coral text { fill: #F5C4B3; }
+      .n-amber { fill: #412402; stroke: #EF9F27; } .n-amber text { fill: #FAC775; }
+      .n-teal text.sub { fill: #5DCAA5; } .n-amber text.sub { fill: #EF9F27; }
+      .n-gray text.sub { fill: #B4B2A9; } .n-purple text.sub { fill: #AFA9EC; }
+      .n-blue text.sub { fill: #85B7EB; } .n-coral text.sub { fill: #F0997B; }
+      .heading { fill: #D3D1C7; } .label { fill: #B4B2A9; } .arrow { stroke: #B4B2A9; }
+    }
+    text { font-size: 14px; font-weight: 500; }
+    text.sub { font-size: 12px; font-weight: 400; }
+    text.heading { font-size: 14px; font-weight: 500; }
+    text.label { font-size: 12px; font-weight: 400; }
   </style>
   <defs>
     <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-      <path d="M2 1L8 5L2 9" fill="none" stroke="#adb5bd" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
     </marker>
   </defs>
 
-  <!-- Write path -->
-  <text class="heading" x="20" y="24">Write path (journal_append)</text>
-  <rect class="box-blue" x="20" y="36" width="150" height="36" rx="6"/>
-  <text class="title" x="95" y="58" text-anchor="middle">LLM tool call</text>
-  <line x1="170" y1="54" x2="200" y2="54" class="arr"/>
+  <!-- WRITE PATH -->
+  <text class="heading" x="40" y="30" dominant-baseline="central">Write path (append_entry)</text>
+  <rect class="n-gray" x="40" y="45" width="110" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-gray" x="95" y="65" text-anchor="middle" dominant-baseline="central">Validate</text>
+  <line x1="150" y1="65" x2="180" y2="65" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-purple" x="182" y="45" width="140" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-purple" x="252" y="65" text-anchor="middle" dominant-baseline="central">Insert entry</text>
+  <line x1="322" y1="65" x2="350" y2="65" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-teal" x="352" y="45" width="140" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-teal" x="422" y="65" text-anchor="middle" dominant-baseline="central">Update FTS5</text>
+  <line x1="492" y1="65" x2="520" y2="65" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-blue" x="522" y="45" width="120" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-blue" x="582" y="65" text-anchor="middle" dominant-baseline="central">Commit WAL</text>
 
-  <rect class="box-teal" x="200" y="36" width="130" height="36" rx="6"/>
-  <text class="title" x="265" y="58" text-anchor="middle">Validate input</text>
-  <line x1="330" y1="54" x2="360" y2="54" class="arr"/>
+  <!-- READ PATH -->
+  <text class="heading" x="40" y="120" dominant-baseline="central">Read path (read_topic)</text>
+  <rect class="n-gray" x="40" y="135" width="140" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-gray" x="110" y="155" text-anchor="middle" dominant-baseline="central">Query entries</text>
+  <line x1="180" y1="155" x2="210" y2="155" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-purple" x="212" y="135" width="130" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-purple" x="277" y="155" text-anchor="middle" dominant-baseline="central">Date filter</text>
+  <line x1="342" y1="155" x2="370" y2="155" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-teal" x="372" y="135" width="160" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-teal" x="452" y="155" text-anchor="middle" dominant-baseline="central">Paginate (≤500)</text>
+  <line x1="532" y1="155" x2="560" y2="155" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-coral" x="562" y="135" width="80" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-coral" x="602" y="155" text-anchor="middle" dominant-baseline="central">Return</text>
 
-  <rect class="box-green" x="360" y="36" width="160" height="36" rx="6"/>
-  <text class="title" x="440" y="52" text-anchor="middle">Lock → write .md</text>
-  <text class="subtitle" x="440" y="66" text-anchor="middle">→ release lock</text>
-  <line x1="520" y1="54" x2="550" y2="54" class="arr"/>
+  <!-- SEARCH PATH -->
+  <text class="heading" x="40" y="210" dominant-baseline="central">Search path (search)</text>
+  <rect class="n-teal" x="40" y="230" width="130" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-teal" x="105" y="248" text-anchor="middle" dominant-baseline="central">FTS5 keyword</text>
+  <text class="n-teal sub" x="105" y="268" text-anchor="middle" dominant-baseline="central">Full-text search</text>
+  <rect class="n-amber" x="40" y="300" width="130" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-amber" x="105" y="318" text-anchor="middle" dominant-baseline="central">Semantic vector</text>
+  <text class="n-amber sub" x="105" y="338" text-anchor="middle" dominant-baseline="central">ONNX embeddings</text>
+  <text class="label" x="105" y="290" text-anchor="middle">parallel</text>
+  <line x1="170" y1="258" x2="240" y2="290" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <line x1="170" y1="328" x2="240" y2="300" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-purple" x="242" y="275" width="160" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-purple" x="322" y="295" text-anchor="middle" dominant-baseline="central">Merge + dedup</text>
+  <line x1="402" y1="295" x2="430" y2="295" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-coral" x="432" y="275" width="180" height="40" rx="8" stroke-width="0.5"/>
+  <text class="n-coral" x="522" y="295" text-anchor="middle" dominant-baseline="central">Snippets + scores</text>
 
-  <rect class="box-amber" x="550" y="36" width="140" height="36" rx="6"/>
-  <text class="title" x="620" y="58" text-anchor="middle">Upsert FTS5</text>
+  <!-- CONVERSATION SAVE -->
+  <text class="heading" x="40" y="385" dominant-baseline="central">Conversation save path</text>
+  <rect class="n-gray" x="40" y="400" width="110" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-gray" x="95" y="418" text-anchor="middle" dominant-baseline="central">Validate</text>
+  <text class="n-gray sub" x="95" y="438" text-anchor="middle" dominant-baseline="central">≤1000 msgs</text>
+  <line x1="150" y1="428" x2="175" y2="428" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-amber" x="177" y="400" width="125" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-amber" x="240" y="418" text-anchor="middle" dominant-baseline="central">Archive JSON</text>
+  <text class="n-amber sub" x="240" y="438" text-anchor="middle" dominant-baseline="central">{id}.json file</text>
+  <line x1="302" y1="428" x2="325" y2="428" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-blue" x="327" y="400" width="135" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-blue" x="395" y="418" text-anchor="middle" dominant-baseline="central">Insert DB</text>
+  <text class="n-blue sub" x="395" y="438" text-anchor="middle" dominant-baseline="central">convos + messages</text>
+  <line x1="462" y1="428" x2="485" y2="428" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-teal" x="487" y="400" width="130" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-teal" x="552" y="418" text-anchor="middle" dominant-baseline="central">Update FTS5</text>
+  <text class="n-teal sub" x="552" y="438" text-anchor="middle" dominant-baseline="central">Idempotent</text>
 
-  <!-- Read path -->
-  <text class="heading" x="20" y="114">Read path (journal_read)</text>
-  <rect class="box-blue" x="20" y="126" width="150" height="36" rx="6"/>
-  <text class="title" x="95" y="148" text-anchor="middle">LLM tool call</text>
-  <line x1="170" y1="144" x2="200" y2="144" class="arr"/>
+  <!-- BRIEFING -->
+  <text class="heading" x="40" y="500" dominant-baseline="central">Briefing path</text>
+  <rect class="n-gray" x="40" y="515" width="130" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-gray" x="105" y="533" text-anchor="middle" dominant-baseline="central">User profile</text>
+  <text class="n-gray sub" x="105" y="553" text-anchor="middle" dominant-baseline="central">user-profile.md</text>
+  <line x1="170" y1="543" x2="195" y2="543" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-amber" x="197" y="515" width="130" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-amber" x="262" y="533" text-anchor="middle" dominant-baseline="central">Semantic mem</text>
+  <text class="n-amber sub" x="262" y="553" text-anchor="middle" dominant-baseline="central">Key facts</text>
+  <line x1="327" y1="543" x2="352" y2="543" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-purple" x="354" y="515" width="140" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-purple" x="424" y="533" text-anchor="middle" dominant-baseline="central">Recent entries</text>
+  <text class="n-purple sub" x="424" y="553" text-anchor="middle" dominant-baseline="central">This week (≤25)</text>
+  <line x1="494" y1="543" x2="519" y2="543" class="arrow" stroke-width="1.5" marker-end="url(#arrow)"/>
+  <rect class="n-coral" x="521" y="515" width="120" height="56" rx="8" stroke-width="0.5"/>
+  <text class="n-coral" x="581" y="533" text-anchor="middle" dominant-baseline="central">Context</text>
+  <text class="n-coral sub" x="581" y="553" text-anchor="middle" dominant-baseline="central">Single payload</text>
 
-  <rect class="box-green" x="200" y="126" width="190" height="36" rx="6"/>
-  <text class="title" x="295" y="142" text-anchor="middle">Load .md → parse</text>
-  <text class="subtitle" x="295" y="156" text-anchor="middle">YAML frontmatter + entries</text>
-  <line x1="390" y1="144" x2="420" y2="144" class="arr"/>
-
-  <rect class="box" x="420" y="126" width="180" height="36" rx="6"/>
-  <text class="title" x="510" y="148" text-anchor="middle">Return metadata + entries</text>
-
-  <!-- Search path -->
-  <text class="heading" x="20" y="204">Search path (journal_search)</text>
-  <rect class="box-blue" x="20" y="216" width="150" height="36" rx="6"/>
-  <text class="title" x="95" y="238" text-anchor="middle">LLM tool call</text>
-  <line x1="170" y1="234" x2="200" y2="234" class="arr"/>
-
-  <rect class="box-amber" x="200" y="216" width="190" height="36" rx="6"/>
-  <text class="title" x="295" y="232" text-anchor="middle">FTS5 MATCH query</text>
-  <text class="subtitle" x="295" y="246" text-anchor="middle">+ topic/date filters</text>
-  <line x1="390" y1="234" x2="420" y2="234" class="arr"/>
-
-  <rect class="box" x="420" y="216" width="220" height="36" rx="6"/>
-  <text class="title" x="530" y="238" text-anchor="middle">Results with highlighted snippets</text>
-
-  <!-- Conversation save path -->
-  <text class="heading" x="20" y="294">Conversation save path</text>
-  <rect class="box-blue" x="20" y="306" width="150" height="36" rx="6"/>
-  <text class="title" x="95" y="328" text-anchor="middle">LLM tool call</text>
-  <line x1="170" y1="324" x2="200" y2="324" class="arr"/>
-
-  <rect class="box-green" x="200" y="306" width="160" height="56" rx="6"/>
-  <text class="title" x="280" y="326" text-anchor="middle">Write transcript .md</text>
-  <text class="subtitle" x="280" y="342" text-anchor="middle">+ upsert summary</text>
-  <text class="subtitle" x="280" y="356" text-anchor="middle">in topic file</text>
-  <line x1="360" y1="334" x2="390" y2="334" class="arr"/>
-
-  <rect class="box-amber" x="390" y="306" width="160" height="56" rx="6"/>
-  <text class="title" x="470" y="330" text-anchor="middle">Index both files</text>
-  <text class="subtitle" x="470" y="348" text-anchor="middle">in FTS5</text>
-
-  <!-- Briefing path -->
-  <text class="heading" x="20" y="404">Briefing path (conversation start)</text>
-  <rect class="box-blue" x="20" y="416" width="150" height="36" rx="6"/>
-  <text class="title" x="95" y="438" text-anchor="middle">LLM tool call</text>
-  <line x1="170" y1="434" x2="200" y2="434" class="arr"/>
-
-  <rect class="box-green" x="200" y="416" width="130" height="36" rx="6"/>
-  <text class="title" x="265" y="438" text-anchor="middle">Read profile</text>
-  <line x1="330" y1="434" x2="340" y2="434" class="arr"/>
-
-  <rect class="box-amber" x="340" y="416" width="130" height="36" rx="6"/>
-  <text class="title" x="405" y="438" text-anchor="middle">Query timeline</text>
-  <line x1="470" y1="434" x2="480" y2="434" class="arr"/>
-
-  <rect class="box" x="480" y="416" width="200" height="36" rx="6"/>
-  <text class="title" x="580" y="438" text-anchor="middle">Return profile + activity</text>
+  <text class="label" x="340" y="650" text-anchor="middle">All writes are atomic via SQLite WAL mode</text>
 </svg>
