@@ -1,8 +1,8 @@
 """Journal MCP Server — FastAPI application entry point.
 
 Serves the MCP protocol over streamable HTTP (production) or
-stdio (local development). Based on fastapi_template
-patterns: CustomFastAPI subclass, lifespan, structlog.
+stdio (local development). Based on fastapi_template patterns:
+CustomFastAPI subclass, lifespan, AppContext, structlog.
 """
 
 import asyncio
@@ -10,6 +10,7 @@ import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
+import asyncpg
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -17,14 +18,13 @@ from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
 from journalctl.config import Settings, get_settings
+from journalctl.core.context import AppContext
 from journalctl.core.logger import initialize_logger
-from journalctl.memory.bootstrap import configure_env, init_service
-from journalctl.memory.client import MemoryServiceProtocol
 from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
 from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.search_index import SearchIndex
+from journalctl.storage.embedding_service import EmbeddingService
+from journalctl.storage.pg_setup import init_pool, setup_schema
 from journalctl.tools.registry import register_tools
 
 
@@ -32,19 +32,13 @@ class CustomFastAPI(FastAPI):
     """Extended FastAPI with journal-specific attributes."""
 
     logger: structlog.BoundLogger
-    storage: DatabaseStorage
-    index: SearchIndex
+    pool: asyncpg.Pool
+    embedding_service: EmbeddingService
     settings: Settings
     mcp: FastMCP
-    memory_service: MemoryServiceProtocol
 
 
-def create_mcp_server(
-    storage: DatabaseStorage,
-    index: SearchIndex,
-    settings: Settings,
-    memory_service: MemoryServiceProtocol,
-) -> FastMCP:
+def create_mcp_server(app_ctx: AppContext) -> FastMCP:
     """Create and configure the MCP server with all tools."""
     mcp = FastMCP(
         "Personal Journal & Lifelong Memory",
@@ -82,9 +76,9 @@ def create_mcp_server(
             Before writing, confirm the topic exists (check briefing)"""),
         stateless_http=True,
         streamable_http_path="/",
-        host=settings.host,
+        host=app_ctx.settings.host,
     )
-    register_tools(mcp, storage, index, settings, memory_service=memory_service)
+    register_tools(mcp, app_ctx)
     return mcp
 
 
@@ -93,27 +87,27 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
     settings = get_settings()
 
-    # Initialize logger
     initialize_logger("journalctl", log_dir=str(settings.log_dir))
     app.logger = structlog.get_logger("journalctl")
     await app.logger.info("Server starting up")
 
-    # Initialize storage
     app.settings = settings
-    app.storage = DatabaseStorage(settings.db_path, settings.journal_root)
-    app.index = SearchIndex(settings.db_path)
-
-    # Ensure knowledge directory exists (still file-based)
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
+    settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
 
-    # Force schema init on both storage and index
-    _ = app.storage.conn
-    _ = app.index.conn
-    await app.logger.info("Storage initialized", db_path=str(settings.db_path))
+    # PostgreSQL pool — each gunicorn worker creates its own pool (no --preload)
+    app.pool = await init_pool(settings.database_url)
+    await setup_schema(app.pool)
+    await app.logger.info("PostgreSQL pool ready")
 
-    # Initialize OAuth storage and register routes
+    # EmbeddingService — ONNX model loaded here before workers fork.
+    # entrypoint.sh pre-downloads the model to disk; this just loads it.
+    app.embedding_service = EmbeddingService()
+    await app.logger.info("EmbeddingService ready")
+
+    # OAuth (stays SQLite — own connection, out of scope for PG migration)
     oauth_storage = OAuthStorage(settings.oauth_db_path)
-    _ = oauth_storage.conn  # Force schema init
+    _ = oauth_storage.conn
     expired = oauth_storage.cleanup_expired()
     if expired:
         await app.logger.info("OAuth cleanup", expired_tokens=expired)
@@ -122,27 +116,24 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     if token_validator:
         await app.logger.info("OAuth endpoints registered")
 
-    # Initialize memory service
-    configure_env()
-    memory_service = await init_service(settings)
-    app.memory_service = memory_service
-    await app.logger.info("Memory service initialized", db_path=str(settings.memory_db_path))
+    app_ctx = AppContext(
+        pool=app.pool,
+        embedding_service=app.embedding_service,
+        settings=settings,
+        logger=app.logger,
+    )
 
-    # Create MCP server and mount on FastAPI
-    app.mcp = create_mcp_server(app.storage, app.index, settings, memory_service=app.memory_service)
+    app.mcp = create_mcp_server(app_ctx)
     mcp_http = app.mcp.streamable_http_app()
     authed_mcp = BearerAuthMiddleware(mcp_http, token_validator=token_validator)
     app.mount("/mcp", authed_mcp)
 
-    # session_manager must be entered AFTER streamable_http_app()
     try:
         async with app.mcp.session_manager.run():
             yield
     finally:
         await app.logger.info("Server shutting down")
-        if hasattr(app.memory_service, "close"):
-            await app.memory_service.close()
-        app.index.close()
+        await app.pool.close()
         oauth_storage.close()
 
 
@@ -150,13 +141,12 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 server = CustomFastAPI(
     title="journalctl",
     description="Personal journal MCP server",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
     middleware=[Middleware(MCPPathNormalizer)],
 )
 
 
-# Global exception handler
 @server.exception_handler(Exception)
 async def general_exception_handler(
     request: Request,
@@ -176,12 +166,11 @@ async def general_exception_handler(
     )
 
 
-# Health check (unprotected)
 @server.get("/health")
 @server.get("/mcp/")
 async def mcp_health() -> dict:
-    """Liveness probe for the MCP endpoint."""
-    return {"status": "ok", "service": "journalctl-mcp"}
+    """Liveness probe for Docker health checks."""
+    return {"status": "ok"}
 
 
 def main() -> None:
@@ -189,20 +178,26 @@ def main() -> None:
     settings = get_settings()
 
     if settings.transport == "stdio":
-        configure_env()
 
-        storage = DatabaseStorage(settings.db_path, settings.journal_root)
-        idx = SearchIndex(settings.db_path)
-        try:
+        async def _run_stdio() -> None:
+            pool = await init_pool(settings.database_url)
+            await setup_schema(pool)
+            embedding_service = EmbeddingService()
             settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-            _ = storage.conn
-            _ = idx.conn
-            mem_service = asyncio.run(init_service(settings))
-            mcp = create_mcp_server(storage, idx, settings, memory_service=mem_service)
-            mcp.run(transport="stdio")
-        finally:
-            idx.close()
-            storage.close()
+            settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
+            app_ctx = AppContext(
+                pool=pool,
+                embedding_service=embedding_service,
+                settings=settings,
+                logger=structlog.get_logger("journalctl"),
+            )
+            mcp = create_mcp_server(app_ctx)
+            try:
+                mcp.run(transport="stdio")
+            finally:
+                await pool.close()
+
+        asyncio.run(_run_stdio())
     else:
         import uvicorn  # noqa: PLC0415
 

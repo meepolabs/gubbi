@@ -7,6 +7,7 @@ import re
 import bcrypt
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
+from mcp.shared.auth import OAuthClientInformationFull
 from pydantic import AnyHttpUrl
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -21,6 +22,19 @@ from journalctl.oauth.templates import CSRF_COOKIE_NAME
 SERVER_URL = "http://localhost:8100"
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
+TEST_CLIENT_ID = "test-client"
+TEST_REDIRECT_URI = "http://localhost/callback"
+
+
+def _register_test_client(storage: OAuthStorage) -> None:
+    """Pre-register the test client so redirect_uri validation passes."""
+    client = OAuthClientInformationFull(
+        client_id=TEST_CLIENT_ID,
+        client_secret="test-secret",  # noqa: S106
+        redirect_uris=[TEST_REDIRECT_URI],  # type: ignore[arg-type]
+        client_name="test-app",
+    )
+    storage.save_client(client)
 
 
 def _create_test_app(oauth_storage: OAuthStorage) -> Starlette:
@@ -183,6 +197,7 @@ class TestLoginPage:
         assert response.status_code == 403
 
     def test_login_wrong_password(self, oauth_storage: OAuthStorage) -> None:
+        _register_test_client(oauth_storage)
         app = _create_test_app(oauth_storage)
         client = TestClient(app)
 
@@ -204,6 +219,7 @@ class TestLoginPage:
         assert "Invalid password" in response.text
 
     def test_login_correct_password_redirects(self, oauth_storage: OAuthStorage) -> None:
+        _register_test_client(oauth_storage)
         app = _create_test_app(oauth_storage)
         client = TestClient(app, follow_redirects=False)
 

@@ -6,11 +6,12 @@ from datetime import date, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.config import Settings
-from journalctl.memory.client import MemoryServiceProtocol
+from journalctl.core.context import AppContext
+from journalctl.core.validation import local_today
+from journalctl.storage import knowledge
 from journalctl.storage.constants import SNIPPET_PREVIEW_LEN
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.search_index import SearchIndex
+from journalctl.storage.repositories import entries as entry_repo
+from journalctl.storage.repositories import topics as topic_repo
 from journalctl.tools.constants import (
     BRIEFING_KEY_FACTS_COUNT,
     BRIEFING_KEY_FACTS_QUERY,
@@ -34,17 +35,17 @@ def _normalize_period(period: str) -> str:
     return re.sub(r"[\s_]+", "-", period.strip().lower())
 
 
-def _resolve_period(
-    period: str,
-) -> tuple[str, str, str]:
+def _resolve_period(period: str, today: date) -> tuple[str, str, str]:
     """Resolve a period string to (date_from, date_to, label).
 
     Supports: 'YYYY', 'YYYY-MM', 'YYYY-WNN',
               'this-week', 'last-week', 'this-month', 'last-month'.
     Input is auto-normalized (case-insensitive, spaces/underscores become hyphens).
+
+    today must be supplied by the caller (computed from the configured timezone)
+    so that period boundaries reflect the user's local date rather than server UTC.
     """
     period = _normalize_period(period)
-    today = date.today()
 
     if period == "today":
         s = today.isoformat()
@@ -107,13 +108,7 @@ def _resolve_period(
     raise ValueError(msg)
 
 
-def register(
-    mcp: FastMCP,
-    storage: DatabaseStorage,
-    index: SearchIndex,
-    settings: Settings,
-    memory_service: MemoryServiceProtocol,
-) -> None:
+def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register context tools on the MCP server."""
 
     @mcp.tool()
@@ -135,11 +130,41 @@ def register(
         """
 
         # User profile
-        profile = storage.read_knowledge("user-profile")
+        profile = knowledge.read(app_ctx.settings.journal_root, "user-profile")
 
         # This week's timeline
-        date_from, date_to, label = _resolve_period("this-week")
-        week_entries = storage.get_entries_by_date_range(date_from, date_to)
+        _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
+        date_from, date_to, label = _resolve_period("this-week", today=_today)
+
+        # Encode before acquiring a DB connection — keeps the pool free during inference
+        import asyncio  # noqa: PLC0415
+
+        key_facts_embedding: list[float] | None = None
+        try:
+            key_facts_embedding = await asyncio.to_thread(
+                app_ctx.embedding_service.encode, BRIEFING_KEY_FACTS_QUERY
+            )
+        except Exception:
+            logger.warning("Key facts encoding failed, continuing without", exc_info=True)
+
+        key_facts: list[dict] = []
+        async with app_ctx.pool.acquire() as conn:
+            week_entries = await entry_repo.get_by_date_range(
+                conn, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES
+            )
+            all_topics, topic_count = await topic_repo.list_all(conn, limit=BRIEFING_MAX_TOPICS)
+            stats = await entry_repo.get_stats(conn)
+
+            if key_facts_embedding is not None:
+                try:
+                    raw_facts = await app_ctx.embedding_service.search_by_vector(
+                        conn,
+                        key_facts_embedding,
+                        limit=BRIEFING_KEY_FACTS_COUNT,
+                    )
+                    key_facts = [{"content": r["content"]} for r in raw_facts]
+                except Exception:
+                    logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
 
         # Clean entries for briefing output
         clean_entries = []
@@ -158,47 +183,8 @@ def register(
                 entry["conversation_id"] = e["conversation_id"]
             clean_entries.append(entry)
 
-        # Most recent entries first; drop oldest when the week is very active
-        clean_entries = clean_entries[-BRIEFING_MAX_WEEK_ENTRIES:][::-1]
-
-        all_topics = storage.list_topics()
-        top_topics = all_topics[:BRIEFING_MAX_TOPICS]
-
-        # Stats
-        stats = storage.get_stats()
-
-        # Key facts — top semantic matches for user identity/preferences/status
-        key_facts: list[dict] = []
-        try:
-            mem_response = await memory_service.retrieve_memories(
-                query=BRIEFING_KEY_FACTS_QUERY,
-                n_results=BRIEFING_KEY_FACTS_COUNT,
-            )
-            memories = mem_response.get("memories", [])
-            if isinstance(memories, list):
-                # Collect entry_ids so we can filter out orphaned embeddings
-                # (entries that were deleted but whose embeddings persist).
-                candidate_facts = []
-                entry_ids_to_check: set[int] = set()
-                for m in memories:
-                    if not isinstance(m, dict) or not m.get("content"):
-                        continue
-                    metadata = m.get("metadata", {}) or {}
-                    eid = metadata.get("entry_id")
-                    candidate_facts.append(
-                        {"content": m["content"], "entry_id": int(eid) if eid else None}
-                    )
-                    if eid:
-                        entry_ids_to_check.add(int(eid))
-
-                active_ids = storage.get_active_entry_ids(entry_ids_to_check)
-                key_facts = [
-                    {"content": f["content"]}
-                    for f in candidate_facts
-                    if not f["entry_id"] or f["entry_id"] in active_ids
-                ]
-        except Exception:
-            logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
+        # SQL returned DESC order (limit was set); reverse to most-recent-first
+        clean_entries = list(reversed(clean_entries))
 
         return {
             "user_profile": profile,
@@ -209,15 +195,13 @@ def register(
                 "date_to": date_to,
                 "entries": clean_entries,
             },
-            "topics": [t.model_dump() for t in top_topics],
-            "topic_count": len(all_topics),
+            "topics": [t.model_dump() for t in all_topics],
+            "topic_count": topic_count,
             "stats": stats,
         }
 
     @mcp.tool()
-    async def journal_timeline(
-        period: str,
-    ) -> dict:
+    async def journal_timeline(period: str) -> dict:
         """Browse what happened during a time period — "what was I doing last week?"
         or "show me this month."
 
@@ -237,11 +221,12 @@ def register(
             entries (flat chronological list), count.
         """
         try:
-            date_from, date_to, label = _resolve_period(period)
+            _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
+            date_from, date_to, label = _resolve_period(period, today=_today)
         except ValueError as e:
             return validation_error(str(e))
-        entries = storage.get_entries_by_date_range(date_from, date_to)
-
+        async with app_ctx.pool.acquire() as conn:
+            entries = await entry_repo.get_by_date_range(conn, date_from, date_to)
         return {
             "period": period,
             "label": label,

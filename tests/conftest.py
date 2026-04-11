@@ -1,44 +1,44 @@
-"""Shared test fixtures."""
+"""Shared test fixtures.
+
+PostgreSQL tests require a running PostgreSQL instance.
+Set TEST_DATABASE_URL to point at it, or run:
+
+    docker run -d --name journalctl-test-pg \\
+        -e POSTGRES_DB=journal_test \\
+        -e POSTGRES_USER=journal \\
+        -e POSTGRES_PASSWORD=testpass \\
+        -p 5433:5432 \\
+        pgvector/pgvector:pg17
+
+Then run: pytest tests/
+"""
 
 import os
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
+import asyncpg
 import bcrypt
 import pytest
+import pytest_asyncio
 
 from journalctl.config import get_settings
 from journalctl.oauth.storage import OAuthStorage
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.search_index import SearchIndex
+from journalctl.storage.pg_setup import _init_connection, setup_schema
 
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
+
+_DEFAULT_TEST_DB = "postgresql://journal:testpass@localhost:5433/journal_test"
+TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB)
 
 
 @pytest.fixture
 def tmp_journal(tmp_path: Path) -> Path:
     """Create a temporary journal directory structure."""
     (tmp_path / "knowledge").mkdir()
+    (tmp_path / "conversations_json").mkdir()
     return tmp_path
-
-
-@pytest.fixture
-def storage(tmp_journal: Path, tmp_path: Path) -> DatabaseStorage:
-    """DatabaseStorage pointed at a temp directory."""
-    db = DatabaseStorage(tmp_path / "test.db", tmp_journal)
-    _ = db.conn  # Force schema init
-    yield db
-    db.close()
-
-
-@pytest.fixture
-def index(tmp_path: Path) -> SearchIndex:
-    """SearchIndex with a temp database (shares same db as storage)."""
-    idx = SearchIndex(tmp_path / "test.db")
-    _ = idx.conn  # Force schema init
-    yield idx
-    idx.close()
 
 
 _TEST_ENV: dict[str, str] = {
@@ -48,6 +48,7 @@ _TEST_ENV: dict[str, str] = {
     "JOURNAL_OAUTH_ACCESS_TOKEN_TTL": "3600",
     "JOURNAL_OAUTH_REFRESH_TOKEN_TTL": "2592000",
     "JOURNAL_OAUTH_AUTH_CODE_TTL": "300",
+    "JOURNAL_DATABASE_URL": TEST_DATABASE_URL,
 }
 
 
@@ -57,7 +58,6 @@ def _set_env(tmp_journal: Path, tmp_path: Path) -> Iterator[None]:
     env = {
         **_TEST_ENV,
         "JOURNAL_JOURNAL_ROOT": str(tmp_journal),
-        "JOURNAL_DB_PATH": str(tmp_path / "test.db"),
         "JOURNAL_OWNER_PASSWORD_HASH": TEST_PASSWORD_HASH,
         "JOURNAL_OAUTH_DB_PATH": str(tmp_path / "oauth.db"),
     }
@@ -73,8 +73,64 @@ def _set_env(tmp_journal: Path, tmp_path: Path) -> Iterator[None]:
     get_settings.cache_clear()
 
 
+@pytest_asyncio.fixture(scope="session")
+async def pool() -> AsyncIterator[asyncpg.Pool]:
+    """asyncpg Pool connected to the test PostgreSQL database.
+
+    Session-scoped: one pool for the entire test run.
+    Skips the test session if PostgreSQL is not reachable.
+
+    Start a test database with:
+        docker run -d --name journalctl-test-pg \\
+            -e POSTGRES_DB=journal_test -e POSTGRES_USER=journal \\
+            -e POSTGRES_PASSWORD=testpass -p 5433:5432 \\
+            pgvector/pgvector:pg17
+    """
+    try:
+        _pool: asyncpg.Pool = await asyncpg.create_pool(
+            TEST_DATABASE_URL,
+            statement_cache_size=0,
+            min_size=1,
+            max_size=5,
+            timeout=5,  # fast fail if PG not reachable
+            init=_init_connection,
+        )
+    except (
+        asyncpg.InvalidCatalogNameError,
+        OSError,
+        asyncpg.CannotConnectNowError,
+        ConnectionRefusedError,
+        TimeoutError,
+        Exception,
+    ) as exc:
+        pytest.skip(f"PostgreSQL not reachable at {TEST_DATABASE_URL}: {exc}")
+        return
+
+    async with _pool.acquire() as conn:
+        await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    await setup_schema(_pool)
+    yield _pool
+    await _pool.close()
+
+
+@pytest_asyncio.fixture
+async def clean_pool(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Pool]:
+    """Yield the shared pool; TRUNCATE all tables before and after each test for isolation."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE topics, entries, conversations, messages, entry_embeddings"
+            " RESTART IDENTITY CASCADE"
+        )
+    yield pool
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "TRUNCATE topics, entries, conversations, messages, entry_embeddings"
+            " RESTART IDENTITY CASCADE"
+        )
+
+
 @pytest.fixture
-def oauth_storage(tmp_path: Path) -> OAuthStorage:
+def oauth_storage(tmp_path: Path) -> Iterator[OAuthStorage]:
     """OAuthStorage with a temp database."""
     db = OAuthStorage(tmp_path / "oauth.db")
     _ = db.conn  # Force schema init

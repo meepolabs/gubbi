@@ -1,29 +1,46 @@
 """MCP tool: journal_reindex."""
 
 import asyncio
-import json
 import logging
-import sqlite3
+import time
+from datetime import UTC
+from datetime import datetime as datetime_cls
 
+import asyncpg
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.memory.client import MemoryServiceProtocol, hard_delete_by_entry_id
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.search_index import SearchIndex
+from journalctl.core.context import AppContext
+from journalctl.storage import pg_setup
+from journalctl.storage.repositories import entries as entry_repo
 from journalctl.tools.constants import REINDEX_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
+_REINDEX_ADVISORY_LOCK_KEY = 3141592653  # stable app-wide key
+_REINDEX_COOLDOWN_SECONDS = 60
 
-def register(
-    mcp: FastMCP,
-    index: SearchIndex,
-    storage: DatabaseStorage,
-    memory_service: MemoryServiceProtocol,
-) -> None:
+
+async def _db_reindex_cooldown(pool: asyncpg.Pool) -> int | None:
+    """Return seconds until cooldown expires, or None if reindex is allowed.
+
+    Uses MAX(indexed_at) from entries as a shared proxy for last reindex time —
+    accurate across all workers since the value lives in PostgreSQL.
+    """
+    async with pool.acquire() as conn:
+        max_indexed = await entry_repo.get_max_indexed_at(conn)
+    if max_indexed is None:
+        return None
+    now_utc = datetime_cls.now(UTC)
+    if max_indexed.tzinfo is None:
+        max_indexed = max_indexed.replace(tzinfo=UTC)
+    elapsed = (now_utc - max_indexed).total_seconds()
+    if elapsed < _REINDEX_COOLDOWN_SECONDS:
+        return int(_REINDEX_COOLDOWN_SECONDS - elapsed)
+    return None
+
+
+def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register admin tools on the MCP server."""
-
-    _reindex_lock = asyncio.Lock()
 
     @mcp.tool()
     async def journal_reindex() -> dict:
@@ -33,83 +50,84 @@ def register(
         Rarely needed during normal use.
 
         Returns:
-            Number of documents indexed, embeddings generated, and duration.
+            Number of embeddings generated and duration.
         """
-        if _reindex_lock.locked():
+        retry_after = await _db_reindex_cooldown(app_ctx.pool)
+        if retry_after is not None:
             return {
-                "status": "already_running",
-                "message": "A reindex is already in progress.",
+                "status": "cooldown",
+                "message": f"Reindex completed recently. Try again in {retry_after}s.",
+                "retry_after": retry_after,
             }
 
-        async with _reindex_lock:
-            result = index.rebuild_from_db(storage)
-
-            # Reset all indexed_at so every entry is re-embedded from scratch.
-            # journal_reindex is an explicit repair action — incremental skipping
-            # via the indexed_at watermark is only useful for routine indexing,
-            # not for repair.  Both indexed_at and updated_at use date-only
-            # precision (YYYY-MM-DD), so same-day update+index looks "up to date"
-            # and would otherwise cause the reindex to skip stale entries.
-            storage.reset_all_indexed_at()
-
-            embeddings_generated = 0
-            embeddings_failed = 0
-            last_id = 0
-            semantic_status = "ok"
-
+        async with app_ctx.pool.acquire() as lock_conn:
+            acquired = await pg_setup.try_advisory_lock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
+            if not acquired:
+                return {
+                    "status": "already_running",
+                    "message": "A reindex is already in progress.",
+                }
             try:
-                while True:
-                    batch = storage.get_unindexed_entries(last_id, REINDEX_BATCH_SIZE)
+                return await _run_reindex(app_ctx)
+            finally:
+                await pg_setup.advisory_unlock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
 
-                    if not batch:
-                        break
 
-                    for r in batch:
-                        try:
-                            # Purge ALL embeddings for this entry_id (current
-                            # + stale from prior content) so store_memory()
-                            # won't hit the UNIQUE constraint (#644) and old
-                            # content embeddings are cleaned up.
-                            hard_delete_by_entry_id(memory_service, r["id"])
+async def _run_reindex(app_ctx: AppContext) -> dict:
+    start = time.monotonic()
 
-                            content = r["content"] or ""
-                            first_line = content.split("\n", 1)[0][:80]
-                            await memory_service.store_memory(
-                                content=content,
-                                tags=json.loads(r["tags"] or "[]"),
-                                metadata={
-                                    "entry_id": r["id"],
-                                    "source": "journal_entry",
-                                    "topic": r["topic"],
-                                    "date": r["date"],
-                                    "title": first_line,
-                                },
-                            )
-                            storage.mark_entry_indexed(r["id"])
-                            embeddings_generated += 1
-                        except Exception as e:
-                            embeddings_failed += 1
-                            logger.warning(
-                                "Failed to embed entry %s during reindex: %s",
-                                r["id"],
-                                e,
-                                exc_info=True,
-                            )
+    # tsvector columns are GENERATED ALWAYS — always up-to-date.
+    # journal_reindex only needs to rebuild semantic embeddings.
+    async with app_ctx.pool.acquire() as conn:
+        await entry_repo.reset_indexed_at(conn)
 
-                    last_id = batch[-1]["id"]  # advance cursor past all processed entries
+    embeddings_generated = 0
+    embeddings_failed = 0
+    last_id = 0
+    semantic_status = "ok"
 
-            except (sqlite3.Error, json.JSONDecodeError, OSError):
-                logger.warning("Semantic reindex failed", exc_info=True)
-                semantic_status = "failed"
+    while True:
+        async with app_ctx.pool.acquire() as conn:
+            batch = await entry_repo.get_unindexed(conn, last_id, REINDEX_BATCH_SIZE)
 
-            if embeddings_failed and semantic_status == "ok":
-                semantic_status = "partial"
+        if not batch:
+            break
 
-            return {
-                "status": "rebuilt",
-                "semantic_status": semantic_status,
-                "documents_indexed": result["documents_indexed"],
-                "embeddings_generated": embeddings_generated,
-                "embeddings_failed": embeddings_failed,
-                "duration_seconds": result["duration_seconds"],
-            }
+        succeeded_ids: list[int] = []
+        for r in batch:
+            try:
+                content = r["content"] or ""
+                # Encode outside the connection acquire — ONNX inference is CPU-bound
+                # (10-200ms) and should not hold a pool connection during that time.
+                embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
+                async with app_ctx.pool.acquire() as conn:
+                    await app_ctx.embedding_service.store_by_vector(conn, r["id"], embedding)
+                succeeded_ids.append(r["id"])
+                embeddings_generated += 1
+            except Exception as e:
+                embeddings_failed += 1
+                logger.warning(
+                    "Failed to embed entry %s during reindex: %s",
+                    r["id"],
+                    e,
+                    exc_info=True,
+                )
+
+        # Batch-mark all succeeded entries as indexed in one query
+        if succeeded_ids:
+            async with app_ctx.pool.acquire() as conn:
+                await entry_repo.mark_indexed_batch(conn, succeeded_ids)
+
+        last_id = batch[-1]["id"]
+
+    if embeddings_failed:
+        semantic_status = "partial"
+
+    duration = round(time.monotonic() - start, 2)
+    return {
+        "status": "rebuilt",
+        "semantic_status": semantic_status,
+        "embeddings_generated": embeddings_generated,
+        "embeddings_failed": embeddings_failed,
+        "duration_seconds": duration,
+    }

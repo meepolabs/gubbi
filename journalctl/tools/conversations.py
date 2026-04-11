@@ -1,11 +1,14 @@
 """MCP tools: journal_save_conversation, journal_list_conversations,
 journal_read_conversation."""
 
+import logging
 from typing import Any, NotRequired, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.context import AppContext
 from journalctl.core.validation import (
+    local_today,
     sanitize_freetext,
     sanitize_label,
     validate_date,
@@ -13,9 +16,9 @@ from journalctl.core.validation import (
     validate_topic,
 )
 from journalctl.models.conversation import Message
-from journalctl.storage.database import DatabaseStorage
 from journalctl.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
-from journalctl.storage.search_index import SearchIndex
+from journalctl.storage.repositories import conversations as conv_repo
+from journalctl.storage.repositories import entries as entry_repo
 from journalctl.tools.constants import (
     DEFAULT_CONVERSATIONS_LIMIT,
     KEEP_ROLES,
@@ -24,6 +27,8 @@ from journalctl.tools.constants import (
     MAX_MSG_CHARS,
 )
 from journalctl.tools.errors import invalid_date, invalid_topic, not_found, validation_error
+
+logger = logging.getLogger(__name__)
 
 
 class MessageInput(TypedDict):
@@ -44,11 +49,7 @@ def _format_messages_as_markdown(title: str, messages: list[Message]) -> str:
     return "\n\n".join(parts)
 
 
-def register(
-    mcp: FastMCP,
-    storage: DatabaseStorage,
-    index: SearchIndex,
-) -> None:
+def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register conversation tools on the MCP server."""
 
     @mcp.tool()
@@ -95,7 +96,6 @@ def register(
         Returns:
             Conversation ID, summary, and whether it was a new save or update.
         """
-
         try:
             topic = validate_topic(topic)
         except ValueError as e:
@@ -106,13 +106,18 @@ def register(
             return validation_error(str(e))
         source = sanitize_label(source)
         summary = sanitize_freetext(summary)
+        tags_dropped = 0
         if tags:
+            original_tag_count = len(tags)
             tags = [s for t in tags if (s := sanitize_label(t))]
+            tags_dropped = original_tag_count - len(tags)
         if date:
             try:
                 validate_date(date)
             except ValueError:
                 return invalid_date(date)
+
+        resolved_date = date or local_today(app_ctx.settings.timezone)
 
         if len(messages) > MAX_MESSAGES_PER_CONVERSATION:
             return validation_error(
@@ -121,6 +126,7 @@ def register(
 
         # Only keep human-readable turns. Tool calls, tool results, and system
         # messages are infrastructure noise — not part of the conversation record.
+        keepable = [m for m in messages if m.get("role") in KEEP_ROLES]
         try:
             parsed_messages = [
                 Message(
@@ -128,8 +134,8 @@ def register(
                     content=sanitize_freetext(m.get("content", ""))[:MAX_MSG_CHARS],
                     timestamp=m.get("timestamp"),
                 )
-                for m in messages
-                if m.get("role") in KEEP_ROLES and m.get("content", "").strip()
+                for m in keepable
+                if m.get("content", "").strip()
             ]
         except (TypeError, AttributeError) as e:
             return validation_error(
@@ -140,41 +146,50 @@ def register(
         if not parsed_messages:
             return validation_error("No user/assistant messages found after filtering.")
 
+        empty_dropped = len(keepable) - len(parsed_messages)
+
         try:
-            conv_id, saved_summary, is_update = storage.save_conversation(
+            conv_id, saved_summary, is_update, linked_entry_id = await conv_repo.save_conversation(
+                app_ctx.pool,
+                conversations_json_dir=app_ctx.settings.conversations_json_dir,
                 topic=topic,
                 title=title,
                 messages=parsed_messages,
                 summary=summary,
                 source=source,
                 tags=tags,
-                date=date,
+                date=resolved_date,
             )
         except TopicNotFoundError:
             return not_found("Topic", topic)
 
-        # Update FTS5 index
-        message_content = "\n\n".join(m.content for m in parsed_messages)
-        from datetime import date as date_cls  # noqa: PLC0415
+        # Embed linked entry after transaction commits (best-effort)
+        import asyncio  # noqa: PLC0415
 
-        today = date_cls.today().isoformat()
-        index.upsert_conversation(
-            conversation_id=conv_id,
-            topic=topic,
-            title=title,
-            summary=saved_summary,
-            tags=tags or [],
-            updated=date or today,
-            message_content=message_content,
-        )
+        linked_content = f"Conversation saved: {title}\n\n{summary}"
+        try:
+            embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, linked_content)
+            async with app_ctx.pool.acquire() as conn:
+                await app_ctx.embedding_service.store_by_vector(conn, linked_entry_id, embedding)
+                await entry_repo.mark_indexed(conn, linked_entry_id)
+        except Exception as e:
+            logger.warning("Failed to embed linked entry %s: %s", linked_entry_id, e, exc_info=True)
 
-        return {
+        result: dict[str, Any] = {
             "status": "updated" if is_update else "saved",
             "conversation_id": conv_id,
             "summary": saved_summary,
             "topic": topic,
             "title": title,
         }
+        notes = []
+        if tags_dropped:
+            notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
+        if empty_dropped:
+            notes.append(f"{empty_dropped} message(s) dropped (empty content)")
+        if notes:
+            result["note"] = "; ".join(notes)
+        return result
 
     @mcp.tool()
     async def journal_list_conversations(
@@ -202,7 +217,6 @@ def register(
             List of conversations with id, title, date, summary,
             and message count.
         """
-
         limit = max(1, min(limit, MAX_CONVERSATIONS_RESULTS))
         offset = max(0, offset)
         if topic_prefix:
@@ -212,12 +226,12 @@ def register(
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
-        total = storage.count_conversations(topic_prefix=topic_prefix)
-        conversations = storage.list_conversations(
-            topic_prefix=topic_prefix, limit=limit, offset=offset
-        )
+        async with app_ctx.pool.acquire() as conn:
+            convs, total = await conv_repo.list_conversations(
+                conn, topic_prefix=topic_prefix, limit=limit, offset=offset
+            )
         return {
-            "conversations": [c.model_dump() for c in conversations],
+            "conversations": [c.model_dump() for c in convs],
             "total": total,
             "limit": limit,
             "offset": offset,
@@ -242,9 +256,11 @@ def register(
             metadata (title, topic, summary, dates, participants),
             content (full transcript as markdown), messages_shown, messages_total.
         """
-
         try:
-            meta, messages = storage.read_conversation_by_id(conversation_id, preview=preview)
+            async with app_ctx.pool.acquire() as conn:
+                meta, messages = await conv_repo.read_conversation_by_id(
+                    conn, conversation_id, preview=preview
+                )
         except ConversationNotFoundError:
             return not_found("Conversation", conversation_id)
         content = _format_messages_as_markdown(meta.title, messages)

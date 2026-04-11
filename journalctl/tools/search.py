@@ -1,33 +1,27 @@
-"""MCP tool: journal_search (unified FTS5 + semantic)."""
+"""MCP tool: journal_search (unified tsvector FTS + pgvector semantic)."""
 
 import logging
+from datetime import date as date_cls
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.core.validation import sanitize_freetext, validate_date, validate_topic
-from journalctl.memory.client import MemoryServiceProtocol
+from journalctl.core.context import AppContext
+from journalctl.core.validation import validate_date, validate_topic
 from journalctl.models.search import SearchResult
 from journalctl.storage.constants import SUMMARY_TRUNCATE_LEN
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.search_index import SearchIndex
+from journalctl.storage.repositories import search as search_repo
 from journalctl.tools.constants import (
     DEFAULT_SEARCH_LIMIT,
     MAX_QUERY_LEN,
     MAX_SEARCH_RESULTS,
-    MEMORY_HASH_PREVIEW_LEN,
 )
 from journalctl.tools.errors import invalid_date, invalid_topic, validation_error
 
 logger = logging.getLogger(__name__)
 
 
-def register(
-    mcp: FastMCP,
-    storage: DatabaseStorage,
-    index: SearchIndex,
-    memory_service: MemoryServiceProtocol,
-) -> None:
+def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register search tool on the MCP server."""
 
     @mcp.tool()
@@ -84,115 +78,76 @@ def register(
             except ValueError:
                 return invalid_date(date_to)
 
-        # Run FTS5 keyword search
-        try:
-            fts_results = index.search(
-                query=query,
-                topic_prefix=topic_prefix,
-                date_from=date_from,
-                date_to=date_to,
-                limit=limit,
-            )
-        except ValueError as e:
-            return validation_error(str(e))
-
-        # Run semantic search in parallel
+        # Encode query before acquiring a DB connection — ONNX inference is CPU-bound
+        # and holds the thread for 10-200ms. Encoding first keeps the pool free.
+        fts_results: list[SearchResult] = []
         semantic_results: list[SearchResult] = []
-        semantic_available = True
+
+        import asyncio  # noqa: PLC0415
+
         try:
-            sanitized_query = sanitize_freetext(query)
-            mem_response = await memory_service.retrieve_memories(
-                query=sanitized_query,
-                n_results=limit,
+            query_embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, query)
+        except Exception:
+            logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
+            query_embedding = None
+
+        df = date_cls.fromisoformat(date_from) if date_from else None
+        dt = date_cls.fromisoformat(date_to) if date_to else None
+
+        async with app_ctx.pool.acquire() as conn:
+            # FTS search — topic prefix and dates filtered in SQL
+            fts_results = await search_repo.fts_search(
+                conn, query, topic_prefix, date_from, date_to, limit
             )
-            # Convert memory results to SearchResult format
-            memories = mem_response.get("memories", [])
-            if isinstance(memories, list):
-                for mem in memories:
-                    if isinstance(mem, dict):
-                        content = mem.get("content", "")
-                        metadata = mem.get("metadata", {}) or {}
-                        entry_id = metadata.get("entry_id")
-                        similarity = float(mem.get("similarity_score", 0.0))
-                        src_key = f"memory:{mem.get('content_hash', '')[:MEMORY_HASH_PREVIEW_LEN]}"
+
+            # Semantic search — topic prefix and dates pushed into SQL, no pre-query needed
+            if query_embedding is not None:
+                try:
+                    raw = await app_ctx.embedding_service.search_by_vector(
+                        conn,
+                        query_embedding,
+                        limit=limit,
+                        topic_prefix=topic_prefix,
+                        date_from=df,
+                        date_to=dt,
+                    )
+                    for r in raw:
+                        entry_id = r.get("entry_id")
                         semantic_results.append(
                             SearchResult(
-                                source_key=src_key,
-                                doc_type="entry" if entry_id else "memory",
-                                topic=metadata.get("topic", ""),
-                                title=metadata.get("title", ""),
-                                snippet=content[:SUMMARY_TRUNCATE_LEN],
-                                rank=-similarity if similarity else 0.0,
-                                date=metadata.get("date", ""),
-                                entry_id=int(entry_id) if entry_id else None,
+                                source_key=f"entry:{entry_id}",
+                                doc_type="entry",
+                                topic=r.get("topic", ""),
+                                title=r.get("content", "").split("\n", 1)[0][:80],
+                                snippet=(r.get("content") or "")[:SUMMARY_TRUNCATE_LEN],
+                                rank=-(float(r.get("similarity", 0.0))),
+                                date=r.get("date", ""),
+                                entry_id=entry_id,
                                 conversation_id=None,
                             )
                         )
-        except Exception:
-            logger.warning("Semantic search failed, using FTS5 only", exc_info=True)
-            semantic_available = False
+                except Exception:
+                    logger.warning("Semantic search failed, using FTS only", exc_info=True)
 
-        # Filter orphaned semantic results (deleted entries still in vector index)
-        semantic_entry_ids = {r.entry_id for r in semantic_results if r.entry_id}
-        active_ids = storage.get_active_entry_ids(semantic_entry_ids)
-        semantic_results = [
-            r for r in semantic_results if not r.entry_id or r.entry_id in active_ids
-        ]
-
-        # Enrich semantic results with DB metadata (topic, date, title)
-        enrichable_ids = {r.entry_id for r in semantic_results if r.entry_id}
-        if enrichable_ids:
-            brief = storage.get_entries_brief(enrichable_ids)
-            for r in semantic_results:
-                if r.entry_id and r.entry_id in brief:
-                    meta = brief[r.entry_id]
-                    if not r.topic:
-                        r.topic = meta["topic"]
-                    if not r.date:
-                        r.date = meta["date"]
-                    if not r.title:
-                        r.title = meta["title"]
-
-        # Post-filter semantic results by topic and date (memory service
-        # doesn't support these filters natively, so we apply them here
-        # after enrichment has filled in the DB metadata).
-        if topic_prefix:
-            semantic_results = [
-                r
-                for r in semantic_results
-                if r.topic == topic_prefix or r.topic.startswith(topic_prefix + "/")
-            ]
-        if date_from:
-            semantic_results = [r for r in semantic_results if r.date >= date_from]
-        if date_to:
-            semantic_results = [r for r in semantic_results if r.date <= date_to]
-
-        # Merge and deduplicate
-        seen_ids: set[str] = set()
+        # Merge and deduplicate by source_key
+        seen_keys: set[str] = set()
         merged: list[SearchResult] = []
 
-        for r in fts_results:
-            key = r.source_key
-            if key not in seen_ids:
-                seen_ids.add(key)
-                merged.append(r)
+        for result in fts_results:
+            if result.source_key not in seen_keys:
+                seen_keys.add(result.source_key)
+                merged.append(result)
 
-        for r in semantic_results:
-            # Deduplicate by entry_id if it matches an FTS5 result
-            if r.entry_id:
-                entry_key = f"entry:{r.entry_id}"
-                if entry_key in seen_ids:
-                    continue
-                seen_ids.add(entry_key)
-            merged.append(r)
+        for result in semantic_results:
+            if result.source_key not in seen_keys:
+                seen_keys.add(result.source_key)
+                merged.append(result)
 
-        # Sort by rank (lower is better in FTS5), limit
-        merged.sort(key=lambda r: r.rank)
+        merged.sort(key=lambda x: x.rank)
         merged = merged[:limit]
 
         return {
-            "results": [r.model_dump() for r in merged],
+            "results": [result.model_dump(exclude={"rank", "source_key"}) for result in merged],
             "total": len(merged),
             "query": query,
-            "semantic_available": semantic_available,
         }

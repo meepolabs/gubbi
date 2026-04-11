@@ -14,3 +14,7 @@ class TopicNotFoundError(LookupError):
 
 class ConversationNotFoundError(LookupError):
     """Raised when a conversation ID or title/topic pair does not exist."""
+
+
+class EntryNotFoundError(LookupError):
+    """Raised when an entry ID does not exist or has been deleted."""

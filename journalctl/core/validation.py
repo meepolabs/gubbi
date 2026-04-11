@@ -3,6 +3,7 @@
 import re
 from datetime import date as date_cls
 from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 # Sanitization
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
@@ -92,8 +93,20 @@ def validate_date(value: str) -> str:
         datetime.strptime(value, "%Y-%m-%d")
     except ValueError:
         msg = f"Invalid calendar date '{value}'."
-        raise
+        raise ValueError(msg) from None
     return value
+
+
+def local_today(timezone: str = "UTC") -> str:
+    """Return today's date in the given IANA timezone as YYYY-MM-DD.
+
+    Falls back to UTC if the timezone string is invalid.
+    """
+    try:
+        tz = ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, KeyError):
+        tz = ZoneInfo("UTC")
+    return datetime.now(tz).date().isoformat()
 
 
 def is_future_date(value: str) -> bool:

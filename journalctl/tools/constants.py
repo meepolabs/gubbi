@@ -12,7 +12,7 @@ MAX_MSG_CHARS: Final = 20_000
 BRIEFING_MAX_TOPICS: Final = 20
 BRIEFING_MAX_WEEK_ENTRIES: Final = 25
 BRIEFING_KEY_FACTS_QUERY: Final = "user identity preferences habits goals current status"
-BRIEFING_KEY_FACTS_COUNT: Final = 15
+BRIEFING_KEY_FACTS_COUNT: Final = 7
 
 # Upper-bound cap for journal_read_topic n parameter — prevents loading entire journal into memory
 MAX_READ_ENTRIES: Final = 500

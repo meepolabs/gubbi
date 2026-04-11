@@ -1,65 +1,49 @@
 """MCP tools: journal_append_entry, journal_read_topic, journal_update_entry,
 journal_delete_entry."""
 
-import json
 import logging
-import sqlite3
-from datetime import date as date_cls
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.context import AppContext
 from journalctl.core.validation import (
     is_future_date,
+    local_today,
     sanitize_freetext,
     sanitize_label,
     validate_date,
     validate_topic,
 )
-from journalctl.memory.client import MemoryServiceProtocol, hard_delete_by_entry_id
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.exceptions import TopicNotFoundError
-from journalctl.storage.search_index import SearchIndex
+from journalctl.storage.exceptions import EntryNotFoundError, TopicNotFoundError
+from journalctl.storage.repositories import entries as entry_repo
 from journalctl.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
 from journalctl.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 
 logger = logging.getLogger(__name__)
 
 
-def register(
-    mcp: FastMCP,
-    storage: DatabaseStorage,
-    index: SearchIndex,
-    memory_service: MemoryServiceProtocol,
-) -> None:
+def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register entry tools on the MCP server."""
 
     async def _embed_entry(
         entry_id: int,
         content: str,
-        topic: str = "",
-        date: str = "",
-        tags: list[str] | None = None,
-    ) -> bool:
-        """Store an embedding for a journal entry. Returns True on success.
-        Internal — not exposed to LLM."""
+    ) -> list[float] | None:
+        """Encode text and store embedding. Returns the embedding on success, None on failure.
+
+        Encodes outside a DB connection so the pool is free during ONNX inference.
+        """
+        import asyncio  # noqa: PLC0415
+
         try:
-            first_line = content.split("\n", 1)[0][:80]
-            await memory_service.store_memory(
-                content=content,
-                tags=tags,
-                metadata={
-                    "entry_id": entry_id,
-                    "source": "journal_entry",
-                    "topic": topic,
-                    "date": date,
-                    "title": first_line,
-                },
-            )
-            return True
+            embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
+            async with app_ctx.pool.acquire() as conn:
+                await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
+            return embedding
         except Exception as e:
             logger.warning("Failed to embed entry %s: %s", entry_id, e, exc_info=True)
-            return False
+            return None
 
     @mcp.tool()
     async def journal_append_entry(
@@ -101,10 +85,8 @@ def register(
             date: Date of the entry as YYYY-MM-DD. Defaults to today.
 
         Returns:
-            Confirmation with entry_id, topic, date, and topic entry count
-            (total entries in that topic).
+            Confirmation with entry_id, topic, and date.
         """
-
         try:
             topic = validate_topic(topic)
         except ValueError as e:
@@ -114,61 +96,50 @@ def register(
             return validation_error("Content cannot be empty")
         if reasoning:
             reasoning = sanitize_freetext(reasoning)
+        tags_dropped = 0
         if tags:
+            original_tag_count = len(tags)
             tags = [s for t in tags if (s := sanitize_label(t))]
+            tags_dropped = original_tag_count - len(tags)
         if date:
             try:
                 validate_date(date)
             except ValueError:
                 return invalid_date(date)
 
+        resolved_date = date or local_today(app_ctx.settings.timezone)
+
         try:
-            entry_id, count = storage.append_entry(
-                topic=topic,
-                content=content,
-                reasoning=reasoning,
-                tags=tags,
-                date=date,
-                commit=False,  # deferred — commit after FTS write for atomicity
-            )
+            async with app_ctx.pool.acquire() as conn, conn.transaction():
+                entry_id = await entry_repo.append(
+                    conn,
+                    topic=topic,
+                    content=content,
+                    reasoning=reasoning,
+                    tags=tags,
+                    date=resolved_date,
+                )
         except TopicNotFoundError:
             return not_found("Topic", topic)
 
-        # Write FTS5 index on the same connection, then commit both atomically
-        meta = storage.get_topic(topic)
-        try:
-            resolved_date = date or date_cls.today().isoformat()
-            index.upsert_entry_on_conn(
-                storage.conn,
-                entry_id=entry_id,
-                topic=topic,
-                title=meta.title if meta else topic,
-                date=resolved_date,
-                content=content,
-                reasoning=reasoning,
-                tags=tags or [],
-            )
-            storage.conn.commit()
-        except sqlite3.Error as e:
-            storage.conn.rollback()
-            logger.error("Failed to write FTS index for entry %s: %s", entry_id, e, exc_info=True)
-            return validation_error(
-                "Failed to save entry due to an internal storage error. Please try again."
-            )
-
-        # Auto-embed for semantic search; stamp indexed_at on success
-        if await _embed_entry(entry_id, content, topic=topic, date=resolved_date, tags=tags):
-            storage.mark_entry_indexed(entry_id)
+        # Embed after the transaction commits (embedding is best-effort)
+        if await _embed_entry(entry_id, content) is not None:
+            async with app_ctx.pool.acquire() as conn:
+                await entry_repo.mark_indexed(conn, entry_id)
 
         result: dict[str, Any] = {
             "status": "appended",
             "topic": topic,
             "date": resolved_date,
             "entry_id": entry_id,
-            "entry_count": count,
         }
+        notes = []
         if date and is_future_date(date):
-            result["note"] = "Date is in the future"
+            notes.append("Date is in the future")
+        if tags_dropped:
+            notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
+        if notes:
+            result["note"] = "; ".join(notes)
         return result
 
     @mcp.tool()
@@ -200,7 +171,6 @@ def register(
             metadata (topic info), entries (list with content and reasoning),
             total (total matching entries), limit, offset.
         """
-
         try:
             topic = validate_topic(topic)
         except ValueError as e:
@@ -217,23 +187,24 @@ def register(
                 return invalid_date(date_to)
         limit = max(1, min(limit, MAX_READ_ENTRIES))
         offset = max(0, offset)
-        count = limit
         try:
-            meta, entries, total = storage.read_entries(
-                topic,
-                limit=count,
-                date_from=date_from,
-                date_to=date_to,
-                offset=offset,
-            )
+            async with app_ctx.pool.acquire() as conn:
+                meta, entries, total = await entry_repo.read(
+                    conn,
+                    topic,
+                    limit=limit,
+                    date_from=date_from,
+                    date_to=date_to,
+                    offset=offset,
+                )
         except TopicNotFoundError:
             return not_found("Topic", topic)
 
         return {
-            "metadata": meta.model_dump(),
+            "metadata": meta.model_dump(exclude={"id", "created", "updated"}),
             "entries": [e.model_dump() for e in entries],
             "total": total,
-            "limit": count,
+            "limit": limit,
             "offset": offset,
         }
 
@@ -265,62 +236,69 @@ def register(
         Returns:
             Confirmation with updated entry_id.
         """
-
-        if content:
+        if content is not None:
             content = sanitize_freetext(content)
-        if reasoning:
+            if not content.strip():
+                return validation_error("content cannot be empty")
+        if reasoning is not None:
             reasoning = sanitize_freetext(reasoning)
         if date:
             try:
                 validate_date(date)
             except ValueError:
                 return invalid_date(date)
+        tags_dropped = 0
         if tags:
+            original_tag_count = len(tags)
             tags = [s for t in tags if (s := sanitize_label(t))]
+            tags_dropped = original_tag_count - len(tags)
 
+        # Read committed text inside the same transaction — avoids a second round-trip.
+        # Within a transaction, reads see writes from the same transaction (savepoint).
+        row_data: tuple[str, str | None] | None = None
         try:
-            storage.update_entry(
-                entry_id=entry_id,
-                content=content,
-                reasoning=reasoning,
-                mode=mode,
-                date=date,
-                tags=tags,
-            )
-        except IndexError:
+            async with app_ctx.pool.acquire() as conn, conn.transaction():
+                await entry_repo.update(
+                    conn,
+                    entry_id=entry_id,
+                    content=content,
+                    reasoning=reasoning,
+                    mode=mode,
+                    date=date,
+                    tags=tags,
+                )
+                if content is not None or reasoning is not None:
+                    row_data = await entry_repo.get_text(conn, entry_id)
+        except EntryNotFoundError:
             return not_found("Entry", entry_id)
 
-        # Re-index with updated content
-        row = storage.get_entry_with_topic(entry_id)
-        if row:
-            index.upsert_entry(
-                entry_id=entry_id,
-                topic=row["path"],
-                title=row["title"],
-                date=row["date"],
-                content=row["content"],
-                reasoning=row["reasoning"],
-                tags=json.loads(row["tags"] or "[]"),
-            )
-            # Remove all embeddings for this entry (current + stale from
-            # prior content), then store fresh embedding.
-            hard_delete_by_entry_id(memory_service, entry_id)
-            if await _embed_entry(
-                entry_id,
-                row["content"],
-                topic=row["path"],
-                date=row["date"],
-                tags=json.loads(row["tags"] or "[]"),
-            ):
-                storage.mark_entry_indexed(entry_id)
+        # Re-embed if text changed: encode outside any connection, then store+mark in one.
+        if row_data:
+            import asyncio  # noqa: PLC0415
+
+            embed_text = (row_data[0] or "") + " " + (row_data[1] or "")
+            try:
+                embedding = await asyncio.to_thread(
+                    app_ctx.embedding_service.encode, embed_text.strip()
+                )
+                async with app_ctx.pool.acquire() as conn:
+                    await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
+                    await entry_repo.mark_indexed(conn, entry_id)
+            except Exception as e:
+                logger.warning("Failed to embed updated entry %s: %s", entry_id, e, exc_info=True)
 
         result: dict[str, Any] = {
             "status": "updated",
             "entry_id": entry_id,
             "mode": mode,
         }
+        notes = []
         if date and is_future_date(date):
-            result["note"] = "Date is in the future"
+            notes.append("Date is in the future")
+        if tags_dropped:
+            notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
+        if notes:
+            result["note"] = "; ".join(notes)
         return result
 
     @mcp.tool()
@@ -340,17 +318,12 @@ def register(
         Returns:
             Confirmation with deleted entry_id.
         """
-
         try:
-            storage.delete_entry(entry_id)
-        except IndexError:
+            async with app_ctx.pool.acquire() as conn, conn.transaction():
+                # delete_entry soft-deletes the entry and removes its embedding
+                await entry_repo.delete(conn, entry_id)
+        except EntryNotFoundError:
             return not_found("Entry", entry_id)
-
-        # Remove from FTS5 index
-        index.remove_entry(entry_id)
-
-        # Remove all semantic embeddings for this entry (current + stale)
-        hard_delete_by_entry_id(memory_service, entry_id)
 
         return {
             "status": "deleted",

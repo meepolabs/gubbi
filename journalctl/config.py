@@ -25,22 +25,35 @@ class Settings(BaseSettings):
     # OAuth — empty owner_password_hash disables OAuth endpoints
     server_url: str = "http://localhost:8100"
     owner_password_hash: str = ""
-    oauth_db_path: Path = Path("./oauth.db")
+    oauth_db_path: Path = Path("./data/oauth.db")
     oauth_access_token_ttl: int = 3600  # 1 hour
     oauth_refresh_token_ttl: int = 2592000  # 30 days
     oauth_auth_code_ttl: int = 300  # 5 minutes
 
-    # Paths — override via JOURNAL_JOURNAL_ROOT / JOURNAL_DB_PATH
+    # Database — PostgreSQL connection string
+    database_url: str = "postgresql://journal:journal@localhost:5432/journal"
+
+    @field_validator("database_url")
+    @classmethod
+    def validate_database_url(cls, v: str) -> str:
+        if v == "postgresql://journal:journal@localhost:5432/journal":
+            raise ValueError(
+                "JOURNAL_DATABASE_URL is not set — refusing to start with default credentials"
+            )
+        return v
+
+    # Paths — override via JOURNAL_JOURNAL_ROOT
     journal_root: Path = Path("./journal")
-    db_path: Path = Path("./journal.db")
+
+    # Timezone — controls the "today" default for journal_append_entry and
+    # journal_save_conversation when no explicit date is provided.
+    # Set via JOURNAL_TIMEZONE (e.g. America/Los_Angeles). Defaults to UTC.
+    timezone: str = "UTC"
 
     # Server
     host: str = "0.0.0.0"  # noqa: S104 — bind all interfaces for Docker
     port: int = 8100
     transport: str = "streamable-http"  # or "stdio"
-
-    # Memory service (semantic memory via mcp-memory-service)
-    memory_db_path: Path = Path("./memory.db")
 
     # Logging
     log_level: str = "info"

@@ -3,52 +3,51 @@
 from pathlib import Path
 from typing import Any
 
+import asyncpg
 import pytest
-
-# We test tools by calling the registered async functions directly.
-# FastMCP registers them as coroutines, so we invoke them the same way.
+import structlog
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import get_settings
-from journalctl.storage.database import DatabaseStorage
-from journalctl.storage.search_index import SearchIndex
+from journalctl.core.context import AppContext
 from journalctl.tools.registry import register_tools
 
 
-class _StubMemoryService:
-    """Minimal stub for memory_service in tool tests."""
+class _StubEmbeddingService:
+    """Minimal stub for EmbeddingService in tool tests.
 
-    async def store_memory(self, content: str, **kwargs: Any) -> dict[str, Any]:
-        return {"content_hash": "a" * 64, "status": "stored"}
+    encode() returns a zero vector; store/search do nothing.
+    This keeps tool tests fast and free of ONNX model downloads.
+    """
 
-    async def retrieve_memories(self, query: str, **kwargs: Any) -> dict[str, Any]:
-        return {"memories": []}
+    def encode(self, text: str) -> list[float]:
+        return [0.0] * 384
 
-    async def search_by_tag(self, tags: Any, **kwargs: Any) -> dict[str, Any]:
-        return {"memories": []}
-
-    async def list_memories(self, **kwargs: Any) -> dict[str, Any]:
-        return {"memories": [], "total": 0}
-
-    async def delete_memory(self, content_hash: str, **kwargs: Any) -> dict[str, Any]:
-        return {"status": "deleted"}
-
-    async def health_check(self) -> dict[str, Any]:
-        return {"status": "ok"}
-
-    async def close(self) -> None:
+    async def store(self, conn: Any, entry_id: int, text: str) -> None:
         pass
+
+    async def search(
+        self,
+        conn: Any,
+        text: str,
+        limit: int = 10,
+        topic_ids: list[int] | None = None,
+    ) -> list[dict]:
+        return []
 
 
 @pytest.fixture
-def mcp_server(
-    storage: DatabaseStorage,
-    index: SearchIndex,
-) -> FastMCP:
-    """Create an MCP server with all tools registered."""
+def mcp_server(clean_pool: asyncpg.Pool, tmp_journal: Path) -> FastMCP:
+    """Create an MCP server with all tools registered against a test pool."""
     settings = get_settings()
+    app_ctx = AppContext(
+        pool=clean_pool,
+        embedding_service=_StubEmbeddingService(),  # type: ignore[arg-type]
+        settings=settings,
+        logger=structlog.get_logger("test"),
+    )
     mcp = FastMCP("test-journalctl")
-    register_tools(mcp, storage, index, settings, memory_service=_StubMemoryService())
+    register_tools(mcp, app_ctx)
     return mcp
 
 
@@ -64,7 +63,6 @@ def tools(mcp_server: FastMCP) -> dict:
 class TestAppendAndRead:
     """journal_append_entry and journal_read_topic round-trip."""
 
-    @pytest.mark.asyncio
     async def test_append_and_read(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         result = await tools["journal_append_entry"](
@@ -74,7 +72,6 @@ class TestAppendAndRead:
             date="2025-06-01",
         )
         assert result["status"] == "appended"
-        assert result["entry_count"] == 1
         assert "entry_id" in result
 
         result = await tools["journal_read_topic"](topic="work/acme")
@@ -82,13 +79,12 @@ class TestAppendAndRead:
         assert "Got the offer today." in result["entries"][0]["content"]
         assert result["entries"][0]["id"] is not None
 
-    @pytest.mark.asyncio
     async def test_append_with_reasoning(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/decision", title="Work Decisions")
         result = await tools["journal_append_entry"](
             topic="work/decision",
-            content="Chose SQLite as canonical storage.",
-            reasoning="Markdown has no stable IDs; SQLite enables relationships.",
+            content="Chose PostgreSQL as canonical storage.",
+            reasoning="SQLite had no async driver; PostgreSQL enables concurrency.",
             tags=["decision"],
         )
         assert result["status"] == "appended"
@@ -96,10 +92,9 @@ class TestAppendAndRead:
         read = await tools["journal_read_topic"](topic="work/decision")
         assert (
             read["entries"][0]["reasoning"]
-            == "Markdown has no stable IDs; SQLite enables relationships."
+            == "SQLite had no async driver; PostgreSQL enables concurrency."
         )
 
-    @pytest.mark.asyncio
     async def test_read_recent_entries(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/recent", title="Test Recent")
         await tools["journal_append_entry"](
@@ -120,7 +115,6 @@ class TestAppendAndRead:
 class TestSearch:
     """journal_search."""
 
-    @pytest.mark.asyncio
     async def test_search_finds_entry(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         await tools["journal_append_entry"](
@@ -133,33 +127,26 @@ class TestSearch:
         assert result["total"] >= 1
         assert any("work/acme" in r["topic"] for r in result["results"])
 
-    @pytest.mark.asyncio
     async def test_search_no_results(self, tools: dict) -> None:
         result = await tools["journal_search"](query="xyznonexistent123")
         assert result["total"] == 0
 
-    @pytest.mark.asyncio
     async def test_search_rejects_invalid_date_from(self, tools: dict) -> None:
         result = await tools["journal_search"](query="anything", date_from="not-a-date")
         assert result.get("error_code") == "INVALID_DATE"
 
-    @pytest.mark.asyncio
     async def test_search_rejects_invalid_date_to(self, tools: dict) -> None:
-        # "2025-13-01" passes the YYYY-MM-DD regex but fails strptime (month 13 is invalid)
         result = await tools["journal_search"](query="anything", date_to="2025-13-01")
         assert result.get("error_code") == "INVALID_DATE"
 
-    @pytest.mark.asyncio
     async def test_search_limit_is_capped(self, tools: dict) -> None:
         result = await tools["journal_search"](query="anything", limit=99999)
-        # Should not raise; limit is silently capped
         assert isinstance(result["results"], list)
 
 
 class TestConversationFlow:
     """journal_save_conversation end-to-end."""
 
-    @pytest.mark.asyncio
     async def test_save_and_list(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         result = await tools["journal_save_conversation"](
@@ -178,7 +165,6 @@ class TestConversationFlow:
         listed = await tools["journal_list_conversations"](topic_prefix="work")
         assert listed["total"] == 1
 
-    @pytest.mark.asyncio
     async def test_save_returns_conversation_id(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="hobbies/running", title="Running")
         result = await tools["journal_save_conversation"](
@@ -193,16 +179,13 @@ class TestConversationFlow:
         assert "conversation_id" in result
         assert isinstance(result["conversation_id"], int)
 
-    @pytest.mark.asyncio
     async def test_resave_updates(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/resave", title="Test Resave")
         msgs_v1 = [
             {"role": "user", "content": "V1 question"},
             {"role": "assistant", "content": "V1 answer"},
         ]
-        msgs_v2 = [
-            {"role": "user", "content": "V1 question"},
-            {"role": "assistant", "content": "V1 answer"},
+        msgs_v2 = msgs_v1 + [
             {"role": "user", "content": "V2 followup"},
             {"role": "assistant", "content": "V2 answer"},
         ]
@@ -225,13 +208,11 @@ class TestConversationFlow:
 class TestTopicManagement:
     """journal_list_topics and journal_create_topic."""
 
-    @pytest.mark.asyncio
     async def test_create_and_list(self, tools: dict) -> None:
         await tools["journal_create_topic"](
             topic="projects/alpha",
             title="Project Alpha",
             description="First project.",
-            tags=["projects"],
         )
         await tools["journal_create_topic"](
             topic="projects/beta",
@@ -246,7 +227,6 @@ class TestTopicManagement:
 class TestTimeline:
     """journal_timeline and journal_briefing."""
 
-    @pytest.mark.asyncio
     async def test_timeline_this_week(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/timeline", title="Test Timeline")
         await tools["journal_append_entry"](topic="test/timeline", content="Today's entry.")
@@ -254,16 +234,12 @@ class TestTimeline:
         result = await tools["journal_timeline"](period="this-week")
         assert result["count"] >= 1
 
-    @pytest.mark.asyncio
     async def test_briefing(self, tools: dict, tmp_journal: Path) -> None:
         await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
         await tools["journal_append_entry"](topic="work/acme", content="Working on the project.")
 
         profile_path = tmp_journal / "knowledge" / "user-profile.md"
-        profile_path.write_text(
-            "# User Profile\n\nSoftware engineer.",
-            encoding="utf-8",
-        )
+        profile_path.write_text("# User Profile\n\nSoftware engineer.", encoding="utf-8")
 
         result = await tools["journal_briefing"]()
         assert "Software engineer" in result["user_profile"]
@@ -274,11 +250,12 @@ class TestTimeline:
 class TestReindex:
     """journal_reindex."""
 
-    @pytest.mark.asyncio
     async def test_reindex(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="test/reindex", title="Test Reindex")
         await tools["journal_append_entry"](topic="test/reindex", content="Indexed entry.")
 
         result = await tools["journal_reindex"]()
         assert result["status"] == "rebuilt"
-        assert result["documents_indexed"] >= 1
+        # With stub embedding service, embeddings_generated may be 0 (store() is a no-op)
+        assert "embeddings_generated" in result
+        assert "duration_seconds" in result

@@ -4,18 +4,18 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.context import AppContext
 from journalctl.core.validation import (
     sanitize_freetext,
     sanitize_label,
-    validate_date,
     validate_topic,
 )
-from journalctl.storage.database import DatabaseStorage
+from journalctl.storage.repositories import topics as topic_repo
 from journalctl.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
-from journalctl.tools.errors import already_exists, invalid_date, invalid_topic, validation_error
+from journalctl.tools.errors import already_exists, invalid_topic, validation_error
 
 
-def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
+def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register topic tools on the MCP server."""
 
     @mcp.tool()
@@ -47,8 +47,10 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
-        total = storage.count_topics(topic_prefix=topic_prefix)
-        page = storage.list_topics(topic_prefix=topic_prefix, limit=limit, offset=offset)
+        async with app_ctx.pool.acquire() as conn:
+            page, total = await topic_repo.list_all(
+                conn, topic_prefix=topic_prefix, limit=limit, offset=offset
+            )
         return {
             "topics": [t.model_dump() for t in page],
             "total": total,
@@ -61,7 +63,6 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
         topic: str,
         title: str,
         description: str = "",
-        created_at: str | None = None,
     ) -> dict[str, Any]:
         """Create a new journal topic for an area of the user's life not yet tracked.
         e.g., "I want to start tracking my fitness" or "make a topic for the house renovation."
@@ -75,13 +76,11 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
                    Max 2 levels, lowercase alphanumeric with hyphens.
             title: Human-readable title (max 100 characters).
             description: One-line description of this topic (max 500 characters).
-            created_at: Optional creation date (YYYY-MM-DD format).
 
         Returns:
             Confirmation with topic (path), topic_id, and normalized_from if
             the path was auto-corrected from the input.
         """
-
         original_topic = topic
         try:
             topic = validate_topic(topic)
@@ -92,18 +91,14 @@ def register(mcp: FastMCP, storage: DatabaseStorage) -> None:
             return validation_error("title cannot be empty after sanitization")
         if description:
             description = sanitize_freetext(description, max_len=500)
-        if created_at:
-            try:
-                validate_date(created_at)
-            except ValueError:
-                return invalid_date(created_at)
         try:
-            topic_id = storage.create_topic(
-                topic=topic,
-                title=title,
-                description=description,
-                created_at=created_at,
-            )
+            async with app_ctx.pool.acquire() as conn:
+                topic_id = await topic_repo.create(
+                    conn,
+                    topic=topic,
+                    title=title,
+                    description=description,
+                )
         except ValueError:
             return already_exists(topic)
         result: dict[str, Any] = {

@@ -8,19 +8,19 @@ JSON output through a shared ProcessorFormatter.
 import logging
 import os
 from logging import handlers
-from typing import Any
 
 import structlog
+from structlog.types import EventDict, WrappedLogger
 
 LOG_ROTATE_WHEN = os.getenv(key="LOG_ROTATE_WHEN", default="W6")
 LOG_ROTATE_BACKUP = int(os.getenv(key="LOG_ROTATE_BACKUP", default="4"))
 
 
 def _safe_add_logger_name(
-    logger: Any,
-    method_name: str,
-    event_dict: dict[str, Any],
-) -> dict[str, Any]:
+    logger: WrappedLogger,
+    method: str,
+    event_dict: EventDict,
+) -> EventDict:
     """Like add_logger_name but handles None logger.
 
     The MCP SDK's internal loggers pass records through the
