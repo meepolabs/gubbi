@@ -19,12 +19,15 @@ fi
 chown -R appuser:appuser /src /app/logs /home/appuser/.cache 2>/dev/null || true
 
 # Pre-download ONNX model as appuser before gunicorn workers start.
-# Without this, both workers race to download simultaneously and one gets
-# a corrupted archive. Running once here serializes the download.
+# Without --preload, each worker would try to download concurrently.
+# Running EmbeddingService() here serializes the download to disk cache
+# so all workers find the model already present on startup.
+# Exit with non-zero status on failure so Docker can restart the container
+# rather than starting a degraded server with no embedding capability.
 gosu appuser python -c "
-from mcp_memory_service.embeddings.onnx_embeddings import ONNXEmbeddingModel
-ONNXEmbeddingModel()
-" 2>&1 || true
+from journalctl.storage.embedding_service import EmbeddingService
+EmbeddingService()
+" 2>&1
 
 # Drop privileges and run the CMD
 exec gosu appuser "$@"

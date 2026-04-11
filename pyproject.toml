@@ -19,30 +19,20 @@ mcp = "^1.26.0"
 python-frontmatter = "^1.1.0"
 filelock = "^3.16.0"
 bcrypt = "^5.0.0"
-# mcp-memory-service runtime deps (installed --no-deps in Docker to skip torch/sentence-transformers).
-# This list is the full mcp-memory-service dependency set minus:
-#   torch, sentence-transformers  — too heavy (~2.7 GB), ONNX path used instead
-#   build                         — build-time only, not needed at runtime
-#   mcp, fastapi, uvicorn         — already above
-#   tokenizers, python-dotenv, chardet — already above
+# PostgreSQL async driver + pgvector extension codec
+asyncpg = "^0.30.0"
+pgvector = "^0.3.6"
+# ONNX embeddings (all-MiniLM-L6-v2, CPU-only, ~80MB)
 onnxruntime = ">=1.14.1"
 tokenizers = ">=0.22.2"
-sqlite-vec = ">=0.1.0"
 numpy = ">=1.24.0"
 python-dotenv = ">=1.0.0"
 chardet = ">=5.0.0,<6.0.0"
 requests = ">=2.33.0"
-aiosqlite = ">=0.20.0"
-aiohttp = ">=3.13.3"
-aiofiles = ">=23.2.1"
 python-multipart = ">=0.0.22"
 sse-starlette = ">=2.1.0"
-psutil = ">=5.9.0"
-zeroconf = ">=0.130.0"
-pypdf = ">=6.9.1"
 click = ">=8.0.0"
 httpx = ">=0.24.0"
-apscheduler = ">=3.11.0"
 authlib = ">=1.6.9"
 PyJWT = {version = ">=2.12.0", extras = ["crypto"]}
 cryptography = ">=46.0.6"
@@ -54,6 +44,7 @@ pytest-cov = "^6.0.0"
 pre-commit = "^3.5.0"
 ruff = "^0.8.0"
 mypy = "^1.13.0"
+types-requests = ">=2.32.0"
 
 [build-system]
 requires = ["poetry-core>=1.0.0"]
@@ -68,10 +59,10 @@ select = ["E", "F", "B", "I", "N", "UP", "ANN", "S", "A", "C4", "T20", "PT", "RE
 ignore = ["ANN401"]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**/*.py" = ["S101", "PT011", "S105", "S106", "S107"]
-"scripts/**/*.py" = ["T201", "S112", "N806", "E501"]
-"storage/database.py" = ["S101", "E501"]
+"tests/**/*.py" = ["S101", "PT011", "S105", "S106", "S107", "ANN", "E501"]
 "journalctl/storage/database.py" = ["S101", "E501"]
+"journalctl/storage/conversations.py" = ["E501"]
+"journalctl/storage/embedding_service.py" = ["ANN"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["journalctl"]
@@ -91,3 +82,4 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_functions = "test_*"
 asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "session"

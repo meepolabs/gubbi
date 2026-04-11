@@ -29,12 +29,6 @@ COPY poetry.lock pyproject.toml ./
 # Install runtime deps — versions and hashes locked via poetry.lock
 RUN poetry install --only main
 
-# Install mcp-memory-service from PyPI, exact version + sha256 hash verified.
-# --no-deps: skips torch/sentence-transformers (2.7GB); lightweight deps
-# are provided by the Poetry install above (onnxruntime, tokenizers, sqlite-vec).
-# To upgrade: bump version, update hash from https://pypi.org/pypi/mcp-memory-service/<ver>/json
-COPY deployment/requirements-memory.txt ./
-RUN pip install --no-deps --require-hashes -r requirements-memory.txt
 
 RUN adduser --disabled-password --gecos "" appuser && \
     mkdir -p /app/logs /app/journal
@@ -57,10 +51,11 @@ EXPOSE 8100
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8100/health || exit 1
 
-# --preload loads app once in master, workers share model memory via fork (copy-on-write).
+# No --preload: asyncpg pools must not be shared across os.fork().
+# Each worker creates its own pool independently (2 workers × min_size=2 = 4 connections).
+# ONNX model is pre-downloaded by entrypoint.sh; each worker loads from disk cache.
 CMD ["gunicorn", "journalctl.main:server", \
     "--workers", "2", \
-    "--preload", \
     "--worker-class", "uvicorn.workers.UvicornWorker", \
     "--bind", "0.0.0.0:8100", \
     "--timeout", "300", \
