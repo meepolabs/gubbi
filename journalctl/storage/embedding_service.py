@@ -25,8 +25,8 @@ _EMBEDDING_DIM = 384
 # HuggingFace direct download URLs
 _HF_BASE = f"https://huggingface.co/{_MODEL_REPO}/resolve/main"
 _TOKENIZER_URL = f"{_HF_BASE}/tokenizer.json"
-_MODEL_URL = f"{_HF_BASE}/onnx/model_quantized.onnx"
-_MODEL_URL_FALLBACK = f"{_HF_BASE}/onnx/model.onnx"
+_MODEL_URL = f"{_HF_BASE}/onnx/model_O2.onnx"
+_MODEL_URL_FALLBACK = f"{_HF_BASE}/onnx/model_O1.onnx"
 
 
 def _download_file(url: str, dest: Path) -> bool:

@@ -15,8 +15,11 @@ if [ "$MOUNT_UID" != "0" ]; then
     groupmod -g "$MOUNT_GID" appuser 2>/dev/null || true
 fi
 
+# Ensure journal subdirectories exist before appuser needs them
+mkdir -p /app/journal/knowledge /app/journal/conversations_json /app/logs
+
 # Fix ownership of app-internal directories (including ONNX model volume)
-chown -R appuser:appuser /src /app/logs /home/appuser/.cache 2>/dev/null || true
+chown -R appuser:appuser /src /app/journal /app/logs /home/appuser/.cache 2>/dev/null || true
 
 # Pre-download ONNX model as appuser before gunicorn workers start.
 # Without --preload, each worker would try to download concurrently.
