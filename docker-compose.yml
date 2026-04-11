@@ -1,11 +1,33 @@
 # Host environment must provide:
-#   JOURNAL_API_KEY    — Bearer token for MCP auth
-#   JOURNAL_TIMEZONE   — e.g. America/Los_Angeles
+#   JOURNAL_API_KEY           — Bearer token for MCP auth
+#   JOURNAL_POSTGRES_PASSWORD — PostgreSQL password
+#   JOURNAL_TIMEZONE          — e.g. America/Los_Angeles
 #
 # Set these via Doppler, .env file, or export before running docker compose.
-# Journal data (journal.db, memory.db, conversations_json/) lives in ./data/
+#
+# Local bind mounts under ./data/ — data survives `docker compose down -v`:
+#   ./data/journal/   — conversations_json/, knowledge/
+#   ./data/postgres/  — PostgreSQL WAL and data files
+#   ./data/onnx/      — cached ONNX model (avoid re-download on recreate)
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: journalctl-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: journal
+      POSTGRES_USER: journal
+      POSTGRES_PASSWORD: ${JOURNAL_POSTGRES_PASSWORD}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./deployment/init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U journal -d journal"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   journalctl:
     container_name: journalctl
     build:
@@ -13,12 +35,15 @@ services:
       dockerfile: deployment/Dockerfile
     image: journalctl:latest
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "127.0.0.1:8100:8100"
     environment:
       - JOURNAL_API_KEY
+      - JOURNAL_DATABASE_URL=postgresql://journal:${JOURNAL_POSTGRES_PASSWORD}@postgres:5432/journal
       - JOURNAL_JOURNAL_ROOT=/app/journal
-      - JOURNAL_DB_PATH=/app/journal/journal.db
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
@@ -27,14 +52,10 @@ services:
       - JOURNAL_SERVER_URL
       - JOURNAL_OWNER_PASSWORD_HASH
       - JOURNAL_OAUTH_DB_PATH
-      # Memory service
-      - JOURNAL_MEMORY_ENABLED=true
-      - JOURNAL_MEMORY_DB_PATH=/app/journal/memory.db
-      - MCP_CUSTOM_MEMORY_TYPES
     volumes:
-      - ./data:/app/journal
+      - ./data/journal:/app/journal
       - ./logs:/app/logs
-      - onnx-model-cache:/home/appuser/.cache/mcp_memory
+      - ./data/onnx:/home/appuser/.cache/journalctl
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
       interval: 30s
@@ -43,9 +64,6 @@ services:
     deploy:
       resources:
         limits:
-          memory: 1024M   # gunicorn 2 workers + ONNX model (~80MB) + sqlite-vec
+          memory: 1024M
         reservations:
-          memory: 512M    # baseline without cached embeddings
-
-volumes:
-  onnx-model-cache:
+          memory: 512M
