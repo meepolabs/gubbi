@@ -295,6 +295,7 @@ async def get_by_date_range(
     date_from: str,
     date_to: str,
     limit: int | None = None,
+    ascending: bool = True,
 ) -> list[dict]:
     """Get entries and conversations updated within a date range.
 
@@ -302,12 +303,10 @@ async def get_by_date_range(
     Returns lightweight dicts (no reasoning for brevity).
     Single UNION ALL query — one round-trip to the database.
 
-    When limit is provided, returns the most recent N items (ORDER BY DESC)
-    so callers avoid fetching the full week when only a tail is needed.
-    Results are still returned in ascending order regardless.
+    ascending=True  (default): oldest-first — use for timeline/date-range views.
+    ascending=False: newest-first — use with limit for briefing (most-recent N).
     """
-    # Use DESC + LIMIT when a cap is requested, ASC otherwise (timeline needs full set)
-    order = "DESC" if limit is not None else "ASC"
+    order = "ASC" if ascending else "DESC"
     limit_clause = f"LIMIT {limit}" if limit is not None else ""
     rows = await conn.fetch(
         f"""
@@ -387,16 +386,19 @@ async def get_stats(conn: asyncpg.Connection) -> dict[str, int]:
         """
         SELECT
             (SELECT COUNT(*) FROM entries WHERE deleted_at IS NULL) AS entry_count,
-            (SELECT COUNT(*) FROM conversations)                    AS conv_count
+            (SELECT COUNT(*) FROM conversations)                    AS conv_count,
+            (SELECT COUNT(*) FROM topics)                           AS topic_count
         """
     )
     if row is None:
-        return {"total_documents": 0, "conversations": 0}
+        return {"total_documents": 0, "conversations": 0, "topics": 0}
     entry_count = int(row["entry_count"] or 0)
     conv_count = int(row["conv_count"] or 0)
+    topic_count = int(row["topic_count"] or 0)
     return {
         "total_documents": entry_count + conv_count,
         "conversations": conv_count,
+        "topics": topic_count,
     }
 
 

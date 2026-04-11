@@ -134,7 +134,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "entry_id": entry_id,
         }
         notes = []
-        if date and is_future_date(date):
+        if date and is_future_date(date, app_ctx.settings.timezone):
             notes.append("Date is in the future")
         if tags_dropped:
             notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
@@ -293,7 +293,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "mode": mode,
         }
         notes = []
-        if date and is_future_date(date):
+        if date and is_future_date(date, app_ctx.settings.timezone):
             notes.append("Date is in the future")
         if tags_dropped:
             notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")

@@ -1,7 +1,6 @@
 """Input validation and sanitization utilities."""
 
 import re
-from datetime import date as date_cls
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -109,9 +108,14 @@ def local_today(timezone: str = "UTC") -> str:
     return datetime.now(tz).date().isoformat()
 
 
-def is_future_date(value: str) -> bool:
-    """Return True if the YYYY-MM-DD string is after today."""
-    return datetime.strptime(value, "%Y-%m-%d").date() > date_cls.today()
+def is_future_date(value: str, timezone: str = "UTC") -> bool:
+    """Return True if the YYYY-MM-DD string is after today in the given timezone."""
+    try:
+        tz = ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, KeyError):
+        tz = ZoneInfo("UTC")
+    today = datetime.now(tz).date()
+    return datetime.strptime(value, "%Y-%m-%d").date() > today
 
 
 def slugify(text: str) -> str:

@@ -150,7 +150,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         key_facts: list[dict] = []
         async with app_ctx.pool.acquire() as conn:
             week_entries = await entry_repo.get_by_date_range(
-                conn, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES
+                conn, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES, ascending=False
             )
             all_topics, topic_count = await topic_repo.list_all(conn, limit=BRIEFING_MAX_TOPICS)
             stats = await entry_repo.get_stats(conn)
@@ -182,9 +182,6 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             if e.get("conversation_id") is not None:
                 entry["conversation_id"] = e["conversation_id"]
             clean_entries.append(entry)
-
-        # SQL returned DESC order (limit was set); reverse to most-recent-first
-        clean_entries = list(reversed(clean_entries))
 
         return {
             "user_profile": profile,
