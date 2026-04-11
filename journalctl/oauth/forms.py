@@ -30,6 +30,19 @@ LoginHandler = Callable[[Request], Coroutine[Any, Any, Response]]
 
 logger = logging.getLogger("journalctl.oauth.forms")
 
+_MAX_FAILURES = 10
+_LOCKOUT_WINDOW = 300  # seconds
+_failure_timestamps: list[float] = []
+
+
+def _is_rate_limited() -> bool:
+    """Return True if too many failures occurred in the lockout window."""
+    now = time.time()
+    cutoff = now - _LOCKOUT_WINDOW
+    # Discard old entries in-place
+    _failure_timestamps[:] = [t for t in _failure_timestamps if t > cutoff]
+    return len(_failure_timestamps) >= _MAX_FAILURES
+
 
 def create_login_handler(
     storage: OAuthStorage,
@@ -55,6 +68,12 @@ def create_login_handler(
                 secure_cookies=secure_cookies,
             )
 
+        # POST: rate-limit check before any work
+        if _is_rate_limited():
+            client_host = request.client.host if request.client else "unknown"
+            logger.warning("Login rate limit reached, rejecting request from %s", client_host)
+            return HTMLResponse("Too many failed attempts. Try again later.", status_code=429)
+
         # POST: verify CSRF token first
         form = await request.form()
         form_csrf = str(form.get("csrf_token", ""))
@@ -71,11 +90,24 @@ def create_login_handler(
         scope = str(form.get("scope", ""))
         password = str(form.get("password", ""))
 
+        # Validate client exists and redirect_uri is registered before touching credentials
+        client = storage.get_client(client_id)
+        if client is None:
+            logger.warning("Unknown client_id in login form: %s", client_id)
+            return HTMLResponse("Invalid client", status_code=400)
+        registered_uris = [str(u) for u in (client.redirect_uris or [])]
+        if redirect_uri not in registered_uris:
+            logger.warning(
+                "Unregistered redirect_uri '%s' for client '%s'", redirect_uri, client_id
+            )
+            return HTMLResponse("Invalid redirect_uri", status_code=400)
+
         # Verify password
         if not bcrypt.checkpw(
             password.encode("utf-8"),
             owner_password_hash.encode("utf-8"),
         ):
+            _failure_timestamps.append(time.time())
             client_host = request.client.host if request.client else "unknown"
             logger.warning("Failed login attempt from %s", client_host)
             csrf_token = secrets.token_urlsafe(32)

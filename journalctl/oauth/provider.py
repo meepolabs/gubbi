@@ -110,8 +110,6 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             expires_at=now + self.settings.oauth_access_token_ttl,
             resource=resource,
         )
-        self.storage.save_access_token(access_token_str, access_token)
-
         refresh_token_str = secrets.token_urlsafe(32)
         refresh_token = RefreshToken(
             token=refresh_token_str,
@@ -119,9 +117,9 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             scopes=scopes,
             expires_at=now + self.settings.oauth_refresh_token_ttl,
         )
-        self.storage.save_refresh_token(refresh_token_str, refresh_token)
-
-        self.storage.save_token_pair(access_token_str, refresh_token_str)
+        self.storage.save_issued_token_pair(
+            access_token_str, access_token, refresh_token_str, refresh_token
+        )
 
         return OAuthToken(
             access_token=access_token_str,

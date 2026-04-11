@@ -195,6 +195,35 @@ class OAuthStorage:
         )
         self.conn.commit()
 
+    def save_issued_token_pair(
+        self,
+        access_token_str: str,
+        access_token: AccessToken,
+        refresh_token_str: str,
+        refresh_token: RefreshToken,
+    ) -> None:
+        """Atomically persist access token, refresh token, and their pairing.
+
+        All three inserts are wrapped in a single transaction so a crash
+        between saves cannot leave partial state.
+        """
+        with self.conn:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO access_tokens (token, data, created_at) "
+                "VALUES (?, ?, strftime('%s', 'now'))",
+                (access_token_str, access_token.model_dump_json()),
+            )
+            self.conn.execute(
+                "INSERT OR REPLACE INTO refresh_tokens (token, data, created_at) "
+                "VALUES (?, ?, strftime('%s', 'now'))",
+                (refresh_token_str, refresh_token.model_dump_json()),
+            )
+            self.conn.execute(
+                "INSERT INTO token_pairs (access_token, refresh_token, created_at) "
+                "VALUES (?, ?, ?)",
+                (access_token_str, refresh_token_str, int(time.time())),
+            )
+
     def get_paired_refresh_token(self, access_token: str) -> str | None:
         """Get the refresh token paired with an access token."""
         row = self.conn.execute(
@@ -303,6 +332,10 @@ class OAuthStorage:
                 for at in self.get_paired_access_tokens(row["token"]):
                     self.conn.execute(
                         "DELETE FROM access_tokens WHERE token = ?",
+                        (at,),
+                    )
+                    self.conn.execute(
+                        "DELETE FROM token_pairs WHERE access_token = ?",
                         (at,),
                     )
                     deleted += 1
