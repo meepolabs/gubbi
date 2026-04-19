@@ -22,6 +22,11 @@ class Settings(BaseSettings):
             raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
         return v
 
+    # Hydra OAuth 2.0 introspection — empty = disabled
+    hydra_admin_url: str = ""
+    hydra_introspect_timeout: float = 3.0
+    required_oauth_scope: str = "journal"
+
     # OAuth — empty owner_password_hash disables OAuth endpoints
     server_url: str = "http://localhost:8100"
     owner_password_hash: str = ""

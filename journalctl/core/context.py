@@ -27,4 +27,4 @@ class AppContext:
     pool: asyncpg.Pool
     embedding_service: EmbeddingService
     settings: Settings
-    logger: structlog.BoundLogger
+    logger: structlog.stdlib.AsyncBoundLogger

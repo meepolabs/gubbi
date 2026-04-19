@@ -37,3 +37,5 @@ htmlcov/
 Thumbs.db
 
 scripts/
+*.dump
+*.dmp

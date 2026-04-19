@@ -11,12 +11,14 @@ from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
 import asyncpg
+import httpx
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
+from journalctl.auth.hydra import HydraIntrospector, InMemoryHydraCache
 from journalctl.config import Settings, get_settings
 from journalctl.core.context import AppContext
 from journalctl.core.logger import initialize_logger
@@ -31,7 +33,7 @@ from journalctl.tools.registry import register_tools
 class CustomFastAPI(FastAPI):
     """Extended FastAPI with journal-specific attributes."""
 
-    logger: structlog.BoundLogger
+    logger: structlog.stdlib.AsyncBoundLogger
     pool: asyncpg.Pool
     embedding_service: EmbeddingService
     settings: Settings
@@ -125,7 +127,28 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     app.mcp = create_mcp_server(app_ctx)
     mcp_http = app.mcp.streamable_http_app()
-    authed_mcp = BearerAuthMiddleware(mcp_http, token_validator=token_validator)
+
+    # Hydra introspector — optional, activated when JOURNAL_HYDRA_ADMIN_URL is set
+    introspector: HydraIntrospector | None = None
+    hydra_http_client: httpx.AsyncClient | None = None
+    if settings.hydra_admin_url:
+        hydra_http_client = httpx.AsyncClient(timeout=settings.hydra_introspect_timeout)
+        introspector = HydraIntrospector(
+            admin_url=settings.hydra_admin_url,
+            http_client=hydra_http_client,
+            logger=app.logger,
+            cache=InMemoryHydraCache(),
+            timeout_seconds=settings.hydra_introspect_timeout,
+        )
+        await app.logger.info("Hydra introspector ready", admin_url=settings.hydra_admin_url)
+
+    authed_mcp = BearerAuthMiddleware(
+        mcp_http,
+        api_key=settings.api_key,
+        introspector=introspector,
+        required_scope=settings.required_oauth_scope,
+        legacy_token_validator=token_validator,
+    )
     app.mount("/mcp", authed_mcp)
 
     try:
@@ -133,6 +156,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await app.logger.info("Server shutting down")
+        if hydra_http_client is not None:
+            await hydra_http_client.aclose()
         await app.pool.close()
         oauth_storage.close()
 
