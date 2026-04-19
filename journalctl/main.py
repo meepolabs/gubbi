@@ -9,6 +9,7 @@ import asyncio
 import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from uuid import UUID
 
 import asyncpg
 import httpx
@@ -35,9 +36,46 @@ class CustomFastAPI(FastAPI):
 
     logger: structlog.stdlib.AsyncBoundLogger
     pool: asyncpg.Pool
+    admin_pool: asyncpg.Pool | None
     embedding_service: EmbeddingService
     settings: Settings
     mcp: FastMCP
+
+
+async def _resolve_founder_user_id(
+    settings: Settings,
+    pool: asyncpg.Pool,
+    logger: structlog.stdlib.AsyncBoundLogger,
+) -> UUID | None:
+    """Resolve the founder UUID for legacy-auth requests.
+
+    Precedence: JOURNAL_FOUNDER_USER_ID env override > DB lookup by
+    JOURNAL_FOUNDER_EMAIL > None. None is a valid outcome; callers must
+    treat it as "legacy auth unbound".
+    """
+    if settings.founder_user_id is not None:
+        await logger.info("Using founder_user_id from env override")
+        return settings.founder_user_id
+    if not settings.founder_email:
+        return None
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
+            settings.founder_email,
+        )
+    if row is None:
+        await logger.warning(
+            "Founder email not found in users table — legacy auth will be unbound",
+            email=settings.founder_email,
+        )
+        return None
+    resolved = row["id"]
+    await logger.info(
+        "Resolved founder_user_id from DB",
+        email=settings.founder_email,
+        founder_user_id=str(resolved),
+    )
+    return resolved if isinstance(resolved, UUID) else UUID(str(resolved))
 
 
 def create_mcp_server(app_ctx: AppContext) -> FastMCP:
@@ -102,10 +140,37 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     await setup_schema(app.pool)
     await app.logger.info("PostgreSQL pool ready")
 
+    # Admin pool (journal_admin, BYPASSRLS) — optional. Cross-tenant worker paths
+    # (journal_reindex, cleanup) acquire from this pool; user-scoped tool calls
+    # must never touch it. Empty DSN falls back to the runtime pool, which is
+    # fine in single-tenant dev before RLS is live.
+    app.admin_pool = None
+    if settings.database_url_admin:
+        app.admin_pool = await init_pool(settings.database_url_admin)
+        await app.logger.info("Admin PG pool ready (BYPASSRLS)")
+
     # EmbeddingService — ONNX model loaded here before workers fork.
     # entrypoint.sh pre-downloads the model to disk; this just loads it.
     app.embedding_service = EmbeddingService()
     await app.logger.info("EmbeddingService ready")
+
+    # Founder UUID — binds legacy API-key + legacy-OAuth paths to a concrete
+    # tenant so user_scoped_connection works uniformly. Look up against the
+    # admin pool when available so the query bypasses RLS (once 02.05 ships,
+    # the app pool would return zero rows with app.current_user_id unset).
+    # users has no RLS today (migration 0005 only enables it on the 5 tenant
+    # tables), so the app-pool fallback works — warn loudly so the assumption
+    # is visible if users ever gets an RLS policy.
+    if app.admin_pool is None and settings.founder_email:
+        await app.logger.warning(
+            "Founder lookup will use app pool — safe only while users table "
+            "has no RLS policy. Configure JOURNAL_DATABASE_URL_ADMIN for safety."
+        )
+    founder_user_id = await _resolve_founder_user_id(
+        settings,
+        app.admin_pool or app.pool,
+        app.logger,
+    )
 
     # OAuth (stays SQLite — own connection, out of scope for PG migration)
     oauth_storage = OAuthStorage(settings.oauth_db_path)
@@ -123,6 +188,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         embedding_service=app.embedding_service,
         settings=settings,
         logger=app.logger,
+        admin_pool=app.admin_pool,
+        founder_user_id=founder_user_id,
     )
 
     app.mcp = create_mcp_server(app_ctx)
@@ -148,6 +215,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         introspector=introspector,
         required_scope=settings.required_oauth_scope,
         legacy_token_validator=token_validator,
+        founder_user_id=founder_user_id,
     )
     app.mount("/mcp", authed_mcp)
 
@@ -158,6 +226,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         await app.logger.info("Server shutting down")
         if hydra_http_client is not None:
             await hydra_http_client.aclose()
+        if app.admin_pool is not None:
+            await app.admin_pool.close()
         await app.pool.close()
         oauth_storage.close()
 
@@ -205,21 +275,30 @@ def main() -> None:
     if settings.transport == "stdio":
 
         async def _run_stdio() -> None:
+            logger = structlog.get_logger("journalctl")
             pool = await init_pool(settings.database_url)
             await setup_schema(pool)
+            admin_pool: asyncpg.Pool | None = None
+            if settings.database_url_admin:
+                admin_pool = await init_pool(settings.database_url_admin)
             embedding_service = EmbeddingService()
             settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
             settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
+            founder_user_id = await _resolve_founder_user_id(settings, admin_pool or pool, logger)
             app_ctx = AppContext(
                 pool=pool,
                 embedding_service=embedding_service,
                 settings=settings,
-                logger=structlog.get_logger("journalctl"),
+                logger=logger,
+                admin_pool=admin_pool,
+                founder_user_id=founder_user_id,
             )
             mcp = create_mcp_server(app_ctx)
             try:
                 mcp.run(transport="stdio")
             finally:
+                if admin_pool is not None:
+                    await admin_pool.close()
                 await pool.close()
 
         asyncio.run(_run_stdio())

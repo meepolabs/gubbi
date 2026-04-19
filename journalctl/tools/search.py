@@ -1,5 +1,6 @@
 """MCP tool: journal_search (unified tsvector FTS + pgvector semantic)."""
 
+import asyncio
 import logging
 from datetime import date as date_cls
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.context import AppContext
+from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import validate_date, validate_topic
 from journalctl.models.search import SearchResult
 from journalctl.storage.constants import SUMMARY_TRUNCATE_LEN
@@ -83,8 +85,6 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         fts_results: list[SearchResult] = []
         semantic_results: list[SearchResult] = []
 
-        import asyncio  # noqa: PLC0415
-
         try:
             query_embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, query)
         except Exception:
@@ -94,7 +94,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         df = date_cls.fromisoformat(date_from) if date_from else None
         dt = date_cls.fromisoformat(date_to) if date_to else None
 
-        async with app_ctx.pool.acquire() as conn:
+        async with user_scoped_connection(app_ctx.pool) as conn:
             # FTS search — topic prefix and dates filtered in SQL
             fts_results = await search_repo.fts_search(
                 conn, query, topic_prefix, date_from, date_to, limit

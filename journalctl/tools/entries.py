@@ -1,12 +1,14 @@
 """MCP tools: journal_append_entry, journal_read_topic, journal_update_entry,
 journal_delete_entry."""
 
+import asyncio
 import logging
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.context import AppContext
+from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
     is_future_date,
     local_today,
@@ -34,11 +36,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         Encodes outside a DB connection so the pool is free during ONNX inference.
         """
-        import asyncio  # noqa: PLC0415
-
         try:
             embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
-            async with app_ctx.pool.acquire() as conn:
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
             return embedding
         except Exception as e:
@@ -110,7 +110,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         resolved_date = date or local_today(app_ctx.settings.timezone)
 
         try:
-            async with app_ctx.pool.acquire() as conn, conn.transaction():
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 entry_id = await entry_repo.append(
                     conn,
                     topic=topic,
@@ -124,7 +124,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         # Embed after the transaction commits (embedding is best-effort)
         if await _embed_entry(entry_id, content) is not None:
-            async with app_ctx.pool.acquire() as conn:
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 await entry_repo.mark_indexed(conn, entry_id)
 
         result: dict[str, Any] = {
@@ -188,7 +188,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit = max(1, min(limit, MAX_READ_ENTRIES))
         offset = max(0, offset)
         try:
-            async with app_ctx.pool.acquire() as conn:
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 meta, entries, total = await entry_repo.read(
                     conn,
                     topic,
@@ -257,7 +257,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         # Within a transaction, reads see writes from the same transaction (savepoint).
         row_data: tuple[str, str | None] | None = None
         try:
-            async with app_ctx.pool.acquire() as conn, conn.transaction():
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 await entry_repo.update(
                     conn,
                     entry_id=entry_id,
@@ -274,14 +274,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         # Re-embed if text changed: encode outside any connection, then store+mark in one.
         if row_data:
-            import asyncio  # noqa: PLC0415
-
             embed_text = (row_data[0] or "") + " " + (row_data[1] or "")
             try:
                 embedding = await asyncio.to_thread(
                     app_ctx.embedding_service.encode, embed_text.strip()
                 )
-                async with app_ctx.pool.acquire() as conn:
+                async with user_scoped_connection(app_ctx.pool) as conn:
                     await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
                     await entry_repo.mark_indexed(conn, entry_id)
             except Exception as e:
@@ -319,7 +317,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             Confirmation with deleted entry_id.
         """
         try:
-            async with app_ctx.pool.acquire() as conn, conn.transaction():
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 # delete_entry soft-deletes the entry and removes its embedding
                 await entry_repo.delete(conn, entry_id)
         except EntryNotFoundError:

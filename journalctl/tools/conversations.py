@@ -1,12 +1,14 @@
 """MCP tools: journal_save_conversation, journal_list_conversations,
 journal_read_conversation."""
 
+import asyncio
 import logging
 from typing import Any, NotRequired, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.context import AppContext
+from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
     local_today,
     sanitize_freetext,
@@ -149,27 +151,31 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         empty_dropped = len(keepable) - len(parsed_messages)
 
         try:
-            conv_id, saved_summary, is_update, linked_entry_id = await conv_repo.save_conversation(
-                app_ctx.pool,
-                conversations_json_dir=app_ctx.settings.conversations_json_dir,
-                topic=topic,
-                title=title,
-                messages=parsed_messages,
-                summary=summary,
-                source=source,
-                tags=tags,
-                date=resolved_date,
-            )
+            async with user_scoped_connection(app_ctx.pool) as conn:
+                (
+                    conv_id,
+                    saved_summary,
+                    is_update,
+                    linked_entry_id,
+                ) = await conv_repo.save_conversation(
+                    conn,
+                    conversations_json_dir=app_ctx.settings.conversations_json_dir,
+                    topic=topic,
+                    title=title,
+                    messages=parsed_messages,
+                    summary=summary,
+                    source=source,
+                    tags=tags,
+                    date=resolved_date,
+                )
         except TopicNotFoundError:
             return not_found("Topic", topic)
 
         # Embed linked entry after transaction commits (best-effort)
-        import asyncio  # noqa: PLC0415
-
         linked_content = f"Conversation saved: {title}\n\n{summary}"
         try:
             embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, linked_content)
-            async with app_ctx.pool.acquire() as conn:
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 await app_ctx.embedding_service.store_by_vector(conn, linked_entry_id, embedding)
                 await entry_repo.mark_indexed(conn, linked_entry_id)
         except Exception as e:
@@ -226,7 +232,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
-        async with app_ctx.pool.acquire() as conn:
+        async with user_scoped_connection(app_ctx.pool) as conn:
             convs, total = await conv_repo.list_conversations(
                 conn, topic_prefix=topic_prefix, limit=limit, offset=offset
             )
@@ -257,7 +263,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             content (full transcript as markdown), messages_shown, messages_total.
         """
         try:
-            async with app_ctx.pool.acquire() as conn:
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 meta, messages = await conv_repo.read_conversation_by_id(
                     conn, conversation_id, preview=preview
                 )

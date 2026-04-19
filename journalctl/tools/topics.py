@@ -5,6 +5,7 @@ from typing import Any
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.context import AppContext
+from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
     sanitize_freetext,
     sanitize_label,
@@ -47,7 +48,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
-        async with app_ctx.pool.acquire() as conn:
+        async with user_scoped_connection(app_ctx.pool) as conn:
             page, total = await topic_repo.list_all(
                 conn, topic_prefix=topic_prefix, limit=limit, offset=offset
             )
@@ -92,7 +93,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         if description:
             description = sanitize_freetext(description, max_len=500)
         try:
-            async with app_ctx.pool.acquire() as conn:
+            async with user_scoped_connection(app_ctx.pool) as conn:
                 topic_id = await topic_repo.create(
                     conn,
                     topic=topic,

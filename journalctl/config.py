@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from uuid import UUID
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings
@@ -35,7 +36,7 @@ class Settings(BaseSettings):
     oauth_refresh_token_ttl: int = 2592000  # 30 days
     oauth_auth_code_ttl: int = 300  # 5 minutes
 
-    # Database — PostgreSQL connection string
+    # Database — PostgreSQL connection string (runtime role: journal_app, no BYPASSRLS).
     database_url: str = "postgresql://journal:journal@localhost:5432/journal"
 
     @field_validator("database_url")
@@ -46,6 +47,19 @@ class Settings(BaseSettings):
                 "JOURNAL_DATABASE_URL is not set — refusing to start with default credentials"
             )
         return v
+
+    # Admin DSN — role: journal_admin (BYPASSRLS). Used by reindex and cross-tenant ops.
+    # Empty = fall back to the runtime pool (OK in single-tenant dev before RLS is live).
+    database_url_admin: str = ""
+
+    # Founder identity — binds the legacy API key path to a specific user UUID so
+    # user_scoped_connection works uniformly regardless of auth mode. Either:
+    #   1. JOURNAL_FOUNDER_USER_ID (UUID string) — used directly, or
+    #   2. JOURNAL_FOUNDER_EMAIL — resolved against the users table at startup.
+    # When both are empty, legacy API-key requests have no bound user and any
+    # tool call that needs DB access will raise MissingUserIdError.
+    founder_user_id: UUID | None = None
+    founder_email: str = ""
 
     # Paths — override via JOURNAL_JOURNAL_ROOT
     journal_root: Path = Path("./journal")

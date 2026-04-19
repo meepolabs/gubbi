@@ -52,7 +52,20 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Returns:
             Number of embeddings generated and duration.
         """
-        retry_after = await _db_reindex_cooldown(app_ctx.pool)
+        # Reindex rebuilds embeddings for ALL tenants' entries, so it must run
+        # under the BYPASSRLS admin pool. Fallback to app pool is only safe in
+        # single-tenant dev (pre-RLS). Once 02.05 is applied in prod, running
+        # reindex against the app pool would silently process zero rows, so
+        # log a loud warning when the fallback is taken.
+        pool = app_ctx.admin_pool
+        if pool is None:
+            logger.warning(
+                "journal_reindex: admin_pool not configured — falling back to app pool. "
+                "With RLS active this will process zero rows. "
+                "Set JOURNAL_DATABASE_URL_ADMIN (BYPASSRLS DSN) to fix."
+            )
+            pool = app_ctx.pool
+        retry_after = await _db_reindex_cooldown(pool)
         if retry_after is not None:
             return {
                 "status": "cooldown",
@@ -60,7 +73,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 "retry_after": retry_after,
             }
 
-        async with app_ctx.pool.acquire() as lock_conn:
+        async with pool.acquire() as lock_conn:
             acquired = await pg_setup.try_advisory_lock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
             if not acquired:
                 return {
@@ -68,17 +81,17 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     "message": "A reindex is already in progress.",
                 }
             try:
-                return await _run_reindex(app_ctx)
+                return await _run_reindex(app_ctx, pool)
             finally:
                 await pg_setup.advisory_unlock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
 
 
-async def _run_reindex(app_ctx: AppContext) -> dict:
+async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool) -> dict:
     start = time.monotonic()
 
     # tsvector columns are GENERATED ALWAYS — always up-to-date.
     # journal_reindex only needs to rebuild semantic embeddings.
-    async with app_ctx.pool.acquire() as conn:
+    async with pool.acquire() as conn:
         await entry_repo.reset_indexed_at(conn)
 
     embeddings_generated = 0
@@ -87,7 +100,7 @@ async def _run_reindex(app_ctx: AppContext) -> dict:
     semantic_status = "ok"
 
     while True:
-        async with app_ctx.pool.acquire() as conn:
+        async with pool.acquire() as conn:
             batch = await entry_repo.get_unindexed(conn, last_id, REINDEX_BATCH_SIZE)
 
         if not batch:
@@ -100,7 +113,7 @@ async def _run_reindex(app_ctx: AppContext) -> dict:
                 # Encode outside the connection acquire — ONNX inference is CPU-bound
                 # (10-200ms) and should not hold a pool connection during that time.
                 embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
-                async with app_ctx.pool.acquire() as conn:
+                async with pool.acquire() as conn:
                     await app_ctx.embedding_service.store_by_vector(conn, r["id"], embedding)
                 succeeded_ids.append(r["id"])
                 embeddings_generated += 1
@@ -115,7 +128,7 @@ async def _run_reindex(app_ctx: AppContext) -> dict:
 
         # Batch-mark all succeeded entries as indexed in one query
         if succeeded_ids:
-            async with app_ctx.pool.acquire() as conn:
+            async with pool.acquire() as conn:
                 await entry_repo.mark_indexed_batch(conn, succeeded_ids)
 
         last_id = batch[-1]["id"]

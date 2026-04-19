@@ -1,5 +1,6 @@
 """MCP tools: journal_briefing, journal_timeline."""
 
+import asyncio
 import logging
 import re
 from datetime import date, timedelta
@@ -7,6 +8,7 @@ from datetime import date, timedelta
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.context import AppContext
+from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import local_today
 from journalctl.storage import knowledge
 from journalctl.storage.constants import SNIPPET_PREVIEW_LEN
@@ -137,8 +139,6 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         date_from, date_to, label = _resolve_period("this-week", today=_today)
 
         # Encode before acquiring a DB connection — keeps the pool free during inference
-        import asyncio  # noqa: PLC0415
-
         key_facts_embedding: list[float] | None = None
         try:
             key_facts_embedding = await asyncio.to_thread(
@@ -148,7 +148,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             logger.warning("Key facts encoding failed, continuing without", exc_info=True)
 
         key_facts: list[dict] = []
-        async with app_ctx.pool.acquire() as conn:
+        async with user_scoped_connection(app_ctx.pool) as conn:
             week_entries = await entry_repo.get_by_date_range(
                 conn, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES, ascending=False
             )
@@ -222,7 +222,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             date_from, date_to, label = _resolve_period(period, today=_today)
         except ValueError as e:
             return validation_error(str(e))
-        async with app_ctx.pool.acquire() as conn:
+        async with user_scoped_connection(app_ctx.pool) as conn:
             entries = await entry_repo.get_by_date_range(conn, date_from, date_to)
         return {
             "period": period,

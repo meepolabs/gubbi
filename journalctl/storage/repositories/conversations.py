@@ -79,7 +79,7 @@ def _row_to_meta(row: asyncpg.Record) -> ConversationMeta:
 
 
 async def save_conversation(
-    pool: asyncpg.Pool,
+    conn: asyncpg.Connection,
     conversations_json_dir: Path,
     topic: str,
     title: str,
@@ -91,15 +91,22 @@ async def save_conversation(
 ) -> tuple[int, str, bool, int]:
     """Save a conversation. Idempotent — same topic+title overwrites.
 
-    Returns (conversation_id, summary, is_update).
+    The caller MUST supply ``conn`` already inside a transaction — e.g. from
+    ``core.db_context.user_scoped_connection`` — because this function issues
+    multiple writes (upsert conversation, delete/insert messages, upsert
+    linked entry, update topic) that only stay consistent when grouped into
+    one atomic commit.
 
-    Design: JSON archive is written to disk BEFORE the transaction using a
-    UUID filename. This means json_path is known at INSERT time and can be
+    Returns (conversation_id, summary, is_update, linked_entry_id).
+
+    Design: JSON archive is written to disk BEFORE the DB writes using a
+    UUID filename. That way ``json_path`` is known at INSERT time and can be
     committed atomically with the rest of the row — no separate UPDATE needed.
 
     Failure modes:
-    - File write fails → transaction never starts, clean state.
-    - Transaction fails → orphan UUID file on disk, harmless (nothing points to it).
+    - File write fails → DB writes never run, clean state.
+    - Caller's transaction rolls back → orphan UUID file on disk, harmless
+      (nothing points to it).
     """
     topic = validate_topic(topic)
     title = validate_title(title)
@@ -109,14 +116,12 @@ async def save_conversation(
     participants = sorted({m.role for m in messages})
 
     # Pre-check: validate topic exists early and get canonical_created for re-saves.
-    # Outside the transaction — single-user journal, no concurrent write risk.
-    async with pool.acquire() as conn:
-        topic_id = await get_topic_id(conn, topic)
-        existing_row = await conn.fetchrow(
-            "SELECT created_at FROM conversations WHERE topic_id = $1 AND slug = $2",
-            topic_id,
-            slug,
-        )
+    topic_id = await get_topic_id(conn, topic)
+    existing_row = await conn.fetchrow(
+        "SELECT created_at FROM conversations WHERE topic_id = $1 AND slug = $2",
+        topic_id,
+        slug,
+    )
     canonical_created = (
         existing_row["created_at"].date().isoformat() if existing_row else conversation_date
     )
@@ -137,36 +142,35 @@ async def save_conversation(
 
     # --- Phase 2: All DB writes in a single transaction, json_path included ---
     # topic_id already verified and fetched in the pre-check above — no need to re-query.
-    async with pool.acquire() as conn, conn.transaction():
-        conv_id, is_update, existing_msg_count = await _upsert_conversation_record(
-            conn,
-            topic_id,
-            title,
-            slug,
-            source,
-            summary,
-            tags or [],
-            participants,
-            messages,
-            conversation_date,
-            json_path,
-        )
+    conv_id, is_update, existing_msg_count = await _upsert_conversation_record(
+        conn,
+        topic_id,
+        title,
+        slug,
+        source,
+        summary,
+        tags or [],
+        participants,
+        messages,
+        conversation_date,
+        json_path,
+    )
 
-        # Skip delete+reinsert when only metadata changed (same message count).
-        # This avoids deleting and re-inserting potentially thousands of rows
-        # when the caller is just updating the summary or tags.
-        if not is_update or existing_msg_count != len(messages):
-            await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
-            await _insert_messages(conn, conv_id, messages)
-        linked_entry_id = await _upsert_linked_entry(
-            conn, topic_id, conv_id, title, summary, conversation_date, now
-        )
+    # Skip delete+reinsert when only metadata changed (same message count).
+    # This avoids deleting and re-inserting potentially thousands of rows
+    # when the caller is just updating the summary or tags.
+    if not is_update or existing_msg_count != len(messages):
+        await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
+        await _insert_messages(conn, conv_id, messages)
+    linked_entry_id = await _upsert_linked_entry(
+        conn, topic_id, conv_id, title, summary, conversation_date, now
+    )
 
-        await conn.execute(
-            "UPDATE topics SET updated_at = $1 WHERE id = $2",
-            now,
-            topic_id,
-        )
+    await conn.execute(
+        "UPDATE topics SET updated_at = $1 WHERE id = $2",
+        now,
+        topic_id,
+    )
 
     return conv_id, summary, is_update, linked_entry_id
 

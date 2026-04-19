@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import secrets
 from collections.abc import Callable
+from uuid import UUID
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -67,12 +68,19 @@ class BearerAuthMiddleware:
         introspector: HydraIntrospector | None = None,
         required_scope: str = "journal",
         legacy_token_validator: Callable[[str], bool] | None = None,
+        founder_user_id: UUID | None = None,
     ) -> None:
         self.app = app
         self.api_key = api_key
         self.introspector = introspector
         self.required_scope = required_scope
         self.legacy_token_validator = legacy_token_validator
+        # Legacy API-key and legacy-OAuth paths pre-date multi-tenant auth; both
+        # authenticate as "the founder". Binding their requests to this UUID lets
+        # user_scoped_connection set app.current_user_id uniformly across all auth
+        # modes. When None, legacy-authenticated requests reach DB code without a
+        # user binding and MissingUserIdError surfaces as a 500.
+        self.founder_user_id = founder_user_id
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -98,7 +106,7 @@ class BearerAuthMiddleware:
 
         # Mode 1: Legacy API key (timing-safe comparison)
         if secrets.compare_digest(token, self.api_key):
-            await self.app(scope, receive, send)
+            await self._call_with_founder(scope, receive, send)
             return
 
         # Mode 2: Hydra introspection (Ory access tokens)
@@ -117,6 +125,13 @@ class BearerAuthMiddleware:
                 await _forbidden(self.required_scope)(scope, receive, send)
                 return
 
+            # Defense-in-depth: TokenClaims.sub is typed UUID and parsed via UUID(sub_raw)
+            # in HydraIntrospector, but mirror db_context's isinstance guard so a bypass
+            # path (test mock, future cache deserializer) cannot stash a str into the ctxvar.
+            if not isinstance(claims.sub, UUID):
+                await _unauthorized("Invalid or expired token")(scope, receive, send)
+                return
+
             token_reset = current_user_id.set(claims.sub)
             try:
                 await self.app(scope, receive, send)
@@ -126,8 +141,26 @@ class BearerAuthMiddleware:
 
         # Mode 3: Legacy OAuth callback
         if self.legacy_token_validator is not None and self.legacy_token_validator(token):
-            await self.app(scope, receive, send)
+            await self._call_with_founder(scope, receive, send)
             return
 
         # None of the modes accepted the token
         await _unauthorized("Invalid or expired token")(scope, receive, send)
+
+    async def _call_with_founder(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Invoke the wrapped app with current_user_id bound to the founder UUID.
+
+        Used by legacy auth modes (API key, legacy OAuth). When no founder UUID
+        is configured the request passes through without binding; downstream
+        DB code will then raise MissingUserIdError (→ 500). This is intentional
+        fail-loud behaviour — the 500 flags a deployment misconfiguration, it
+        is NOT a silent security bypass.
+        """
+        if self.founder_user_id is None:
+            await self.app(scope, receive, send)
+            return
+        token_reset = current_user_id.set(self.founder_user_id)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            current_user_id.reset(token_reset)
