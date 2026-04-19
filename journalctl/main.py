@@ -22,6 +22,7 @@ from starlette.middleware import Middleware
 from journalctl.auth.hydra import HydraIntrospector, InMemoryHydraCache
 from journalctl.config import Settings, get_settings
 from journalctl.core.context import AppContext
+from journalctl.core.crypto import ContentCipher, load_master_keys_from_env
 from journalctl.core.logger import initialize_logger
 from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
 from journalctl.oauth.router import register_oauth_routes
@@ -39,7 +40,49 @@ class CustomFastAPI(FastAPI):
     admin_pool: asyncpg.Pool | None
     embedding_service: EmbeddingService
     settings: Settings
+    cipher: ContentCipher | None
     mcp: FastMCP
+
+
+async def _build_content_cipher(
+    logger: structlog.stdlib.AsyncBoundLogger,
+) -> ContentCipher | None:
+    """Build ContentCipher from JOURNAL_ENCRYPTION_MASTER_KEY_V* env vars.
+
+    Returns None if no key is configured -- acceptable during Track B
+    pre-02.13; once the repo layer depends on it, a missing cipher
+    surfaces as an explicit startup failure from that wiring, not here.
+    Raises on malformed key material so a misconfigured deploy fails
+    loudly at startup rather than at first encrypt call.
+    """
+    try:
+        master_keys = load_master_keys_from_env()
+    except ValueError as exc:
+        await logger.error(
+            "Content cipher startup failed -- malformed JOURNAL_ENCRYPTION_MASTER_KEY_V*",
+            error=str(exc),
+        )
+        raise
+    if not master_keys:
+        await logger.warning(
+            "Content cipher disabled -- set JOURNAL_ENCRYPTION_MASTER_KEY_V1 "
+            "to enable app-layer encryption (required once 02.13 ships)"
+        )
+        return None
+    try:
+        cipher = ContentCipher(master_keys)
+    except (TypeError, ValueError) as exc:
+        await logger.error(
+            "Content cipher rejected master key material",
+            error=str(exc),
+        )
+        raise
+    await logger.info(
+        "Content cipher ready",
+        versions=sorted(master_keys.keys()),
+        active_version=cipher.active_version,
+    )
+    return cipher
 
 
 async def _resolve_founder_user_id(
@@ -172,6 +215,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         app.logger,
     )
 
+    app.cipher = await _build_content_cipher(app.logger)
+
     # OAuth (stays SQLite — own connection, out of scope for PG migration)
     oauth_storage = OAuthStorage(settings.oauth_db_path)
     _ = oauth_storage.conn
@@ -190,6 +235,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         logger=app.logger,
         admin_pool=app.admin_pool,
         founder_user_id=founder_user_id,
+        cipher=app.cipher,
     )
 
     app.mcp = create_mcp_server(app_ctx)
@@ -285,6 +331,7 @@ def main() -> None:
             settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
             settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
             founder_user_id = await _resolve_founder_user_id(settings, admin_pool or pool, logger)
+            cipher = await _build_content_cipher(logger)
             app_ctx = AppContext(
                 pool=pool,
                 embedding_service=embedding_service,
@@ -292,6 +339,7 @@ def main() -> None:
                 logger=logger,
                 admin_pool=admin_pool,
                 founder_user_id=founder_user_id,
+                cipher=cipher,
             )
             mcp = create_mcp_server(app_ctx)
             try:

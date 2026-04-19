@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from journalctl.config import Settings
+    from journalctl.core.crypto import ContentCipher
     from journalctl.storage.embedding_service import EmbeddingService
 
 
@@ -36,6 +37,11 @@ class AppContext:
     ContextVar when a legacy API-key request is authorised. Resolved during
     lifespan from ``JOURNAL_FOUNDER_USER_ID`` or a DB lookup by
     ``JOURNAL_FOUNDER_EMAIL``. ``None`` disables the legacy-key tenant path.
+
+    ``cipher`` is the app-layer AES-256-GCM content cipher (TASK-02.11).
+    Built from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*`` env vars at startup.
+    ``None`` = no master key configured; required once TASK-02.13 wires
+    repository encrypt/decrypt.
     """
 
     pool: asyncpg.Pool
@@ -44,3 +50,4 @@ class AppContext:
     logger: structlog.stdlib.AsyncBoundLogger
     admin_pool: asyncpg.Pool | None = None
     founder_user_id: UUID | None = None
+    cipher: ContentCipher | None = None
