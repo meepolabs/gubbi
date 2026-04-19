@@ -1,7 +1,9 @@
 """Tests for the OAuth provider."""
 
+import sqlite3
 import time
 
+import pytest
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
@@ -253,3 +255,44 @@ class TestRevocation:
 
         await provider.revoke_token(token)
         assert await provider.load_access_token("revoke-me") is None
+
+
+class TestRotationAtomicity:
+    async def test_rotation_leaves_no_partial_state(self, oauth_storage: OAuthStorage) -> None:
+        """HIGH-1: if rotate_refresh_token fails mid-way, old state must be intact."""
+        provider = _make_provider(oauth_storage)
+        client = _make_client()
+
+        # Seed tokens via normal flow
+        auth_code = AuthorizationCode(
+            code="code-atomic",
+            scopes=["read"],
+            expires_at=time.time() + 300,
+            client_id="test-client",
+            code_challenge="c",
+            redirect_uri="http://localhost/callback",  # type: ignore[arg-type]
+            redirect_uri_provided_explicitly=True,
+        )
+        oauth_storage.save_auth_code("code-atomic", auth_code)
+        loaded = await provider.load_authorization_code(client, "code-atomic")
+        assert loaded is not None
+        initial = await provider.exchange_authorization_code(client, loaded)
+
+        # Monkey-patch storage to raise mid-rotation
+        original = oauth_storage.rotate_refresh_token
+
+        def boom(**kwargs: object) -> None:
+            raise sqlite3.OperationalError("simulated mid-rotation failure")
+
+        oauth_storage.rotate_refresh_token = boom  # type: ignore[assignment]
+        try:
+            refresh = await provider.load_refresh_token(client, initial.refresh_token)  # type: ignore[arg-type]
+            assert refresh is not None
+            with pytest.raises(sqlite3.OperationalError):
+                await provider.exchange_refresh_token(client, refresh, ["read"])
+        finally:
+            oauth_storage.rotate_refresh_token = original  # type: ignore[assignment]
+
+        # Old access + refresh must still be valid
+        assert oauth_storage.get_access_token(initial.access_token) is not None
+        assert oauth_storage.get_refresh_token(initial.refresh_token) is not None  # type: ignore[arg-type]

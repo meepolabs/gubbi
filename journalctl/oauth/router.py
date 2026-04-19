@@ -6,27 +6,31 @@ keeping main.py:lifespan() clean.
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import time
 from collections.abc import Callable
+from typing import Any
 
 from fastapi import FastAPI
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl
+from starlette.requests import Request as StarletteRequest
+from starlette.responses import JSONResponse
 from starlette.routing import Route
 
 from journalctl.config import Settings
-from journalctl.oauth.forms import create_login_handler
+from journalctl.oauth.constants import REGISTER_MAX_ATTEMPTS, REGISTER_WINDOW_SECS
+from journalctl.oauth.forms import client_ip, create_login_handler
 from journalctl.oauth.provider import JournalOAuthProvider
 from journalctl.oauth.storage import OAuthStorage
+
+_logger = logging.getLogger("journalctl.oauth.router")
 
 
 def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], bool]:
     """Build a closure that validates OAuth access tokens."""
-    import logging
-
-    _logger = logging.getLogger("journalctl.oauth.validator")
 
     def validate(token: str) -> bool:
         try:
@@ -40,6 +44,50 @@ def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], bool]:
             return False
 
     return validate
+
+
+def _wrap_register_rate_limit(
+    route: Route,
+    oauth_storage: OAuthStorage,
+) -> None:
+    """Wrap a Starlette Route's ASGI app to rate-limit by client IP.
+
+    The SDK's /register route stores a CORSMiddleware ASGI app as route.app,
+    so the endpoint cannot be called as a simple Starlette handler. We replace
+    route.app with a new ASGI callable that checks rate limits then delegates
+    to the original ASGI app.
+    """
+    original_app = route.app
+
+    async def rate_limited_app(
+        scope: dict[str, Any],
+        receive: Any,
+        send: Any,
+    ) -> None:
+        request = StarletteRequest(scope)
+        ip = client_ip(request)
+        event_key = f"register:{ip}"
+        try:
+            count = oauth_storage.count_rate_limit_events(event_key, REGISTER_WINDOW_SECS)
+        except (sqlite3.Error, ValueError):
+            # Fail safe — reject on storage error rather than allow unrestricted registration
+            response = JSONResponse(
+                {"error": "rate_limit_unavailable"},
+                status_code=503,
+            )
+            await response(scope, receive, send)
+            return
+        if count >= REGISTER_MAX_ATTEMPTS:
+            response = JSONResponse(
+                {"error": "rate_limit_exceeded"},
+                status_code=429,
+            )
+            await response(scope, receive, send)
+            return
+        oauth_storage.record_rate_limit_event(event_key)
+        await original_app(scope, receive, send)
+
+    route.app = rate_limited_app  # type: ignore[assignment]
 
 
 def register_oauth_routes(
@@ -71,6 +119,8 @@ def register_oauth_routes(
         revocation_options=RevocationOptions(enabled=True),
     )
     for route in auth_routes:
+        if isinstance(route, Route) and route.path == "/register":
+            _wrap_register_rate_limit(route, oauth_storage)
         app.routes.insert(0, route)
 
     # Protected resource metadata

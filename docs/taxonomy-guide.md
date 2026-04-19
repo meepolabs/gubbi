@@ -4,7 +4,7 @@ How to organize your journal topics for a system that grows with your life.
 
 ## Topic structure
 
-Topics use 1–2 level paths: `category/subject`. The first level is the **life domain**, the second is the **specific thing**. Topics are stored in SQLite — the paths below represent the namespace, not files on disk.
+Topics use 1–2 level paths: `category/subject`. The first level is the **life domain**, the second is the **specific thing**. Topics are rows in the PostgreSQL `topics` table — the paths below represent the namespace, not files on disk.
 
 ```
 hobbies/running
@@ -47,7 +47,7 @@ travel/trips
 - It's the same ongoing thing. Different aspects of a single project all go in one topic — they're facets of the same subject.
 - The timeline makes more sense together. A fitness journey includes gym sessions, runs, and recovery — they interleave chronologically and splitting them would lose the narrative.
 
-**Don't over-split.** A topic with 100+ entries is fine — that's the ledger doing its job. You don't need separate topics for every sub-aspect. Just use one topic and let dated entries and tags provide granularity.
+**Don't over-split.** A topic with 100+ entries is fine — that's the ledger doing its job. `journal_read_topic(topic, limit=10)` returns the most recent slice, and FTS+semantic search cut across every entry. You don't need separate topics for every sub-aspect.
 
 ## Recommended categories
 
@@ -78,7 +78,7 @@ Use tags for cross-cutting concerns:
 - `#maintenance` — routine upkeep
 - `#purchase` — something bought
 
-You can search by tag content using FTS5: `journal_search("#decision")` finds all entries tagged with `#decision` across all topics.
+You can search by tag content using `journal_search("#decision")` — the `tsvector` FTS index treats `#decision` as a token, so it finds all entries tagged with `#decision` across all topics.
 
 ## Migrating from another LLM
 
@@ -108,11 +108,13 @@ The bulk archive doesn't need careful curation — it's just making old conversa
 ```
 Previous LLM Project "Side Project"
     │
-    ├── Active decisions, current state   → journal topic entry (projects/side-project)
-    ├── Full research conversation         → conversation archive
+    ├── Active decisions, current state    → journal_append_entry (projects/side-project)
+    ├── Full research conversation         → journal_save_conversation
     ├── Quick one-off questions            → skip (not worth archiving)
     │
-    └── Atomic facts: "uses React, deployed on Vercel" → memory service (future)
+    └── Atomic facts: "uses React, deployed on Vercel"
+                                           → journal_append_entry with tags=["fact"]
+                                             (surfaces via semantic search + journal_briefing)
 ```
 
 ## Growing the taxonomy
@@ -120,9 +122,9 @@ Previous LLM Project "Side Project"
 Your taxonomy will evolve. New hobbies appear, projects end, interests shift. That's fine — the two-level structure handles this naturally:
 
 - **New subtopic:** Create the topic first with `journal_create_topic`, then start appending entries.
-- **Topic gets huge:** It's still one file. FTS5 searches within it. `journal_read_topic(topic, limit=5)` shows the most recent entries. Don't split unless the subtopics are genuinely different areas.
+- **Topic gets huge:** It's still one topic row with N entry rows behind it. FTS + semantic search scope within it via `topic_prefix`. `journal_read_topic(topic, limit=5)` shows the most recent entries. Don't split unless the subtopics are genuinely different areas.
 - **Topic goes dormant:** Leave it. It's an append-only ledger. Old topics are historical records.
-- **Wrong category:** Topic paths live in SQLite — there's no built-in rename. Create a new topic, re-enter key entries, and let the old topic go dormant.
+- **Wrong category:** There's no built-in rename. Create a new topic, re-enter key entries, and let the old topic go dormant.
 - **New category:** Just start using it. Create `travel/europe-2026` and it exists.
 
 The taxonomy is a namespace. Adding topics is instant — create one and start appending.

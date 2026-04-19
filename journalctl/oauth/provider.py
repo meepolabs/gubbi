@@ -164,18 +164,40 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         refresh_token: RefreshToken,
         scopes: list[str],
     ) -> OAuthToken:
-        """Rotate both access and refresh tokens."""
-        # Revoke old access tokens before issuing new pair
-        for at in self.storage.get_paired_access_tokens(refresh_token.token):
-            self.storage.delete_access_token(at)
-        self.storage.delete_token_pair_by_refresh(refresh_token.token)
-        self.storage.delete_refresh_token(refresh_token.token)
-
-        logger.info("Refresh token rotated for client_id=%s", client.client_id)
+        """Rotate both access and refresh tokens (atomic)."""
         effective_scopes = scopes if scopes else refresh_token.scopes
-        return self._issue_token_pair(
+        now = int(time.time())
+
+        new_access_str = secrets.token_urlsafe(32)
+        new_access = AccessToken(
+            token=new_access_str,
             client_id=client.client_id or "",
             scopes=effective_scopes,
+            expires_at=now + self.settings.oauth_access_token_ttl,
+        )
+        new_refresh_str = secrets.token_urlsafe(32)
+        new_refresh = RefreshToken(
+            token=new_refresh_str,
+            client_id=client.client_id or "",
+            scopes=effective_scopes,
+            expires_at=now + self.settings.oauth_refresh_token_ttl,
+        )
+
+        self.storage.rotate_refresh_token(
+            old_refresh_token_str=refresh_token.token,
+            new_access_token_str=new_access_str,
+            new_access_token=new_access,
+            new_refresh_token_str=new_refresh_str,
+            new_refresh_token=new_refresh,
+        )
+
+        logger.info("Refresh token rotated for client_id=%s", client.client_id)
+        return OAuthToken(
+            access_token=new_access_str,
+            token_type="Bearer",  # noqa: S106 — protocol constant
+            expires_in=self.settings.oauth_access_token_ttl,
+            refresh_token=new_refresh_str,
+            scope=" ".join(effective_scopes) if effective_scopes else None,
         )
 
     async def load_access_token(self, token: str) -> AccessToken | None:

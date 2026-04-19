@@ -22,7 +22,11 @@ from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
-from journalctl.oauth.constants import CSRF_COOKIE_NAME
+from journalctl.oauth.constants import (
+    CSRF_COOKIE_NAME,
+    LOGIN_LOCKOUT_WINDOW_SECS,
+    LOGIN_MAX_FAILURES,
+)
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.oauth.templates import render_login_page
 
@@ -30,18 +34,18 @@ LoginHandler = Callable[[Request], Coroutine[Any, Any, Response]]
 
 logger = logging.getLogger("journalctl.oauth.forms")
 
-_MAX_FAILURES = 10
-_LOCKOUT_WINDOW = 300  # seconds
-_failure_timestamps: list[float] = []
 
+def client_ip(request: Request) -> str:
+    """Extract client IP, honoring X-Forwarded-For from the nginx proxy.
 
-def _is_rate_limited() -> bool:
-    """Return True if too many failures occurred in the lockout window."""
-    now = time.time()
-    cutoff = now - _LOCKOUT_WINDOW
-    # Discard old entries in-place
-    _failure_timestamps[:] = [t for t in _failure_timestamps if t > cutoff]
-    return len(_failure_timestamps) >= _MAX_FAILURES
+    NOTE: X-Forwarded-For is trusted here. This assumes nginx is always in
+    front of the application server. Do not expose journalctl directly to the
+    internet without a reverse proxy.
+    """
+    xff: str = request.headers.get("x-forwarded-for", "") or ""
+    if xff:
+        return xff.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
 
 
 def create_login_handler(
@@ -68,9 +72,15 @@ def create_login_handler(
                 secure_cookies=secure_cookies,
             )
 
+        # POST: extract client IP for rate limiting
+        client_host = client_ip(request)
+        event_key = f"login_failure:{client_host}"
+
         # POST: rate-limit check before any work
-        if _is_rate_limited():
-            client_host = request.client.host if request.client else "unknown"
+        if (
+            storage.count_rate_limit_events(event_key, LOGIN_LOCKOUT_WINDOW_SECS)
+            >= LOGIN_MAX_FAILURES
+        ):
             logger.warning("Login rate limit reached, rejecting request from %s", client_host)
             return HTMLResponse("Too many failed attempts. Try again later.", status_code=429)
 
@@ -107,8 +117,8 @@ def create_login_handler(
             password.encode("utf-8"),
             owner_password_hash.encode("utf-8"),
         ):
-            _failure_timestamps.append(time.time())
-            client_host = request.client.host if request.client else "unknown"
+            # Record the failure for per-IP rate limiting (CRITICAL-2)
+            storage.record_rate_limit_event(event_key)
             logger.warning("Failed login attempt from %s", client_host)
             csrf_token = secrets.token_urlsafe(32)
             return render_login_page(
@@ -137,7 +147,6 @@ def create_login_handler(
         )
         storage.save_auth_code(code, auth_code)
 
-        client_host = request.client.host if request.client else "unknown"
         logger.info("Authorization code issued from %s", client_host)
 
         # Redirect back to client, clear CSRF cookie

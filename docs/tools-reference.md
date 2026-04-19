@@ -124,7 +124,7 @@ Edit an existing entry by its database ID.
 
 ### journal_delete_entry
 
-Soft-delete an existing entry by its database ID. Deleted entries are marked as deleted in the database and excluded from reads/searches, but preserved in git history.
+Soft-delete an existing entry by its database ID. The entry is marked with a `deleted_at` timestamp and excluded from reads and searches. The linked row in `entry_embeddings` is removed in the same CTE, so semantic search also stops returning it immediately.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -138,17 +138,17 @@ Soft-delete an existing entry by its database ID. Deleted entries are marked as 
 
 ### journal_search
 
-Hybrid search across all journal entries and conversations — FTS5 keyword matching merged with semantic (vector) search.
+Hybrid search across all journal entries and conversations — `tsvector` keyword matching merged with `pgvector` semantic similarity. Both searches run in one tool call and results are deduplicated before being returned.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `query` | string | yes | — | Search query. Supports FTS5 syntax: `AND`, `OR`, `NOT`, `"exact phrase"`, `prefix*` |
-| `topic_prefix` | string | no | — | Filter to topics under this prefix |
-| `date_from` | string | no | — | Filter from this date (`YYYY-MM-DD`). Filters on **document updated date**, not individual entry dates. |
-| `date_to` | string | no | — | Filter to this date (`YYYY-MM-DD`). Same caveat as `date_from`. |
+| `query` | string | yes | — | Search query. Uses `websearch_to_tsquery` — accepts natural language plus `AND` / `OR` / `-negation` / `"exact phrase"`. Trailing operators are safely handled. |
+| `topic_prefix` | string | no | — | Filter to topics under this prefix (no trailing slash) |
+| `date_from` | string | no | — | Filter from this date (`YYYY-MM-DD`). Applied to entry date / conversation updated date. |
+| `date_to` | string | no | — | Filter to this date (`YYYY-MM-DD`). |
 | `limit` | integer | no | 10 | Max results |
 
-**Returns:** List of results with `doc_type`, `topic`, `title`, snippet, relevance score, date, and `entry_id`/`conversation_id` for follow-up calls.
+**Returns:** List of results with `doc_type`, `topic`, `title`, snippet, relevance score, date, and `entry_id`/`conversation_id` for follow-up calls. Response also includes `semantic_available: bool` — if the ONNX encode step fails, the tool transparently degrades to FTS-only and sets this flag to `false` so the client can tell.
 
 **Examples:**
 ```
@@ -209,10 +209,15 @@ Read a specific archived conversation's full transcript.
 
 ### journal_reindex
 
-Rebuild the FTS5 search index and repair semantic embeddings from the SQLite database. Use when search results seem wrong or stale.
+Rebuild semantic embeddings (`pgvector`) for every active entry. The `tsvector` full-text index is a `GENERATED ALWAYS STORED` column, so it's always current and is **not** touched by this tool.
 
 **Parameters:** None.
 
-**Returns:** Number of documents indexed, embeddings generated, and duration in seconds.
+**Returns:** `status` (`ok`, `cooldown`, or `already_running`), `semantic_status` (`ok` / `partial`), `embeddings_generated`, `embeddings_failed`, and `duration_seconds`.
 
-**When to use:** If search results seem stale or incomplete.
+**When to use:** If semantic search results look off, or after swapping the embedding model. Rarely needed in normal operation.
+
+**Safety features:**
+
+- **Cooldown.** If a reindex ran in the last 60 seconds, returns `{status: "cooldown"}` without doing work. Uses `MAX(indexed_at) FROM entries` as a shared cross-worker "last reindex" timestamp.
+- **Advisory lock.** A PostgreSQL session-level advisory lock guarantees only one worker runs the reindex at a time across the whole gunicorn pool. If the lock can't be acquired, returns `{status: "already_running"}`.

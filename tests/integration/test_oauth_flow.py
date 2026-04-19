@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 import bcrypt
+from fastapi import FastAPI
 from mcp.server.auth.routes import create_auth_routes, create_protected_resource_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull
@@ -16,6 +18,7 @@ from starlette.testclient import TestClient
 from journalctl.config import get_settings
 from journalctl.oauth.forms import create_login_handler
 from journalctl.oauth.provider import JournalOAuthProvider
+from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.oauth.templates import CSRF_COOKIE_NAME
 
@@ -406,3 +409,55 @@ class TestFullOAuthFlow:
         at = oauth_storage.get_access_token(token_data["access_token"])
         assert at is not None
         assert at.client_id == client_id
+
+
+class TestRegisterRateLimit:
+    def test_register_rate_limited_per_ip(self, oauth_storage: OAuthStorage) -> None:
+        """HIGH-4: /register returns 429 after REGISTER_MAX_ATTEMPTS in window."""
+        from journalctl.oauth.constants import REGISTER_MAX_ATTEMPTS
+
+        # Use the real register_oauth_routes so the wrap is applied
+        settings = get_settings()
+        app = FastAPI()
+        register_oauth_routes(app, oauth_storage, settings)
+
+        client = TestClient(app)
+        for i in range(REGISTER_MAX_ATTEMPTS):
+            resp = client.post(
+                "/register",
+                json={
+                    "redirect_uris": [f"http://localhost/{i}"],
+                    "client_name": f"c{i}",
+                },
+            )
+            assert resp.status_code in (201, 200), f"attempt {i} got {resp.status_code}"
+
+        resp = client.post(
+            "/register",
+            json={
+                "redirect_uris": ["http://localhost/last"],
+                "client_name": "last",
+            },
+        )
+        assert resp.status_code == 429
+
+
+class TestLoginRateLimitSharedAcrossInstances:
+    def test_lockout_persists_when_storage_reopened(self, tmp_path: Path) -> None:
+        """CRITICAL-2: simulate two workers by opening storage twice on same DB."""
+        from journalctl.oauth.constants import LOGIN_MAX_FAILURES
+
+        db_path = tmp_path / "oauth.db"
+
+        storage_a = OAuthStorage(db_path)
+        _ = storage_a.conn
+        for _ in range(LOGIN_MAX_FAILURES):
+            storage_a.record_rate_limit_event("login_failure:1.2.3.4")
+
+        # "Worker B" opens the same DB
+        storage_b = OAuthStorage(db_path)
+        count_b = storage_b.count_rate_limit_events("login_failure:1.2.3.4", 600)
+        assert count_b == LOGIN_MAX_FAILURES
+
+        storage_a.close()
+        storage_b.close()

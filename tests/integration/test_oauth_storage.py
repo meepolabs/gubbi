@@ -1,6 +1,8 @@
 """Tests for OAuth SQLite storage."""
 
+import sqlite3
 import time
+from pathlib import Path
 
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
@@ -212,3 +214,111 @@ class TestCleanupExpired:
         deleted = oauth_storage.cleanup_expired()
         assert deleted >= 1
         assert oauth_storage.get_auth_code("expired-code") is None
+
+
+class TestExpiresAtColumn:
+    def test_save_populates_expires_at(self, oauth_storage: OAuthStorage) -> None:
+        token = _make_access_token(expires_at=int(time.time()) + 3600)
+        oauth_storage.save_access_token("t1", token)
+        row = oauth_storage.conn.execute(
+            "SELECT expires_at FROM access_tokens WHERE token = ?",
+            ("t1",),
+        ).fetchone()
+        assert row["expires_at"] is not None
+
+    def test_cleanup_uses_indexed_column(self, oauth_storage: OAuthStorage) -> None:
+        """EXPLAIN QUERY PLAN should use the expires_at index."""
+        plan = oauth_storage.conn.execute(
+            "EXPLAIN QUERY PLAN DELETE FROM access_tokens "
+            "WHERE expires_at IS NOT NULL AND expires_at < 100",
+        ).fetchall()
+        plan_txt = " ".join(str(row[-1]) for row in plan)
+        assert "idx_access_tokens_expires_at" in plan_txt or "USING INDEX" in plan_txt
+
+
+class TestExpiresAtBackfill:
+    def test_backfill_populates_null_expires_at(self, tmp_path: Path) -> None:
+        # Create DB with old schema — mimic pre-upgrade state
+        db_path = tmp_path / "legacy.db"
+        raw = sqlite3.connect(str(db_path))
+        raw.executescript("""
+            CREATE TABLE access_tokens (
+                token TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            INSERT INTO access_tokens (token, data, created_at) VALUES
+                ('legacy-at',
+                 '{"token":"legacy-at","expires_at":9999999999,"client_id":"x","scopes":[]}',
+                 0);
+        """)
+        raw.commit()
+        raw.close()
+
+        storage = OAuthStorage(db_path)
+        _ = storage.conn  # triggers migration + backfill
+
+        row = storage.conn.execute(
+            "SELECT expires_at FROM access_tokens WHERE token = 'legacy-at'"
+        ).fetchone()
+        assert row["expires_at"] == 9999999999
+        storage.close()
+
+
+class TestRateLimitEvents:
+    def test_record_and_count(self, oauth_storage: OAuthStorage) -> None:
+        for _ in range(3):
+            oauth_storage.record_rate_limit_event("test_key")
+        assert oauth_storage.count_rate_limit_events("test_key", 60) == 3
+
+    def test_count_respects_window(self, oauth_storage: OAuthStorage) -> None:
+        # Insert an old row directly
+        oauth_storage.conn.execute(
+            "INSERT INTO rate_limit_events (event_key, occurred_at) VALUES (?, ?)",
+            ("old_key", int(time.time()) - 3600),
+        )
+        oauth_storage.conn.commit()
+        oauth_storage.record_rate_limit_event("old_key")  # recent
+        assert oauth_storage.count_rate_limit_events("old_key", 60) == 1
+        assert oauth_storage.count_rate_limit_events("old_key", 7200) == 2
+
+    def test_prune_removes_old_events(self, oauth_storage: OAuthStorage) -> None:
+        oauth_storage.conn.execute(
+            "INSERT INTO rate_limit_events (event_key, occurred_at) VALUES (?, ?)",
+            ("k", int(time.time()) - 10_000),
+        )
+        oauth_storage.conn.commit()
+        oauth_storage.record_rate_limit_event("k")
+        deleted = oauth_storage.prune_rate_limit_events(3600)
+        assert deleted == 1
+        assert oauth_storage.count_rate_limit_events("k", 60) == 1
+
+
+class TestRotateRefreshToken:
+    def test_rotate_is_atomic(self, oauth_storage: OAuthStorage) -> None:
+        # Seed old pair
+        old_at = _make_access_token("old-at", expires_at=int(time.time()) + 3600)
+        old_rt = _make_refresh_token("old-rt")
+        oauth_storage.save_access_token("old-at", old_at)
+        oauth_storage.save_refresh_token("old-rt", old_rt)
+        oauth_storage.save_token_pair("old-at", "old-rt")
+
+        new_at = _make_access_token("new-at", expires_at=int(time.time()) + 3600)
+        new_rt = _make_refresh_token("new-rt")
+
+        oauth_storage.rotate_refresh_token(
+            old_refresh_token_str="old-rt",
+            new_access_token_str="new-at",
+            new_access_token=new_at,
+            new_refresh_token_str="new-rt",
+            new_refresh_token=new_rt,
+        )
+
+        # Old gone
+        assert oauth_storage.get_access_token("old-at") is None
+        assert oauth_storage.get_refresh_token("old-rt") is None
+        assert oauth_storage.get_paired_refresh_token("old-at") is None
+        # New present and paired
+        assert oauth_storage.get_access_token("new-at") is not None
+        assert oauth_storage.get_refresh_token("new-rt") is not None
+        assert oauth_storage.get_paired_refresh_token("new-at") == "new-rt"

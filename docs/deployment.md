@@ -2,87 +2,138 @@
 
 ## Prerequisites
 
-- A server with Docker and Docker Compose (tested on GCP e2-small, 2GB RAM)
+- A server with Docker and Docker Compose (any small VPS will do; see memory requirements below)
 - A domain with DNS configured
-- [Doppler](https://doppler.com/) for secrets management (or use `.env` files)
-- A git repo for journal content backup
+- A secrets manager of your choice, or a local `.env` file
 
 ## Repository layout
 
-You'll have two repos on the server:
+One repo on the server:
 
 ```
-~/journalctl/     # This repo — server code, Dockerfile, tests
-~/journal/        # Content repo — markdown files, MkDocs config, .gitignore
+~/journalctl/           # This repo — server code, docker-compose.yml, Dockerfile, data/
+    └── data/           # Bind-mounted persistent data (see below)
+        ├── postgres/   #   PostgreSQL WAL + tablespaces  → /var/lib/postgresql/data
+        ├── journal/    #   oauth.db, knowledge/, conversations_json/  → /app/journal
+        └── onnx/       #   Cached ONNX embedding model  → /home/appuser/.cache/journalctl
 ```
 
-The content repo is mounted into the Docker container as a bind volume. The server code repo contains the application and deployment config.
+All persistent state lives under `./data/` in the repo root. Nothing lives in named Docker volumes — `docker compose down -v` is safe.
 
 ## Environment variables
 
-All configuration is via `JOURNAL_*` environment variables, managed through Doppler in production:
+All configuration is via `JOURNAL_*` environment variables. In production, use a secrets manager; for local dev, a `.env` file works.
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `JOURNAL_API_KEY` | Static Bearer token for API key auth | `sk-journal-...` |
-| `JOURNAL_TIMEZONE` | Timezone for date handling | `America/New_York` |
-| `JOURNAL_OAUTH_DB_PATH` | OAuth database path | `/app/journal/oauth.db` |
-| `JOURNAL_OWNER_PASSWORD_HASH` | Bcrypt hash for OAuth login | `$2b$12$...` |
-| `JOURNAL_SERVER_URL` | Public HTTPS URL | `https://journal.yourdomain.com` |
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `JOURNAL_API_KEY` | yes | Static Bearer token for API key auth. Must be ≥32 chars. | `sk-journal-...` |
+| `JOURNAL_POSTGRES_PASSWORD` | yes | PostgreSQL password (used by both services) | (random) |
+| `JOURNAL_TIMEZONE` | yes | Timezone for "today" defaulting and briefing week math | `America/Los_Angeles` |
+| `JOURNAL_SERVER_URL` | for OAuth | Public HTTPS URL used in OAuth metadata endpoints | `https://journal.yourdomain.com` |
+| `JOURNAL_OWNER_PASSWORD_HASH` | for OAuth | Bcrypt hash for OAuth login. Empty string disables OAuth. | `$2b$12$...` |
+| `JOURNAL_OAUTH_DB_PATH` | for OAuth | Path to OAuth SQLite DB inside container | `/app/journal/oauth.db` |
 
-Journal data (`journal.db`, `memory.db`, `conversations_json/`) lives in `./data/` — a directory inside the repo, mounted as a Docker bind mount. Edit `data/knowledge/user-profile.md` to set your identity profile.
+`JOURNAL_DATABASE_URL` is set inside `docker-compose.yml` from the PostgreSQL service credentials — you don't need to configure it manually in your secrets manager. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
+
+Generate a bcrypt password hash via the built-in CLI:
+
+```bash
+docker compose exec journalctl python -m journalctl.oauth.crypto 'your-password'
+```
 
 ## Docker Compose
 
+The stack is two services: `postgres` (pgvector/pgvector:pg17) and `journalctl`. Both use bind mounts under `./data/`.
+
 ```yaml
 services:
-  journalctl:
-    build: .
-    ports:
-      - "127.0.0.1:8100:8100"
-    volumes:
-      - ./data:/app/journal
-      - ./logs:/app/logs
-      - onnx-model-cache:/home/appuser/.cache/mcp_memory
+  postgres:
+    image: pgvector/pgvector:pg17
+    container_name: journalctl-postgres
+    restart: unless-stopped
     environment:
-      - JOURNAL_DB_PATH=/app/journal/journal.db
-      - JOURNAL_MEMORY_DB_PATH=/app/journal/memory.db
-      - JOURNAL_OAUTH_DB_PATH=/app/journal/oauth.db
-      # OAuth (optional)
+      POSTGRES_DB: journal
+      POSTGRES_USER: journal
+      POSTGRES_PASSWORD: ${JOURNAL_POSTGRES_PASSWORD}
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+      - ./deployment/init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U journal -d journal"]
+      interval: 10s
+
+  journalctl:
+    build:
+      context: .
+      dockerfile: deployment/Dockerfile
+    container_name: journalctl
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8100:8100"   # loopback only — nginx fronts it
+    environment:
+      - JOURNAL_API_KEY
+      - JOURNAL_DATABASE_URL=postgresql://journal:${JOURNAL_POSTGRES_PASSWORD}@postgres:5432/journal
+      - JOURNAL_JOURNAL_ROOT=/app/journal
+      - JOURNAL_TRANSPORT=streamable-http
+      - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_SERVER_URL
       - JOURNAL_OWNER_PASSWORD_HASH
-    # env_file: .env  # or use Doppler: doppler run -- docker compose up
-
-volumes:
-  onnx-model-cache:
+      - JOURNAL_OAUTH_DB_PATH
+    volumes:
+      - ./data/journal:/app/journal
+      - ./logs:/app/logs
+      - ./data/onnx:/home/appuser/.cache/journalctl
+    deploy:
+      resources:
+        limits: { memory: 1024M }
+        reservations: { memory: 512M }
 ```
+
+Bring it up:
+
+```bash
+docker compose --env-file .env up -d
+# or pipe env through your secrets manager of choice
+```
+
+PostgreSQL will come up first, then journalctl waits for the healthcheck before starting. First boot runs the idempotent `schema.sql` bootstrap inside the `setup_schema(pool)` lifespan step.
 
 ### Docker permissions (the gosu pattern)
 
-The container starts as root, reads the UID/GID of the bind mount owner, then drops to a matching non-root user via `gosu`. This is the same pattern used by the official PostgreSQL and Redis Docker images.
+The journalctl container starts as root, reads the UID/GID of the bind mount owner (`/app/journal`), then drops to a matching non-root user via `gosu`. Same pattern used by the official PostgreSQL and Redis images.
 
 ```
 entrypoint.sh:
   1. Start as root
   2. Detect mount owner: stat -c '%u:%g' /app/journal
-  3. Create appuser with matching UID:GID
-  4. exec gosu appuser gunicorn ...
+  3. usermod/groupmod appuser to match
+  4. chown the ONNX cache, logs, and src
+  5. Pre-download the ONNX model as appuser (serialized, prevents worker race)
+  6. exec gosu appuser gunicorn ...
 ```
+
+The ONNX pre-download is critical: without it, multiple gunicorn workers race on first boot and one can get a corrupted partial download. The entrypoint exits non-zero on model-load failure so Docker restarts instead of booting degraded.
+
+### Why no `--preload` in gunicorn?
+
+`asyncpg` pools cannot survive `os.fork()`. Each gunicorn worker creates its own pool during its lifespan startup.
 
 ## nginx configuration
 
-nginx sits in front of both containers and handles SSL termination, routing, rate limiting, and SSE passthrough.
+nginx sits in front of the container and handles SSL termination, routing, rate limiting, and SSE passthrough.
+
+Rate limits below are placeholders — tune them for your traffic and threat model, and keep the values out of version control if you can.
 
 ```nginx
-limit_req_zone $binary_remote_addr zone=login_limit:10m rate=5r/m;
-limit_req_zone $binary_remote_addr zone=oauth_limit:10m rate=30r/m;
+# Tune these for your environment.
+limit_req_zone $binary_remote_addr zone=login_limit:10m rate=<CHOOSE_A_LOW_VALUE>;
+limit_req_zone $binary_remote_addr zone=oauth_limit:10m rate=<CHOOSE_A_HIGHER_VALUE>;
 
 upstream journalctl {
     server 127.0.0.1:8100;
-}
-
-upstream journal_mkdocs {
-    server 127.0.0.1:8300;
 }
 
 server {
@@ -91,30 +142,36 @@ server {
     # Security headers
     add_header X-Content-Type-Options nosniff always;
     add_header X-Frame-Options DENY always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
-    # OAuth endpoints — must come before MkDocs catch-all
+    # OAuth endpoints — auth handled by the app
     location ~ ^/(\.well-known/(oauth-authorization-server|oauth-protected-resource)|authorize|token|register|revoke) {
-        limit_req zone=oauth_limit burst=10 nodelay;
+        limit_req zone=oauth_limit burst=<N> nodelay;
         proxy_pass http://journalctl;
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # Login endpoint — stricter rate limit
+    # Login endpoint — stricter rate limit than OAuth
     location = /login {
-        limit_req zone=login_limit burst=3 nodelay;
+        limit_req zone=login_limit burst=<N> nodelay;
         proxy_pass http://journalctl/login;
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # MCP endpoint — Bearer/OAuth auth handled by app
+    # MCP endpoint — Bearer/OAuth auth handled by the app
+    # Prefix match catches both /mcp and /mcp/ — path normalization
+    # handled by MCPPathNormalizer middleware in the application
     location /mcp {
         proxy_pass http://journalctl;
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto $scheme;
 
@@ -131,19 +188,22 @@ server {
         proxy_pass http://journalctl/health;
     }
 
-    # MkDocs — browsable journal site, basic auth
+    # UI placeholder — a custom viewer will land in a later phase
     location / {
-        auth_basic "Journal";
-        auth_basic_user_file /etc/nginx/.htpasswd_journal;
-        proxy_pass http://journal_mkdocs/;
-        proxy_set_header Host $host;
+        return 404;
     }
 
     # SSL managed by certbot
 }
+
+server {
+    server_name _;
+    listen 80;
+    return 301 https://$host$request_uri;
+}
 ```
 
-**Critical:** `proxy_buffering off` is required for the MCP endpoint. Without it, nginx buffers SSE responses and MCP streaming breaks.
+**Critical:** `proxy_buffering off` is required for the `/mcp` location. Without it, nginx buffers SSE responses and MCP streaming breaks.
 
 ## Connecting MCP clients
 
@@ -185,29 +245,35 @@ If your client doesn't support `type: "http"` natively, use `mcp-remote` as a lo
 
 ### OAuth 2.0 (browser/mobile clients)
 
-For browser-based clients, the server supports OAuth 2.0 with PKCE. Connect via your client's MCP integrations settings. You'll be redirected to a login page on your server.
+For browser-based clients that require OAuth (rather than a static Bearer token), the server implements OAuth 2.0 with PKCE, bcrypt password verification, CSRF-protected login, and token refresh. Connect via your client's MCP integrations settings — you'll be redirected to a login page on your server.
 
-Generate a bcrypt password hash:
+OAuth state (clients, auth codes, tokens) lives in `oauth.db` (SQLite), deliberately separate from the PostgreSQL journal database.
 
-```bash
-python -c "import bcrypt; print(bcrypt.hashpw(b'your-password', bcrypt.gensalt()).decode())"
-```
+**Hardening checklist** before exposing OAuth endpoints to the public internet:
 
-Set the result as `JOURNAL_OWNER_PASSWORD_HASH` in your secrets manager.
+- Put strict rate limits on `/login`, `/token`, and `/register` at the reverse proxy.
+- Ensure your reverse proxy only accepts requests on the public hostname you actually own.
+- Review the OAuth hardening backlog for items that matter at scale.
 
-The OAuth flow:
+## Backup strategy
 
-```
-Client  → POST /register          → gets client_id
-Client  → GET /authorize           → redirects to /login
-User    → enters password           → bcrypt verified, CSRF protected
-Server  → generates auth code       → redirects back to client
-Client  → POST /token (code+PKCE)  → gets access + refresh tokens
-Client  → MCP calls with Bearer    → works
-```
+Two things to back up:
 
-OAuth state (clients, auth codes, tokens) lives in `oauth.db`, separate from the disposable FTS5 index.
+1. **PostgreSQL dumps.** `pg_dump -Fc` to an external host or object store on a cron.
+   ```bash
+   docker compose exec -T postgres pg_dump -U journal -Fc journal \
+       > backups/journal_$(date +%Y%m%d).dump
+   ```
+2. **Conversation JSON archives.** `data/journal/conversations_json/` — rsync or S3 sync. These are the rebuildable source for `conversations` and `messages` tables.
+
+The ONNX model cache (`data/onnx/`) is not worth backing up — it's re-downloaded automatically on boot if missing.
 
 ## Memory requirements
 
-On a small VM (2GB RAM), the two containers (journalctl + mkdocs) plus nginx run comfortably. If RAM becomes tight, replacing the MkDocs dev server with static builds reduces memory usage.
+On a small VM (2GB RAM), PostgreSQL + journalctl + nginx run comfortably for a single user (hundreds of topics, thousands of entries). Sizing guidance:
+
+- PostgreSQL idle: ~200MB. Add ~50MB per concurrent pool connection.
+- journalctl idle: ~300MB, of which ~100MB is the loaded ONNX model.
+- nginx: negligible.
+
+For multi-tenant scale, plan for multiple vCPUs and 4+ GB RAM on a dedicated VPS.
