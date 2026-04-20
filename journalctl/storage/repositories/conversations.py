@@ -80,20 +80,17 @@ def _decrypt_message_content(
     cipher: ContentCipher,
     row: Any,
 ) -> str:
-    """Return decrypted message content, or fall back to the legacy plaintext column.
+    """Return decrypted message content.
 
-    Half-NULL pairs (exactly one of ciphertext/nonce present) surface as
-    ``DecryptionError`` rather than silently falling back -- symmetric with
-    ``_decrypt_content_field`` in the entries repo. A silent fallback on a
-    corrupt row would mask the data-integrity bug.
+    Requires both ciphertext and nonce to be present. ``messages.content_encrypted``
+    and ``messages.content_nonce`` are NOT NULL post-0008, so both-NULL and
+    half-NULL alike indicate row corruption and raise ``DecryptionError``.
     """
     ct = row["content_encrypted"]
     nonce = row["content_nonce"]
     if ct is not None and nonce is not None:
         return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
-    if ct is not None or nonce is not None:
-        raise DecryptionError("message encrypted column and nonce must both be present")
-    return row["content"] or ""
+    raise DecryptionError("message content_encrypted and content_nonce must both be present")
 
 
 # ── Save ──────────────────────────────────────────────────────────────────────
@@ -273,15 +270,14 @@ async def _insert_messages(
     conv_id: int,
     messages: list[Message],
 ) -> None:
-    """Insert all messages for a conversation. Dual-writes plaintext + encrypted."""
-    rows: list[tuple[int, str, str, datetime_cls | None, int, bytes, bytes, str]] = []
+    """Insert all messages for a conversation."""
+    rows: list[tuple[int, str, datetime_cls | None, int, bytes, bytes, str]] = []
     for i, m in enumerate(messages):
         content_ct, content_nonce = cipher.encrypt(m.content)
         rows.append(
             (
                 conv_id,
                 m.role,
-                m.content,
                 _parse_ts(m.timestamp),
                 i,
                 content_ct,
@@ -292,10 +288,10 @@ async def _insert_messages(
     await conn.executemany(
         """
         INSERT INTO messages
-            (conversation_id, role, content, timestamp, position,
+            (conversation_id, role, timestamp, position,
              content_encrypted, content_nonce, search_text, user_id)
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
+            $1, $2, $3, $4, $5, $6, $7,
             (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid)
         )
         """,
@@ -330,11 +326,10 @@ async def _upsert_linked_entry(
         # never have reasoning, and clearing them explicitly prevents stale
         # ciphertext from persisting if that invariant is ever relaxed.
         await conn.execute(
-            "UPDATE entries SET content = $1, content_encrypted = $2, content_nonce = $3,"
-            " search_text = $4, reasoning = NULL, reasoning_encrypted = NULL,"
-            " reasoning_nonce = NULL, updated_at = $5, date = $6, indexed_at = NULL"
-            " WHERE id = $7",
-            content,
+            "UPDATE entries SET content_encrypted = $1, content_nonce = $2,"
+            " search_text = $3, reasoning_encrypted = NULL,"
+            " reasoning_nonce = NULL, updated_at = $4, date = $5, indexed_at = NULL"
+            " WHERE id = $6",
             content_ct,
             content_nonce,
             content,
@@ -346,18 +341,17 @@ async def _upsert_linked_entry(
     row = await conn.fetchrow(
         """
         INSERT INTO entries
-            (topic_id, date, content, content_encrypted, content_nonce, search_text,
+            (topic_id, date, content_encrypted, content_nonce, search_text,
              conversation_id, tags, user_id, created_at, updated_at)
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
+            $1, $2, $3, $4, $5, $6, $7,
             (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
-            $9, $9
+            $8, $8
         )
         RETURNING id
         """,
         topic_id,
         entry_date_val,
-        content,
         content_ct,
         content_nonce,
         content,
@@ -459,7 +453,7 @@ async def read_conversation(
 
     meta = _row_to_meta(row)
     msg_rows = await conn.fetch(
-        "SELECT role, content, content_encrypted, content_nonce, timestamp FROM messages"
+        "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
         int(row["id"]),
     )
@@ -504,7 +498,7 @@ async def read_conversation_by_id(
 
     meta = _row_to_meta(row)
     msg_rows = await conn.fetch(
-        "SELECT role, content, content_encrypted, content_nonce, timestamp FROM messages"
+        "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
         conversation_id,
     )

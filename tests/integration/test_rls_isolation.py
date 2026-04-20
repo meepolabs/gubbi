@@ -184,17 +184,27 @@ async def test_insert_into_entries_with_foreign_user_id_rejected(
     """Scoped as A, INSERT INTO entries with user_id=B is rejected by WITH CHECK."""
     now = datetime.now(UTC)
     today = date.today()
+    # Encrypted shape post-0008; plaintext "cross-tenant pwn attempt" is encrypted
+    # with the seed cipher so the row is syntactically valid -- the RLS WITH CHECK
+    # clause is what should reject it, not a missing-column error.
+    from tests.fixtures.tenants import _SEED_CIPHER  # noqa: PLC0415
+
+    ct, nonce = _SEED_CIPHER.encrypt("cross-tenant pwn attempt")
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         with pytest.raises(asyncpg.PostgresError, match=_RLS_ERROR_RE):
             await conn.execute(
                 """
                 INSERT INTO entries
-                    (topic_id, user_id, date, content, tags, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $6)
+                    (topic_id, user_id, date,
+                     content_encrypted, content_nonce, search_text,
+                     tags, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
                 """,
                 seeded_a.topic_id,
                 tenant_b,
                 today,
+                ct,
+                nonce,
                 "cross-tenant pwn attempt",
                 [],
                 now,
@@ -272,13 +282,16 @@ async def test_update_cross_tenant_affects_zero_rows(
     b_entry_id = seeded_b.entry_ids[0]
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         status = await conn.execute(
-            "UPDATE entries SET content = 'pwned' WHERE id = $1", b_entry_id
+            "UPDATE entries SET search_text = 'pwned' WHERE id = $1", b_entry_id
         )
     assert status.endswith(" 0"), f"expected trailing ' 0' (status={status!r})"
 
+    # Row should be untouched -- search_text still reflects B's seed value.
     async with admin_pool.acquire() as conn:
-        content = await conn.fetchval("SELECT content FROM entries WHERE id = $1", b_entry_id)
-    assert content != "pwned"
+        search_text = await conn.fetchval(
+            "SELECT search_text FROM entries WHERE id = $1", b_entry_id
+        )
+    assert search_text != "pwned"
 
 
 # ---------------------------------------------------------------------------

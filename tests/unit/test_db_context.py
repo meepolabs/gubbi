@@ -20,6 +20,12 @@ import pytest
 from journalctl.core.auth_context import current_user_id
 from journalctl.core.db_context import MissingUserIdError, user_scoped_connection
 
+# The ``pool`` fixture is session-scoped. pytest-asyncio 0.25+ requires every
+# test using session-scoped async fixtures to explicitly pin the loop scope,
+# otherwise each test gets a fresh loop and the shared pool raises
+# "cannot perform operation: another operation is in progress" at teardown.
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
 
 @pytest.fixture
 def reset_user_ctxvar() -> Iterator[None]:

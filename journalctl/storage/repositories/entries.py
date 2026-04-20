@@ -30,27 +30,26 @@ def _decrypt_content_field(
     row: Any,
     encrypted_key: str,
     nonce_key: str,
-    plaintext_key: str,
 ) -> str | None:
-    """Return decrypted content for a row, or fall back to the legacy plaintext column.
+    """Return decrypted content for a row, or ``None`` if no value is stored.
 
-    ``row`` may be an asyncpg.Record or a dict. ``None`` plaintext legacy
-    values pass through unchanged (reasoning is nullable). The function
-    raises ``DecryptionError`` via ``decrypt_or_raise`` on any cipher
-    failure so the repo caller sees a single opaque error.
+    ``row`` may be an asyncpg.Record or a dict. Three cases:
 
-    Half-NULL pairs (exactly one of ciphertext/nonce present) indicate row
-    corruption and surface as ``DecryptionError`` rather than silently
-    falling back to the plaintext column -- a silent fallback would mask
-    the data-integrity bug.
+    * Both ciphertext and nonce present -- decrypt via ``decrypt_or_raise``
+      which flattens any cipher failure into an opaque ``DecryptionError``.
+    * Both NULL -- legitimately "no value" (reasoning is nullable, so an
+      entry with no reasoning has both encrypted/nonce as NULL). Return
+      ``None``; callers that require a value (e.g. ``content``) must
+      verify the result is not None themselves.
+    * Exactly one NULL -- corruption signal, raises ``DecryptionError``.
     """
     ct = row[encrypted_key]
     nonce = row[nonce_key]
     if ct is not None and nonce is not None:
         return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
-    if ct is not None or nonce is not None:
-        raise DecryptionError("encrypted column and nonce must both be present")
-    return cast(str | None, row[plaintext_key])
+    if ct is None and nonce is None:
+        return None
+    raise DecryptionError("encrypted column and nonce must both be present")
 
 
 async def append(
@@ -84,32 +83,31 @@ async def append(
         """
         WITH new_entry AS (
             INSERT INTO entries
-                (topic_id, date, content, content_encrypted, content_nonce,
-                 reasoning, reasoning_encrypted, reasoning_nonce,
+                (topic_id, date, content_encrypted, content_nonce,
+                 reasoning_encrypted, reasoning_nonce,
                  tags, user_id, created_at, updated_at, search_text)
             VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                $1, $2, $3, $4, $5, $6, $7,
                 (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
-                $10, $10, $3
+                $8, $8, $9
             )
             RETURNING id
         ),
         _upd AS (
-            UPDATE topics SET updated_at = $10
+            UPDATE topics SET updated_at = $8
             WHERE id = $1
         )
         SELECT id FROM new_entry
         """,
         topic_id,
         d,
-        content,
         content_ct,
         content_nonce,
-        reasoning,
         reasoning_ct,
         reasoning_nonce,
         tags or [],
         now,
+        content,
     )
     if row is None:
         raise RuntimeError("INSERT entries failed: no row returned")
@@ -153,12 +151,8 @@ async def read(
     where = " AND ".join(where_parts)
 
     def _build_entry(r: Any) -> Entry:
-        content = cast(
-            str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce", "content")
-        )
-        reasoning = _decrypt_content_field(
-            cipher, r, "reasoning_encrypted", "reasoning_nonce", "reasoning"
-        )
+        content = cast(str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce"))
+        reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
         return Entry(
             id=r["id"],
             date=str(r["date"]),
@@ -174,7 +168,7 @@ async def read(
         data_params = list(params)
         limit_ph = _add_param(data_params, limit)
         rows = await conn.fetch(
-            f"SELECT id, date, content, reasoning, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
+            f"SELECT id, date, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
             f" reasoning_encrypted, reasoning_nonce, conversation_id, tags,"
             f" COUNT(*) OVER() AS total_count"
             f" FROM entries WHERE {where}"
@@ -189,7 +183,7 @@ async def read(
     sql_offset: int = offset if offset > 0 else 0
     data_params = list(params)
     data_sql = (
-        f"SELECT id, date, content, reasoning, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
+        f"SELECT id, date, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
         f" reasoning_encrypted, reasoning_nonce, conversation_id, tags,"
         f" COUNT(*) OVER() AS total_count"
         f" FROM entries WHERE {where} ORDER BY date ASC, created_at ASC"
@@ -238,7 +232,7 @@ async def update(
     """
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT id, content, reasoning, content_encrypted, content_nonce,"
+            "SELECT id, content_encrypted, content_nonce,"
             " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
             " FROM entries WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
             entry_id,
@@ -247,11 +241,9 @@ async def update(
             msg = f"Entry id {entry_id} not found"
             raise EntryNotFoundError(msg)
 
-        old_content = _decrypt_content_field(
-            cipher, row, "content_encrypted", "content_nonce", "content"
-        )
+        old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
         old_reasoning = _decrypt_content_field(
-            cipher, row, "reasoning_encrypted", "reasoning_nonce", "reasoning"
+            cipher, row, "reasoning_encrypted", "reasoning_nonce"
         )
         if old_content is None:
             raise RuntimeError(
@@ -297,19 +289,17 @@ async def update(
             """
             WITH updated AS (
                 UPDATE entries
-                SET content=$1, reasoning=$2, date=$3, tags=$4,
-                    updated_at=$5, indexed_at=NULL,
-                    content_encrypted=$6, content_nonce=$7,
-                    reasoning_encrypted=$8, reasoning_nonce=$9,
-                    search_text=$1
-                WHERE id=$10
+                SET date=$1, tags=$2,
+                    updated_at=$3, indexed_at=NULL,
+                    content_encrypted=$4, content_nonce=$5,
+                    reasoning_encrypted=$6, reasoning_nonce=$7,
+                    search_text=$8
+                WHERE id=$9
                 RETURNING topic_id
             )
-            UPDATE topics SET updated_at=$5
+            UPDATE topics SET updated_at=$3
             FROM updated WHERE topics.id = updated.topic_id
             """,
-            new_content,
-            new_reasoning,
             new_date,
             new_tags,
             now,
@@ -317,6 +307,7 @@ async def update(
             new_content_nonce,
             new_reasoning_ct,
             new_reasoning_nonce,
+            new_content,
             entry_id,
         )
 
@@ -401,16 +392,16 @@ async def get_by_date_range(
     rows = await conn.fetch(
         f"""
         SELECT
-            e.id           AS doc_id,
-            'entry'        AS doc_type,
-            e.date::text   AS date,
-            e.content,
+            e.id              AS doc_id,
+            'entry'           AS doc_type,
+            e.date::text      AS date,
+            NULL::text        AS content,
             e.content_encrypted,
             e.content_nonce,
             e.tags,
-            t.path         AS topic,
-            t.title        AS topic_title,
-            NULL::int      AS conv_id
+            t.path            AS topic,
+            t.title           AS topic_title,
+            NULL::int         AS conv_id
         FROM entries e
         JOIN topics t ON t.id = e.topic_id
         WHERE e.date >= $1 AND e.date <= $2
@@ -420,16 +411,16 @@ async def get_by_date_range(
         UNION ALL
 
         SELECT
-            c.id                AS doc_id,
-            'conversation'      AS doc_type,
+            c.id                      AS doc_id,
+            'conversation'            AS doc_type,
             c.created_at::date::text  AS date,
-            c.summary           AS content,
-            NULL::bytea         AS content_encrypted,
-            NULL::bytea         AS content_nonce,
+            c.summary                 AS content,
+            NULL::bytea               AS content_encrypted,
+            NULL::bytea               AS content_nonce,
             c.tags,
-            t.path              AS topic,
-            c.title             AS topic_title,
-            c.id                AS conv_id
+            t.path                    AS topic,
+            c.title                   AS topic_title,
+            c.id                      AS conv_id
         FROM conversations c
         JOIN topics t ON t.id = c.topic_id
         WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
@@ -444,9 +435,7 @@ async def get_by_date_range(
     results: list[dict] = []
     for r in rows:
         if r["doc_type"] == "entry":
-            decrypted = _decrypt_content_field(
-                cipher, r, "content_encrypted", "content_nonce", "content"
-            )
+            decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
             if decrypted is None:
                 raise RuntimeError(
                     f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
@@ -515,7 +504,7 @@ async def get_unindexed(
     """Return a cursor-paginated batch of entries needing semantic indexing."""
     rows = await conn.fetch(
         """
-        SELECT e.id, e.content, e.content_encrypted, e.content_nonce,
+        SELECT e.id, e.content_encrypted, e.content_nonce,
                e.tags, e.date::text AS date, t.path AS topic, t.title
         FROM entries e
         JOIN topics t ON t.id = e.topic_id
@@ -530,9 +519,7 @@ async def get_unindexed(
     )
     result: list[dict] = []
     for r in rows:
-        decrypted = _decrypt_content_field(
-            cipher, r, "content_encrypted", "content_nonce", "content"
-        )
+        decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
         if decrypted is None:
             raise RuntimeError(
                 f"Entry {r['id']}: content decrypted to None; schema invariant violated"
@@ -557,7 +544,7 @@ async def get_text(
 ) -> tuple[str, str | None] | None:
     """Return (content, reasoning) for an active entry, or None if not found."""
     row = await conn.fetchrow(
-        "SELECT content, reasoning, content_encrypted, content_nonce,"
+        "SELECT content_encrypted, content_nonce,"
         " reasoning_encrypted, reasoning_nonce"
         " FROM entries WHERE id = $1 AND deleted_at IS NULL",
         entry_id,
@@ -567,9 +554,9 @@ async def get_text(
     return (
         cast(
             str,
-            _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce", "content"),
+            _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce"),
         ),
-        _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce", "reasoning"),
+        _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce"),
     )
 
 

@@ -75,17 +75,17 @@ async def _seed_encrypted_entry(
         entry_id = await conn.fetchval(
             """
             INSERT INTO entries
-                (topic_id, user_id, date, content, content_encrypted, content_nonce,
+                (topic_id, user_id, date, content_encrypted, content_nonce,
                  search_text, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $4, '{}', $7, $7)
+            VALUES ($1, $2, $3, $4, $5, $6, '{}', $7, $7)
             RETURNING id
             """,
             topic_id,
             user_id,
             today,
-            content,
             content_ct,
             content_nonce,
+            content,
             now,
         )
     return int(entry_id)

@@ -86,7 +86,7 @@ async def fts_search(
                 'entry'::text   AS doc_type,
                 t.path          AS topic,
                 t.title         AS title,
-                ts_headline('english', coalesce(e.search_text, e.content),
+                ts_headline('english', e.search_text,
                             {tsq}, {opts_ph}) AS snippet,
                 ts_rank(e.search_vector, {tsq})                      AS rank,
                 e.date::text    AS date

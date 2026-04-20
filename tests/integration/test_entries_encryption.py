@@ -84,21 +84,20 @@ async def _seed_entry(
         entry_id = await conn.fetchval(
             """
             INSERT INTO entries
-                (topic_id, user_id, date, content, content_encrypted, content_nonce,
-                 reasoning, reasoning_encrypted, reasoning_nonce,
+                (topic_id, user_id, date, content_encrypted, content_nonce,
+                 reasoning_encrypted, reasoning_nonce,
                  search_text, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $4, '{}', $10, $10)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}', $9, $9)
             RETURNING id
             """,
             topic_id,
             user_id,
             today,
-            content,
             content_ct,
             content_nonce,
-            reasoning,
             reasoning_ct,
             reasoning_nonce,
+            content,
             now,
         )
     return int(entry_id)
@@ -161,7 +160,7 @@ async def test_update_rotates_ciphertext_and_nonce(
     cipher: ContentCipher,
     tenant_a: UUID,
 ) -> None:
-    """Update re-encrypts: new ciphertext differs, new nonce differs, old plaintext gone."""
+    """Update re-encrypts: new ciphertext differs, new nonce differs."""
     original = "Original plaintext"
     updated = "Updated plaintext"
     topic_id = await _seed_topic(admin_pool, tenant_a, "roundtrip/update-check")
@@ -169,8 +168,7 @@ async def test_update_rotates_ciphertext_and_nonce(
 
     async with admin_pool.acquire() as conn:
         before = await conn.fetchrow(
-            "SELECT content_encrypted, content_nonce, content, search_text"
-            " FROM entries WHERE id = $1",
+            "SELECT content_encrypted, content_nonce, search_text" " FROM entries WHERE id = $1",
             entry_id,
         )
     assert before is not None
@@ -182,8 +180,7 @@ async def test_update_rotates_ciphertext_and_nonce(
 
     async with admin_pool.acquire() as conn:
         after = await conn.fetchrow(
-            "SELECT content_encrypted, content_nonce, content, search_text"
-            " FROM entries WHERE id = $1",
+            "SELECT content_encrypted, content_nonce, search_text" " FROM entries WHERE id = $1",
             entry_id,
         )
     assert after is not None
@@ -200,8 +197,7 @@ async def test_update_rotates_ciphertext_and_nonce(
     # three random portions to be pairwise distinct.
     third_ct, third_nonce = cipher.encrypt("third distinct value")
     assert len({bytes(old_nonce[1:]), bytes(new_nonce[1:]), bytes(third_nonce[1:])}) == 3
-    # Dual-write window: plaintext column tracks the latest content.
-    assert after["content"] == updated
+    # Encrypted column tracks the latest content after update.
     assert after["search_text"] == updated
     # Repo read should return the updated plaintext.
     async with user_scoped_connection(app_pool, tenant_a) as conn:

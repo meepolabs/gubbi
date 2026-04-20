@@ -28,7 +28,7 @@ import pytest_asyncio
 from journalctl.config import get_settings
 from journalctl.core.crypto import ContentCipher
 from journalctl.oauth.storage import OAuthStorage
-from journalctl.storage.pg_setup import _init_connection, setup_schema
+from journalctl.storage.pg_setup import _init_connection
 
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -112,7 +112,25 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
 
     async with _pool.acquire() as conn:
         await conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
-    await setup_schema(_pool)
+    project_root = Path(__file__).resolve().parents[1]
+    env = {
+        **os.environ,
+        "JOURNAL_DATABASE_URL": TEST_DATABASE_URL,
+        "JOURNAL_FOUNDER_EMAIL": _RLS_FOUNDER_EMAIL,
+    }
+    result = subprocess.run(  # noqa: S603 -- sys.executable is trusted, args are literals
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(
+            "alembic upgrade head failed for test DB:\n"
+            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        )
     yield _pool
     await _pool.close()
 

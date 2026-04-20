@@ -22,6 +22,17 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest_asyncio
 
+from journalctl.core.crypto import ContentCipher
+
+# Fixed test cipher -- keep in sync with the ``cipher`` fixture in conftest
+# so fixture-seeded rows can be decrypted by test code that imports that
+# fixture. NEVER use this key outside tests.
+_SEED_CIPHER = ContentCipher({1: bytes([1]) * 32})
+
+
+def _encrypt(plaintext: str) -> tuple[bytes, bytes]:
+    return _SEED_CIPHER.encrypt(plaintext)
+
 
 @dataclass(frozen=True)
 class TenantSeed:
@@ -100,19 +111,28 @@ async def seed_for(
 
         entry_ids: list[int] = []
         for i in range(n_entries):
+            content_plain = f"Entry {i} for {topic_path}"
+            reasoning_plain = f"Reasoning {i}"
+            content_ct, content_nonce = _encrypt(content_plain)
+            reasoning_ct, reasoning_nonce = _encrypt(reasoning_plain)
             entry_id = await conn.fetchval(
                 """
                 INSERT INTO entries
-                    (topic_id, user_id, date, content, reasoning, tags,
-                     created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+                    (topic_id, user_id, date,
+                     content_encrypted, content_nonce,
+                     reasoning_encrypted, reasoning_nonce,
+                     search_text, tags, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
                 RETURNING id
                 """,
                 topic_id,
                 user_id,
                 today - timedelta(days=i),
-                f"Entry {i} for {topic_path}",
-                f"Reasoning {i}",
+                content_ct,
+                content_nonce,
+                reasoning_ct,
+                reasoning_nonce,
+                content_plain,
                 [f"tag-{i}", "seed"],
                 now,
             )
@@ -141,17 +161,22 @@ async def seed_for(
                 f"conversations_json/{uuid4()}.json",
             )
             for i in range(n_messages):
+                msg_plain = f"Message {i} content"
+                msg_ct, msg_nonce = _encrypt(msg_plain)
                 msg_id = await conn.fetchval(
                     """
                     INSERT INTO messages
-                        (conversation_id, user_id, role, content, position)
-                    VALUES ($1, $2, $3, $4, $5)
+                        (conversation_id, user_id, role,
+                         content_encrypted, content_nonce, search_text, position)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7)
                     RETURNING id
                     """,
                     conv_id,
                     user_id,
                     "user" if i % 2 == 0 else "assistant",
-                    f"Message {i} content",
+                    msg_ct,
+                    msg_nonce,
+                    msg_plain,
                     i,
                 )
                 message_ids.append(int(msg_id))

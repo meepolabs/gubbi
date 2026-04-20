@@ -1,6 +1,10 @@
 """Tests for storage/pg_setup.py — pool initialisation and schema bootstrap."""
 
 import asyncpg
+import pytest
+
+# Session-scoped asyncpg pool requires tests to share its event loop.
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 class TestPgSetup:
