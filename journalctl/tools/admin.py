@@ -9,7 +9,9 @@ from datetime import datetime as datetime_cls
 import asyncpg
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
+from journalctl.core.crypto import ContentCipher
 from journalctl.storage import pg_setup
 from journalctl.storage.repositories import entries as entry_repo
 from journalctl.tools.constants import REINDEX_BATCH_SIZE
@@ -65,6 +67,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 "Set JOURNAL_DATABASE_URL_ADMIN (BYPASSRLS DSN) to fix."
             )
             pool = app_ctx.pool
+        cipher = require_cipher(app_ctx)
         retry_after = await _db_reindex_cooldown(pool)
         if retry_after is not None:
             return {
@@ -81,12 +84,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     "message": "A reindex is already in progress.",
                 }
             try:
-                return await _run_reindex(app_ctx, pool)
+                return await _run_reindex(app_ctx, pool, cipher)
             finally:
                 await pg_setup.advisory_unlock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
 
 
-async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool) -> dict:
+async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentCipher) -> dict:
     start = time.monotonic()
 
     # tsvector columns are GENERATED ALWAYS — always up-to-date.
@@ -101,7 +104,7 @@ async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool) -> dict:
 
     while True:
         async with pool.acquire() as conn:
-            batch = await entry_repo.get_unindexed(conn, last_id, REINDEX_BATCH_SIZE)
+            batch = await entry_repo.get_unindexed(conn, cipher, last_id, REINDEX_BATCH_SIZE)
 
         if not batch:
             break

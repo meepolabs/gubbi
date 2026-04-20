@@ -21,6 +21,7 @@ import secrets
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 _KEY_ENV_PATTERN = re.compile(r"^JOURNAL_ENCRYPTION_MASTER_KEY_V(\d+)$")
@@ -154,3 +155,37 @@ def load_master_keys_from_env(
             raise ValueError(f"{name}: decoded key must be {_KEY_LEN} bytes, got {len(raw)}")
         keys[version] = raw
     return keys
+
+
+class DecryptionError(Exception):
+    """Opaque sentinel raised when decryption fails for any reason.
+
+    The repository layer wraps every ``cipher.decrypt`` call with
+    ``decrypt_or_raise`` so callers see a single error type regardless of
+    cause (tampered ciphertext, wrong key, unknown key version, malformed
+    nonce). Distinguishing causes in any response would create a
+    version-existence oracle -- see the note on ``ContentCipher.decrypt``.
+
+    The original exception is preserved via ``__cause__`` (implicit from
+    ``raise ... from exc``) so server-side logs can still record the
+    forensic signal without the client ever observing it.
+    """
+
+
+def decrypt_or_raise(cipher: ContentCipher, ciphertext: bytes, nonce: bytes) -> str:
+    """Decrypt and flatten every failure mode into :class:`DecryptionError`.
+
+    Wraps ``cipher.decrypt(ciphertext, nonce)``. If the underlying cipher
+    raises ``ValueError`` (bad nonce shape, unknown key version) or
+    ``cryptography.exceptions.InvalidTag`` (tamper, wrong key, truncation),
+    both re-raise as a single ``DecryptionError`` with the original
+    exception chained via ``__cause__``.
+
+    Any other exception type propagates unchanged -- the repo layer treats
+    non-cipher bugs (e.g. ``TypeError`` from a real programming mistake)
+    as a server fault, not a decryption failure.
+    """
+    try:
+        return cipher.decrypt(ciphertext, nonce)
+    except (ValueError, InvalidTag) as exc:
+        raise DecryptionError("decryption failed") from exc

@@ -26,6 +26,7 @@ import pytest
 import pytest_asyncio
 
 from journalctl.config import get_settings
+from journalctl.core.crypto import ContentCipher
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.pg_setup import _init_connection, setup_schema
 
@@ -139,6 +140,17 @@ def oauth_storage(tmp_path: Path) -> Iterator[OAuthStorage]:
     _ = db.conn  # Force schema init
     yield db
     db.close()
+
+
+@pytest.fixture
+def cipher() -> ContentCipher:
+    """Deterministic test cipher with a fixed key so test data is reproducible.
+
+    NEVER use this key outside tests -- it is intentionally weak (all 0x01
+    bytes) and must not end up in any .env, Doppler secret, or production
+    config. Production keys come from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*``.
+    """
+    return ContentCipher({1: bytes([1]) * 32})
 
 
 # ---------------------------------------------------------------------------

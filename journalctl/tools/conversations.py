@@ -7,6 +7,7 @@ from typing import Any, NotRequired, TypedDict
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
@@ -150,6 +151,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         empty_dropped = len(keepable) - len(parsed_messages)
 
+        cipher = require_cipher(app_ctx)
+
         try:
             async with user_scoped_connection(app_ctx.pool) as conn:
                 (
@@ -159,6 +162,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     linked_entry_id,
                 ) = await conv_repo.save_conversation(
                     conn,
+                    cipher,
                     conversations_json_dir=app_ctx.settings.conversations_json_dir,
                     topic=topic,
                     title=title,
@@ -262,10 +266,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             metadata (title, topic, summary, dates, participants),
             content (full transcript as markdown), messages_shown, messages_total.
         """
+        cipher = require_cipher(app_ctx)
         try:
             async with user_scoped_connection(app_ctx.pool) as conn:
                 meta, messages = await conv_repo.read_conversation_by_id(
-                    conn, conversation_id, preview=preview
+                    conn, cipher, conversation_id, preview=preview
                 )
         except ConversationNotFoundError:
             return not_found("Conversation", conversation_id)

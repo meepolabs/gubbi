@@ -14,7 +14,12 @@ import time
 import pytest
 from cryptography.exceptions import InvalidTag
 
-from journalctl.core.crypto import ContentCipher, load_master_keys_from_env
+from journalctl.core.crypto import (
+    ContentCipher,
+    DecryptionError,
+    decrypt_or_raise,
+    load_master_keys_from_env,
+)
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -344,3 +349,54 @@ def test_encrypt_decrypt_1mb_under_100ms() -> None:
     elapsed = time.perf_counter() - t0
     assert elapsed < 0.1, f"encrypt+decrypt took {elapsed:.3f}s"
     assert result == plaintext
+
+
+# -- DecryptionError + decrypt_or_raise wrap (TASK-02.13) --
+
+
+def test_decrypt_or_raise_happy_path() -> None:
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt("hello")
+    assert decrypt_or_raise(cipher, ct, nonce) == "hello"
+
+
+def test_decrypt_or_raise_flattens_invalidtag() -> None:
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt("x")
+    tampered = bytearray(ct)
+    tampered[0] ^= 0xFF
+    with pytest.raises(DecryptionError) as exc_info:
+        decrypt_or_raise(cipher, bytes(tampered), nonce)
+    assert isinstance(exc_info.value.__cause__, InvalidTag)
+
+
+def test_decrypt_or_raise_flattens_valueerror_unknown_version() -> None:
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt("x")
+    mutation = bytearray(nonce)
+    mutation[0] = 99
+    with pytest.raises(DecryptionError) as exc_info:
+        decrypt_or_raise(cipher, ct, bytes(mutation))
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_decrypt_or_raise_flattens_valueerror_malformed_nonce() -> None:
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt("x")
+    truncated = nonce[:11]
+    with pytest.raises(DecryptionError) as exc_info:
+        decrypt_or_raise(cipher, ct, truncated)
+    assert isinstance(exc_info.value.__cause__, ValueError)
+
+
+def test_decrypt_or_raise_empty_string_round_trip() -> None:
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt("")
+    assert decrypt_or_raise(cipher, ct, nonce) == ""
+
+
+def test_decrypt_or_raise_does_not_swallow_type_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    cipher = ContentCipher({1: _key(1)})
+    monkeypatch.setattr(cipher, "decrypt", lambda *a, **k: (_ for _ in ()).throw(TypeError("oops")))
+    with pytest.raises(TypeError, match="oops"):
+        decrypt_or_raise(cipher, b"ct", b"nonce")

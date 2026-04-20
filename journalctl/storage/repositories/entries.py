@@ -6,10 +6,11 @@ import logging
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 
+from journalctl.core.crypto import ContentCipher, DecryptionError, decrypt_or_raise
 from journalctl.core.validation import validate_date as _validate_date
 from journalctl.models.journal import Entry, TopicMeta
 from journalctl.storage.constants import SNIPPET_PREVIEW_LEN
@@ -21,8 +22,40 @@ from journalctl.storage.repositories.topics import get_id as get_topic_id
 logger = logging.getLogger(__name__)
 
 
+# ── module-private helpers ────────────────────────────────────────────────────
+
+
+def _decrypt_content_field(
+    cipher: ContentCipher,
+    row: Any,
+    encrypted_key: str,
+    nonce_key: str,
+    plaintext_key: str,
+) -> str | None:
+    """Return decrypted content for a row, or fall back to the legacy plaintext column.
+
+    ``row`` may be an asyncpg.Record or a dict. ``None`` plaintext legacy
+    values pass through unchanged (reasoning is nullable). The function
+    raises ``DecryptionError`` via ``decrypt_or_raise`` on any cipher
+    failure so the repo caller sees a single opaque error.
+
+    Half-NULL pairs (exactly one of ciphertext/nonce present) indicate row
+    corruption and surface as ``DecryptionError`` rather than silently
+    falling back to the plaintext column -- a silent fallback would mask
+    the data-integrity bug.
+    """
+    ct = row[encrypted_key]
+    nonce = row[nonce_key]
+    if ct is not None and nonce is not None:
+        return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
+    if ct is not None or nonce is not None:
+        raise DecryptionError("encrypted column and nonce must both be present")
+    return cast(str | None, row[plaintext_key])
+
+
 async def append(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     topic: str,
     content: str,
     reasoning: str | None = None,
@@ -40,16 +73,25 @@ async def append(
     d: date_cls = date_cls.fromisoformat(date) if date else date_cls.today()
     now = datetime_cls.now(UTC)
 
+    content_ct, content_nonce = cipher.encrypt(content)
+    if reasoning is not None:
+        reasoning_ct, reasoning_nonce = cipher.encrypt(reasoning)
+    else:
+        reasoning_ct = None
+        reasoning_nonce = None
+
     row = await conn.fetchrow(
         """
         WITH new_entry AS (
             INSERT INTO entries
-                (topic_id, date, content, reasoning, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $6)
+                (topic_id, date, content, content_encrypted, content_nonce,
+                 reasoning, reasoning_encrypted, reasoning_nonce,
+                 tags, created_at, updated_at, search_text)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $3)
             RETURNING id
         ),
         _upd AS (
-            UPDATE topics SET updated_at = $6
+            UPDATE topics SET updated_at = $10
             WHERE id = $1
         )
         SELECT id FROM new_entry
@@ -57,7 +99,11 @@ async def append(
         topic_id,
         d,
         content,
+        content_ct,
+        content_nonce,
         reasoning,
+        reasoning_ct,
+        reasoning_nonce,
         tags or [],
         now,
     )
@@ -68,6 +114,7 @@ async def append(
 
 async def read(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     topic: str,
     limit: int | None = None,
     date_from: str | None = None,
@@ -80,7 +127,7 @@ async def read(
     Raises TopicNotFoundError if topic missing.
     """
     # Defense-in-depth: validate date formats here even though the tool layer
-    # validates first — protects migration scripts and direct test calls.
+    # validates first -- protects migration scripts and direct test calls.
     if date_from:
         _validate_date(date_from)
     if date_to:
@@ -102,11 +149,17 @@ async def read(
     where = " AND ".join(where_parts)
 
     def _build_entry(r: Any) -> Entry:
+        content = cast(
+            str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce", "content")
+        )
+        reasoning = _decrypt_content_field(
+            cipher, r, "reasoning_encrypted", "reasoning_nonce", "reasoning"
+        )
         return Entry(
             id=r["id"],
             date=str(r["date"]),
-            content=r["content"],
-            reasoning=r["reasoning"],
+            content=content,
+            reasoning=reasoning,
             conversation_id=r["conversation_id"],
             tags=list(r["tags"] or []),
         )
@@ -117,7 +170,8 @@ async def read(
         data_params = list(params)
         limit_ph = _add_param(data_params, limit)
         rows = await conn.fetch(
-            f"SELECT id, date, content, reasoning, conversation_id, tags,"  # noqa: S608 — safe: see above
+            f"SELECT id, date, content, reasoning, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
+            f" reasoning_encrypted, reasoning_nonce, conversation_id, tags,"
             f" COUNT(*) OVER() AS total_count"
             f" FROM entries WHERE {where}"
             f" ORDER BY date DESC, created_at DESC LIMIT {limit_ph}",
@@ -126,12 +180,13 @@ async def read(
         total = int(rows[0]["total_count"]) if rows else 0
         return meta, [_build_entry(r) for r in reversed(rows)], total
 
-    # Explicit offset or date filter — window function gives total without extra query.
+    # Explicit offset or date filter - window function gives total without extra query.
     sql_limit: int | None = limit if (limit is not None and limit > 0) else None
     sql_offset: int = offset if offset > 0 else 0
     data_params = list(params)
     data_sql = (
-        f"SELECT id, date, content, reasoning, conversation_id, tags,"  # noqa: S608 — safe: see above
+        f"SELECT id, date, content, reasoning, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
+        f" reasoning_encrypted, reasoning_nonce, conversation_id, tags,"
         f" COUNT(*) OVER() AS total_count"
         f" FROM entries WHERE {where} ORDER BY date ASC, created_at ASC"
     )
@@ -146,10 +201,10 @@ async def read(
     if rows:
         total = int(rows[0]["total_count"])
     else:
-        # Offset past end — fallback count (uncommon path)
+        # Offset past end - fallback count (uncommon path)
         total = int(
             await conn.fetchval(
-                f"SELECT COUNT(*) FROM entries WHERE {where}",  # noqa: S608 — safe: see above
+                f"SELECT COUNT(*) FROM entries WHERE {where}",  # noqa: S608 - safe: see above
                 *params,
             )
             or 0
@@ -159,6 +214,7 @@ async def read(
 
 async def update(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     entry_id: int,
     content: str | None = None,
     reasoning: str | None = None,
@@ -178,7 +234,8 @@ async def update(
     """
     async with conn.transaction():
         row = await conn.fetchrow(
-            "SELECT id, content, reasoning, topic_id, date, tags"
+            "SELECT id, content, reasoning, content_encrypted, content_nonce,"
+            " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
             " FROM entries WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
             entry_id,
         )
@@ -186,28 +243,49 @@ async def update(
             msg = f"Entry id {entry_id} not found"
             raise EntryNotFoundError(msg)
 
+        old_content = _decrypt_content_field(
+            cipher, row, "content_encrypted", "content_nonce", "content"
+        )
+        old_reasoning = _decrypt_content_field(
+            cipher, row, "reasoning_encrypted", "reasoning_nonce", "reasoning"
+        )
+        if old_content is None:
+            raise RuntimeError(
+                f"Entry {entry_id}: content decrypted to None; schema invariant violated"
+            )
+
+        new_content: str
+        new_reasoning: str | None
         if content is not None:
             if mode == "replace":
                 new_content = content
             elif mode == "append":
-                new_content = f"{row['content']}\n\n{content}".strip()
+                new_content = f"{old_content}\n\n{content}".strip()
             else:
                 msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
                 raise ValueError(msg)
         else:
-            new_content = row["content"]
+            new_content = old_content
 
         if reasoning is not None:
-            if mode == "append" and row["reasoning"]:
-                new_reasoning = f"{row['reasoning']}\n\n{reasoning}".strip()
+            if mode == "append" and old_reasoning:
+                new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
             else:
                 new_reasoning = reasoning
         else:
-            new_reasoning = row["reasoning"]
+            new_reasoning = old_reasoning
 
         new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
         new_tags: list[str] = tags if tags is not None else list(row["tags"] or [])
         now = datetime_cls.now(UTC)
+
+        # Encrypt new content and reasoning (if not None); else None pair for reasoning.
+        new_content_ct, new_content_nonce = cipher.encrypt(new_content)
+        if new_reasoning is not None:
+            new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
+        else:
+            new_reasoning_ct = None
+            new_reasoning_nonce = None
 
         # CTE: update entry + update topic timestamp in one round-trip.
         # indexed_at = NULL signals the embedding needs regenerating.
@@ -216,8 +294,11 @@ async def update(
             WITH updated AS (
                 UPDATE entries
                 SET content=$1, reasoning=$2, date=$3, tags=$4,
-                    updated_at=$5, indexed_at=NULL
-                WHERE id=$6
+                    updated_at=$5, indexed_at=NULL,
+                    content_encrypted=$6, content_nonce=$7,
+                    reasoning_encrypted=$8, reasoning_nonce=$9,
+                    search_text=$1
+                WHERE id=$10
                 RETURNING topic_id
             )
             UPDATE topics SET updated_at=$5
@@ -228,6 +309,10 @@ async def update(
             new_date,
             new_tags,
             now,
+            new_content_ct,
+            new_content_nonce,
+            new_reasoning_ct,
+            new_reasoning_nonce,
             entry_id,
         )
 
@@ -292,6 +377,7 @@ async def reset_indexed_at(conn: asyncpg.Connection) -> None:
 
 async def get_by_date_range(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     date_from: str,
     date_to: str,
     limit: int | None = None,
@@ -301,10 +387,10 @@ async def get_by_date_range(
 
     Used by journal_briefing and journal_timeline.
     Returns lightweight dicts (no reasoning for brevity).
-    Single UNION ALL query — one round-trip to the database.
+    Single UNION ALL query - one round-trip to the database.
 
-    ascending=True  (default): oldest-first — use for timeline/date-range views.
-    ascending=False: newest-first — use with limit for briefing (most-recent N).
+    ascending=True  (default): oldest-first - use for timeline/date-range views.
+    ascending=False: newest-first - use with limit for briefing (most-recent N).
     """
     order = "ASC" if ascending else "DESC"
     limit_clause = f"LIMIT {limit}" if limit is not None else ""
@@ -315,6 +401,8 @@ async def get_by_date_range(
             'entry'        AS doc_type,
             e.date::text   AS date,
             e.content,
+            e.content_encrypted,
+            e.content_nonce,
             e.tags,
             t.path         AS topic,
             t.title        AS topic_title,
@@ -332,6 +420,8 @@ async def get_by_date_range(
             'conversation'      AS doc_type,
             c.created_at::date::text  AS date,
             c.summary           AS content,
+            NULL::bytea         AS content_encrypted,
+            NULL::bytea         AS content_nonce,
             c.tags,
             t.path              AS topic,
             c.title             AS topic_title,
@@ -340,7 +430,7 @@ async def get_by_date_range(
         JOIN topics t ON t.id = c.topic_id
         WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
 
-        ORDER BY date {order}, doc_id {order}
+        ORDER BY date {order}, doc_type ASC, doc_id {order}
         {limit_clause}
         """,
         date_cls.fromisoformat(date_from),
@@ -349,7 +439,17 @@ async def get_by_date_range(
 
     results: list[dict] = []
     for r in rows:
-        content = r["content"] or ""
+        if r["doc_type"] == "entry":
+            decrypted = _decrypt_content_field(
+                cipher, r, "content_encrypted", "content_nonce", "content"
+            )
+            if decrypted is None:
+                raise RuntimeError(
+                    f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
+                )
+            content = decrypted
+        else:
+            content = r["content"] or ""
         if r["doc_type"] == "entry":
             first_line = content.split("\n", 1)[0][:80]
             results.append(
@@ -404,13 +504,15 @@ async def get_stats(conn: asyncpg.Connection) -> dict[str, int]:
 
 async def get_unindexed(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     last_id: int,
     batch_size: int,
-) -> list[Any]:
+) -> list[dict]:
     """Return a cursor-paginated batch of entries needing semantic indexing."""
-    return await conn.fetch(  # type: ignore[no-any-return]
+    rows = await conn.fetch(
         """
-        SELECT e.id, e.content, e.tags, e.date::text AS date, t.path AS topic, t.title
+        SELECT e.id, e.content, e.content_encrypted, e.content_nonce,
+               e.tags, e.date::text AS date, t.path AS topic, t.title
         FROM entries e
         JOIN topics t ON t.id = e.topic_id
         WHERE e.deleted_at IS NULL
@@ -422,17 +524,49 @@ async def get_unindexed(
         last_id,
         batch_size,
     )
+    result: list[dict] = []
+    for r in rows:
+        decrypted = _decrypt_content_field(
+            cipher, r, "content_encrypted", "content_nonce", "content"
+        )
+        if decrypted is None:
+            raise RuntimeError(
+                f"Entry {r['id']}: content decrypted to None; schema invariant violated"
+            )
+        result.append(
+            {
+                "id": r["id"],
+                "content": decrypted,
+                "tags": list(r["tags"] or []),
+                "date": r["date"],
+                "topic": r["topic"],
+                "title": r["title"],
+            }
+        )
+    return result
 
 
-async def get_text(conn: asyncpg.Connection, entry_id: int) -> tuple[str, str | None] | None:
+async def get_text(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    entry_id: int,
+) -> tuple[str, str | None] | None:
     """Return (content, reasoning) for an active entry, or None if not found."""
     row = await conn.fetchrow(
-        "SELECT content, reasoning FROM entries WHERE id = $1 AND deleted_at IS NULL",
+        "SELECT content, reasoning, content_encrypted, content_nonce,"
+        " reasoning_encrypted, reasoning_nonce"
+        " FROM entries WHERE id = $1 AND deleted_at IS NULL",
         entry_id,
     )
     if not row:
         return None
-    return row["content"], row["reasoning"]
+    return (
+        cast(
+            str,
+            _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce", "content"),
+        ),
+        _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce", "reasoning"),
+    )
 
 
 async def get_max_indexed_at(conn: asyncpg.Connection) -> datetime_cls | None:

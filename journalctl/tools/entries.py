@@ -7,6 +7,7 @@ from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
@@ -108,11 +109,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 return invalid_date(date)
 
         resolved_date = date or local_today(app_ctx.settings.timezone)
+        cipher = require_cipher(app_ctx)
 
         try:
             async with user_scoped_connection(app_ctx.pool) as conn:
                 entry_id = await entry_repo.append(
                     conn,
+                    cipher,
                     topic=topic,
                     content=content,
                     reasoning=reasoning,
@@ -187,10 +190,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 return invalid_date(date_to)
         limit = max(1, min(limit, MAX_READ_ENTRIES))
         offset = max(0, offset)
+        cipher = require_cipher(app_ctx)
         try:
             async with user_scoped_connection(app_ctx.pool) as conn:
                 meta, entries, total = await entry_repo.read(
                     conn,
+                    cipher,
                     topic,
                     limit=limit,
                     date_from=date_from,
@@ -253,6 +258,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             tags = [s for t in tags if (s := sanitize_label(t))]
             tags_dropped = original_tag_count - len(tags)
 
+        cipher = require_cipher(app_ctx)
+
         # Read committed text inside the same transaction — avoids a second round-trip.
         # Within a transaction, reads see writes from the same transaction (savepoint).
         row_data: tuple[str, str | None] | None = None
@@ -260,6 +267,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             async with user_scoped_connection(app_ctx.pool) as conn:
                 await entry_repo.update(
                     conn,
+                    cipher,
                     entry_id=entry_id,
                     content=content,
                     reasoning=reasoning,
@@ -268,7 +276,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     tags=tags,
                 )
                 if content is not None or reasoning is not None:
-                    row_data = await entry_repo.get_text(conn, entry_id)
+                    row_data = await entry_repo.get_text(conn, cipher, entry_id)
         except EntryNotFoundError:
             return not_found("Entry", entry_id)
 

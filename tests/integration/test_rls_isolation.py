@@ -24,6 +24,7 @@ from uuid import UUID
 import asyncpg
 import pytest
 
+from journalctl.core.crypto import ContentCipher
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
 from journalctl.storage.repositories import conversations as conv_repo
@@ -65,6 +66,7 @@ async def test_topics_visible_only_to_owner(
 
 async def test_entries_visible_only_to_owner(
     app_pool: asyncpg.Pool,
+    cipher: ContentCipher,
     seeded_a: TenantSeed,
     seeded_b: TenantSeed,
 ) -> None:
@@ -74,13 +76,13 @@ async def test_entries_visible_only_to_owner(
     date_to = (today + timedelta(days=1)).isoformat()
 
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
-        a_rows = await entry_repo.get_by_date_range(conn, date_from, date_to)
+        a_rows = await entry_repo.get_by_date_range(conn, cipher, date_from, date_to)
     a_entry_ids = {r["entry_id"] for r in a_rows if r["entry_id"] is not None}
     assert a_entry_ids == set(seeded_a.entry_ids)
     assert a_entry_ids.isdisjoint(set(seeded_b.entry_ids))
 
     async with user_scoped_connection(app_pool, user_id=seeded_b.user_id) as conn:
-        b_rows = await entry_repo.get_by_date_range(conn, date_from, date_to)
+        b_rows = await entry_repo.get_by_date_range(conn, cipher, date_from, date_to)
     b_entry_ids = {r["entry_id"] for r in b_rows if r["entry_id"] is not None}
     assert b_entry_ids == set(seeded_b.entry_ids)
 
@@ -129,17 +131,19 @@ async def test_entries_get_stats_scoped_per_user(
 
 async def test_entries_pk_lookup_cross_tenant_returns_none(
     app_pool: asyncpg.Pool,
+    cipher: ContentCipher,
     seeded_a: TenantSeed,
     seeded_b: TenantSeed,
 ) -> None:
     """get_text for B's entry, scoped as A, returns None (RLS hides the row)."""
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
-        result = await entry_repo.get_text(conn, seeded_b.entry_ids[0])
+        result = await entry_repo.get_text(conn, cipher, seeded_b.entry_ids[0])
     assert result is None
 
 
 async def test_conversations_pk_lookup_cross_tenant_raises(
     app_pool: asyncpg.Pool,
+    cipher: ContentCipher,
     seeded_a: TenantSeed,
     seeded_b: TenantSeed,
 ) -> None:
@@ -147,7 +151,7 @@ async def test_conversations_pk_lookup_cross_tenant_raises(
     assert seeded_b.conversation_id is not None
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         with pytest.raises(ConversationNotFoundError):
-            await conv_repo.read_conversation_by_id(conn, seeded_b.conversation_id)
+            await conv_repo.read_conversation_by_id(conn, cipher, seeded_b.conversation_id)
 
 
 async def test_topic_get_id_cross_tenant_raises(

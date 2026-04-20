@@ -42,24 +42,34 @@ CREATE INDEX IF NOT EXISTS idx_conv_slug    ON conversations (topic_id, slug);
 CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations (created_at DESC);
 
 -- ── Entries ──────────────────────────────────────────────────────────────────
--- search_vector is GENERATED: auto-updated whenever content or reasoning changes.
--- No application-side FTS sync needed.
+-- search_vector is GENERATED from search_text (post-02.12 baseline).
+-- New writes populate content_encrypted/content_nonce + reasoning_encrypted/
+-- reasoning_nonce + search_text; legacy content/reasoning columns remain
+-- during the 02.13 -> 02.14 backfill window (dropped in migration 0007).
 CREATE TABLE IF NOT EXISTS entries (
-    id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    topic_id        INTEGER NOT NULL REFERENCES topics (id) ON DELETE RESTRICT,
-    date            DATE NOT NULL DEFAULT CURRENT_DATE,
-    content         TEXT NOT NULL,
-    reasoning       TEXT,
-    conversation_id INTEGER REFERENCES conversations (id) ON DELETE RESTRICT,
-    tags            TEXT[] NOT NULL DEFAULT '{}',
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
-    deleted_at      TIMESTAMPTZ,
-    indexed_at      TIMESTAMPTZ,
-    search_vector   tsvector GENERATED ALWAYS AS (
-        to_tsvector('english',
-            coalesce(content, '') || ' ' || coalesce(reasoning, ''))
-    ) STORED
+    id                  INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    topic_id            INTEGER NOT NULL REFERENCES topics (id) ON DELETE RESTRICT,
+    date                DATE NOT NULL DEFAULT CURRENT_DATE,
+    content             TEXT NOT NULL,
+    reasoning           TEXT,
+    content_encrypted   BYTEA,
+    content_nonce       BYTEA,
+    reasoning_encrypted BYTEA,
+    reasoning_nonce     BYTEA,
+    search_text         TEXT,
+    conversation_id     INTEGER REFERENCES conversations (id) ON DELETE RESTRICT,
+    tags                TEXT[] NOT NULL DEFAULT '{}',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    deleted_at          TIMESTAMPTZ,
+    indexed_at          TIMESTAMPTZ,
+    search_vector       tsvector GENERATED ALWAYS AS (
+        to_tsvector('english', coalesce(search_text, ''))
+    ) STORED,
+    CONSTRAINT entries_content_nonce_len
+        CHECK (content_nonce IS NULL OR octet_length(content_nonce) = 12),
+    CONSTRAINT entries_reasoning_nonce_len
+        CHECK (reasoning_nonce IS NULL OR octet_length(reasoning_nonce) = 12)
 );
 
 -- Composite partial index: covers read_entries (topic + date range, active only),
@@ -75,13 +85,20 @@ CREATE INDEX IF NOT EXISTS idx_entries_indexed_at ON entries (id) WHERE indexed_
 CREATE INDEX IF NOT EXISTS idx_entries_fts        ON entries USING GIN (search_vector);
 
 -- ── Messages ─────────────────────────────────────────────────────────────────
+-- content_encrypted/content_nonce/search_text added in migration 0006;
+-- legacy content column remains NOT NULL during the backfill window.
 CREATE TABLE IF NOT EXISTS messages (
-    id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
-    role            TEXT NOT NULL,
-    content         TEXT NOT NULL,
-    timestamp       TIMESTAMPTZ,
-    position        INTEGER NOT NULL DEFAULT 0
+    id                INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    conversation_id   INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
+    role              TEXT NOT NULL,
+    content           TEXT NOT NULL,
+    content_encrypted BYTEA,
+    content_nonce     BYTEA,
+    search_text       TEXT,
+    timestamp         TIMESTAMPTZ,
+    position          INTEGER NOT NULL DEFAULT 0,
+    CONSTRAINT messages_content_nonce_len
+        CHECK (content_nonce IS NULL OR octet_length(content_nonce) = 12)
 );
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, position);

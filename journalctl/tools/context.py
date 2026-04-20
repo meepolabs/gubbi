@@ -7,6 +7,7 @@ from datetime import date, timedelta
 
 from mcp.server.fastmcp import FastMCP
 
+from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import local_today
@@ -148,9 +149,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             logger.warning("Key facts encoding failed, continuing without", exc_info=True)
 
         key_facts: list[dict] = []
+        cipher = require_cipher(app_ctx)
         async with user_scoped_connection(app_ctx.pool) as conn:
             week_entries = await entry_repo.get_by_date_range(
-                conn, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES, ascending=False
+                conn, cipher, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES, ascending=False
             )
             all_topics, topic_count = await topic_repo.list_all(conn, limit=BRIEFING_MAX_TOPICS)
             stats = await entry_repo.get_stats(conn)
@@ -222,8 +224,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             date_from, date_to, label = _resolve_period(period, today=_today)
         except ValueError as e:
             return validation_error(str(e))
+        cipher = require_cipher(app_ctx)
         async with user_scoped_connection(app_ctx.pool) as conn:
-            entries = await entry_repo.get_by_date_range(conn, date_from, date_to)
+            entries = await entry_repo.get_by_date_range(conn, cipher, date_from, date_to)
         return {
             "period": period,
             "label": label,

@@ -17,6 +17,7 @@ from uuid import uuid4
 
 import asyncpg
 
+from journalctl.core.crypto import ContentCipher, DecryptionError, decrypt_or_raise
 from journalctl.core.validation import slugify, validate_title, validate_topic
 from journalctl.models.conversation import ConversationMeta, Message
 from journalctl.storage.exceptions import ConversationNotFoundError
@@ -75,11 +76,32 @@ def _row_to_meta(row: asyncpg.Record) -> ConversationMeta:
     )
 
 
+def _decrypt_message_content(
+    cipher: ContentCipher,
+    row: Any,
+) -> str:
+    """Return decrypted message content, or fall back to the legacy plaintext column.
+
+    Half-NULL pairs (exactly one of ciphertext/nonce present) surface as
+    ``DecryptionError`` rather than silently falling back -- symmetric with
+    ``_decrypt_content_field`` in the entries repo. A silent fallback on a
+    corrupt row would mask the data-integrity bug.
+    """
+    ct = row["content_encrypted"]
+    nonce = row["content_nonce"]
+    if ct is not None and nonce is not None:
+        return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
+    if ct is not None or nonce is not None:
+        raise DecryptionError("message encrypted column and nonce must both be present")
+    return row["content"] or ""
+
+
 # ── Save ──────────────────────────────────────────────────────────────────────
 
 
 async def save_conversation(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     conversations_json_dir: Path,
     topic: str,
     title: str,
@@ -161,9 +183,9 @@ async def save_conversation(
     # when the caller is just updating the summary or tags.
     if not is_update or existing_msg_count != len(messages):
         await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
-        await _insert_messages(conn, conv_id, messages)
+        await _insert_messages(conn, cipher, conv_id, messages)
     linked_entry_id = await _upsert_linked_entry(
-        conn, topic_id, conv_id, title, summary, conversation_date, now
+        conn, cipher, topic_id, conv_id, title, summary, conversation_date, now
     )
 
     await conn.execute(
@@ -243,21 +265,39 @@ async def _upsert_conversation_record(
 
 async def _insert_messages(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     conv_id: int,
     messages: list[Message],
 ) -> None:
-    """Insert all messages for a conversation."""
+    """Insert all messages for a conversation. Dual-writes plaintext + encrypted."""
+    rows: list[tuple[int, str, str, datetime_cls | None, int, bytes, bytes, str]] = []
+    for i, m in enumerate(messages):
+        content_ct, content_nonce = cipher.encrypt(m.content)
+        rows.append(
+            (
+                conv_id,
+                m.role,
+                m.content,
+                _parse_ts(m.timestamp),
+                i,
+                content_ct,
+                content_nonce,
+                m.content,
+            )
+        )
     await conn.executemany(
         """
-        INSERT INTO messages (conversation_id, role, content, timestamp, position)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO messages (conversation_id, role, content, timestamp, position,
+                              content_encrypted, content_nonce, search_text)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         """,
-        [(conv_id, m.role, m.content, _parse_ts(m.timestamp), i) for i, m in enumerate(messages)],
+        rows,
     )
 
 
 async def _upsert_linked_entry(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     topic_id: int,
     conv_id: int,
     title: str,
@@ -270,6 +310,7 @@ async def _upsert_linked_entry(
     Returns the entry_id so callers can embed it after the transaction commits.
     """
     content = f"Conversation saved: {title}\n\n{summary}"
+    content_ct, content_nonce = cipher.encrypt(content)
     entry_date_val = date_cls.fromisoformat(entry_date)
     existing = await conn.fetchrow(
         "SELECT id FROM entries WHERE conversation_id = $1",
@@ -277,9 +318,17 @@ async def _upsert_linked_entry(
     )
 
     if existing:
+        # reasoning_encrypted/reasoning_nonce reset to NULL: linked entries
+        # never have reasoning, and clearing them explicitly prevents stale
+        # ciphertext from persisting if that invariant is ever relaxed.
         await conn.execute(
-            "UPDATE entries SET content = $1, updated_at = $2, date = $3,"
-            " indexed_at = NULL WHERE id = $4",
+            "UPDATE entries SET content = $1, content_encrypted = $2, content_nonce = $3,"
+            " search_text = $4, reasoning = NULL, reasoning_encrypted = NULL,"
+            " reasoning_nonce = NULL, updated_at = $5, date = $6, indexed_at = NULL"
+            " WHERE id = $7",
+            content,
+            content_ct,
+            content_nonce,
             content,
             now,
             entry_date_val,
@@ -289,12 +338,16 @@ async def _upsert_linked_entry(
     row = await conn.fetchrow(
         """
             INSERT INTO entries
-                (topic_id, date, content, conversation_id, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $6)
+                (topic_id, date, content, content_encrypted, content_nonce, search_text,
+                 conversation_id, tags, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
             RETURNING id
             """,
         topic_id,
         entry_date_val,
+        content,
+        content_ct,
+        content_nonce,
         content,
         conv_id,
         ["conversation"],
@@ -365,6 +418,7 @@ async def list_conversations(
 
 async def read_conversation(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     topic: str,
     title: str,
 ) -> tuple[ConversationMeta, list[Message]]:
@@ -393,14 +447,14 @@ async def read_conversation(
 
     meta = _row_to_meta(row)
     msg_rows = await conn.fetch(
-        "SELECT role, content, timestamp FROM messages"
+        "SELECT role, content, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
         int(row["id"]),
     )
     return meta, [
         Message(
             role=r["role"],
-            content=r["content"],
+            content=_decrypt_message_content(cipher, r),
             timestamp=r["timestamp"].isoformat() if r["timestamp"] else None,
         )
         for r in msg_rows
@@ -409,6 +463,7 @@ async def read_conversation(
 
 async def read_conversation_by_id(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     conversation_id: int,
     preview: bool = False,
 ) -> tuple[ConversationMeta, list[Message]]:
@@ -437,14 +492,14 @@ async def read_conversation_by_id(
 
     meta = _row_to_meta(row)
     msg_rows = await conn.fetch(
-        "SELECT role, content, timestamp FROM messages"
+        "SELECT role, content, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
         conversation_id,
     )
     messages = [
         Message(
             role=r["role"],
-            content=r["content"],
+            content=_decrypt_message_content(cipher, r),
             timestamp=r["timestamp"].isoformat() if r["timestamp"] else None,
         )
         for r in msg_rows
