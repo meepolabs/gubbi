@@ -13,6 +13,8 @@ import time
 
 import pytest
 from cryptography.exceptions import InvalidTag
+from hypothesis import given, settings
+from hypothesis import strategies as st
 
 from journalctl.core.crypto import (
     ContentCipher,
@@ -400,3 +402,53 @@ def test_decrypt_or_raise_does_not_swallow_type_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(cipher, "decrypt", lambda *a, **k: (_ for _ in ()).throw(TypeError("oops")))
     with pytest.raises(TypeError, match="oops"):
         decrypt_or_raise(cipher, b"ct", b"nonce")
+
+
+# -- hypothesis property tests (TASK-02.16) --
+
+
+@settings(max_examples=100, deadline=None)
+@given(plaintext=st.text())
+def test_hypothesis_round_trip_any_text(plaintext: str) -> None:
+    """decrypt(encrypt(x)) == x for any valid str."""
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt(plaintext)
+    assert cipher.decrypt(ct, nonce) == plaintext
+
+
+@settings(max_examples=100, deadline=None)
+@given(plaintext=st.text(min_size=1), nonce_byte=st.integers(min_value=1, max_value=11))
+def test_hypothesis_nonce_byte_tamper_raises_invalid_tag(plaintext: str, nonce_byte: int) -> None:
+    """Flipping any non-version byte of the nonce fails the GCM auth tag.
+
+    Indices 1..11 are the 11 CSPRNG bytes (nonce is 12 bytes, byte 0 is
+    the key version). Mutating byte 0 would trigger an "unknown version"
+    ValueError path, which is covered by hand-written tests; this
+    property focuses on the auth-tag behaviour.
+    """
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt(plaintext)
+    tampered = bytearray(nonce)
+    tampered[nonce_byte] ^= 0xFF
+    with pytest.raises(InvalidTag):
+        cipher.decrypt(ct, bytes(tampered))
+
+
+@settings(max_examples=100, deadline=None)
+@given(plaintext=st.text(min_size=1), byte_offset=st.integers(min_value=0))
+def test_hypothesis_ciphertext_byte_tamper_raises_invalid_tag(
+    plaintext: str, byte_offset: int
+) -> None:
+    """Flipping any ciphertext byte (including the GCM auth tag) raises InvalidTag.
+
+    ``byte_offset`` is modulo-reduced to a valid index so hypothesis can
+    explore the full range without shrinking constraints every iteration.
+    The final 16 bytes of the ciphertext are the GCM auth tag; flipping
+    anywhere in the ciphertext (data OR tag) must fail decryption.
+    """
+    cipher = ContentCipher({1: _key(1)})
+    ct, nonce = cipher.encrypt(plaintext)
+    idx = byte_offset % len(ct)
+    tampered = ct[:idx] + bytes([ct[idx] ^ 0xFF]) + ct[idx + 1 :]
+    with pytest.raises(InvalidTag):
+        cipher.decrypt(tampered, nonce)
