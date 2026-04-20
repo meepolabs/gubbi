@@ -157,11 +157,17 @@ class EmbeddingService:
         """
         await conn.execute(
             """
-            INSERT INTO entry_embeddings (entry_id, embedding, indexed_at)
-            VALUES ($1, $2, now())
+            INSERT INTO entry_embeddings (entry_id, embedding, user_id, indexed_at)
+            VALUES (
+                $1,
+                $2,
+                (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+                now()
+            )
             ON CONFLICT (entry_id) DO UPDATE
                 SET embedding  = excluded.embedding,
-                    indexed_at = excluded.indexed_at
+                    indexed_at = excluded.indexed_at,
+                    user_id    = excluded.user_id
             """,
             entry_id,
             embedding,
@@ -181,11 +187,17 @@ class EmbeddingService:
         embedding = await asyncio.to_thread(self.encode, text)
         await conn.execute(
             """
-            INSERT INTO entry_embeddings (entry_id, embedding, indexed_at)
-            VALUES ($1, $2, now())
+            INSERT INTO entry_embeddings (entry_id, embedding, user_id, indexed_at)
+            VALUES (
+                $1,
+                $2,
+                (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+                now()
+            )
             ON CONFLICT (entry_id) DO UPDATE
                 SET embedding  = excluded.embedding,
-                    indexed_at = excluded.indexed_at
+                    indexed_at = excluded.indexed_at,
+                    user_id    = excluded.user_id
             """,
             entry_id,
             embedding,

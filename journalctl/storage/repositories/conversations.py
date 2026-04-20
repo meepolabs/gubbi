@@ -232,8 +232,12 @@ async def _upsert_conversation_record(
         """
         INSERT INTO conversations
             (topic_id, title, slug, source, summary, tags, participants,
-             message_count, created_at, updated_at, json_path)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             message_count, user_id, created_at, updated_at, json_path)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+            $9, $10, $11
+        )
         ON CONFLICT (topic_id, slug) DO UPDATE
             SET source        = excluded.source,
                 summary       = excluded.summary,
@@ -287,9 +291,13 @@ async def _insert_messages(
         )
     await conn.executemany(
         """
-        INSERT INTO messages (conversation_id, role, content, timestamp, position,
-                              content_encrypted, content_nonce, search_text)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        INSERT INTO messages
+            (conversation_id, role, content, timestamp, position,
+             content_encrypted, content_nonce, search_text, user_id)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid)
+        )
         """,
         rows,
     )
@@ -337,12 +345,16 @@ async def _upsert_linked_entry(
         return int(existing["id"])
     row = await conn.fetchrow(
         """
-            INSERT INTO entries
-                (topic_id, date, content, content_encrypted, content_nonce, search_text,
-                 conversation_id, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9)
-            RETURNING id
-            """,
+        INSERT INTO entries
+            (topic_id, date, content, content_encrypted, content_nonce, search_text,
+             conversation_id, tags, user_id, created_at, updated_at)
+        VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8,
+            (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+            $9, $9
+        )
+        RETURNING id
+        """,
         topic_id,
         entry_date_val,
         content,

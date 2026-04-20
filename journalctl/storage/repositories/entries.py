@@ -86,8 +86,12 @@ async def append(
             INSERT INTO entries
                 (topic_id, date, content, content_encrypted, content_nonce,
                  reasoning, reasoning_encrypted, reasoning_nonce,
-                 tags, created_at, updated_at, search_text)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10, $3)
+                 tags, user_id, created_at, updated_at, search_text)
+            VALUES (
+                $1, $2, $3, $4, $5, $6, $7, $8, $9,
+                (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+                $10, $10, $3
+            )
             RETURNING id
         ),
         _upd AS (

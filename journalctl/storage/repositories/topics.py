@@ -68,8 +68,12 @@ async def create(
     try:
         row = await conn.fetchrow(
             """
-            INSERT INTO topics (path, title, description, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO topics (path, title, description, user_id, created_at, updated_at)
+            VALUES (
+                $1, $2, $3,
+                (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+                $4, $5
+            )
             RETURNING id
             """,
             topic,
