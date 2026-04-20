@@ -35,6 +35,10 @@ from journalctl.core.crypto import ContentCipher, DecryptionError
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.storage.repositories import entries as entry_repo
 
+# Session-scoped asyncpg pools (admin_pool, app_pool) require tests to
+# run in the same event loop they were created in.
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
 
 async def _seed_encrypted_entry(
     admin_pool: asyncpg.Pool,

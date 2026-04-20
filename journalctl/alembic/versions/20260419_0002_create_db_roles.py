@@ -71,6 +71,20 @@ def upgrade() -> None:
     op.execute("GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO journal_admin")
     op.execute("GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO journal_admin")
 
+    # Default privileges for tables/sequences created AFTER this migration.
+    # Without these, tables added by later migrations (e.g. users in 0003) are
+    # created owned by the migration-running role and journal_admin cannot
+    # access them until an explicit grant runs. That breaks 02.14 backfill
+    # (runs as journal_admin) and every admin-pool test fixture.
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT ALL PRIVILEGES ON TABLES TO journal_admin"
+    )
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "GRANT ALL PRIVILEGES ON SEQUENCES TO journal_admin"
+    )
+
 
 def downgrade() -> None:
     """Revoke privileges and drop journal_app and journal_admin roles."""
@@ -84,6 +98,14 @@ def downgrade() -> None:
     op.execute(
         "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
         "REVOKE USAGE, SELECT ON SEQUENCES FROM journal_app"
+    )
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE ALL PRIVILEGES ON TABLES FROM journal_admin"
+    )
+    op.execute(
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        "REVOKE ALL PRIVILEGES ON SEQUENCES FROM journal_admin"
     )
 
     # journal_app revokes

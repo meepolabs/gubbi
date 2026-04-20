@@ -33,10 +33,14 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 import asyncpg
+import pytest
 
 from journalctl.core.crypto import ContentCipher
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.storage.repositories import entries as entry_repo
+
+# Session-scoped asyncpg pools require tests to run in the pools' event loop.
+pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
 async def _seed_topic(admin_pool: asyncpg.Pool, user_id: UUID, topic_path: str) -> int:

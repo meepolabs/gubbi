@@ -37,6 +37,12 @@ from journalctl.storage.repositories import topics as topic_repo
 # shadow the fixture function with the same name and break resolution).
 from tests.fixtures.tenants import TenantSeed, seed_for  # noqa: F401 — type hint + helper call
 
+# Integration tests share session-scoped asyncpg pools (admin_pool, app_pool).
+# Pin the test loop scope to "session" so tests run in the same event loop the
+# pools were created in -- otherwise asyncpg's futures error with
+# "attached to a different loop".
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
 # Error regex matching Postgres row-security violations (INSERT and UPDATE WITH CHECK).
 _RLS_ERROR_RE = "row-level security|row security|violates.*policy|new row violates"
 

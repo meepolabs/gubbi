@@ -298,6 +298,50 @@ async def _rls_provisioned() -> None:
 
     _run_alembic_upgrade(RLS_BOOTSTRAP_URL)
     await _set_role_passwords(RLS_BOOTSTRAP_URL)
+    await _reassign_ownership_to_admin(RLS_BOOTSTRAP_URL)
+
+
+async def _reassign_ownership_to_admin(bootstrap_dsn: str) -> None:
+    """Transfer ownership of every public-schema object to journal_admin.
+
+    In production, alembic runs under journal_admin, so tables + sequences
+    are created owned by that role. In this test harness, alembic bootstraps
+    as the docker default (``journal``), leaving ownership with ``journal``.
+    TRUNCATE RESTART IDENTITY inside ``clean_rls_db`` needs sequence
+    ownership (not just GRANT), so we re-point ownership to journal_admin
+    after migrations land.
+
+    ``REASSIGN OWNED BY journal`` is rejected because the bootstrap role
+    also owns the database itself. A targeted DO-block loop over
+    ``pg_tables`` + ``pg_sequences`` + ``pg_views`` scoped to the public
+    schema sidesteps that.
+    """
+    conn = await asyncpg.connect(bootstrap_dsn, timeout=5)
+    try:
+        await conn.execute(
+            """
+            DO $$
+            DECLARE
+                r record;
+            BEGIN
+                FOR r IN SELECT tablename AS name FROM pg_tables WHERE schemaname = 'public'
+                LOOP
+                    EXECUTE format('ALTER TABLE public.%I OWNER TO journal_admin', r.name);
+                END LOOP;
+                FOR r IN SELECT sequence_name AS name
+                         FROM information_schema.sequences WHERE sequence_schema = 'public'
+                LOOP
+                    EXECUTE format('ALTER SEQUENCE public.%I OWNER TO journal_admin', r.name);
+                END LOOP;
+                FOR r IN SELECT viewname AS name FROM pg_views WHERE schemaname = 'public'
+                LOOP
+                    EXECUTE format('ALTER VIEW public.%I OWNER TO journal_admin', r.name);
+                END LOOP;
+            END $$;
+            """
+        )
+    finally:
+        await conn.close()
 
 
 def _rls_derived_dsn(role: str, password: str) -> str:
