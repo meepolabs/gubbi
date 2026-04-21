@@ -52,10 +52,15 @@ services:
       - JOURNAL_DATABASE_URL_ADMIN=postgresql://journal_admin:${JOURNAL_ADMIN_PASSWORD}@postgres:5432/journal
       - JOURNAL_FOUNDER_EMAIL
       - JOURNAL_ENCRYPTION_MASTER_KEY_V1
+      # Hydra introspection (leave empty to disable Hydra auth path)
+      - JOURNAL_HYDRA_ADMIN_URL
       # OAuth
       - JOURNAL_SERVER_URL
       - JOURNAL_OWNER_PASSWORD_HASH
       - JOURNAL_OAUTH_DB_PATH
+    networks:
+      - default
+      - auth
     volumes:
       - ./data/journal:/app/journal
       - ./logs:/app/logs
@@ -71,3 +76,9 @@ services:
           memory: 1024M
         reservations:
           memory: 512M
+
+networks:
+  default:
+  auth:
+    external: true
+    name: journalctl-auth
