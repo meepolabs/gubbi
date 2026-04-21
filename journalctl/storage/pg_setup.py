@@ -1,6 +1,4 @@
-"""PostgreSQL pool initialisation and schema bootstrap."""
-
-from pathlib import Path
+"""PostgreSQL pool initialisation and advisory-lock helpers."""
 
 import asyncpg
 
@@ -48,14 +46,3 @@ async def try_advisory_lock(conn: asyncpg.Connection, key: int) -> bool:
 async def advisory_unlock(conn: asyncpg.Connection, key: int) -> None:
     """Release a session-level advisory lock."""
     await conn.execute("SELECT pg_advisory_unlock($1)", key)
-
-
-async def setup_schema(pool: asyncpg.Pool) -> None:
-    """Run schema.sql idempotently against the connected database.
-
-    All DDL statements use CREATE TABLE/INDEX IF NOT EXISTS so this is
-    safe to call on every application startup.
-    """
-    schema_sql = (Path(__file__).parent / "schema.sql").read_text()
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute(schema_sql)

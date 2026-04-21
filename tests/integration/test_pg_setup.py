@@ -20,12 +20,3 @@ class TestPgSetup:
         assert "conversations" in table_names
         assert "messages" in table_names
         assert "entry_embeddings" in table_names
-
-    async def test_setup_schema_is_idempotent(self, pool: asyncpg.Pool) -> None:
-        """Running setup_schema twice must not raise."""
-        from journalctl.storage.pg_setup import setup_schema
-
-        await setup_schema(pool)  # Second call — should not fail
-        async with pool.acquire() as conn:
-            count = await conn.fetchval("SELECT COUNT(*) FROM topics")
-        assert count is not None

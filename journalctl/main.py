@@ -28,7 +28,7 @@ from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
 from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.embedding_service import EmbeddingService
-from journalctl.storage.pg_setup import init_pool, setup_schema
+from journalctl.storage.pg_setup import init_pool
 from journalctl.tools.registry import register_tools
 
 
@@ -178,19 +178,20 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
     settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
 
-    # PostgreSQL pool — each gunicorn worker creates its own pool (no --preload)
-    app.pool = await init_pool(settings.database_url)
-    await setup_schema(app.pool)
-    await app.logger.info("PostgreSQL pool ready")
-
-    # Admin pool (journal_admin, BYPASSRLS) — optional. Cross-tenant worker paths
-    # (journal_reindex, cleanup) acquire from this pool; user-scoped tool calls
-    # must never touch it. Empty DSN falls back to the runtime pool, which is
-    # fine in single-tenant dev before RLS is live.
+    # PostgreSQL pools -- each gunicorn worker creates its own (no --preload).
+    # Schema is owned by alembic; run `alembic upgrade head` before first boot.
+    # The runtime pool is journal_app (RLS-enforced); the admin pool is
+    # journal_admin (BYPASSRLS) for cross-tenant worker paths like
+    # journal_reindex and cleanup. User-scoped tool calls must never touch
+    # the admin pool. Empty admin DSN falls back to the runtime pool, which
+    # is fine in single-tenant dev before RLS is live.
     app.admin_pool = None
     if settings.database_url_admin:
         app.admin_pool = await init_pool(settings.database_url_admin)
         await app.logger.info("Admin PG pool ready (BYPASSRLS)")
+
+    app.pool = await init_pool(settings.database_url)
+    await app.logger.info("PostgreSQL pool ready")
 
     # EmbeddingService — ONNX model loaded here before workers fork.
     # entrypoint.sh pre-downloads the model to disk; this just loads it.
@@ -323,7 +324,6 @@ def main() -> None:
         async def _run_stdio() -> None:
             logger = structlog.get_logger("journalctl")
             pool = await init_pool(settings.database_url)
-            await setup_schema(pool)
             admin_pool: asyncpg.Pool | None = None
             if settings.database_url_admin:
                 admin_pool = await init_pool(settings.database_url_admin)

@@ -102,7 +102,7 @@ docker compose --env-file .env up -d
 # or pipe env through your secrets manager of choice
 ```
 
-PostgreSQL will come up first, then journalctl waits for the healthcheck before starting. First boot runs the idempotent `schema.sql` bootstrap inside the `setup_schema(pool)` lifespan step.
+PostgreSQL will come up first, then journalctl waits for the healthcheck before starting. Before the very first `docker compose up`, run `alembic upgrade head` against the database to create the schema; alembic owns all schema changes. Subsequent restarts do not require re-running migrations unless a new revision has been added.
 
 ### Docker permissions (the gosu pattern)
 
