@@ -19,7 +19,7 @@ not added here so there is no membership to revoke.
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "0009_grant_admin_option_on_journal_app"
+revision = "0009_grant_admin_journal_app"
 down_revision = "0008_drop_plaintext_columns"
 branch_labels = None
 depends_on = None
