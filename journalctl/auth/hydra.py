@@ -97,7 +97,7 @@ class HydraIntrospector:
         try:
             # httpx auto-sets Content-Type: application/x-www-form-urlencoded when data is a dict
             resp = await self.http_client.post(
-                f"{self.admin_url}/oauth2/introspect",
+                f"{self.admin_url}/admin/oauth2/introspect",
                 data={"token": token},
             )
 
