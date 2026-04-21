@@ -27,13 +27,15 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
 | `JOURNAL_API_KEY` | yes | Static Bearer token for API key auth. Must be ≥32 chars. | `sk-journal-...` |
-| `JOURNAL_POSTGRES_PASSWORD` | yes | PostgreSQL password (used by both services) | (random) |
+| `JOURNAL_POSTGRES_PASSWORD` | yes | PostgreSQL bootstrap password (initdb + healthcheck). | (random) |
+| `JOURNAL_APP_PASSWORD` | yes | Password for the runtime database role created by migration 0002. Set via `ALTER ROLE ... WITH PASSWORD '<value>'`. | (random, distinct) |
+| `JOURNAL_ADMIN_PASSWORD` | yes | Password for the privileged database role created by migration 0002. | (random, distinct) |
 | `JOURNAL_TIMEZONE` | yes | Timezone for "today" defaulting and briefing week math | `America/Los_Angeles` |
 | `JOURNAL_SERVER_URL` | for OAuth | Public HTTPS URL used in OAuth metadata endpoints | `https://journal.yourdomain.com` |
 | `JOURNAL_OWNER_PASSWORD_HASH` | for OAuth | Bcrypt hash for OAuth login. Empty string disables OAuth. | `$2b$12$...` |
 | `JOURNAL_OAUTH_DB_PATH` | for OAuth | Path to OAuth SQLite DB inside container | `/app/journal/oauth.db` |
 
-`JOURNAL_DATABASE_URL` is set inside `docker-compose.yml` from the PostgreSQL service credentials — you don't need to configure it manually in your secrets manager. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
+`JOURNAL_DATABASE_URL` and `JOURNAL_DATABASE_URL_ADMIN` are composed inside `docker-compose.yml` from the role passwords above -- configure the three password values in your secrets manager, not the full DSNs. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
 
 Generate a bcrypt password hash via the built-in CLI:
 
@@ -75,7 +77,8 @@ services:
       - "127.0.0.1:8100:8100"   # loopback only — nginx fronts it
     environment:
       - JOURNAL_API_KEY
-      - JOURNAL_DATABASE_URL=postgresql://journal:${JOURNAL_POSTGRES_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DATABASE_URL=postgresql://journal_app:${JOURNAL_APP_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DATABASE_URL_ADMIN=postgresql://journal_admin:${JOURNAL_ADMIN_PASSWORD}@postgres:5432/journal
       - JOURNAL_JOURNAL_ROOT=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}

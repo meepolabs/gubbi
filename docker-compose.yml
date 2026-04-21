@@ -1,7 +1,9 @@
 # Host environment must provide:
-#   JOURNAL_API_KEY           — Bearer token for MCP auth
-#   JOURNAL_POSTGRES_PASSWORD — PostgreSQL password
-#   JOURNAL_TIMEZONE          — e.g. America/Los_Angeles
+#   JOURNAL_API_KEY           -- Bearer token for MCP auth
+#   JOURNAL_POSTGRES_PASSWORD -- PostgreSQL bootstrap password (initdb + healthcheck)
+#   JOURNAL_APP_PASSWORD      -- runtime DB role password (see docs/deployment.md)
+#   JOURNAL_ADMIN_PASSWORD    -- privileged DB role password (see docs/deployment.md)
+#   JOURNAL_TIMEZONE          -- e.g. America/Los_Angeles
 #
 # Set these via Doppler, .env file, or export before running docker compose.
 #
@@ -42,7 +44,11 @@ services:
       - "127.0.0.1:8100:8100"
     environment:
       - JOURNAL_API_KEY
-      - JOURNAL_DATABASE_URL=postgresql://journal:${JOURNAL_POSTGRES_PASSWORD}@postgres:5432/journal
+      # Runtime pool uses `journal_app` (created by migration 0002). The
+      # default `journal` superuser from POSTGRES_USER is used only for
+      # initdb and the pg_isready healthcheck -- see migration 0002 + 0005
+      # for the role/RLS setup.
+      - JOURNAL_DATABASE_URL=postgresql://journal_app:${JOURNAL_APP_PASSWORD}@postgres:5432/journal
       - JOURNAL_JOURNAL_ROOT=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
