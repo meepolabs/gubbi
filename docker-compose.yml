@@ -48,6 +48,10 @@ services:
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
       - JOURNAL_LOG_DIR=/app/logs
+      # Multi-tenant auth
+      - JOURNAL_DATABASE_URL_ADMIN=postgresql://journal_admin:${JOURNAL_ADMIN_PASSWORD}@postgres:5432/journal
+      - JOURNAL_FOUNDER_EMAIL
+      - JOURNAL_ENCRYPTION_MASTER_KEY_V1
       # OAuth
       - JOURNAL_SERVER_URL
       - JOURNAL_OWNER_PASSWORD_HASH
