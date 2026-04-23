@@ -186,7 +186,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # Schema is owned by alembic; run `alembic upgrade head` before first boot.
     # The runtime pool is journal_app (RLS-enforced); the admin pool is
     # journal_admin (BYPASSRLS) for cross-tenant worker paths like
-    # journal_reindex and cleanup. User-scoped tool calls must never touch
+    # future admin-dashboard API and cleanup. User-scoped tool calls must never touch
     # the admin pool. Empty admin DSN falls back to the runtime pool, which
     # is fine in single-tenant dev before RLS is live.
     app.admin_pool = None

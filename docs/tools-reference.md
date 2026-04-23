@@ -1,6 +1,6 @@
 # Tools Reference
 
-journalctl exposes 13 MCP tools. The connected LLM calls these automatically during conversation based on context — you don't need to invoke them manually.
+journalctl exposes 12 MCP tools. The connected LLM calls these automatically during conversation based on context — you don't need to invoke them manually.
 
 ## Context tools
 
@@ -207,17 +207,4 @@ Read a specific archived conversation's full transcript.
 
 ## Admin tools
 
-### journal_reindex
-
-Rebuild semantic embeddings (`pgvector`) for every active entry. The `tsvector` full-text index is a `GENERATED ALWAYS STORED` column, so it's always current and is **not** touched by this tool.
-
-**Parameters:** None.
-
-**Returns:** `status` (`ok`, `cooldown`, or `already_running`), `semantic_status` (`ok` / `partial`), `embeddings_generated`, `embeddings_failed`, and `duration_seconds`.
-
-**When to use:** If semantic search results look off, or after swapping the embedding model. Rarely needed in normal operation.
-
-**Safety features:**
-
-- **Cooldown.** If a reindex ran in the last 60 seconds, returns `{status: "cooldown"}` without doing work. Uses `MAX(indexed_at) FROM entries` as a shared cross-worker "last reindex" timestamp.
-- **Advisory lock.** A PostgreSQL session-level advisory lock guarantees only one worker runs the reindex at a time across the whole gunicorn pool. If the lock can't be acquired, returns `{status: "already_running"}`.
+(No public admin tools exposed as MCP tools. Reindex functions are internal library primitives.)

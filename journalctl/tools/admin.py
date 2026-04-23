@@ -1,4 +1,4 @@
-"""MCP tool: journal_reindex."""
+"""Reindex primitives (library). Used by the admin API; no longer exposed as an MCP tool."""
 
 import asyncio
 import logging
@@ -7,12 +7,9 @@ from datetime import UTC
 from datetime import datetime as datetime_cls
 
 import asyncpg
-from mcp.server.fastmcp import FastMCP
 
-from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.crypto import ContentCipher
-from journalctl.storage import pg_setup
 from journalctl.storage.repositories import entries as entry_repo
 from journalctl.tools.constants import REINDEX_BATCH_SIZE
 
@@ -41,59 +38,18 @@ async def _db_reindex_cooldown(pool: asyncpg.Pool) -> int | None:
     return None
 
 
-def register(mcp: FastMCP, app_ctx: AppContext) -> None:
-    """Register admin tools on the MCP server."""
-
-    @mcp.tool()
-    async def journal_reindex() -> dict:
-        """Repair the search index — use when journal_search returns wrong or missing results.
-
-        Only needed if search results seem stale or incomplete.
-        Rarely needed during normal use.
-
-        Returns:
-            Number of embeddings generated and duration.
-        """
-        # Reindex rebuilds embeddings for ALL tenants' entries, so it must run
-        # under the BYPASSRLS admin pool. Fallback to app pool is only safe in
-        # single-tenant dev (pre-RLS). Once 02.05 is applied in prod, running
-        # reindex against the app pool would silently process zero rows, so
-        # log a loud warning when the fallback is taken.
-        pool = app_ctx.admin_pool
-        if pool is None:
-            logger.warning(
-                "journal_reindex: admin_pool not configured — falling back to app pool. "
-                "With RLS active this will process zero rows. "
-                "Set JOURNAL_DATABASE_URL_ADMIN (BYPASSRLS DSN) to fix."
-            )
-            pool = app_ctx.pool
-        cipher = require_cipher(app_ctx)
-        retry_after = await _db_reindex_cooldown(pool)
-        if retry_after is not None:
-            return {
-                "status": "cooldown",
-                "message": f"Reindex completed recently. Try again in {retry_after}s.",
-                "retry_after": retry_after,
-            }
-
-        async with pool.acquire() as lock_conn:
-            acquired = await pg_setup.try_advisory_lock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
-            if not acquired:
-                return {
-                    "status": "already_running",
-                    "message": "A reindex is already in progress.",
-                }
-            try:
-                return await _run_reindex(app_ctx, pool, cipher)
-            finally:
-                await pg_setup.advisory_unlock(lock_conn, _REINDEX_ADVISORY_LOCK_KEY)
-
-
 async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentCipher) -> dict:
+    """Rebuild semantic embeddings for unindexed entries.
+
+    Callers MUST acquire ``pg_try_advisory_lock(_REINDEX_ADVISORY_LOCK_KEY)``
+    before invoking and release it after; this function has no internal
+    concurrency protection. The cooldown check in ``_db_reindex_cooldown``
+    is time-based and does not serialize concurrent callers on its own.
+    """
     start = time.monotonic()
 
     # tsvector columns are GENERATED ALWAYS — always up-to-date.
-    # journal_reindex only needs to rebuild semantic embeddings.
+    # Only needs to rebuild semantic embeddings (tsvector stays current).
     async with pool.acquire() as conn:
         await entry_repo.reset_indexed_at(conn)
 

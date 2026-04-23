@@ -8,8 +8,8 @@ by accident because the failure mode looks like "no results" rather than
 "crash".
 
 This test greps the tool source files for the forbidden pattern. Admin
-paths (``journal_reindex``) are exempt because they acquire from the
-cross-tenant ``admin_pool``.
+module (``admin.py``) is exempt — it is no longer an MCP tool; its
+``pool.acquire()`` calls are library internals for the future admin API.
 """
 
 from __future__ import annotations

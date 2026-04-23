@@ -245,17 +245,3 @@ class TestTimeline:
         assert "Software engineer" in result["user_profile"]
         assert result["topic_count"] >= 1
         assert "stats" in result
-
-
-class TestReindex:
-    """journal_reindex."""
-
-    async def test_reindex(self, tools: dict) -> None:
-        await tools["journal_create_topic"](topic="test/reindex", title="Test Reindex")
-        await tools["journal_append_entry"](topic="test/reindex", content="Indexed entry.")
-
-        result = await tools["journal_reindex"]()
-        assert result["status"] == "rebuilt"
-        # With stub embedding service, embeddings_generated may be 0 (store() is a no-op)
-        assert "embeddings_generated" in result
-        assert "duration_seconds" in result

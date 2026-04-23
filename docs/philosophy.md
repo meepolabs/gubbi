@@ -65,7 +65,7 @@ The earliest versions of journalctl were SQLite + FTS5 + `sqlite-vec`. It worked
 3. **HNSW semantic search.** `pgvector`'s HNSW index (tuned `m=32, ef_construction=128`) gives sub-millisecond cosine similarity at tens of thousands of entries, with explicit `WHERE topic_id = ANY(...)` pre-filtering applied in SQL.
 4. **Multi-tenant ready.** Row-level security, schema-per-tenant isolation, and proper FK cascades are all first-class in PostgreSQL. The self-hosted personal config scales to the hosted multi-tenant product without a schema rewrite.
 
-Semantic search and full-text search both live in the same database as the entries themselves. `journal_reindex` only rebuilds semantic embeddings — `tsvector` is always current.
+Semantic search and full-text search both live in the same database as the entries themselves. Rebuilding semantic embeddings is a recovery operation exposed only through internal library primitives — `tsvector` is always current.
 
 ## Why append-only
 

@@ -17,7 +17,7 @@ is_local=true)`` is the SQL-function form that accepts bound parameters,
 which both avoids injection risk and keeps the statement prepared-plan safe.
 ``user_id`` is additionally validated as a ``UUID`` instance before the call.
 
-Admin/worker paths that must cross tenants (``journal_reindex``, cleanup jobs)
+Admin/worker paths that must cross tenants (future admin-dashboard API, cleanup jobs)
 connect via a separate BYPASSRLS pool — see ``AppContext.admin_pool`` — and
 do NOT use this helper.
 """

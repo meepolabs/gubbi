@@ -77,7 +77,7 @@ data/
         └── user-profile.md          # Your identity profile, loaded by journal_briefing
 ```
 
-All journal data lives in PostgreSQL 17 (`topics`, `conversations`, `entries`, `messages`, `entry_embeddings`). Full-text search is a `tsvector` generated column with a GIN index — auto-maintained by the database, no reindex needed. Semantic search is a `pgvector` HNSW index keyed to `entries.id` via `ON DELETE CASCADE`. A local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) generates embeddings on the CPU. `journal_reindex` rebuilds the semantic embeddings only — `tsvector` stays in sync automatically.
+All journal data lives in PostgreSQL 17 (`topics`, `conversations`, `entries`, `messages`, `entry_embeddings`). Full-text search is a `tsvector` generated column with a GIN index — auto-maintained by the database, no reindex needed. Semantic search is a `pgvector` HNSW index keyed to `entries.id` via `ON DELETE CASCADE`. A local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) generates embeddings on the CPU. Rebuilding semantic embeddings is a recovery operation available through internal primitives — `tsvector` stays in sync automatically.
 
 OAuth state (clients, auth codes, tokens) stays in a separate SQLite file (`oauth.db`), intentionally independent from the journal database.
 
@@ -94,7 +94,7 @@ See [docs/architecture.md](docs/architecture.md) for the full system design.
 | Doc | What's in it |
 |-----|-------------|
 | [Architecture](docs/architecture.md) | System design, data model, deployment stack, data flow |
-| [Tools Reference](docs/tools-reference.md) | All 13 MCP tools with parameters, return values, examples |
+| [Tools Reference](docs/tools-reference.md) | All 12 MCP tools with parameters, return values, examples |
 | [Deployment Guide](docs/deployment.md) | Docker, nginx, SSL, secrets, OAuth setup |
 | [Design Philosophy](docs/philosophy.md) | Why append-only, why not RAG, why PostgreSQL |
 | [Taxonomy Guide](docs/taxonomy-guide.md) | How to organize topics, naming conventions, migration strategy |
@@ -111,7 +111,7 @@ journalctl/
 │   ├── storage/               #   asyncpg pool + pgvector EmbeddingService
 │   │   └── repositories/      #     topics, entries, conversations, search
 │   ├── models/                #   Pydantic models
-│   ├── tools/                 #   13 MCP tool implementations
+│   ├── tools/                 # 12 MCP tool implementations
 │   └── oauth/                 #   OAuth 2.1 + DCR provider for browser clients (self-host)
 ├── tests/                     # pytest-asyncio, session-scoped PG pool fixture
 └── deployment/                # Dockerfile, entrypoint.sh, nginx.conf

@@ -30,8 +30,8 @@ class AppContext:
     ``core.db_context.user_scoped_connection(pool)``.
 
     ``admin_pool`` is the optional cross-tenant pool (``journal_admin`` role,
-    BYPASSRLS). Reserved for admin/worker paths like ``journal_reindex`` that
-    must read across all tenants. ``None`` = single-tenant dev fallback.
+    BYPASSRLS). Reserved for admin/worker paths (like ``_run_reindex``) and the future
+    admin-dashboard API that must read across all tenants. ``None`` = single-tenant dev fallback.
 
     ``operator_user_id`` is the UUID bound into the ``current_user_id``
     ContextVar when an operator-identity auth request is authorised (static

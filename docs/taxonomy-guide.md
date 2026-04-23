@@ -99,7 +99,6 @@ For the rest of your conversation history:
 1. Export your data from the previous provider (most offer JSON exports).
 2. Parse the export and save each conversation via `journal_save_conversation`.
 3. Map original projects to journal topic categories.
-4. Run `journal_reindex` to ensure the search index is up to date.
 
 The bulk archive doesn't need careful curation — it's just making old conversations searchable. The important context was captured in Phase 1.
 

@@ -4,7 +4,6 @@ from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.context import AppContext
 from journalctl.tools import (
-    admin,
     context,
     conversations,
     entries,
@@ -25,4 +24,3 @@ def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
     search.register(mcp, app_ctx)
     conversations.register(mcp, app_ctx)
     context.register(mcp, app_ctx)
-    admin.register(mcp, app_ctx)
