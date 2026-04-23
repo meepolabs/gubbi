@@ -70,7 +70,7 @@ def _wrap_register_rate_limit(
         try:
             count = oauth_storage.count_rate_limit_events(event_key, REGISTER_WINDOW_SECS)
         except (sqlite3.Error, ValueError):
-            # Fail safe — reject on storage error rather than allow unrestricted registration
+            # Fail safe -- reject on storage error rather than allow unrestricted registration
             response = JSONResponse(
                 {"error": "rate_limit_unavailable"},
                 status_code=503,
@@ -97,9 +97,31 @@ def register_oauth_routes(
 ) -> Callable[[str], bool] | None:
     """Register OAuth endpoints on the FastAPI app if configured.
 
+    Dispatches across three deploy shapes:
+    - Mode 1 (neither password_hash nor hydra): no routes, returns None.
+    - Mode 2 (password_hash set): registers self-host OAuth + protected-resource.
+    - Mode 3 (hydra_admin_url set): registers only a protected-resource endpoint
+      pointing at the external Hydra issuer. Returns None because Hydra
+      introspection middleware owns token validation.
+
     Returns a token_validator callable for BearerAuthMiddleware,
     or None if OAuth is disabled.
     """
+    # Mode 3: Hydra-backed multi-tenant. Only advertise the resource
+    # metadata route so MCP clients can discover the Hydra authorization
+    # server. Token validation is handled by Hydra introspection middleware.
+    if settings.hydra_admin_url:
+        issuer_url = AnyHttpUrl(settings.hydra_public_issuer_url)
+        pr_routes = create_protected_resource_routes(
+            resource_url=AnyHttpUrl(f"{settings.server_url.rstrip('/')}/mcp"),
+            authorization_servers=[issuer_url],
+        )
+        for route in pr_routes:
+            app.routes.insert(0, route)
+        _logger.info("Registered protected-resource routes (Mode 3: Hydra)")
+        return None
+
+    # Mode 1: no OAuth path configured.
     if not settings.password_hash:
         return None
 

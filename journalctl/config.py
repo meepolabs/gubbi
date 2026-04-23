@@ -25,16 +25,18 @@ class Settings(BaseSettings):
     Managed by Doppler in production, .env in local dev.
 
     The server supports three mutually-exclusive deploy shapes, selected by
-    which of JOURNAL_HYDRA_ADMIN_URL and JOURNAL_PASSWORD_HASH are set:
+    which of JOURNAL_HYDRA_ADMIN_URL, JOURNAL_PASSWORD_HASH, and
+    JOURNAL_HYDRA_PUBLIC_ISSUER_URL are set:
 
-    1. API-key-only self-host -- both empty. JOURNAL_API_KEY is the only
+    1. API-key-only self-host -- all three empty. JOURNAL_API_KEY is the only
        accepted credential. Useful for CLI-only deploys.
-    2. Full self-host -- PASSWORD_HASH set, HYDRA_ADMIN_URL empty. API key
+    2. Full self-host -- PASSWORD_HASH set, HYDRA fields empty. API key
        works AND self-host OAuth (the MCP SDK's DCR routes) works. One
        operator identity.
-    3. Multi-tenant hosted -- HYDRA_ADMIN_URL set, PASSWORD_HASH empty.
-       Hydra OAuth introspection handles every request; the static API
-       key path is disabled. Operators use OAuth like any real user.
+    3. Multi-tenant hosted -- HYDRA_ADMIN_URL + HYDRA_PUBLIC_ISSUER_URL set,
+       PASSWORD_HASH empty. Hydra OAuth introspection handles every request;
+       the static API key path is disabled. Operators use OAuth like any
+       real user.
 
     Setting both HYDRA_ADMIN_URL and PASSWORD_HASH is a configuration
     error and fails startup.
@@ -56,6 +58,12 @@ class Settings(BaseSettings):
 
     # Hydra OAuth 2.1 introspection -- empty = Mode 3 (hosted) disabled.
     hydra_admin_url: str = ""
+
+    # Hydra public issuer -- the HTTPS base URL of the external Hydra
+    # deployment that issues tokens. Required whenever hydra_admin_url is
+    # set so the protected-resource endpoint can advertise the authorization
+    # server identity to MCP clients.
+    hydra_public_issuer_url: str = ""
 
     # Self-host OAuth -- empty password_hash = Mode 2 (full self-host) disabled.
     password_hash: str = ""
@@ -107,18 +115,38 @@ class Settings(BaseSettings):
 
         Also enforce that JOURNAL_API_KEY is present unless Hydra is on.
         """
-        if self.hydra_admin_url and self.password_hash:
+        hydra_on = bool(self.hydra_admin_url)
+        password_on = bool(self.password_hash)
+        hydra_public_on = bool(self.hydra_public_issuer_url)
+
+        # Existing: HYDRA_ADMIN_URL and PASSWORD_HASH are mutually exclusive.
+        if hydra_on and password_on:
             raise ValueError(
                 "JOURNAL_HYDRA_ADMIN_URL and JOURNAL_PASSWORD_HASH are "
                 "mutually exclusive -- pick one deploy shape. See "
                 "docs/deployment.md for the 3-shape matrix."
             )
-        if not self.hydra_admin_url and not self.api_key:
+
+        # Mode 3 requires both Hydra fields together.
+        if hydra_on and not hydra_public_on:
+            raise ValueError(
+                "JOURNAL_HYDRA_PUBLIC_ISSUER_URL is required when "
+                "JOURNAL_HYDRA_ADMIN_URL is set -- both must be non-empty "
+                "together for Mode 3 (multi-tenant hosted)."
+            )
+        if hydra_public_on and not hydra_on:
+            raise ValueError(
+                "JOURNAL_HYDRA_ADMIN_URL is required when "
+                "JOURNAL_HYDRA_PUBLIC_ISSUER_URL is set -- both must be "
+                "non-empty together for Mode 3 (multi-tenant hosted)."
+            )
+
+        if not hydra_on and not self.api_key:
             raise ValueError(
                 "JOURNAL_API_KEY is required unless JOURNAL_HYDRA_ADMIN_URL "
                 "is set (hosted mode disables the static API key path)."
             )
-        if not self.hydra_admin_url and not self.operator_email:
+        if not hydra_on and not self.operator_email:
             raise ValueError(
                 "JOURNAL_OPERATOR_EMAIL is required unless JOURNAL_HYDRA_ADMIN_URL "
                 "is set -- Modes 1/2 bind every authenticated request to the "
