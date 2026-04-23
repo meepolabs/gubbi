@@ -33,19 +33,53 @@ from journalctl.core.auth_context import current_user_id
 from journalctl.oauth.constants import MAX_BEARER_TOKEN_LEN
 
 
-def _unauthorized(message: str) -> JSONResponse:
+def _build_bearer_challenge(
+    error: str,
+    resource_metadata_url: str | None,
+    *,
+    required_scope: str | None = None,
+) -> str:
+    """Build an RFC 6750 WWW-Authenticate Bearer challenge.
+
+    Per MCP spec 2025-11-25, a protected MCP resource must include a
+    ``resource_metadata`` parameter pointing to its OAuth protected-resource
+    metadata document so clients can discover the authorization server.
+    """
+    parts = [f'error="{error}"']
+    if required_scope is not None:
+        parts.append(f'required_scope="{required_scope}"')
+    if resource_metadata_url is not None:
+        parts.append(f'resource_metadata="{resource_metadata_url}"')
+    return "Bearer " + ", ".join(parts)
+
+
+def _unauthorized(detail: str, resource_metadata_url: str | None = None) -> JSONResponse:
+    """Return a 401 JSONResponse with RFC 6750 Bearer challenge.
+
+    The ``detail`` param is the human-readable error in the JSON body; the
+    WWW-Authenticate challenge always uses error="invalid_token" per RFC 6750.
+    """
     return JSONResponse(
-        {"error": message},
+        {"error": detail},
         status_code=401,
-        headers={"WWW-Authenticate": 'Bearer error="invalid_token"'},
+        headers={
+            "WWW-Authenticate": _build_bearer_challenge("invalid_token", resource_metadata_url),
+        },
     )
 
 
-def _forbidden(scope: str) -> JSONResponse:
+def _forbidden(required_scope: str, resource_metadata_url: str | None = None) -> JSONResponse:
+    """Return a 403 JSONResponse with Bearer challenge for scope denial."""
     return JSONResponse(
         {"error": "insufficient_scope"},
         status_code=403,
-        headers={"WWW-Authenticate": f'Bearer error="insufficient_scope",required_scope="{scope}"'},
+        headers={
+            "WWW-Authenticate": _build_bearer_challenge(
+                "insufficient_scope",
+                resource_metadata_url,
+                required_scope=required_scope,
+            ),
+        },
     )
 
 
@@ -78,6 +112,7 @@ class BearerAuthMiddleware:
         required_scope: str = "journal",
         selfhost_token_validator: Callable[[str], bool] | None = None,
         operator_user_id: UUID | None = None,
+        protected_resource_metadata_url: str | None = None,
     ) -> None:
         self.app = app
         self.api_key = api_key
@@ -90,6 +125,12 @@ class BearerAuthMiddleware:
         # auth modes. When None, operator-bound requests reach DB code without
         # a user binding and MissingUserIdError surfaces as a 500.
         self.operator_user_id = operator_user_id
+        # URL of the OAuth protected-resource metadata document. Surfaced in
+        # WWW-Authenticate on 401/403 per MCP spec 2025-11-25 so clients can
+        # discover the authorization server. None disables the parameter
+        # (appropriate for Mode 1 API-key-only deployments with no OAuth
+        # routes to discover).
+        self.protected_resource_metadata_url = protected_resource_metadata_url
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -100,17 +141,23 @@ class BearerAuthMiddleware:
         auth_header = request.headers.get("authorization", "")
 
         if not auth_header:
-            await _unauthorized("Missing or invalid Authorization header")(scope, receive, send)
+            await _unauthorized(
+                "Missing or invalid Authorization header", self.protected_resource_metadata_url
+            )(scope, receive, send)
             return
 
         if not auth_header.lower().startswith("bearer "):
-            await _unauthorized("Missing or invalid Authorization header")(scope, receive, send)
+            await _unauthorized(
+                "Missing or invalid Authorization header", self.protected_resource_metadata_url
+            )(scope, receive, send)
             return
 
         token = auth_header[7:]
 
         if len(token) > MAX_BEARER_TOKEN_LEN:
-            await _unauthorized("Invalid token")(scope, receive, send)
+            await _unauthorized("Invalid token", self.protected_resource_metadata_url)(
+                scope, receive, send
+            )
             return
 
         # Mode 1: Static API key (timing-safe comparison).
@@ -128,19 +175,25 @@ class BearerAuthMiddleware:
                 await _service_unavailable()(scope, receive, send)
                 return
             except HydraInvalidToken:
-                await _unauthorized("Invalid or expired token")(scope, receive, send)
+                await _unauthorized(
+                    "Invalid or expired token", self.protected_resource_metadata_url
+                )(scope, receive, send)
                 return
 
             scopes = claims.scope.split()
             if self.required_scope not in scopes:
-                await _forbidden(self.required_scope)(scope, receive, send)
+                await _forbidden(self.required_scope, self.protected_resource_metadata_url)(
+                    scope, receive, send
+                )
                 return
 
             # Defense-in-depth: TokenClaims.sub is typed UUID and parsed via UUID(sub_raw)
             # in HydraIntrospector, but mirror db_context's isinstance guard so a bypass
             # path (test mock, future cache deserializer) cannot stash a str into the ctxvar.
             if not isinstance(claims.sub, UUID):
-                await _unauthorized("Invalid or expired token")(scope, receive, send)
+                await _unauthorized(
+                    "Invalid or expired token", self.protected_resource_metadata_url
+                )(scope, receive, send)
                 return
 
             token_reset = current_user_id.set(claims.sub)
@@ -156,7 +209,9 @@ class BearerAuthMiddleware:
             return
 
         # None of the modes accepted the token
-        await _unauthorized("Invalid or expired token")(scope, receive, send)
+        await _unauthorized("Invalid or expired token", self.protected_resource_metadata_url)(
+            scope, receive, send
+        )
 
     async def _call_with_operator(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Invoke the wrapped app with current_user_id bound to the operator UUID.

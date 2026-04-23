@@ -446,3 +446,114 @@ class TestNonHttpScope:
         await mw(scope, receive, MagicMock())
         assert len(got_scope) == 1
         assert got_scope[0]["type"] == "websocket"
+
+
+class TestWWWAuthenticateHeader:
+    """RFC 6750 + MCP spec 2025-11-25 compliance for WWW-Authenticate.
+
+    A protected MCP resource must advertise its OAuth protected-resource
+    metadata URL on 401/403 so clients can discover the authorization
+    server without baked-in knowledge of the deployment.
+    """
+
+    PRM_URL = "https://api.journalctl.app/.well-known/oauth-protected-resource"
+
+    async def test_missing_auth_includes_resource_metadata_when_configured(self) -> None:
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            protected_resource_metadata_url=self.PRM_URL,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/")
+        assert resp.status_code == 401
+        challenge = resp.headers["www-authenticate"]
+        assert challenge.startswith("Bearer ")
+        assert 'error="invalid_token"' in challenge
+        assert f'resource_metadata="{self.PRM_URL}"' in challenge
+
+    async def test_invalid_token_includes_resource_metadata(self) -> None:
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            protected_resource_metadata_url=self.PRM_URL,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"Authorization": "Bearer wrong_key"})
+        assert resp.status_code == 401
+        assert f'resource_metadata="{self.PRM_URL}"' in resp.headers["www-authenticate"]
+
+    async def test_insufficient_scope_includes_resource_metadata(self) -> None:
+        claims = TokenClaims(sub=TEST_SUB, scope="openid email", exp=9999999999)
+        mock_iv = AsyncMock(spec=HydraIntrospector)
+        mock_iv.introspect = AsyncMock(return_value=claims)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            introspector=mock_iv,
+            required_scope="journal",
+            protected_resource_metadata_url=self.PRM_URL,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+        assert resp.status_code == 403
+        challenge = resp.headers["www-authenticate"]
+        assert 'error="insufficient_scope"' in challenge
+        assert 'required_scope="journal"' in challenge
+        assert f'resource_metadata="{self.PRM_URL}"' in challenge
+
+    async def test_no_url_configured_omits_resource_metadata(self) -> None:
+        """Mode 1 (API-key only, no OAuth) deployments get a bare challenge."""
+        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/")
+        assert resp.status_code == 401
+        challenge = resp.headers["www-authenticate"]
+        assert 'error="invalid_token"' in challenge
+        assert "resource_metadata=" not in challenge
+
+    async def test_challenge_grammar_exact_for_401(self) -> None:
+        """Full-string assertion pins RFC 6750 challenge grammar + param order."""
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            protected_resource_metadata_url=self.PRM_URL,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/")
+        assert resp.status_code == 401
+        expected = f'Bearer error="invalid_token", resource_metadata="{self.PRM_URL}"'
+        assert resp.headers["www-authenticate"] == expected
+
+    async def test_challenge_grammar_exact_for_403(self) -> None:
+        """Full-string assertion pins order: error, required_scope, resource_metadata."""
+        claims = TokenClaims(sub=TEST_SUB, scope="openid email", exp=9999999999)
+        mock_iv = AsyncMock(spec=HydraIntrospector)
+        mock_iv.introspect = AsyncMock(return_value=claims)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            introspector=mock_iv,
+            required_scope="journal",
+            protected_resource_metadata_url=self.PRM_URL,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+        assert resp.status_code == 403
+        expected = (
+            'Bearer error="insufficient_scope", required_scope="journal", '
+            f'resource_metadata="{self.PRM_URL}"'
+        )
+        assert resp.headers["www-authenticate"] == expected

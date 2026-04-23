@@ -266,6 +266,20 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # compare in the middleware can never match (every token is >= one char).
     effective_api_key = "" if introspector is not None else settings.api_key
 
+    # Point clients at the OAuth protected-resource metadata doc so they can
+    # discover the authorization server (MCP spec 2025-11-25). Only surface
+    # the URL when OAuth is actually wired -- pure Mode 1 API-key deployments
+    # have no /.well-known/oauth-protected-resource endpoint to advertise.
+    protected_resource_metadata_url: str | None = None
+    if introspector is not None or token_validator is not None:
+        server_base = settings.server_url.rstrip("/")
+        protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource"
+        # Guard: resource_metadata must be an absolute URI (RFC 8414 §3).
+        if protected_resource_metadata_url and not any(
+            protected_resource_metadata_url.startswith(pre) for pre in ("http://", "https://")
+        ):
+            protected_resource_metadata_url = None
+
     authed_mcp = BearerAuthMiddleware(
         mcp_http,
         api_key=effective_api_key,
@@ -273,6 +287,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         required_scope=REQUIRED_OAUTH_SCOPE,
         selfhost_token_validator=token_validator,
         operator_user_id=operator_user_id,
+        protected_resource_metadata_url=protected_resource_metadata_url,
     )
     app.mount("/mcp", authed_mcp)
 
