@@ -49,10 +49,8 @@ _TEST_ENV: dict[str, str] = {
     "JOURNAL_API_KEY": "test-api-key-for-unit-tests-only",  # must be >= 32 chars
     "JOURNAL_TRANSPORT": "stdio",
     "JOURNAL_SERVER_URL": "http://localhost:8100",
-    "JOURNAL_OAUTH_ACCESS_TOKEN_TTL": "3600",
-    "JOURNAL_OAUTH_REFRESH_TOKEN_TTL": "2592000",
-    "JOURNAL_OAUTH_AUTH_CODE_TTL": "300",
-    "JOURNAL_DATABASE_URL": TEST_DATABASE_URL,
+    "JOURNAL_DB_APP_URL": TEST_DATABASE_URL,
+    "JOURNAL_OPERATOR_EMAIL": "operator@test.local",
 }
 
 
@@ -61,9 +59,8 @@ def _set_env(tmp_journal: Path, tmp_path: Path) -> Iterator[None]:
     """Set environment variables for tests and restore them on teardown."""
     env = {
         **_TEST_ENV,
-        "JOURNAL_JOURNAL_ROOT": str(tmp_journal),
-        "JOURNAL_OWNER_PASSWORD_HASH": TEST_PASSWORD_HASH,
-        "JOURNAL_OAUTH_DB_PATH": str(tmp_path / "oauth.db"),
+        "JOURNAL_DATA_DIR": str(tmp_journal),
+        "JOURNAL_PASSWORD_HASH": TEST_PASSWORD_HASH,
     }
     old = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
@@ -115,8 +112,8 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
     project_root = Path(__file__).resolve().parents[1]
     env = {
         **os.environ,
-        "JOURNAL_DATABASE_URL": TEST_DATABASE_URL,
-        "JOURNAL_FOUNDER_EMAIL": _RLS_FOUNDER_EMAIL,
+        "JOURNAL_DB_APP_URL": TEST_DATABASE_URL,
+        "JOURNAL_OPERATOR_EMAIL": _RLS_OPERATOR_EMAIL,
     }
     result = subprocess.run(  # noqa: S603 -- sys.executable is trusted, args are literals
         [sys.executable, "-m", "alembic", "upgrade", "head"],
@@ -195,9 +192,9 @@ def cipher() -> ContentCipher:
 _DEFAULT_RLS_DB = "postgresql://journal:testpass@localhost:5433/journal_rls_test"
 RLS_BOOTSTRAP_URL = os.environ.get("TEST_DATABASE_URL_RLS", _DEFAULT_RLS_DB)
 
-_RLS_APP_PASSWORD = "testpass_app"  # noqa: S105 — test-only credential
-_RLS_ADMIN_PASSWORD = "testpass_admin"  # noqa: S105 — test-only credential
-_RLS_FOUNDER_EMAIL = "founder@test.local"
+_RLS_APP_PASSWORD = "testpass_app"  # noqa: S105 -- test-only credential
+_RLS_ADMIN_PASSWORD = "testpass_admin"  # noqa: S105 -- test-only credential
+_RLS_OPERATOR_EMAIL = "operator@test.local"
 
 
 def _rewrite_dsn(dsn: str, *, user: str, password: str) -> str:
@@ -247,8 +244,8 @@ def _run_alembic_upgrade(bootstrap_dsn: str) -> None:
     project_root = Path(__file__).resolve().parents[1]
     env = {
         **os.environ,
-        "JOURNAL_DATABASE_URL": bootstrap_dsn,
-        "JOURNAL_FOUNDER_EMAIL": _RLS_FOUNDER_EMAIL,
+        "JOURNAL_DB_APP_URL": bootstrap_dsn,
+        "JOURNAL_OPERATOR_EMAIL": _RLS_OPERATOR_EMAIL,
     }
     result = subprocess.run(  # noqa: S603 — args are a hard-coded list, no shell
         [sys.executable, "-m", "alembic", "upgrade", "head"],

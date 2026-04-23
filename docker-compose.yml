@@ -1,16 +1,21 @@
 # Host environment must provide:
-#   JOURNAL_API_KEY           -- Bearer token for MCP auth
-#   JOURNAL_POSTGRES_PASSWORD -- PostgreSQL bootstrap password (initdb + healthcheck)
-#   JOURNAL_APP_PASSWORD      -- runtime DB role password (see docs/deployment.md)
-#   JOURNAL_ADMIN_PASSWORD    -- privileged DB role password (see docs/deployment.md)
-#   JOURNAL_TIMEZONE          -- e.g. America/Los_Angeles
+#   JOURNAL_API_KEY               -- Bearer token for MCP auth (required unless
+#                                    JOURNAL_HYDRA_ADMIN_URL is set)
+#   JOURNAL_DB_SUPERUSER_PASSWORD -- PostgreSQL superuser bootstrap password
+#                                    (initdb + healthcheck only; the app never
+#                                    connects as this role)
+#   JOURNAL_DB_APP_PASSWORD       -- runtime DB role password (journal_app)
+#   JOURNAL_DB_ADMIN_PASSWORD     -- privileged DB role password (journal_admin)
+#   JOURNAL_TIMEZONE              -- e.g. America/Los_Angeles
 #
 # Set these via Doppler, .env file, or export before running docker compose.
+# See docs/deployment.md for the full 3-shape deploy matrix (API-key-only /
+# full self-host / multi-tenant hosted).
 #
-# Local bind mounts under ./data/ — data survives `docker compose down -v`:
-#   ./data/journal/   — conversations_json/, knowledge/
-#   ./data/postgres/  — PostgreSQL WAL and data files
-#   ./data/onnx/      — cached ONNX model (avoid re-download on recreate)
+# Local bind mounts under ./data/ -- data survives `docker compose down -v`:
+#   ./data/journal/   -- conversations_json/, knowledge/, oauth.db
+#   ./data/postgres/  -- PostgreSQL WAL and data files
+#   ./data/onnx/      -- cached ONNX model (avoid re-download on recreate)
 
 services:
   postgres:
@@ -20,7 +25,7 @@ services:
     environment:
       POSTGRES_DB: journal
       POSTGRES_USER: journal
-      POSTGRES_PASSWORD: ${JOURNAL_POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${JOURNAL_DB_SUPERUSER_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./deployment/init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
@@ -48,22 +53,22 @@ services:
       # default `journal` superuser from POSTGRES_USER is used only for
       # initdb and the pg_isready healthcheck -- see migration 0002 + 0005
       # for the role/RLS setup.
-      - JOURNAL_DATABASE_URL=postgresql://journal_app:${JOURNAL_APP_PASSWORD}@postgres:5432/journal
-      - JOURNAL_JOURNAL_ROOT=/app/journal
+      - JOURNAL_DB_APP_URL=postgresql://journal_app:${JOURNAL_DB_APP_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DB_ADMIN_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DATA_DIR=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
       - JOURNAL_LOG_DIR=/app/logs
-      # Multi-tenant auth
-      - JOURNAL_DATABASE_URL_ADMIN=postgresql://journal_admin:${JOURNAL_ADMIN_PASSWORD}@postgres:5432/journal
-      - JOURNAL_FOUNDER_EMAIL
+      # Operator identity + encryption (multi-tenant auth)
+      - JOURNAL_OPERATOR_EMAIL
       - JOURNAL_ENCRYPTION_MASTER_KEY_V1
-      # Hydra introspection (leave empty to disable Hydra auth path)
+      # Hydra introspection (leave empty to disable Hydra auth path).
+      # Mutually exclusive with JOURNAL_PASSWORD_HASH -- setting both fails startup.
       - JOURNAL_HYDRA_ADMIN_URL
-      # OAuth
+      # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
-      - JOURNAL_OWNER_PASSWORD_HASH
-      - JOURNAL_OAUTH_DB_PATH
+      - JOURNAL_PASSWORD_HASH
     networks:
       - default
       - auth

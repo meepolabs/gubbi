@@ -56,7 +56,7 @@ jobs:
       # Consumed by tests/conftest.py (legacy + RLS fixtures).
       TEST_DATABASE_URL: postgresql://journal:testpass@localhost:5433/journal_test
       TEST_DATABASE_URL_RLS: postgresql://journal:testpass@localhost:5433/journal_rls_test
-      JOURNAL_FOUNDER_EMAIL: founder@test.local
+      JOURNAL_OPERATOR_EMAIL: operator@test.local
       # The fixture cipher uses a fixed key; this env var only matters for tests
       # that construct a real cipher from the env loader. Pre-encoded 32-byte
       # key that base64-decodes to 32 bytes of 0x01 -- reproducible, not secret.

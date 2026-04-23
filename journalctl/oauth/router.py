@@ -20,7 +20,7 @@ from starlette.requests import Request as StarletteRequest
 from starlette.responses import JSONResponse
 from starlette.routing import Route
 
-from journalctl.config import Settings
+from journalctl.config import OAUTH_AUTH_CODE_TTL_SECS, Settings
 from journalctl.oauth.constants import REGISTER_MAX_ATTEMPTS, REGISTER_WINDOW_SECS
 from journalctl.oauth.forms import client_ip, create_login_handler
 from journalctl.oauth.provider import JournalOAuthProvider
@@ -100,13 +100,12 @@ def register_oauth_routes(
     Returns a token_validator callable for BearerAuthMiddleware,
     or None if OAuth is disabled.
     """
-    if not settings.owner_password_hash:
+    if not settings.password_hash:
         return None
 
     provider = JournalOAuthProvider(
         storage=oauth_storage,
         server_url=settings.server_url,
-        settings=settings,
     )
 
     issuer_url = AnyHttpUrl(settings.server_url)
@@ -134,8 +133,8 @@ def register_oauth_routes(
     # Custom login page
     login_handler = create_login_handler(
         storage=oauth_storage,
-        owner_password_hash=settings.owner_password_hash,
-        auth_code_ttl=settings.oauth_auth_code_ttl,
+        password_hash=settings.password_hash,
+        auth_code_ttl=OAUTH_AUTH_CODE_TTL_SECS,
         secure_cookies=settings.server_url.startswith("https"),
     )
     app.routes.insert(

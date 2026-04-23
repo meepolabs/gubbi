@@ -1,4 +1,4 @@
-"""Add user_id FK to every tenant table + backfill existing rows to the founder.
+"""Add user_id FK to every tenant table + backfill existing rows to the operator.
 
 Every tenant-scoped table (topics, entries, conversations, messages,
 entry_embeddings) gains ``user_id UUID NOT NULL REFERENCES users(id)
@@ -8,14 +8,14 @@ can scope by user.
 Six-phase migration inside one alembic transaction:
 
 1. Add nullable user_id column to each tenant table.
-2. Seed a single "founder" row in users (email from env, UUID generated).
-3. Backfill every tenant row's user_id to the founder's UUID.
+2. Seed a single "operator" row in users (email from env, UUID generated).
+3. Backfill every tenant row's user_id to the operator's UUID.
 4. Guard: verify zero NULL user_id rows remain after backfill (operator-
    friendly early failure, before Phase 5 surfaces it as cryptic PG error).
 5. Promote user_id to NOT NULL on every tenant table.
 6. Add composite indexes for the hot-path queries under RLS.
 
-Requires env var ``JOURNAL_FOUNDER_EMAIL`` to be set before ``alembic
+Requires env var ``JOURNAL_OPERATOR_EMAIL`` to be set before ``alembic
 upgrade``. This is a one-time seed value for the sole pre-Kratos tenant.
 
 KRATOS REBIND — when Kratos is wired later and the operator signs up with
@@ -78,22 +78,22 @@ if not all(t.isidentifier() for t in _TENANT_TABLES):
     )
 
 
-def _founder_email() -> str:
-    """Read the founder email from env or fail loudly."""
-    email = os.environ.get("JOURNAL_FOUNDER_EMAIL")
+def _operator_email() -> str:
+    """Read the operator email from env or fail loudly."""
+    email = os.environ.get("JOURNAL_OPERATOR_EMAIL")
     if not email:
         raise RuntimeError(
-            "JOURNAL_FOUNDER_EMAIL must be set before running migration 0004. "
+            "JOURNAL_OPERATOR_EMAIL must be set before running migration 0004. "
             "Set it to the existing operator's email (e.g. 'you@example.com'). "
-            "This seeds the one founder row into the users table and backfills "
+            "This seeds the one operator row into the users table and backfills "
             "all pre-multitenant data to that user."
         )
     return email
 
 
 def upgrade() -> None:
-    """Add user_id FK to tenant tables, seed founder, backfill, enforce NOT NULL."""
-    email = _founder_email()
+    """Add user_id FK to tenant tables, seed operator, backfill, enforce NOT NULL."""
+    email = _operator_email()
 
     # Phase 1 — add nullable user_id column on every tenant table.
     # Table names are f-string-interpolated here because they are DDL
@@ -109,7 +109,7 @@ def upgrade() -> None:
             """  # noqa: S608 — table from identifier-validated tuple
         )
 
-    # Phase 2 — seed founder user row (idempotent via partial unique email index)
+    # Phase 2 -- seed operator user row (idempotent via partial unique email index)
     op.execute(
         sa.text(
             """
@@ -120,7 +120,7 @@ def upgrade() -> None:
         ).bindparams(email=email)
     )
 
-    # Phase 3 — backfill every tenant row's user_id to the founder.
+    # Phase 3 -- backfill every tenant row's user_id to the operator.
     # One UPDATE per tenant table; the partial unique index on users.email
     # (from 0003) makes the subquery lookup an index-only probe.
     for table in _TENANT_TABLES:
@@ -137,9 +137,9 @@ def upgrade() -> None:
             ).bindparams(email=email)
         )
 
-    # Phase 4 — guard: catch silent NULL propagation before Phase 5 turns it
+    # Phase 4 -- guard: catch silent NULL propagation before Phase 5 turns it
     # into a cryptic "column contains null values" Postgres error. The most
-    # common cause of reaching this guard is a typo in JOURNAL_FOUNDER_EMAIL
+    # common cause of reaching this guard is a typo in JOURNAL_OPERATOR_EMAIL
     # that caused the Phase 3 subquery to return NULL.
     bind = op.get_bind()
     for table in _TENANT_TABLES:
@@ -149,8 +149,8 @@ def upgrade() -> None:
         if null_count > 0:
             raise RuntimeError(
                 f"Backfill left {null_count} NULL user_id rows in {table}. "
-                "This usually means JOURNAL_FOUNDER_EMAIL does not match "
-                "an active row in users, or the founder insert silently "
+                "This usually means JOURNAL_OPERATOR_EMAIL does not match "
+                "an active row in users, or the operator insert silently "
                 "conflicted. Aborting before SET NOT NULL to preserve state."
             )
 
@@ -183,7 +183,7 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Drop composite indexes and user_id columns from every tenant table.
 
-    The founder users row is intentionally left in place — it belongs to the
+    The operator users row is intentionally left in place -- it belongs to the
     users table created in 0003 and is orthogonal to the tenant-FK addition.
     """
     # Drop composite indexes first (safe even if already gone)

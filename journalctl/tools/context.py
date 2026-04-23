@@ -133,7 +133,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         """
 
         # User profile
-        profile = knowledge.read(app_ctx.settings.journal_root, "user-profile")
+        profile = knowledge.read(app_ctx.settings.data_dir, "user-profile")
 
         # This week's timeline
         _today = date.fromisoformat(local_today(app_ctx.settings.timezone))

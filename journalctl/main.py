@@ -20,7 +20,12 @@ from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
 from journalctl.auth.hydra import HydraIntrospector, InMemoryHydraCache
-from journalctl.config import Settings, get_settings
+from journalctl.config import (
+    HYDRA_INTROSPECT_TIMEOUT_SECS,
+    REQUIRED_OAUTH_SCOPE,
+    Settings,
+    get_settings,
+)
 from journalctl.core.context import AppContext
 from journalctl.core.crypto import ContentCipher, load_master_keys_from_env
 from journalctl.core.logger import initialize_logger
@@ -85,40 +90,37 @@ async def _build_content_cipher(
     return cipher
 
 
-async def _resolve_founder_user_id(
+async def _resolve_operator_user_id(
     settings: Settings,
     pool: asyncpg.Pool,
     logger: structlog.stdlib.AsyncBoundLogger,
 ) -> UUID | None:
-    """Resolve the founder UUID for founder-identity auth modes.
+    """Resolve the operator UUID for operator-identity auth modes.
 
     Used by the static API key path and the self-host OAuth callback --
     both represent a single operator identity and bind requests to this
-    UUID. Precedence: JOURNAL_FOUNDER_USER_ID env override > DB lookup
-    by JOURNAL_FOUNDER_EMAIL > None. None is a valid outcome; callers
-    treat it as "founder binding absent" and fail loud on DB code paths.
+    UUID. The UUID is derived by looking up users.email =
+    JOURNAL_OPERATOR_EMAIL. None is a valid outcome; callers treat it as
+    "operator binding absent" and fail loud on DB code paths.
     """
-    if settings.founder_user_id is not None:
-        await logger.info("Using founder_user_id from env override")
-        return settings.founder_user_id
-    if not settings.founder_email:
+    if not settings.operator_email:
         return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
-            settings.founder_email,
+            settings.operator_email,
         )
     if row is None:
         await logger.warning(
-            "Founder email not found in users table -- founder-identity auth will be unbound",
-            email=settings.founder_email,
+            "Operator email not found in users table -- operator-identity auth will be unbound",
+            email=settings.operator_email,
         )
         return None
     resolved = row["id"]
     await logger.info(
-        "Resolved founder_user_id from DB",
-        email=settings.founder_email,
-        founder_user_id=str(resolved),
+        "Resolved operator_user_id from DB",
+        email=settings.operator_email,
+        operator_user_id=str(resolved),
     )
     return resolved if isinstance(resolved, UUID) else UUID(str(resolved))
 
@@ -188,11 +190,11 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # the admin pool. Empty admin DSN falls back to the runtime pool, which
     # is fine in single-tenant dev before RLS is live.
     app.admin_pool = None
-    if settings.database_url_admin:
-        app.admin_pool = await init_pool(settings.database_url_admin)
+    if settings.db_admin_url:
+        app.admin_pool = await init_pool(settings.db_admin_url)
         await app.logger.info("Admin PG pool ready (BYPASSRLS)")
 
-    app.pool = await init_pool(settings.database_url)
+    app.pool = await init_pool(settings.db_app_url)
     await app.logger.info("PostgreSQL pool ready")
 
     # EmbeddingService — ONNX model loaded here before workers fork.
@@ -200,19 +202,19 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     app.embedding_service = EmbeddingService()
     await app.logger.info("EmbeddingService ready")
 
-    # Founder UUID -- binds static API key + self-host OAuth paths to a concrete
+    # Operator UUID -- binds static API key + self-host OAuth paths to a concrete
     # tenant so user_scoped_connection works uniformly. Look up against the admin
     # pool when available so the query bypasses RLS (once 02.05 ships, the app
     # pool would return zero rows with app.current_user_id unset). users has no
     # RLS today (migration 0005 only enables it on the 5 tenant tables), so the
     # app-pool fallback works -- warn loudly so the assumption is visible if
     # users ever gets an RLS policy.
-    if app.admin_pool is None and settings.founder_email:
+    if app.admin_pool is None and settings.operator_email:
         await app.logger.warning(
-            "Founder lookup will use app pool — safe only while users table "
-            "has no RLS policy. Configure JOURNAL_DATABASE_URL_ADMIN for safety."
+            "Operator lookup will use app pool -- safe only while users table "
+            "has no RLS policy. Configure JOURNAL_DB_ADMIN_URL for safety."
         )
-    founder_user_id = await _resolve_founder_user_id(
+    operator_user_id = await _resolve_operator_user_id(
         settings,
         app.admin_pool or app.pool,
         app.logger,
@@ -237,34 +239,40 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         settings=settings,
         logger=app.logger,
         admin_pool=app.admin_pool,
-        founder_user_id=founder_user_id,
+        operator_user_id=operator_user_id,
         cipher=app.cipher,
     )
 
     app.mcp = create_mcp_server(app_ctx)
     mcp_http = app.mcp.streamable_http_app()
 
-    # Hydra introspector — optional, activated when JOURNAL_HYDRA_ADMIN_URL is set
+    # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
+    # When on, the static API key path is disabled (hosted mode is OAuth-only).
     introspector: HydraIntrospector | None = None
     hydra_http_client: httpx.AsyncClient | None = None
     if settings.hydra_admin_url:
-        hydra_http_client = httpx.AsyncClient(timeout=settings.hydra_introspect_timeout)
+        hydra_http_client = httpx.AsyncClient(timeout=HYDRA_INTROSPECT_TIMEOUT_SECS)
         introspector = HydraIntrospector(
             admin_url=settings.hydra_admin_url,
             http_client=hydra_http_client,
             logger=app.logger,
             cache=InMemoryHydraCache(),
-            timeout_seconds=settings.hydra_introspect_timeout,
+            timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
         )
         await app.logger.info("Hydra introspector ready", admin_url=settings.hydra_admin_url)
 
+    # Mode 3 (hosted) disables the shared static API key path -- operators
+    # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
+    # compare in the middleware can never match (every token is >= one char).
+    effective_api_key = "" if introspector is not None else settings.api_key
+
     authed_mcp = BearerAuthMiddleware(
         mcp_http,
-        api_key=settings.api_key,
+        api_key=effective_api_key,
         introspector=introspector,
-        required_scope=settings.required_oauth_scope,
+        required_scope=REQUIRED_OAUTH_SCOPE,
         selfhost_token_validator=token_validator,
-        founder_user_id=founder_user_id,
+        operator_user_id=operator_user_id,
     )
     app.mount("/mcp", authed_mcp)
 
@@ -325,14 +333,14 @@ def main() -> None:
 
         async def _run_stdio() -> None:
             logger = structlog.get_logger("journalctl")
-            pool = await init_pool(settings.database_url)
+            pool = await init_pool(settings.db_app_url)
             admin_pool: asyncpg.Pool | None = None
-            if settings.database_url_admin:
-                admin_pool = await init_pool(settings.database_url_admin)
+            if settings.db_admin_url:
+                admin_pool = await init_pool(settings.db_admin_url)
             embedding_service = EmbeddingService()
             settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
             settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
-            founder_user_id = await _resolve_founder_user_id(settings, admin_pool or pool, logger)
+            operator_user_id = await _resolve_operator_user_id(settings, admin_pool or pool, logger)
             cipher = await _build_content_cipher(logger)
             app_ctx = AppContext(
                 pool=pool,
@@ -340,7 +348,7 @@ def main() -> None:
                 settings=settings,
                 logger=logger,
                 admin_pool=admin_pool,
-                founder_user_id=founder_user_id,
+                operator_user_id=operator_user_id,
                 cipher=cipher,
             )
             mcp = create_mcp_server(app_ctx)

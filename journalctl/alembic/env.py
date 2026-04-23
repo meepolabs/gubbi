@@ -1,6 +1,6 @@
 """Alembic environment configuration — sync mode with raw SQL migrations.
 
-The database URL is read from the JOURNAL_DATABASE_URL environment variable.
+The database URL is read from the JOURNAL_DB_APP_URL environment variable.
 We do not use SQLAlchemy model reflection (autogenerate) because our schema
 source of truth is the raw SQL file at journalctl/storage/schema.sql.
 """
@@ -22,14 +22,14 @@ target_metadata = None
 
 
 def get_database_url() -> str:
-    """Read the database URL from JOURNAL_DATABASE_URL environment variable.
+    """Read the database URL from JOURNAL_DB_APP_URL environment variable.
 
     Returns the URL with the psycopg driver scheme for SQLAlchemy.
     """
-    url = os.environ.get("JOURNAL_DATABASE_URL")
+    url = os.environ.get("JOURNAL_DB_APP_URL")
     if not url:
         raise RuntimeError(
-            "JOURNAL_DATABASE_URL is not set. "
+            "JOURNAL_DB_APP_URL is not set. "
             "Set it to your PostgreSQL connection string, e.g.: "
             "postgresql+psycopg://user:pass@host:5432/dbname"
         )

@@ -22,7 +22,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
-from journalctl.config import Settings
+from journalctl.config import OAUTH_ACCESS_TOKEN_TTL_SECS, OAUTH_REFRESH_TOKEN_TTL_SECS
 from journalctl.oauth.storage import OAuthStorage
 
 logger = logging.getLogger("journalctl.oauth.provider")
@@ -37,11 +37,9 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         self,
         storage: OAuthStorage,
         server_url: str,
-        settings: Settings,
     ) -> None:
         self.storage = storage
         self.server_url = server_url.rstrip("/")
-        self.settings = settings
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
         return self.storage.get_client(client_id)
@@ -107,7 +105,7 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             token=access_token_str,
             client_id=client_id,
             scopes=scopes,
-            expires_at=now + self.settings.oauth_access_token_ttl,
+            expires_at=now + OAUTH_ACCESS_TOKEN_TTL_SECS,
             resource=resource,
         )
         refresh_token_str = secrets.token_urlsafe(32)
@@ -115,7 +113,7 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             token=refresh_token_str,
             client_id=client_id,
             scopes=scopes,
-            expires_at=now + self.settings.oauth_refresh_token_ttl,
+            expires_at=now + OAUTH_REFRESH_TOKEN_TTL_SECS,
         )
         self.storage.save_issued_token_pair(
             access_token_str, access_token, refresh_token_str, refresh_token
@@ -124,7 +122,7 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         return OAuthToken(
             access_token=access_token_str,
             token_type="Bearer",  # noqa: S106 — protocol constant
-            expires_in=self.settings.oauth_access_token_ttl,
+            expires_in=OAUTH_ACCESS_TOKEN_TTL_SECS,
             refresh_token=refresh_token_str,
             scope=" ".join(scopes) if scopes else None,
         )
@@ -173,14 +171,14 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             token=new_access_str,
             client_id=client.client_id or "",
             scopes=effective_scopes,
-            expires_at=now + self.settings.oauth_access_token_ttl,
+            expires_at=now + OAUTH_ACCESS_TOKEN_TTL_SECS,
         )
         new_refresh_str = secrets.token_urlsafe(32)
         new_refresh = RefreshToken(
             token=new_refresh_str,
             client_id=client.client_id or "",
             scopes=effective_scopes,
-            expires_at=now + self.settings.oauth_refresh_token_ttl,
+            expires_at=now + OAUTH_REFRESH_TOKEN_TTL_SECS,
         )
 
         self.storage.rotate_refresh_token(
@@ -195,7 +193,7 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         return OAuthToken(
             access_token=new_access_str,
             token_type="Bearer",  # noqa: S106 — protocol constant
-            expires_in=self.settings.oauth_access_token_ttl,
+            expires_in=OAUTH_ACCESS_TOKEN_TTL_SECS,
             refresh_token=new_refresh_str,
             scope=" ".join(effective_scopes) if effective_scopes else None,
         )

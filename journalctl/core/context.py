@@ -33,11 +33,11 @@ class AppContext:
     BYPASSRLS). Reserved for admin/worker paths like ``journal_reindex`` that
     must read across all tenants. ``None`` = single-tenant dev fallback.
 
-    ``founder_user_id`` is the UUID bound into the ``current_user_id``
-    ContextVar when a founder-identity auth request is authorised (static
-    API key or self-host OAuth). Resolved during lifespan from
-    ``JOURNAL_FOUNDER_USER_ID`` or a DB lookup by ``JOURNAL_FOUNDER_EMAIL``.
-    ``None`` disables the founder-identity tenant binding.
+    ``operator_user_id`` is the UUID bound into the ``current_user_id``
+    ContextVar when an operator-identity auth request is authorised (static
+    API key or self-host OAuth). Resolved during lifespan via DB lookup by
+    ``JOURNAL_OPERATOR_EMAIL``. ``None`` disables the operator-identity
+    tenant binding.
 
     ``cipher`` is the app-layer AES-256-GCM content cipher (TASK-02.11).
     Built from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*`` env vars at startup.
@@ -50,5 +50,5 @@ class AppContext:
     settings: Settings
     logger: structlog.stdlib.AsyncBoundLogger
     admin_pool: asyncpg.Pool | None = None
-    founder_user_id: UUID | None = None
+    operator_user_id: UUID | None = None
     cipher: ContentCipher | None = None

@@ -42,11 +42,9 @@ def _register_test_client(storage: OAuthStorage) -> None:
 
 def _create_test_app(oauth_storage: OAuthStorage) -> Starlette:
     """Create a minimal Starlette app with OAuth routes for testing."""
-    settings = get_settings()
     provider = JournalOAuthProvider(
         storage=oauth_storage,
         server_url=SERVER_URL,
-        settings=settings,
     )
 
     issuer_url = AnyHttpUrl(SERVER_URL)
@@ -65,7 +63,7 @@ def _create_test_app(oauth_storage: OAuthStorage) -> Starlette:
 
     login_handler = create_login_handler(
         storage=oauth_storage,
-        owner_password_hash=TEST_PASSWORD_HASH,
+        password_hash=TEST_PASSWORD_HASH,
         secure_cookies=False,
     )
 
@@ -306,7 +304,7 @@ class TestTokenLengthValidation:
             return JSONResponse({"ok": True})
 
         inner = Starlette(routes=[Route("/", echo)])
-        app = BearerAuthMiddleware(inner)
+        app = BearerAuthMiddleware(inner, api_key="unused-for-oversized-check")
         client = TestClient(app)
 
         oversized = "x" * 300

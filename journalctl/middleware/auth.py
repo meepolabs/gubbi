@@ -1,15 +1,17 @@
 """Bearer token authentication for the MCP endpoint.
 
-Validates three types of tokens, reflecting the two supported deploy
-shapes (single-user self-host and multi-tenant hosted):
+Validates three types of tokens, reflecting the three supported deploy
+shapes (see docs/deployment.md for the full matrix):
 
-1. Static API key (Claude Code, Desktop, Cursor, other CLI clients --
-   works in both deploy shapes)
-2. Hydra OAuth 2.0 access tokens (multi-tenant hosted -- activated when
-   JOURNAL_HYDRA_ADMIN_URL is set)
+1. Static API key (Claude Code, Desktop, Cursor, other CLI clients).
+   Enabled in Mode 1 (API-key-only) and Mode 2 (full self-host). Disabled
+   in Mode 3 (multi-tenant hosted) -- lifespan passes api_key="" so the
+   timing-safe compare never matches.
+2. Hydra OAuth 2.1 access tokens (Mode 3 -- multi-tenant hosted,
+   activated when JOURNAL_HYDRA_ADMIN_URL is set).
 3. Self-host OAuth access tokens via external token_validator callback
-   (single-user self-host via the MCP SDK's DCR-capable OAuth routes --
-   activated when JOURNAL_OWNER_PASSWORD_HASH is set)
+   (Mode 2 -- single-user self-host via the MCP SDK's DCR-capable OAuth
+   routes, activated when JOURNAL_PASSWORD_HASH is set).
 
 Uses a lightweight ASGI wrapper (NOT BaseHTTPMiddleware) to avoid
 buffering responses -- BaseHTTPMiddleware breaks SSE streaming
@@ -75,7 +77,7 @@ class BearerAuthMiddleware:
         introspector: HydraIntrospector | None = None,
         required_scope: str = "journal",
         selfhost_token_validator: Callable[[str], bool] | None = None,
-        founder_user_id: UUID | None = None,
+        operator_user_id: UUID | None = None,
     ) -> None:
         self.app = app
         self.api_key = api_key
@@ -83,11 +85,11 @@ class BearerAuthMiddleware:
         self.required_scope = required_scope
         self.selfhost_token_validator = selfhost_token_validator
         # Static API key + self-host OAuth paths both authenticate as a single
-        # operator ("the founder"). Binding their requests to this UUID lets
+        # operator. Binding their requests to this UUID lets
         # user_scoped_connection set app.current_user_id uniformly across all
-        # auth modes. When None, founder-bound requests reach DB code without
+        # auth modes. When None, operator-bound requests reach DB code without
         # a user binding and MissingUserIdError surfaces as a 500.
-        self.founder_user_id = founder_user_id
+        self.operator_user_id = operator_user_id
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -111,9 +113,11 @@ class BearerAuthMiddleware:
             await _unauthorized("Invalid token")(scope, receive, send)
             return
 
-        # Mode 1: Static API key (timing-safe comparison)
-        if secrets.compare_digest(token, self.api_key):
-            await self._call_with_founder(scope, receive, send)
+        # Mode 1: Static API key (timing-safe comparison).
+        # Empty api_key disables the path entirely (Mode 3 passes ""); the
+        # explicit truthiness check prevents an empty-vs-empty match.
+        if self.api_key and secrets.compare_digest(token, self.api_key):
+            await self._call_with_operator(scope, receive, send)
             return
 
         # Mode 2: Hydra introspection (Ory access tokens)
@@ -148,25 +152,25 @@ class BearerAuthMiddleware:
 
         # Mode 3: Self-host OAuth callback
         if self.selfhost_token_validator is not None and self.selfhost_token_validator(token):
-            await self._call_with_founder(scope, receive, send)
+            await self._call_with_operator(scope, receive, send)
             return
 
         # None of the modes accepted the token
         await _unauthorized("Invalid or expired token")(scope, receive, send)
 
-    async def _call_with_founder(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Invoke the wrapped app with current_user_id bound to the founder UUID.
+    async def _call_with_operator(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Invoke the wrapped app with current_user_id bound to the operator UUID.
 
-        Used by founder-identity auth modes (static API key, self-host OAuth).
-        When no founder UUID is configured the request passes through without
+        Used by operator-identity auth modes (static API key, self-host OAuth).
+        When no operator UUID is configured the request passes through without
         binding; downstream DB code will then raise MissingUserIdError (-> 500).
         This is intentional fail-loud behaviour -- the 500 flags a deployment
         misconfiguration, it is NOT a silent security bypass.
         """
-        if self.founder_user_id is None:
+        if self.operator_user_id is None:
             await self.app(scope, receive, send)
             return
-        token_reset = current_user_id.set(self.founder_user_id)
+        token_reset = current_user_id.set(self.operator_user_id)
         try:
             await self.app(scope, receive, send)
         finally:

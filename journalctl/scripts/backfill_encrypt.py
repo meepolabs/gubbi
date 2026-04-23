@@ -178,19 +178,19 @@ async def _run(pool: asyncpg.Pool, cipher: ContentCipher, dry_run: bool) -> None
 
 
 def _resolve_admin_dsn() -> str:
-    dsn = os.environ.get("JOURNAL_DATABASE_URL_ADMIN")
+    dsn = os.environ.get("JOURNAL_DB_ADMIN_URL")
     if dsn:
         return dsn
     try:
         from journalctl.config import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        if settings.database_url_admin:
-            return str(settings.database_url_admin)
+        if settings.db_admin_url:
+            return str(settings.db_admin_url)
     except Exception as exc:
         sys.stderr.write(f"Could not resolve admin DSN from settings: {exc}\n")
     _fail(
-        "JOURNAL_DATABASE_URL_ADMIN environment variable is required. "
+        "JOURNAL_DB_ADMIN_URL environment variable is required. "
         "This DSN provides the BYPASSRLS role needed to read all tenants' "
         "rows. Set it before running the backfill."
     )

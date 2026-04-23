@@ -1,18 +1,30 @@
 # Deployment Guide
 
-Journalctl supports two deployment shapes. Pick the one that matches your
-use case:
+Journalctl supports three mutually-exclusive deploy shapes, selected by
+which of `JOURNAL_HYDRA_ADMIN_URL` and `JOURNAL_PASSWORD_HASH` are set.
+Setting both is a configuration error and fails startup.
 
-### Single-user self-host (this document)
+| Shape | `JOURNAL_HYDRA_ADMIN_URL` | `JOURNAL_PASSWORD_HASH` | API key | Hydra | Self-host OAuth |
+|-------|---------------------------|-------------------------|---------|-------|-----------------|
+| API-key-only self-host | empty | empty | yes | -- | -- |
+| Full self-host | empty | set | yes | -- | yes |
+| Multi-tenant hosted | set | empty | no | yes | -- |
+
+### API-key-only self-host
+
+Simplest surface. `JOURNAL_API_KEY` is the only accepted credential.
+Useful when every client supports static Bearer tokens (Claude Code,
+Claude Desktop, Cursor, Aider).
+
+### Full self-host (this document)
 
 One operator, one user identity. Uses the MCP SDK's built-in OAuth 2.1 +
 PKCE + RFC 7591 Dynamic Client Registration routes for OAuth clients
-(claude.ai, ChatGPT), and a shared static API key for Bearer-token
-clients (Claude Code, Claude Desktop, Cursor, Aider). One container, one
-PostgreSQL. Simplest operational surface.
+(claude.ai, ChatGPT) AND accepts the static API key for Bearer-token
+clients. One container, one PostgreSQL.
 
-Set `JOURNAL_OWNER_PASSWORD_HASH` to enable OAuth; leave it empty for
-API-key-only deploys.
+Set `JOURNAL_PASSWORD_HASH` (bcrypt hash of the operator's password) to
+activate self-host OAuth.
 
 ### Multi-tenant hosted
 
@@ -22,16 +34,12 @@ in the private `journalctl-cloud` repo alongside the cloud-api webhook
 service; this `journalctl` repo is then the MCP backend behind a shared
 auth plane. See that repo's own deployment docs.
 
-Set `JOURNAL_HYDRA_ADMIN_URL` on the journalctl service to switch on the
-Hydra introspection path in the auth middleware.
+Set `JOURNAL_HYDRA_ADMIN_URL` on the journalctl service to switch on
+Hydra introspection. The static API key path is disabled in this mode --
+operators authenticate via OAuth like any real user, or `docker exec`
+for ops work.
 
-Both shapes can share the same deploy host, though in practice you pick
-one. The auth middleware handles any combination of the two at runtime
--- setting both env vars enables both paths simultaneously (Hydra tokens
-via introspection, self-host OAuth via the MCP SDK callback, static API
-key in either case). Setting neither gives you an API-key-only server.
-
-The rest of this document covers the **single-user self-host** path.
+The rest of this document covers the **full self-host** path.
 
 ---
 
@@ -61,16 +69,16 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `JOURNAL_API_KEY` | yes | Static Bearer token for API key auth. Must be ≥32 chars. | `sk-journal-...` |
-| `JOURNAL_POSTGRES_PASSWORD` | yes | PostgreSQL bootstrap password (initdb + healthcheck). | (random) |
-| `JOURNAL_APP_PASSWORD` | yes | Password for the runtime database role created by migration 0002. Set via `ALTER ROLE ... WITH PASSWORD '<value>'`. | (random, distinct) |
-| `JOURNAL_ADMIN_PASSWORD` | yes | Password for the privileged database role created by migration 0002. | (random, distinct) |
+| `JOURNAL_API_KEY` | yes (unless `JOURNAL_HYDRA_ADMIN_URL` is set) | Static Bearer token for API key auth. Must be >=32 chars. | `sk-journal-...` |
+| `JOURNAL_DB_SUPERUSER_PASSWORD` | yes | PostgreSQL superuser bootstrap password (initdb + healthcheck). The app never connects as this role. | (random) |
+| `JOURNAL_DB_APP_PASSWORD` | yes | Password for the runtime database role (`journal_app`, RLS-enforced) created by migration 0002. Set via `ALTER ROLE ... WITH PASSWORD '<value>'`. | (random, distinct) |
+| `JOURNAL_DB_ADMIN_PASSWORD` | yes | Password for the privileged database role (`journal_admin`, BYPASSRLS) created by migration 0002. | (random, distinct) |
 | `JOURNAL_TIMEZONE` | yes | Timezone for "today" defaulting and briefing week math | `America/Los_Angeles` |
+| `JOURNAL_OPERATOR_EMAIL` | yes | Email of the single operator user. The operator's UUID is derived at startup via `users.email` lookup and bound to every API-key / self-host OAuth request. | `you@example.com` |
 | `JOURNAL_SERVER_URL` | for self-host OAuth | Public HTTPS URL advertised in the OAuth + RFC 7591 DCR metadata endpoints | `https://journal.yourdomain.com` |
-| `JOURNAL_OWNER_PASSWORD_HASH` | for self-host OAuth | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty string keeps the server API-key-only. | `$2b$12$...` |
-| `JOURNAL_OAUTH_DB_PATH` | for self-host OAuth | Path to the SQLite DB backing issued clients + tokens inside the container | `/app/journal/oauth.db` |
+| `JOURNAL_PASSWORD_HASH` | for self-host OAuth | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty keeps the server API-key-only. Mutually exclusive with `JOURNAL_HYDRA_ADMIN_URL`. | `$2b$12$...` |
 
-`JOURNAL_DATABASE_URL` and `JOURNAL_DATABASE_URL_ADMIN` are composed inside `docker-compose.yml` from the role passwords above -- configure the three password values in your secrets manager, not the full DSNs. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
+`JOURNAL_DB_APP_URL` and `JOURNAL_DB_ADMIN_URL` are composed inside `docker-compose.yml` from the three password values above -- configure those in your secrets manager, not the full DSNs. The OAuth SQLite file lives at `<JOURNAL_DATA_DIR>/oauth.db` and needs no separate config. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
 
 Generate a bcrypt password hash via the built-in CLI:
 
@@ -91,7 +99,7 @@ services:
     environment:
       POSTGRES_DB: journal
       POSTGRES_USER: journal
-      POSTGRES_PASSWORD: ${JOURNAL_POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${JOURNAL_DB_SUPERUSER_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
       - ./deployment/init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
@@ -112,14 +120,14 @@ services:
       - "127.0.0.1:8100:8100"   # loopback only — nginx fronts it
     environment:
       - JOURNAL_API_KEY
-      - JOURNAL_DATABASE_URL=postgresql://journal_app:${JOURNAL_APP_PASSWORD}@postgres:5432/journal
-      - JOURNAL_DATABASE_URL_ADMIN=postgresql://journal_admin:${JOURNAL_ADMIN_PASSWORD}@postgres:5432/journal
-      - JOURNAL_JOURNAL_ROOT=/app/journal
+      - JOURNAL_DB_APP_URL=postgresql://journal_app:${JOURNAL_DB_APP_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DB_ADMIN_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DATA_DIR=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
+      - JOURNAL_OPERATOR_EMAIL
       - JOURNAL_SERVER_URL
-      - JOURNAL_OWNER_PASSWORD_HASH
-      - JOURNAL_OAUTH_DB_PATH
+      - JOURNAL_PASSWORD_HASH
     volumes:
       - ./data/journal:/app/journal
       - ./logs:/app/logs
@@ -288,7 +296,7 @@ For clients that require OAuth rather than a static Bearer token
 with PKCE, RFC 7591 Dynamic Client Registration, bcrypt password
 verification, CSRF-protected login, and token refresh -- all via the
 MCP SDK's built-in auth routes. Enable it by setting
-`JOURNAL_OWNER_PASSWORD_HASH` (bcrypt hash of the single operator's
+`JOURNAL_PASSWORD_HASH` (bcrypt hash of the single operator's
 password).
 
 Clients that support MCP OAuth self-register via `POST /register`, then

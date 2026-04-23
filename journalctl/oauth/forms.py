@@ -22,6 +22,7 @@ from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
 
+from journalctl.config import OAUTH_AUTH_CODE_TTL_SECS
 from journalctl.oauth.constants import (
     CSRF_COOKIE_NAME,
     LOGIN_LOCKOUT_WINDOW_SECS,
@@ -50,8 +51,8 @@ def client_ip(request: Request) -> str:
 
 def create_login_handler(
     storage: OAuthStorage,
-    owner_password_hash: str,
-    auth_code_ttl: int = 300,
+    password_hash: str,
+    auth_code_ttl: int = OAUTH_AUTH_CODE_TTL_SECS,
     *,
     secure_cookies: bool = True,
 ) -> LoginHandler:
@@ -115,7 +116,7 @@ def create_login_handler(
         # Verify password
         if not bcrypt.checkpw(
             password.encode("utf-8"),
-            owner_password_hash.encode("utf-8"),
+            password_hash.encode("utf-8"),
         ):
             # Record the failure for per-IP rate limiting (CRITICAL-2)
             storage.record_rate_limit_event(event_key)

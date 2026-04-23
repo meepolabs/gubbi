@@ -11,7 +11,7 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull
 
-from journalctl.config import get_settings
+from journalctl.config import OAUTH_ACCESS_TOKEN_TTL_SECS
 from journalctl.oauth.provider import JournalOAuthProvider
 from journalctl.oauth.storage import OAuthStorage
 
@@ -28,7 +28,6 @@ def _make_provider(oauth_storage: OAuthStorage) -> JournalOAuthProvider:
     return JournalOAuthProvider(
         storage=oauth_storage,
         server_url="http://localhost:8100",
-        settings=get_settings(),
     )
 
 
@@ -92,7 +91,7 @@ class TestCodeExchange:
         token = await provider.exchange_authorization_code(client, loaded)
         assert token.access_token
         assert token.refresh_token
-        assert token.expires_in == get_settings().oauth_access_token_ttl
+        assert token.expires_in == OAUTH_ACCESS_TOKEN_TTL_SECS
 
         # Code is deleted after exchange (one-time use)
         assert oauth_storage.get_auth_code("test-code") is None
