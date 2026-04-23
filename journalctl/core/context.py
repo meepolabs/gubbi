@@ -34,9 +34,10 @@ class AppContext:
     must read across all tenants. ``None`` = single-tenant dev fallback.
 
     ``founder_user_id`` is the UUID bound into the ``current_user_id``
-    ContextVar when a legacy API-key request is authorised. Resolved during
-    lifespan from ``JOURNAL_FOUNDER_USER_ID`` or a DB lookup by
-    ``JOURNAL_FOUNDER_EMAIL``. ``None`` disables the legacy-key tenant path.
+    ContextVar when a founder-identity auth request is authorised (static
+    API key or self-host OAuth). Resolved during lifespan from
+    ``JOURNAL_FOUNDER_USER_ID`` or a DB lookup by ``JOURNAL_FOUNDER_EMAIL``.
+    ``None`` disables the founder-identity tenant binding.
 
     ``cipher`` is the app-layer AES-256-GCM content cipher (TASK-02.11).
     Built from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*`` env vars at startup.

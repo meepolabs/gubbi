@@ -1,5 +1,40 @@
 # Deployment Guide
 
+Journalctl supports two deployment shapes. Pick the one that matches your
+use case:
+
+### Single-user self-host (this document)
+
+One operator, one user identity. Uses the MCP SDK's built-in OAuth 2.1 +
+PKCE + RFC 7591 Dynamic Client Registration routes for OAuth clients
+(claude.ai, ChatGPT), and a shared static API key for Bearer-token
+clients (Claude Code, Claude Desktop, Cursor, Aider). One container, one
+PostgreSQL. Simplest operational surface.
+
+Set `JOURNAL_OWNER_PASSWORD_HASH` to enable OAuth; leave it empty for
+API-key-only deploys.
+
+### Multi-tenant hosted
+
+Many user identities, per-user sessions, user management. Uses Ory Hydra
+for OAuth + Ory Kratos for identity + a dedicated auth Postgres. Lives
+in the private `journalctl-cloud` repo alongside the cloud-api webhook
+service; this `journalctl` repo is then the MCP backend behind a shared
+auth plane. See that repo's own deployment docs.
+
+Set `JOURNAL_HYDRA_ADMIN_URL` on the journalctl service to switch on the
+Hydra introspection path in the auth middleware.
+
+Both shapes can share the same deploy host, though in practice you pick
+one. The auth middleware handles any combination of the two at runtime
+-- setting both env vars enables both paths simultaneously (Hydra tokens
+via introspection, self-host OAuth via the MCP SDK callback, static API
+key in either case). Setting neither gives you an API-key-only server.
+
+The rest of this document covers the **single-user self-host** path.
+
+---
+
 ## Prerequisites
 
 - A server with Docker and Docker Compose (any small VPS will do; see memory requirements below)
@@ -31,9 +66,9 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 | `JOURNAL_APP_PASSWORD` | yes | Password for the runtime database role created by migration 0002. Set via `ALTER ROLE ... WITH PASSWORD '<value>'`. | (random, distinct) |
 | `JOURNAL_ADMIN_PASSWORD` | yes | Password for the privileged database role created by migration 0002. | (random, distinct) |
 | `JOURNAL_TIMEZONE` | yes | Timezone for "today" defaulting and briefing week math | `America/Los_Angeles` |
-| `JOURNAL_SERVER_URL` | for OAuth | Public HTTPS URL used in OAuth metadata endpoints | `https://journal.yourdomain.com` |
-| `JOURNAL_OWNER_PASSWORD_HASH` | for OAuth | Bcrypt hash for OAuth login. Empty string disables OAuth. | `$2b$12$...` |
-| `JOURNAL_OAUTH_DB_PATH` | for OAuth | Path to OAuth SQLite DB inside container | `/app/journal/oauth.db` |
+| `JOURNAL_SERVER_URL` | for self-host OAuth | Public HTTPS URL advertised in the OAuth + RFC 7591 DCR metadata endpoints | `https://journal.yourdomain.com` |
+| `JOURNAL_OWNER_PASSWORD_HASH` | for self-host OAuth | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty string keeps the server API-key-only. | `$2b$12$...` |
+| `JOURNAL_OAUTH_DB_PATH` | for self-host OAuth | Path to the SQLite DB backing issued clients + tokens inside the container | `/app/journal/oauth.db` |
 
 `JOURNAL_DATABASE_URL` and `JOURNAL_DATABASE_URL_ADMIN` are composed inside `docker-compose.yml` from the role passwords above -- configure the three password values in your secrets manager, not the full DSNs. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
 
@@ -246,11 +281,23 @@ If your client doesn't support `type: "http"` natively, use `mcp-remote` as a lo
 }
 ```
 
-### OAuth 2.0 (browser/mobile clients)
+### OAuth 2.1 + PKCE + RFC 7591 Dynamic Client Registration (browser/mobile clients)
 
-For browser-based clients that require OAuth (rather than a static Bearer token), the server implements OAuth 2.0 with PKCE, bcrypt password verification, CSRF-protected login, and token refresh. Connect via your client's MCP integrations settings — you'll be redirected to a login page on your server.
+For clients that require OAuth rather than a static Bearer token
+(claude.ai, ChatGPT, custom web apps), the server implements OAuth 2.1
+with PKCE, RFC 7591 Dynamic Client Registration, bcrypt password
+verification, CSRF-protected login, and token refresh -- all via the
+MCP SDK's built-in auth routes. Enable it by setting
+`JOURNAL_OWNER_PASSWORD_HASH` (bcrypt hash of the single operator's
+password).
 
-OAuth state (clients, auth codes, tokens) lives in `oauth.db` (SQLite), deliberately separate from the PostgreSQL journal database.
+Clients that support MCP OAuth self-register via `POST /register`, then
+walk the standard `/authorize` + `/token` flow against the login page
+served by this container.
+
+OAuth state (registered clients, auth codes, access + refresh tokens)
+lives in `oauth.db` (SQLite), deliberately separate from the
+PostgreSQL journal database.
 
 **Hardening checklist** before exposing OAuth endpoints to the public internet:
 

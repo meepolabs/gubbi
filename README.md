@@ -2,7 +2,7 @@
 
 A self-hosted [MCP](https://modelcontextprotocol.io/) server that gives any LLM a persistent, searchable journal — a personal memory infrastructure layer for AI, backed by PostgreSQL on your own infrastructure.
 
-**Works with any MCP-compatible client** — not tied to any specific LLM provider. Any chat app or CLI tool that supports MCP servers via Bearer token or OAuth 2.0 can connect.
+**Works with any MCP-compatible client** -- not tied to any specific LLM provider. Any chat app or CLI tool that supports MCP servers via Bearer token or OAuth 2.1 can connect.
 
 ```
 You: "I just finished setting up the new home server"
@@ -48,7 +48,7 @@ Then connect your MCP client:
 }
 ```
 
-For browser-based clients, the server supports OAuth 2.0 with PKCE — connect via your client's MCP integrations settings.
+For browser-based clients, the server supports OAuth 2.1 with PKCE and RFC 7591 Dynamic Client Registration -- connect via your client's MCP integrations settings.
 
 ## What the LLM can do
 
@@ -112,7 +112,7 @@ journalctl/
 │   │   └── repositories/      #     topics, entries, conversations, search
 │   ├── models/                #   Pydantic models
 │   ├── tools/                 #   13 MCP tool implementations
-│   └── oauth/                 #   OAuth 2.0 provider for browser clients
+│   └── oauth/                 #   OAuth 2.1 + DCR provider for browser clients (self-host)
 ├── tests/                     # pytest-asyncio, session-scoped PG pool fixture
 └── deployment/                # Dockerfile, entrypoint.sh, nginx.conf
 ```
@@ -122,7 +122,7 @@ journalctl/
 - **PostgreSQL is the canonical store.** `topics`, `conversations`, `entries`, `messages`, and `entry_embeddings` all live in one database. `tsvector` generated columns give FTS with zero application-side index sync. `pgvector` HNSW powers semantic search on the same table.
 - **Append-only.** No compaction, compression, or auto-deletion. Soft delete only.
 - **Raw ASGI auth middleware.** BaseHTTPMiddleware buffers responses and breaks SSE streaming.
-- **OAuth 2.0 + API keys.** CLI/desktop clients use Bearer tokens. Browser/mobile clients use OAuth. OAuth state stays in its own SQLite file, separate from the journal database.
+- **OAuth 2.1 + API keys.** CLI/desktop clients use Bearer tokens. Browser/mobile clients use OAuth (PKCE + RFC 7591 DCR via the MCP SDK routes). OAuth state stays in its own SQLite file, separate from the journal database.
 - **Worker-owned pools.** Each gunicorn worker creates its own asyncpg pool in its lifespan (no `--preload`), because asyncpg pools cannot survive `os.fork()`.
 - **No in-process git.** No GitPython, no cross-process locking. Backup strategy is your choice.
 - **gosu Docker pattern.** Container starts as root, detects bind mount owner UID, drops to non-root.

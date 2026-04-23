@@ -90,11 +90,13 @@ async def _resolve_founder_user_id(
     pool: asyncpg.Pool,
     logger: structlog.stdlib.AsyncBoundLogger,
 ) -> UUID | None:
-    """Resolve the founder UUID for legacy-auth requests.
+    """Resolve the founder UUID for founder-identity auth modes.
 
-    Precedence: JOURNAL_FOUNDER_USER_ID env override > DB lookup by
-    JOURNAL_FOUNDER_EMAIL > None. None is a valid outcome; callers must
-    treat it as "legacy auth unbound".
+    Used by the static API key path and the self-host OAuth callback --
+    both represent a single operator identity and bind requests to this
+    UUID. Precedence: JOURNAL_FOUNDER_USER_ID env override > DB lookup
+    by JOURNAL_FOUNDER_EMAIL > None. None is a valid outcome; callers
+    treat it as "founder binding absent" and fail loud on DB code paths.
     """
     if settings.founder_user_id is not None:
         await logger.info("Using founder_user_id from env override")
@@ -108,7 +110,7 @@ async def _resolve_founder_user_id(
         )
     if row is None:
         await logger.warning(
-            "Founder email not found in users table — legacy auth will be unbound",
+            "Founder email not found in users table -- founder-identity auth will be unbound",
             email=settings.founder_email,
         )
         return None
@@ -198,13 +200,13 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     app.embedding_service = EmbeddingService()
     await app.logger.info("EmbeddingService ready")
 
-    # Founder UUID — binds legacy API-key + legacy-OAuth paths to a concrete
-    # tenant so user_scoped_connection works uniformly. Look up against the
-    # admin pool when available so the query bypasses RLS (once 02.05 ships,
-    # the app pool would return zero rows with app.current_user_id unset).
-    # users has no RLS today (migration 0005 only enables it on the 5 tenant
-    # tables), so the app-pool fallback works — warn loudly so the assumption
-    # is visible if users ever gets an RLS policy.
+    # Founder UUID -- binds static API key + self-host OAuth paths to a concrete
+    # tenant so user_scoped_connection works uniformly. Look up against the admin
+    # pool when available so the query bypasses RLS (once 02.05 ships, the app
+    # pool would return zero rows with app.current_user_id unset). users has no
+    # RLS today (migration 0005 only enables it on the 5 tenant tables), so the
+    # app-pool fallback works -- warn loudly so the assumption is visible if
+    # users ever gets an RLS policy.
     if app.admin_pool is None and settings.founder_email:
         await app.logger.warning(
             "Founder lookup will use app pool — safe only while users table "
@@ -261,7 +263,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         api_key=settings.api_key,
         introspector=introspector,
         required_scope=settings.required_oauth_scope,
-        legacy_token_validator=token_validator,
+        selfhost_token_validator=token_validator,
         founder_user_id=founder_user_id,
     )
     app.mount("/mcp", authed_mcp)

@@ -1,12 +1,18 @@
 """Bearer token authentication for the MCP endpoint.
 
-Validates two types of tokens:
-1. Legacy static API key (for Claude CLI / Desktop)
-2. Hydra OAuth 2.0 access tokens (for web/mobile clients)
-3. Legacy OAuth access tokens via external token_validator callback
+Validates three types of tokens, reflecting the two supported deploy
+shapes (single-user self-host and multi-tenant hosted):
+
+1. Static API key (Claude Code, Desktop, Cursor, other CLI clients --
+   works in both deploy shapes)
+2. Hydra OAuth 2.0 access tokens (multi-tenant hosted -- activated when
+   JOURNAL_HYDRA_ADMIN_URL is set)
+3. Self-host OAuth access tokens via external token_validator callback
+   (single-user self-host via the MCP SDK's DCR-capable OAuth routes --
+   activated when JOURNAL_OWNER_PASSWORD_HASH is set)
 
 Uses a lightweight ASGI wrapper (NOT BaseHTTPMiddleware) to avoid
-buffering responses — BaseHTTPMiddleware breaks SSE streaming
+buffering responses -- BaseHTTPMiddleware breaks SSE streaming
 required by MCP's streamable HTTP transport.
 """
 
@@ -53,12 +59,13 @@ class BearerAuthMiddleware:
     """ASGI middleware that enforces Bearer token authentication.
 
     Validates tokens in three modes:
-    1. Direct match against the legacy API key
-    2. Hydra introspection for Ory Atlassian tokens
-    3. Delegated token validation via legacy_token_validator callback
+    1. Direct match against the static API key
+    2. Hydra introspection for Ory access tokens (multi-tenant hosted)
+    3. Delegated token validation via selfhost_token_validator callback
+       (single-user self-host)
 
-    This is NOT BaseHTTPMiddleware — it passes through the raw
-    ASGI interface without buffering, so SSE streaming works.
+    This is NOT BaseHTTPMiddleware -- it passes through the raw ASGI
+    interface without buffering, so SSE streaming works.
     """
 
     def __init__(
@@ -67,19 +74,19 @@ class BearerAuthMiddleware:
         api_key: str,
         introspector: HydraIntrospector | None = None,
         required_scope: str = "journal",
-        legacy_token_validator: Callable[[str], bool] | None = None,
+        selfhost_token_validator: Callable[[str], bool] | None = None,
         founder_user_id: UUID | None = None,
     ) -> None:
         self.app = app
         self.api_key = api_key
         self.introspector = introspector
         self.required_scope = required_scope
-        self.legacy_token_validator = legacy_token_validator
-        # Legacy API-key and legacy-OAuth paths pre-date multi-tenant auth; both
-        # authenticate as "the founder". Binding their requests to this UUID lets
-        # user_scoped_connection set app.current_user_id uniformly across all auth
-        # modes. When None, legacy-authenticated requests reach DB code without a
-        # user binding and MissingUserIdError surfaces as a 500.
+        self.selfhost_token_validator = selfhost_token_validator
+        # Static API key + self-host OAuth paths both authenticate as a single
+        # operator ("the founder"). Binding their requests to this UUID lets
+        # user_scoped_connection set app.current_user_id uniformly across all
+        # auth modes. When None, founder-bound requests reach DB code without
+        # a user binding and MissingUserIdError surfaces as a 500.
         self.founder_user_id = founder_user_id
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -104,7 +111,7 @@ class BearerAuthMiddleware:
             await _unauthorized("Invalid token")(scope, receive, send)
             return
 
-        # Mode 1: Legacy API key (timing-safe comparison)
+        # Mode 1: Static API key (timing-safe comparison)
         if secrets.compare_digest(token, self.api_key):
             await self._call_with_founder(scope, receive, send)
             return
@@ -139,8 +146,8 @@ class BearerAuthMiddleware:
                 current_user_id.reset(token_reset)
             return
 
-        # Mode 3: Legacy OAuth callback
-        if self.legacy_token_validator is not None and self.legacy_token_validator(token):
+        # Mode 3: Self-host OAuth callback
+        if self.selfhost_token_validator is not None and self.selfhost_token_validator(token):
             await self._call_with_founder(scope, receive, send)
             return
 
@@ -150,11 +157,11 @@ class BearerAuthMiddleware:
     async def _call_with_founder(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Invoke the wrapped app with current_user_id bound to the founder UUID.
 
-        Used by legacy auth modes (API key, legacy OAuth). When no founder UUID
-        is configured the request passes through without binding; downstream
-        DB code will then raise MissingUserIdError (→ 500). This is intentional
-        fail-loud behaviour — the 500 flags a deployment misconfiguration, it
-        is NOT a silent security bypass.
+        Used by founder-identity auth modes (static API key, self-host OAuth).
+        When no founder UUID is configured the request passes through without
+        binding; downstream DB code will then raise MissingUserIdError (-> 500).
+        This is intentional fail-loud behaviour -- the 500 flags a deployment
+        misconfiguration, it is NOT a silent security bypass.
         """
         if self.founder_user_id is None:
             await self.app(scope, receive, send)

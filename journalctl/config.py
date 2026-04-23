@@ -52,11 +52,12 @@ class Settings(BaseSettings):
     # Empty = fall back to the runtime pool (OK in single-tenant dev before RLS is live).
     database_url_admin: str = ""
 
-    # Founder identity — binds the legacy API key path to a specific user UUID so
-    # user_scoped_connection works uniformly regardless of auth mode. Either:
-    #   1. JOURNAL_FOUNDER_USER_ID (UUID string) — used directly, or
-    #   2. JOURNAL_FOUNDER_EMAIL — resolved against the users table at startup.
-    # When both are empty, legacy API-key requests have no bound user and any
+    # Founder identity -- binds the static API key + self-host OAuth paths to a
+    # specific user UUID so user_scoped_connection works uniformly regardless of
+    # auth mode. Either:
+    #   1. JOURNAL_FOUNDER_USER_ID (UUID string) -- used directly, or
+    #   2. JOURNAL_FOUNDER_EMAIL -- resolved against the users table at startup.
+    # When both are empty, founder-identity requests have no bound user and any
     # tool call that needs DB access will raise MissingUserIdError.
     founder_user_id: UUID | None = None
     founder_email: str = ""

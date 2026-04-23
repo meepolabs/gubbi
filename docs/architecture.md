@@ -2,7 +2,7 @@
 
 ## System overview
 
-journalctl is a FastAPI application that exposes 13 MCP tools over streamable HTTP. Any MCP-compatible client connects via the MCP protocol, authenticates with Bearer tokens or OAuth 2.0, and reads/writes to a canonical PostgreSQL 17 database (`pgvector/pgvector:pg17`) that stores all journal data. Conversation transcripts are additionally archived as JSON files on disk for long-term backup.
+journalctl is a FastAPI application that exposes 13 MCP tools over streamable HTTP. Any MCP-compatible client connects via the MCP protocol, authenticates with Bearer tokens or OAuth 2.1, and reads/writes to a canonical PostgreSQL 17 database (`pgvector/pgvector:pg17`) that stores all journal data. Conversation transcripts are additionally archived as JSON files on disk for long-term backup.
 
 ![System architecture](diagrams/system-architecture.svg)
 
@@ -137,11 +137,11 @@ The server runs multiple gunicorn workers against a shared PostgreSQL database:
 
 ## Authentication
 
-Dual-mode auth supports both static API keys and OAuth 2.0:
+Dual-mode auth supports both static API keys and OAuth 2.1:
 
-**API key mode** — for CLI tools and desktop apps. Set the key as an environment variable, pass it as a Bearer token in the MCP client config.
+**API key mode** -- for CLI tools and desktop apps. Set the key as an environment variable, pass it as a Bearer token in the MCP client config.
 
-**OAuth 2.0 mode** — for browser and mobile clients. Full PKCE flow with bcrypt password verification, CSRF-protected login page, and token refresh. OAuth state lives in `oauth.db` (SQLite), deliberately separate from the PostgreSQL journal database so auth changes never touch user data.
+**OAuth 2.1 mode** -- for browser and mobile clients. Full PKCE flow with RFC 7591 Dynamic Client Registration, bcrypt password verification, CSRF-protected login page, and token refresh. OAuth state lives in `oauth.db` (SQLite), deliberately separate from the PostgreSQL journal database so auth changes never touch user data. (This is the self-host OAuth path -- multi-tenant hosted deploys use Hydra+Kratos instead; see the private `journalctl-cloud` repo.)
 
 ```
 Incoming request with Bearer token

@@ -2,7 +2,7 @@
 
 Implements the MCP SDK's OAuthAuthorizationServerProvider protocol.
 Single-user: only the journal owner (verified by bcrypt password) can authorize.
-Dual-mode: accepts both legacy API keys and OAuth access tokens.
+Dual-mode: accepts both a shared static API key and OAuth access tokens.
 """
 
 from __future__ import annotations

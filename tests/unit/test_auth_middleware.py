@@ -304,13 +304,13 @@ class TestMissingAndOversizedTokens:
         assert resp.status_code == 401
 
 
-class TestLegacyValidator:
-    async def test_legacy_validator_rejects(self) -> None:
+class TestSelfhostValidator:
+    async def test_selfhost_validator_rejects(self) -> None:
         mock_validator = MagicMock(return_value=False)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,
-            legacy_token_validator=mock_validator,
+            selfhost_token_validator=mock_validator,
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -319,12 +319,12 @@ class TestLegacyValidator:
         assert resp.status_code == 401
         mock_validator.assert_called_once()
 
-    async def test_legacy_validator_accepts(self) -> None:
+    async def test_selfhost_validator_accepts(self) -> None:
         mock_validator = MagicMock(return_value=True)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,
-            legacy_token_validator=mock_validator,
+            selfhost_token_validator=mock_validator,
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -332,30 +332,30 @@ class TestLegacyValidator:
             resp = await client.get("/", headers={"Authorization": "Bearer some_token"})
         assert resp.status_code == 200
 
-    async def test_ory_token_no_introspector_falls_to_legacy_validator(self) -> None:
-        """Ory token with no introspector falls through to legacy validator check."""
+    async def test_ory_token_no_introspector_falls_to_selfhost_validator(self) -> None:
+        """Ory token with no introspector falls through to self-host validator check."""
         mock_validator = MagicMock(return_value=False)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,
             introspector=None,
-            legacy_token_validator=mock_validator,
+            selfhost_token_validator=mock_validator,
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
             resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
         assert resp.status_code == 401
-        # Legacy validator is called because introspector is None
+        # Self-host validator is called because introspector is None
         mock_validator.assert_called_once()
 
     async def test_ory_token_with_none_validator_returns_401(self) -> None:
-        """Ory token without introspector and legacy_validator=None → 401."""
+        """Ory token without introspector and selfhost_validator=None -> 401."""
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,
             introspector=None,
-            legacy_token_validator=None,
+            selfhost_token_validator=None,
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"

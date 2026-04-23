@@ -77,8 +77,8 @@ async def user_scoped_connection(
     resolved = user_id if user_id is not None else current_user_id.get()
     if resolved is None:
         # Log before raising so the operator can tell an auth-misconfig
-        # (founder_user_id=None, legacy-auth path) from a code bug (tool
-        # handler skipped the helper and called .get() elsewhere).
+        # (founder_user_id=None, founder-identity auth path) from a code bug
+        # (tool handler skipped the helper and called .get() elsewhere).
         logger.error(
             "user_scoped_connection: no authenticated user",
             extra={"user_id_arg_provided": user_id is not None},

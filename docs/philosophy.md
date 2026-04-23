@@ -92,6 +92,6 @@ journalctl uses the [Model Context Protocol](https://modelcontextprotocol.io/) (
 - Any MCP-compatible client can connect — CLI tools, desktop apps, browser-based chat, mobile apps.
 - You're not locked into any specific LLM provider. Switch providers, keep your journal.
 - Multiple clients can connect simultaneously — use one from your phone and another from your terminal.
-- Authentication is standard (Bearer tokens or OAuth 2.0), not proprietary.
+- Authentication is standard (Bearer tokens or OAuth 2.1), not proprietary.
 
 The journal doesn't know or care which LLM is calling it. It exposes tools, receives requests, and returns data. The intelligence stays in the LLM; the persistence stays in the journal.
