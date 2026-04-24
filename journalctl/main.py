@@ -269,11 +269,17 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # Point clients at the OAuth protected-resource metadata doc so they can
     # discover the authorization server (MCP spec 2025-11-25). Only surface
     # the URL when OAuth is actually wired -- pure Mode 1 API-key deployments
-    # have no /.well-known/oauth-protected-resource endpoint to advertise.
+    # have no metadata endpoint to advertise.
+    #
+    # RFC 9728 mounts the metadata at <.well-known>/oauth-protected-resource
+    # + the resource path, so for resource <server_url>/mcp the SDK serves
+    # the doc at /.well-known/oauth-protected-resource/mcp. Must match the
+    # resource_url passed to create_protected_resource_routes in router.py
+    # (which uses the same /mcp suffix); a mismatch breaks discovery.
     protected_resource_metadata_url: str | None = None
     if introspector is not None or token_validator is not None:
         server_base = settings.server_url.rstrip("/")
-        protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource"
+        protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource/mcp"
         # Guard: resource_metadata must be an absolute URI (RFC 8414 §3).
         if protected_resource_metadata_url and not any(
             protected_resource_metadata_url.startswith(pre) for pre in ("http://", "https://")
