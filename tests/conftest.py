@@ -418,7 +418,7 @@ async def clean_rls_db(admin_pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Pool]:
     CASCADE walks FKs to clean up dependent rows.
     """
     truncate_sql = (
-        "TRUNCATE topics, entries, conversations, messages, entry_embeddings, users "
+        "TRUNCATE topics, entries, conversations, messages, entry_embeddings, users, audit_log "
         "RESTART IDENTITY CASCADE"
     )
     async with admin_pool.acquire() as conn:
