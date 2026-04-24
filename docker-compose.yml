@@ -65,7 +65,10 @@ services:
       - JOURNAL_ENCRYPTION_MASTER_KEY_V1
       # Hydra introspection (leave empty to disable Hydra auth path).
       # Mutually exclusive with JOURNAL_PASSWORD_HASH -- setting both fails startup.
+      # PUBLIC_ISSUER_URL is the external HTTPS issuer (auth-dev.meepolabs.com)
+      # advertised to MCP clients; both must be set together for Mode 3.
       - JOURNAL_HYDRA_ADMIN_URL
+      - JOURNAL_HYDRA_PUBLIC_ISSUER_URL
       # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
       - JOURNAL_PASSWORD_HASH
