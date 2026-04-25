@@ -53,8 +53,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             limit: Maximum results (default 10).
 
         Returns:
-            List of matching results with snippets, relevance scores,
-            and entry_id/conversation_id for follow-up calls.
+            List of matching results with snippets, ordered by relevance
+            (best first). Each result includes entry_id/conversation_id
+            for follow-up calls.
         """
         limit = max(1, min(limit, MAX_SEARCH_RESULTS))
         if len(query) > MAX_QUERY_LEN:
