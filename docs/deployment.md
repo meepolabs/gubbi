@@ -78,7 +78,7 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 | `JOURNAL_SERVER_URL` | for self-host OAuth | Public HTTPS URL advertised in the OAuth + RFC 7591 DCR metadata endpoints | `https://journal.yourdomain.com` |
 | `JOURNAL_PASSWORD_HASH` | for self-host OAuth | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty keeps the server API-key-only. Mutually exclusive with `JOURNAL_HYDRA_ADMIN_URL`. | `$2b$12$...` |
 
-`JOURNAL_DB_APP_URL` and `JOURNAL_DB_ADMIN_URL` are composed inside `docker-compose.yml` from the three password values above -- configure those in your secrets manager, not the full DSNs. The OAuth SQLite file lives at `<JOURNAL_DATA_DIR>/oauth.db` and needs no separate config. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
+`JOURNAL_DB_APP_URL`, `JOURNAL_DB_ADMIN_URL`, and `JOURNAL_DB_MIGRATION_URL` are composed inside `docker-compose.yml` from the three password values above -- configure those in your secrets manager, not the full DSNs. The runtime pool uses `journal_app` (RLS-enforced, no DDL); alembic resolves its DSN from `JOURNAL_DB_MIGRATION_URL` (preferred) or `JOURNAL_DB_ADMIN_URL`, both pointing at the privileged `journal_admin` role. The OAuth SQLite file lives at `<JOURNAL_DATA_DIR>/oauth.db` and needs no separate config. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
 
 Generate a bcrypt password hash via the built-in CLI:
 
@@ -138,6 +138,7 @@ services:
       - JOURNAL_API_KEY
       - JOURNAL_DB_APP_URL=postgresql://journal_app:${JOURNAL_DB_APP_PASSWORD}@postgres:5432/journal
       - JOURNAL_DB_ADMIN_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
+      - JOURNAL_DB_MIGRATION_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
       - JOURNAL_DATA_DIR=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}

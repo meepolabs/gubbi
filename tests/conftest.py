@@ -112,7 +112,7 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
     project_root = Path(__file__).resolve().parents[1]
     env = {
         **os.environ,
-        "JOURNAL_DB_APP_URL": TEST_DATABASE_URL,
+        "JOURNAL_DB_MIGRATION_URL": TEST_DATABASE_URL,
         "JOURNAL_OPERATOR_EMAIL": _RLS_OPERATOR_EMAIL,
     }
     result = subprocess.run(  # noqa: S603 -- sys.executable is trusted, args are literals
@@ -244,10 +244,10 @@ def _run_alembic_upgrade(bootstrap_dsn: str) -> None:
     project_root = Path(__file__).resolve().parents[1]
     env = {
         **os.environ,
-        "JOURNAL_DB_APP_URL": bootstrap_dsn,
+        "JOURNAL_DB_MIGRATION_URL": bootstrap_dsn,
         "JOURNAL_OPERATOR_EMAIL": _RLS_OPERATOR_EMAIL,
     }
-    result = subprocess.run(  # noqa: S603 — args are a hard-coded list, no shell
+    result = subprocess.run(  # noqa: S603 -- args are a hard-coded list, no shell
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=project_root,
         env=env,
