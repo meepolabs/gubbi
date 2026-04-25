@@ -126,14 +126,29 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         (this week's entries), and what topics they track.
 
         Returns:
-            user_profile (text), key_facts (semantic matches for identity/status),
+            user_profile (str | None): None when knowledge/user-profile.md is missing,
+                "" when present but empty, populated str when configured.
+            user_profile_status (str): one of "configured", "missing", "empty".
+            key_facts (list | None): None when no embeddings exist for this user at all,
+                [] when embeddings exist but query returned no matches,
+                list of dicts when results found.
+            key_facts_status (str): one of "configured", "missing", "empty".
             this_week (label, date_from, date_to, entries list),
             topics (list of topic objects), topic_count,
             stats (total counts: topics, entries, conversations).
         """
 
-        # User profile
+        # User profile — tri-state: missing / empty / configured
         profile = knowledge.read(app_ctx.settings.data_dir, "user-profile")
+        if profile is None:
+            user_profile_status = "missing"
+            user_profile = None
+        elif profile == "":
+            user_profile_status = "empty"
+            user_profile = ""
+        else:
+            user_profile_status = "configured"
+            user_profile = profile
 
         # This week's timeline
         _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
@@ -148,14 +163,20 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         except Exception:
             logger.warning("Key facts encoding failed, continuing without", exc_info=True)
 
-        key_facts: list[dict] = []
         cipher = require_cipher(app_ctx)
+        key_facts: list[dict] | None = None
+        key_facts_status: str = "missing"
+
         async with user_scoped_connection(app_ctx.pool) as conn:
             week_entries = await entry_repo.get_by_date_range(
                 conn, cipher, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES, ascending=False
             )
             all_topics, topic_count = await topic_repo.list_all(conn, limit=BRIEFING_MAX_TOPICS)
             stats = await entry_repo.get_stats(conn)
+
+            has_embeddings: bool = await conn.fetchval(
+                "SELECT EXISTS(SELECT 1 FROM entry_embeddings LIMIT 1)"
+            )
 
             if key_facts_embedding is not None:
                 try:
@@ -164,9 +185,24 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         key_facts_embedding,
                         limit=BRIEFING_KEY_FACTS_COUNT,
                     )
-                    key_facts = [{"content": r["content"]} for r in raw_facts]
+                    facts_list = [{"content": r["content"]} for r in raw_facts]
+                    if facts_list:
+                        key_facts = facts_list
+                        key_facts_status = "configured"
+                    elif has_embeddings:
+                        key_facts = []
+                        key_facts_status = "empty"
+                    else:
+                        key_facts = None
+                        key_facts_status = "missing"
                 except Exception:
                     logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
+                    key_facts = [] if has_embeddings else None
+                    key_facts_status = "empty" if has_embeddings else "missing"
+            else:
+                # encoding failed
+                key_facts = [] if has_embeddings else None
+                key_facts_status = "empty" if has_embeddings else "missing"
 
         # Clean entries for briefing output
         clean_entries = []
@@ -186,8 +222,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             clean_entries.append(entry)
 
         return {
-            "user_profile": profile,
+            "user_profile": user_profile,
+            "user_profile_status": user_profile_status,
             "key_facts": key_facts,
+            "key_facts_status": key_facts_status,
             "this_week": {
                 "label": label,
                 "date_from": date_from,

@@ -35,6 +35,14 @@ class _StubEmbeddingService:
     ) -> list[dict]:
         return []
 
+    async def search_by_vector(
+        self,
+        conn: Any,
+        embedding: list[float],
+        limit: int = 10,
+    ) -> list[dict]:
+        return []
+
 
 @pytest.fixture
 def mcp_server(clean_pool: asyncpg.Pool, tmp_journal: Path) -> FastMCP:
@@ -243,5 +251,27 @@ class TestTimeline:
 
         result = await tools["journal_briefing"]()
         assert "Software engineer" in result["user_profile"]
+        assert result["user_profile_status"] == "configured"
         assert result["topic_count"] >= 1
         assert "stats" in result
+
+    async def test_briefing_missing_profile(self, tools: dict, tmp_journal: Path) -> None:
+        # knowledge/user-profile.md does NOT exist
+        result = await tools["journal_briefing"]()
+        assert result["user_profile"] is None
+        assert result["user_profile_status"] == "missing"
+
+    async def test_briefing_configured_profile(self, tools: dict, tmp_journal: Path) -> None:
+        profile_path = tmp_journal / "knowledge" / "user-profile.md"
+        profile_path.write_text("# User\n\nName: Ada.", encoding="utf-8")
+        result = await tools["journal_briefing"]()
+        assert result["user_profile"] == "# User\n\nName: Ada."
+        assert result["user_profile_status"] == "configured"
+
+    async def test_briefing_empty_profile(self, tools: dict, tmp_journal: Path) -> None:
+        # File exists but is empty -- distinct from missing
+        profile_path = tmp_journal / "knowledge" / "user-profile.md"
+        profile_path.write_text("", encoding="utf-8")
+        result = await tools["journal_briefing"]()
+        assert result["user_profile"] == ""
+        assert result["user_profile_status"] == "empty"
