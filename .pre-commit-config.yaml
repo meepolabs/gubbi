@@ -25,3 +25,13 @@ repos:
           - pydantic-settings
           - types-PyYAML
         exclude: ^(tests/)
+
+  - repo: local
+    hooks:
+      - id: env-contract-lint
+        name: env-contract-lint
+        language: python
+        entry: python tools/check_env_contract.py
+        pass_filenames: false
+        always_run: true
+        additional_dependencies: [pyyaml]

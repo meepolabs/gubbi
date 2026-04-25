@@ -69,6 +69,8 @@ ignore = ["ANN401", "N818"]
 "journalctl/storage/database.py" = ["S101", "E501"]
 "journalctl/storage/conversations.py" = ["E501"]
 "journalctl/storage/embedding_service.py" = ["ANN"]
+"journalctl/alembic/versions/20260419_0004_add_user_id_to_tenants.py" = ["E501"]
+"journalctl-cloud/journalctl_cloud/webhooks/kratos.py" = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["journalctl"]
