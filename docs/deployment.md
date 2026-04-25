@@ -352,3 +352,72 @@ On a small VM (2GB RAM), PostgreSQL + journalctl + nginx run comfortably for a s
 - nginx: negligible.
 
 For multi-tenant scale, plan for multiple vCPUs and 4+ GB RAM on a dedicated VPS.
+
+## Restore procedure
+
+Use this procedure when restoring from a PostgreSQL dump (disaster recovery,
+data corruption repair, point-in-time recovery from a known-good backup). Two
+tools handle the restore:
+
+| Tool | Purpose |
+|------|---------|
+| `restore-db.sh` | Runs `pg_restore`, then verifies invariants, optionally replays grants. |
+| `verify-db-invariants.sh` | Checks that tenant tables have correct privileges, RLS enabled, policies attached, and default privileges set. |
+
+### Taking a compatible backup
+
+Use `pg_dump` with the compress format (`-Fc`) from the `journal_admin` role:
+
+```bash
+docker compose exec -T postgres pg_dump -U journal_admin -Fc journal > backups/journal_$(date +%Y%m%d).dump
+```
+
+The `-Fc` format supports parallel restore and `--clean --if-exists` (idempotent re-runs).
+
+**Important:** Do NOT pass `--no-acl` to `pg_dump`. The flag strips all access-control-list entries from the dump, which removes the GRANT statements set up by [migration 0002](../journalctl/alembic/versions/20260419_0002_create_db_roles.py) and migration 0009 (the `GRANT journal_app TO journal_admin` admin option). After a restore, all privileges are gone -- tables and RLS policies survive because they are part of the DDL, but the GRANTs are stripped. Journalctl will accept traffic on the first read but return `permission denied for table users`, causing 500 errors until grants are manually replayed.
+
+`--no-owner` is safe and often necessary. On cross-restore scenarios (e.g., restoring a production dump into a dev environment), role names may differ; `--no-owner` avoids ownership conflicts on restored tables and roles.
+
+### Running the restore
+
+```bash
+# Required: set the superuser DSN for pg_restore + grant replay
+export JOURNAL_DB_SUPERUSER_URL=postgresql://journal_admin:password@localhost:5432/journal
+
+# Standard restore with verification
+./deployment/restore-db.sh backups/journal_20260419.dump
+```
+
+Flags:
+
+| Flag | Effect |
+|------|--------|
+| `--repair-grants` | After restore, replays the canonical GRANT block (migration 0002 + 0009 grants for `journal_app` and `journal_admin`) inside a single transaction. Use this if your dump was taken with `--no-acl` or if you suspect grants were stripped. |
+| `--no-verify` | Skip the post-restore invariant check. Discouraged -- use only when you have verified separately with external tooling. |
+
+The restore script uses these flags against `pg_restore`: `--clean --if-exists --no-owner`. A re-run on an existing database drops all objects first (non-destructive of data in the sense that the incoming dump replaces everything cleanly) then loads the dump.
+
+If verification fails **without** `--repair-grants`, the script exits with code 1 and prints which table, role, and privilege are missing:
+
+```
+FAIL: users: role=journal_app missing=SELECT
+Remedy: run restore-db.sh --repair-grants <dump-file> to replay migration 0002 + 0009 grants.
+```
+
+With `--repair-grants`, the script attempts a full fix automatically by replaying grants and re-verifying. This is idempotent -- granting already-granted privileges on an already-healthy database is a no-op.
+
+### When to use `--repair-grants` specifically
+
+Use it when:
+1. The source dump was created with `--no-acl`.
+2. A manual `GRANT` was run outside migrations and you want the canonical form back.
+3. After restoring from a very old backup, to modernize default privileges.
+
+### Reference: who owns what
+
+[Migration 0002](../journalctl/alembic/versions/20260419_0002_create_db_roles.py) sets up two database roles:
+
+- **`journal_app`**: runtime role, RLS-enforced. Granted `SELECT, INSERT, UPDATE, DELETE` on all current and future tenant tables in the public schema (migration 0002 + ALTER DEFAULT PRIVILEGES).
+- **`journal_admin`**: privileged admin role, BYPASSRLS. Granted `ALL PRIVILEGES` on database/schema/tables/sequences (migration 0002). Also granted membership on `journal_app` with ADMIN OPTION (migration 0009).
+
+Restoring a dump strips these GRANTs if `--no-acl` was used during backup. The `--repair-grants` flag replays them exactly as migration 0002 + 0009 define them, ensuring idempotent correctness.
