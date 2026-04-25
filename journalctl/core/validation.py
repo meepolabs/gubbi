@@ -29,6 +29,23 @@ def sanitize_freetext(value: str, max_len: int = 1_000_000) -> str:
     return _CONTROL_CHARS.sub("", value)[:max_len]
 
 
+_TOOL_CALL_PATTERNS = (
+    re.compile(r"<parameter\s+name="),
+    re.compile(r"</parameter>"),
+    re.compile(r"<parameter\b"),
+)
+
+
+def reject_tool_call_syntax(text: str) -> None:
+    """Raise ValueError if text contains unparsed tool-call XML fragments."""
+    for pattern in _TOOL_CALL_PATTERNS:
+        if pattern.search(text):
+            raise ValueError(
+                "Input contains unparsed tool-call syntax; "
+                "client likely failed to emit a valid tool call."
+            )
+
+
 # Validation patterns
 # Matches 1-2 level paths: "work", "work/acme", "hobbies/my-project"
 # Prevents path traversal, requires lowercase alphanumeric with hyphens
