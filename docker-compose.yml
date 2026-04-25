@@ -55,6 +55,9 @@ services:
       # for the role/RLS setup.
       - JOURNAL_DB_APP_URL=postgresql://journal_app:${JOURNAL_DB_APP_PASSWORD}@postgres:5432/journal
       - JOURNAL_DB_ADMIN_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
+      # Migrations run under the admin role; alembic resolves this first,
+      # falling back to JOURNAL_DB_ADMIN_URL. The app role lacks DDL.
+      - JOURNAL_DB_MIGRATION_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
       - JOURNAL_DATA_DIR=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
