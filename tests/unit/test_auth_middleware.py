@@ -22,6 +22,7 @@ from journalctl.middleware.auth import BearerAuthMiddleware
 TEST_API_KEY = "a" * 64  # 64-char key
 TEST_TOKEN = "ory_at_" + "x" * 80
 TEST_SUB = UUID("550e8400-e29b-41d4-a716-446655440000")
+TEST_OP_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 
 
 def _asgi_app(
@@ -89,7 +90,7 @@ def transport_app() -> tuple[Any, AsyncMock]:
 class TestAPIMode:
     async def test_api_key_match_returns_200(self) -> None:
         downstream = _asgi_app()
-        mw = BearerAuthMiddleware(downstream, api_key=TEST_API_KEY)
+        mw = BearerAuthMiddleware(downstream, api_key=TEST_API_KEY, operator_user_id=TEST_OP_ID)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -106,30 +107,16 @@ class TestAPIMode:
         assert resp.status_code == 401
         assert "error" in resp.json()
 
-    async def test_api_key_does_not_set_contextvar(self) -> None:
-        captured: list[str | None] = []
-
-        async def capture_app(scope, receive, send):
-            captured.append(current_user_id.get())
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": 200,
-                    "headers": [],
-                }
-            )
-            await send({"type": "http.response.body", "body": b"ok"})
-
-        mw = BearerAuthMiddleware(
-            capture_app,
-            api_key=TEST_API_KEY,
-        )
+    async def test_api_key_no_operator_returns_503(self) -> None:
+        """When operator_user_id is None, API key match returns 503 with provisioning hint."""
+        downstream = _asgi_app()
+        mw = BearerAuthMiddleware(downstream, api_key=TEST_API_KEY, operator_user_id=None)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
-            await client.get("/", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
-        assert captured == [None]
-        assert current_user_id.get() is None
+            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
+        assert resp.status_code == 503
+        assert "scaffold_self_host" in resp.json()["error"]
 
 
 class TestHydraMode:
@@ -325,6 +312,7 @@ class TestSelfhostValidator:
             _asgi_app(),
             api_key=TEST_API_KEY,
             selfhost_token_validator=mock_validator,
+            operator_user_id=TEST_OP_ID,
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -376,6 +364,7 @@ class TestContextvarReset:
         mw = BearerAuthMiddleware(
             crashing_app,
             api_key=TEST_API_KEY,
+            operator_user_id=TEST_OP_ID,
         )
         scope = _scope(auth_header=f"Bearer {TEST_API_KEY}")
 
@@ -390,7 +379,7 @@ class TestContextvarReset:
         with pytest.raises(RuntimeError, match="downstream crash"):
             await mw(scope, receive, send)
 
-        # Contextvar should still be None (API key mode doesn't set it)
+        # Contextvar is reset after downstream exception
         assert current_user_id.get() is None
 
     async def test_contextvar_reset_when_hydra_downstream_crashes(self) -> None:

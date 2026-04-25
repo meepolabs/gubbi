@@ -86,6 +86,22 @@ Generate a bcrypt password hash via the built-in CLI:
 docker compose exec journalctl python -m journalctl.oauth.crypto 'your-password'
 ```
 
+### Operator Provisioning (Mode 1 / Mode 2)
+
+After `alembic upgrade head`, run the operator provisioning script before
+starting the server. This creates a row in the ``users`` table so that the
+JOURNAL_OPERATOR_EMAIL config can be resolved to a concrete UUID at startup.
+
+    docker compose run journalctl python deployment/scaffold_self_host.py
+
+Or directly in a Poetry environment:
+
+    poetry run python deployment/scaffold_self_host.py
+
+This script is idempotent -- safe to re-run without side effects. It requires
+``JOURNAL_OPERATOR_EMAIL`` to be set (as an env var or via the ``--email``
+CLI flag).
+
 ## Docker Compose
 
 The stack is two services: `postgres` (pgvector/pgvector:pg17) and `journalctl`. Both use bind mounts under `./data/`.
