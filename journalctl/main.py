@@ -293,6 +293,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         required_scope=REQUIRED_OAUTH_SCOPE,
         selfhost_token_validator=token_validator,
         operator_user_id=operator_user_id,
+        jit_pool=app.admin_pool or app.pool,
+        hydra_public_url=settings.hydra_public_url if settings.hydra_admin_url else None,
         protected_resource_metadata_url=protected_resource_metadata_url,
     )
     app.mount("/mcp", authed_mcp)
