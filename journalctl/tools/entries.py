@@ -13,6 +13,7 @@ from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
     is_future_date,
     local_today,
+    reject_tool_call_syntax,
     sanitize_freetext,
     sanitize_label,
     validate_date,
@@ -95,8 +96,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         content = sanitize_freetext(content)
         if not content.strip():
             return validation_error("Content cannot be empty")
+        try:
+            reject_tool_call_syntax(content)
+        except ValueError as e:
+            return validation_error(str(e))
         if reasoning:
             reasoning = sanitize_freetext(reasoning)
+            try:
+                reject_tool_call_syntax(reasoning)
+            except ValueError as e:
+                return validation_error(str(e))
         tags_dropped = 0
         if tags:
             original_tag_count = len(tags)
@@ -245,8 +254,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             content = sanitize_freetext(content)
             if not content.strip():
                 return validation_error("content cannot be empty")
+            try:
+                reject_tool_call_syntax(content)
+            except ValueError as e:
+                return validation_error(str(e))
         if reasoning is not None:
             reasoning = sanitize_freetext(reasoning)
+            try:
+                reject_tool_call_syntax(reasoning)
+            except ValueError as e:
+                return validation_error(str(e))
         if date:
             try:
                 validate_date(date)

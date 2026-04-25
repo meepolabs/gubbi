@@ -12,6 +12,7 @@ from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import (
     local_today,
+    reject_tool_call_syntax,
     sanitize_freetext,
     sanitize_label,
     validate_date,
@@ -109,6 +110,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             return validation_error(str(e))
         source = sanitize_label(source)
         summary = sanitize_freetext(summary)
+        try:
+            reject_tool_call_syntax(summary)
+        except ValueError as e:
+            return validation_error(str(e))
         tags_dropped = 0
         if tags:
             original_tag_count = len(tags)
@@ -145,6 +150,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 "Invalid message format — each message"
                 f" must be a dict with 'role' and 'content': {e}"
             )
+
+        for msg in parsed_messages:
+            try:
+                reject_tool_call_syntax(msg.content)
+            except ValueError as e:
+                return validation_error(f"Message content: {e}")
 
         if not parsed_messages:
             return validation_error("No user/assistant messages found after filtering.")
