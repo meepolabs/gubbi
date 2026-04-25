@@ -217,13 +217,20 @@ class BearerAuthMiddleware:
         """Invoke the wrapped app with current_user_id bound to the operator UUID.
 
         Used by operator-identity auth modes (static API key, self-host OAuth).
-        When no operator UUID is configured the request passes through without
-        binding; downstream DB code will then raise MissingUserIdError (-> 500).
-        This is intentional fail-loud behaviour -- the 500 flags a deployment
-        misconfiguration, it is NOT a silent security bypass.
+        When no operator UUID is configured the request returns a 503 with a
+        message telling the operator how to provision a user row via the
+        scaffold_self_host script. This is not a silent security bypass.
         """
         if self.operator_user_id is None:
-            await self.app(scope, receive, send)
+            response = JSONResponse(
+                {
+                    "error": (
+                        "operator not provisioned; run " "python deployment/scaffold_self_host.py"
+                    ),
+                },
+                status_code=503,
+            )
+            await response(scope, receive, send)
             return
         token_reset = current_user_id.set(self.operator_user_id)
         try:

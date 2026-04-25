@@ -1,42 +1,42 @@
-"""Add user_id FK to every tenant table + backfill existing rows to the operator.
+"""Add user_id FK to every tenant table -- pure DDL, no user-row creation.
 
 Every tenant-scoped table (topics, entries, conversations, messages,
 entry_embeddings) gains ``user_id UUID NOT NULL REFERENCES users(id)
 ON DELETE CASCADE`` so the app layer and upcoming RLS policies (02.05)
 can scope by user.
 
-Six-phase migration inside one alembic transaction:
+Three-phase migration inside one alembic transaction:
 
 1. Add nullable user_id column to each tenant table.
-2. Seed a single "operator" row in users (email from env, UUID generated).
-3. Backfill every tenant row's user_id to the operator's UUID.
-4. Guard: verify zero NULL user_id rows remain after backfill (operator-
-   friendly early failure, before Phase 5 surfaces it as cryptic PG error).
 5. Promote user_id to NOT NULL on every tenant table.
 6. Add composite indexes for the hot-path queries under RLS.
 
-Requires env var ``JOURNAL_OPERATOR_EMAIL`` to be set before ``alembic
-upgrade``. This is a one-time seed value for the sole pre-Kratos tenant.
+This migration does NOT create any users rows or backfill data.
+The operator row must be provisioned separately (see
+journalctl/scripts/provision_operator.py). If JOURNAL_OPERATOR_EMAIL
+is set, the app will look it up at startup; if no matching user row
+exists in ``users``, operator-identity auth reaches DB code without
+a user binding and MissingUserIdError surfaces as a 500.
 
-KRATOS REBIND — when Kratos is wired later and the operator signs up with
-this same email, the internal users.id (random UUID generated here) needs
+KRATOS REBIND -- when Kratos is wired later and the operator signs up with
+this same email, the internal users.id (random UUID generated separately) needs
 to be reconciled with the Kratos identity UUID. Do NOT attempt a naive
-``UPDATE users SET id = <kratos-uuid> WHERE email = ...`` — all five
+``UPDATE users SET id = <kratos-uuid> WHERE email = ...`` -- all five
 tenant FKs were created with the default ``ON UPDATE NO ACTION`` and the
 UPDATE will fail on the first referencing row. The correct path is a
 follow-up migration that either (a) adds a separate ``kratos_identity_id
 UUID UNIQUE`` column and keeps the internal UUID as stable PK (preferred
-— decouples internal identity from external auth provider), or (b)
+-- decouples internal identity from external auth provider), or (b)
 rebuilds the FK constraints as ``ON UPDATE CASCADE`` first, then runs
 the UPDATE inside a single transaction. Option (a) is the intended path
 and will be tracked under Track C as part of Kratos wiring (02.08/02.09).
 
-ON DELETE CASCADE from tenant tables → users: matches GDPR
+ON DELETE CASCADE from tenant tables -> users: matches GDPR
 right-to-erasure (hard-deleting a user wipes their data). Soft delete
 via users.deleted_at is the normal path; RLS policies will filter
 ``users.deleted_at IS NULL`` to hide soft-deleted tenants.
 
-SCALE NOTE — for future migrations on tables with 10k+ rows, the
+SCALE NOTE -- for future migrations on tables with 10k+ rows, the
 ``ADD COLUMN ... REFERENCES`` + ``SET NOT NULL`` pattern used here takes
 ACCESS EXCLUSIVE for the whole validation scan and will block reads/writes
 for seconds to minutes. The low-downtime pattern at that scale is
@@ -47,8 +47,6 @@ constraint, ``VALIDATE CONSTRAINT`` outside the hot lock, then ``SET NOT
 NULL`` runs fast because PG can short-circuit using the validated CHECK.
 Current row counts (~600 entries) make this unnecessary for 0004 itself.
 """
-
-import os
 
 import sqlalchemy as sa
 from alembic import op
@@ -68,34 +66,20 @@ _TENANT_TABLES = (
     "entry_embeddings",
 )
 
-# Defense in depth — these names are f-string-interpolated into DDL statements.
+# Defense in depth -- these names are f-string-interpolated into DDL statements.
 # A non-identifier here would be an injection surface for any future contributor
 # who adds a dynamic entry without realizing. Runtime check (not assert) so
-# `python -O` cannot strip the guard.
+# ``python -O`` cannot strip the guard.
 if not all(t.isidentifier() for t in _TENANT_TABLES):
     raise ValueError(
         "All entries in _TENANT_TABLES must be valid Python identifiers; " f"got {_TENANT_TABLES!r}"
     )
 
 
-def _operator_email() -> str:
-    """Read the operator email from env or fail loudly."""
-    email = os.environ.get("JOURNAL_OPERATOR_EMAIL")
-    if not email:
-        raise RuntimeError(
-            "JOURNAL_OPERATOR_EMAIL must be set before running migration 0004. "
-            "Set it to the existing operator's email (e.g. 'you@example.com'). "
-            "This seeds the one operator row into the users table and backfills "
-            "all pre-multitenant data to that user."
-        )
-    return email
-
-
 def upgrade() -> None:
-    """Add user_id FK to tenant tables, seed operator, backfill, enforce NOT NULL."""
-    email = _operator_email()
+    """Add user_id FK to tenant tables, enforce NOT NULL, create indexes."""
 
-    # Phase 1 — add nullable user_id column on every tenant table.
+    # Phase 1 -- add nullable user_id column on every tenant table.
     # Table names are f-string-interpolated here because they are DDL
     # identifiers (parameter binding is not valid for DDL identifier
     # positions); source is the identifier-validated _TENANT_TABLES tuple,
@@ -106,41 +90,13 @@ def upgrade() -> None:
             ALTER TABLE {table}
             ADD COLUMN IF NOT EXISTS user_id UUID
             REFERENCES users (id) ON DELETE CASCADE
-            """  # noqa: S608 — table from identifier-validated tuple
+            """  # noqa: S608 -- table from identifier-validated tuple
         )
 
-    # Phase 2 -- seed operator user row (idempotent via partial unique email index)
-    op.execute(
-        sa.text(
-            """
-            INSERT INTO users (id, email, timezone)
-            VALUES (gen_random_uuid(), :email, 'UTC')
-            ON CONFLICT (email) WHERE deleted_at IS NULL DO NOTHING
-            """
-        ).bindparams(email=email)
-    )
-
-    # Phase 3 -- backfill every tenant row's user_id to the operator.
-    # One UPDATE per tenant table; the partial unique index on users.email
-    # (from 0003) makes the subquery lookup an index-only probe.
-    for table in _TENANT_TABLES:
-        op.execute(
-            sa.text(
-                f"""
-                UPDATE {table}
-                SET user_id = (
-                    SELECT id FROM users
-                    WHERE email = :email AND deleted_at IS NULL
-                )
-                WHERE user_id IS NULL
-                """  # noqa: S608 — table name from a fixed tuple, not user input
-            ).bindparams(email=email)
-        )
-
-    # Phase 4 -- guard: catch silent NULL propagation before Phase 5 turns it
-    # into a cryptic "column contains null values" Postgres error. The most
-    # common cause of reaching this guard is a typo in JOURNAL_OPERATOR_EMAIL
-    # that caused the Phase 3 subquery to return NULL.
+    # Pre-Phase-5 guard: fail early if any tenant rows have NULL user_id.
+    # On a fresh DB this is a no-op. On a Mode 1/2 DB with existing data, this
+    # fires when provision_operator.py has not been run yet (no users row to
+    # backfill against). The error message points operators at the fix.
     bind = op.get_bind()
     for table in _TENANT_TABLES:
         null_count = bind.execute(
@@ -148,19 +104,18 @@ def upgrade() -> None:
         ).scalar_one()
         if null_count > 0:
             raise RuntimeError(
-                f"Backfill left {null_count} NULL user_id rows in {table}. "
-                "This usually means JOURNAL_OPERATOR_EMAIL does not match "
-                "an active row in users, or the operator insert silently "
-                "conflicted. Aborting before SET NOT NULL to preserve state."
+                f"Migration 0004 aborted: {null_count} row(s) in '{table}' have NULL user_id. "
+                "Run `python deployment/scaffold_self_host.py` to create the operator "
+                "row, then backfill user_id manually before re-running alembic upgrade."
             )
 
-    # Phase 5 — promote user_id to NOT NULL now that backfill is complete
+    # Phase 5 -- promote user_id to NOT NULL now that column is present on all rows
     for table in _TENANT_TABLES:
         op.execute(
             f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL"  # noqa: S608
         )
 
-    # Phase 6 — composite indexes for the hot-path queries under RLS
+    # Phase 6 -- composite indexes for the hot-path queries under RLS
     op.execute("CREATE INDEX IF NOT EXISTS idx_topics_user " "ON topics (user_id)")
     op.execute(
         "CREATE INDEX IF NOT EXISTS idx_entries_user_topic_date "
