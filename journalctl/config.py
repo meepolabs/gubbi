@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     # server identity to MCP clients.
     hydra_public_issuer_url: str = ""
 
+    # Hydra public /userinfo URL -- used for JIT user provisioning to fetch
+    # the email of a new identity. Optional; when unset, JIT provisioning
+    # skips without blocking the request. No env var prefix needed since it
+    # is only active when hydra_admin_url is set (Mode 3).
+    hydra_public_url: str | None = None
+
     # Self-host OAuth -- empty password_hash = Mode 2 (full self-host) disabled.
     password_hash: str = ""
     server_url: str = "http://localhost:8100"

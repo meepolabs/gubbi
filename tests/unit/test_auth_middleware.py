@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -18,6 +19,12 @@ from journalctl.auth.hydra import (
 )
 from journalctl.core.auth_context import current_user_id
 from journalctl.middleware.auth import BearerAuthMiddleware
+
+
+@asynccontextmanager
+async def _async_context_manager(obj):
+    yield obj
+
 
 TEST_API_KEY = "a" * 64  # 64-char key
 TEST_TOKEN = "ory_at_" + "x" * 80
@@ -546,3 +553,151 @@ class TestWWWAuthenticateHeader:
             f'resource_metadata="{self.PRM_URL}"'
         )
         assert resp.headers["www-authenticate"] == expected
+
+
+class TestMode3JIT:
+    async def test_mode3_jit_creates_missing_user_row(self) -> None:
+        """JIT inserts a users row when one does not exist (normal first-login path)."""
+        claims = TokenClaims(sub=TEST_SUB, scope="openid journal email", exp=9999999999)
+        mock_iv = AsyncMock(spec=HydraIntrospector)
+        mock_iv.introspect = AsyncMock(return_value=claims)
+
+        # Mock http_client for userinfo
+        mock_http_client = AsyncMock()
+        mock_http_client.get = AsyncMock(
+            return_value=MagicMock(
+                status_code=200,
+                json=MagicMock(return_value={"email": "user@example.com"}),
+            )
+        )
+        mock_iv.http_client = mock_http_client
+
+        # Mock pool
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_pool = MagicMock()
+        mock_pool.acquire = MagicMock(return_value=_async_context_manager(mock_conn))
+
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            introspector=mock_iv,
+            required_scope="journal",
+            jit_pool=mock_pool,
+            hydra_public_url="https://hydra.example.com",
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+
+        assert resp.status_code == 200
+        mock_conn.execute.assert_called_once()
+        call_args = mock_conn.execute.call_args
+        assert "$1" in call_args[0][0] or "INSERT INTO users" in call_args[0][0]
+        assert call_args[0][1] == TEST_SUB
+
+    async def test_mode3_jit_no_op_when_user_exists(self) -> None:
+        """ON CONFLICT DO NOTHING: UPSERT is called even when user exists; DB handles idempotency."""
+        claims = TokenClaims(sub=TEST_SUB, scope="openid journal email", exp=9999999999)
+        mock_iv = AsyncMock(spec=HydraIntrospector)
+        mock_iv.introspect = AsyncMock(return_value=claims)
+
+        mock_http_client = AsyncMock()
+        mock_http_client.get = AsyncMock(
+            return_value=MagicMock(
+                status_code=200,
+                json=MagicMock(return_value={"email": "user@example.com"}),
+            )
+        )
+        mock_iv.http_client = mock_http_client
+
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock()
+        mock_pool = MagicMock()
+        mock_pool.acquire = MagicMock(return_value=_async_context_manager(mock_conn))
+
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            introspector=mock_iv,
+            required_scope="journal",
+            jit_pool=mock_pool,
+            hydra_public_url="https://hydra.example.com",
+        )
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
+
+        # ON CONFLICT DO NOTHING means execute is called (DB handles the no-op)
+        assert resp.status_code == 200
+        mock_conn.execute.assert_called_once()
+
+    async def test_mode3_jit_handles_concurrent_first_request(self) -> None:
+        """Race condition: two concurrent first requests both call UPSERT; ON CONFLICT handles it."""
+        claims = TokenClaims(sub=TEST_SUB, scope="openid journal email", exp=9999999999)
+        mock_iv = AsyncMock(spec=HydraIntrospector)
+        mock_iv.introspect = AsyncMock(return_value=claims)
+
+        mock_http_client = AsyncMock()
+        mock_http_client.get = AsyncMock(
+            return_value=MagicMock(
+                status_code=200,
+                json=MagicMock(return_value={"email": "user@example.com"}),
+            )
+        )
+        mock_iv.http_client = mock_http_client
+
+        execute_call_count = 0
+
+        async def count_execute(*args, **kwargs):
+            nonlocal execute_call_count
+            execute_call_count += 1
+
+        mock_conn = AsyncMock()
+        mock_conn.execute = AsyncMock(side_effect=count_execute)
+
+        class FakeAcquire:
+            """Per-call context manager that yields the mock connection."""
+
+            def __init__(self, conn_obj):
+                self._conn = conn_obj
+
+            async def __aenter__(self):
+                return self._conn
+
+            async def __aexit__(self, *args):
+                pass
+
+        def make_acquire(conn_obj):
+            """Factory that produces a fresh context manager per call."""
+            return FakeAcquire(conn_obj)
+
+        mock_pool = MagicMock()
+        mock_pool.acquire = MagicMock(side_effect=lambda: make_acquire(mock_conn))
+
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            introspector=mock_iv,
+            required_scope="journal",
+            jit_pool=mock_pool,
+            hydra_public_url="https://hydra.example.com",
+        )
+
+        import asyncio
+
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            responses = await asyncio.gather(
+                client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"}),
+                client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"}),
+            )
+
+        assert all(r.status_code == 200 for r in responses)
+        # Both requests called UPSERT -- ON CONFLICT at DB level handles the race
+        assert execute_call_count == 2

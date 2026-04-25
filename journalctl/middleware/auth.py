@@ -24,11 +24,18 @@ import secrets
 from collections.abc import Callable
 from uuid import UUID
 
+import asyncpg
+import structlog
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from journalctl.auth.hydra import HydraIntrospector, HydraInvalidToken, HydraUnreachable
+from journalctl.auth.hydra import (
+    HydraIntrospector,
+    HydraInvalidToken,
+    HydraUnreachable,
+    TokenClaims,
+)
 from journalctl.core.auth_context import current_user_id
 from journalctl.oauth.constants import MAX_BEARER_TOKEN_LEN
 
@@ -112,6 +119,8 @@ class BearerAuthMiddleware:
         required_scope: str = "journal",
         selfhost_token_validator: Callable[[str], bool] | None = None,
         operator_user_id: UUID | None = None,
+        jit_pool: asyncpg.Pool | None = None,
+        hydra_public_url: str | None = None,
         protected_resource_metadata_url: str | None = None,
     ) -> None:
         self.app = app
@@ -125,6 +134,13 @@ class BearerAuthMiddleware:
         # auth modes. When None, operator-bound requests reach DB code without
         # a user binding and MissingUserIdError surfaces as a 500.
         self.operator_user_id = operator_user_id
+        # admin pool (BYPASSRLS) used for JIT user provisioning in Mode 3.
+        # When None, JIT is disabled and the path degrades gracefully.
+        self.jit_pool = jit_pool
+        # Hydra public URL base for /userinfo endpoint. Fetched only on the
+        # JIT path to source an email for the users row. Null disables
+        # email fetching; provisioning skips without blocking the request.
+        self.hydra_public_url = hydra_public_url
         # URL of the OAuth protected-resource metadata document. Surfaced in
         # WWW-Authenticate on 401/403 per MCP spec 2025-11-25 so clients can
         # discover the authorization server. None disables the parameter
@@ -196,6 +212,10 @@ class BearerAuthMiddleware:
                 )(scope, receive, send)
                 return
 
+            # JIT provision: idempotent UPSERT for users rows missing due to
+            # failed Kratos webhook. Never blocks the request; logs warnings.
+            await self._jit_provision(claims, token)
+
             token_reset = current_user_id.set(claims.sub)
             try:
                 await self.app(scope, receive, send)
@@ -212,6 +232,69 @@ class BearerAuthMiddleware:
         await _unauthorized("Invalid or expired token", self.protected_resource_metadata_url)(
             scope, receive, send
         )
+
+    async def _jit_provision(self, claims: TokenClaims, token: str) -> None:
+        """Idempotent UPSERT for users rows missing due to failed Kratos webhook.
+
+        Calls Hydra /userinfo to fetch the email mapped to this token's identity,
+        then inserts or ignores (ON CONFLICT DO NOTHING) a users row keyed on
+        claims.sub.  If jit_pool is None, hydra_public_url is None, or any step
+        errors, the method logs a warning and returns without blocking the request.
+
+        Kratos webhook remains the fast-path for normal logins; this JIT path
+        handles orphaned identities that slipped through.
+        """
+        if self.jit_pool is None:
+            return
+
+        if self.hydra_public_url is None:
+            structlog.get_logger("jit").warning(
+                "JIT provisioning disabled -- no hydra_public_url configured"
+            )
+            return
+
+        try:
+            if self.introspector is None or self.introspector.http_client is None:
+                structlog.get_logger("jit").warning(
+                    "JIT provisioning: no introspector HTTP client available"
+                )
+                return
+
+            userinfo_resp = await self.introspector.http_client.get(
+                f"{self.hydra_public_url}/userinfo",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if userinfo_resp.status_code != 200:
+                structlog.get_logger("jit").warning(
+                    "JIT provisioning: /userinfo returned non-200",
+                    status_code=userinfo_resp.status_code,
+                )
+                return
+            userinfo = userinfo_resp.json()
+            email = userinfo.get("email")
+            if not email:
+                structlog.get_logger("jit").warning(
+                    "JIT provisioning: no email in /userinfo response"
+                )
+                return
+
+            async with self.jit_pool.acquire() as conn:
+                # UUID binds to $1; asyncpg resolves Python UUID → pg UUID type automatically
+                await conn.execute(
+                    """
+                    INSERT INTO users (id, email)
+                    VALUES ($1, $2)
+                    ON CONFLICT (id) DO NOTHING
+                    """,
+                    claims.sub,
+                    email,
+                )
+        except Exception:
+            structlog.get_logger("jit").warning(
+                "JIT provisioning failed (non-blocking)",
+                sub=str(claims.sub),
+                exc_info=True,
+            )
 
     async def _call_with_operator(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Invoke the wrapped app with current_user_id bound to the operator UUID.
