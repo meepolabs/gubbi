@@ -120,30 +120,37 @@ class TestHydraOauthFlow:
             reg_data: dict[str, Any] = reg_resp.json()
             client_id = reg_data["client_id"]
 
-            # ---- Step 2: Kratos identity creation ----
+            # ---- Step 2: Kratos identity creation (two-step flow: init + submit) ----
             test_id = uuid.uuid4().hex[:8]
             email = f"{EMAIL_PREFIX}{test_id}@meepolabs.com"
 
-            ident_resp = await client.post(
+            flow_resp = await client.get(
                 f"{JOURNAL_DEV_IDENTITY_URL}/self-service/registration/api",
+                headers={"Accept": "application/json"},
+            )
+            assert flow_resp.status_code == 200, (
+                f"Kratos flow init failed: {flow_resp.status_code} " f"{flow_resp.text[:500]}"
+            )
+            flow_action = flow_resp.json().get("ui", {}).get("action")
+            assert flow_action, "Kratos flow response missing ui.action"
+
+            ident_resp = await client.post(
+                flow_action,
+                headers={"Accept": "application/json"},
                 json={
-                    "credentials": {
-                        "password": {
-                            "identity": {"traits": {"email": email}},
-                            "password": TEST_PASSWORD,
-                        }
-                    },
-                    "traits": {"email": email},
                     "method": "password",
-                    "flow": None,  # self-service flow via API mode
+                    "password": TEST_PASSWORD,
+                    "traits": {"email": email, "timezone": "UTC"},
                 },
             )
             assert ident_resp.status_code in (200, 201), (
                 f"Kratos reg failed: {ident_resp.status_code} " f"{ident_resp.text[:500]}"
             )
             identity_body = ident_resp.json()
-            identity_uuid = str(identity_body.get("id") or "")
-            assert identity_uuid, "Kratos registration response missing identity id"
+            # API-mode submit returns {session_token, session, identity, continue_with};
+            # the identity id lives at body.identity.id (and session.identity.id).
+            identity_uuid = str(identity_body.get("identity", {}).get("id") or "")
+            assert identity_uuid, "Kratos registration response missing identity.id"
 
             # ---- Step 3: Hydra authorization request (PKCE) ----
             verifier, challenge = _make_pkce()
@@ -160,7 +167,10 @@ class TestHydraOauthFlow:
                 },
             )
 
-            auth_ok = auth_resp.status_code in (302, 400)
+            # Hydra responds 302 or 303 with Location pointing at the login UI
+            # (302 on some versions, 303 See Other on v2.2+); 400 surfaces PKCE
+            # or param-shape errors for debugging.
+            auth_ok = auth_resp.status_code in (302, 303, 400)
             assert auth_ok, (
                 f"Auth request failed unexpectedly: {auth_resp.status_code} "
                 f"{auth_resp.text[:500]}"
