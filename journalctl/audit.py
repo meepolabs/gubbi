@@ -66,16 +66,15 @@ class Action:
     SECRET_ROTATED: Final = "secret.rotated"  # noqa: S105 -- action label, not a password
     ADMIN_QUERY_EXECUTED: Final = "admin.query_executed"
     ENCRYPTION_KEY_ROTATED: Final = "encryption.key_rotated"
-    AUTH_FOUNDER_IMPERSONATION: Final = "auth.founder_impersonation"
 
 
 # Values that the CHECK constraint on actor_type accepts.
+# Must stay in sync with migration 0012's CHECK definition.
 _VALID_ACTOR_TYPES: frozenset[str] = frozenset(
     {
         "user",
         "admin",
         "system",
-        "founder",
         "hydra_subject",
     }
 )
@@ -107,11 +106,11 @@ async def record_audit(
     conn:
         Active asyncpg connection. Caller owns transaction lifecycle.
     actor_type:
-        Must be one of: 'user', 'admin', 'system', 'founder'.
+        Must be one of: 'user', 'admin', 'system', 'hydra_subject'.
         Raises ValueError on any other value.
     actor_id:
-        Opaque identifier for the actor (UUID string, 'founder:<email>',
-        'system:<worker-name>', etc.).
+        Opaque identifier for the actor (UUID string, 'system:<worker-name>',
+        'script:<name>', etc.).
     action:
         Event string. Use Action.* constants for the 13 documented events.
         Custom strings are accepted for extensibility.
