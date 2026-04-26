@@ -160,11 +160,12 @@ class TestDeployShapeValidator:
     """Verify the deploy-shape validator rejects partial Mode 3 config."""
 
     def _patch_mode3(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Clear env vars that would interfere, then set Mode 3 pairs."""
+        """Clear env vars that would interfere, then set Mode 3 triples."""
         for key in ("JOURNAL_PASSWORD_HASH",):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("JOURNAL_HYDRA_ADMIN_URL", "http://hydra:4445")
         monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_URL", "https://hydra.example.com")
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
         from journalctl.config import get_settings
 
@@ -182,6 +183,7 @@ class TestDeployShapeValidator:
         settings = self._get_settings()
         assert settings.hydra_admin_url
         assert settings.hydra_public_issuer_url
+        assert settings.hydra_public_url
 
     def test_hydra_admin_without_issuer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("JOURNAL_PASSWORD_HASH", raising=False)
@@ -198,6 +200,33 @@ class TestDeployShapeValidator:
         monkeypatch.delenv("JOURNAL_PASSWORD_HASH", raising=False)
         monkeypatch.delenv("JOURNAL_HYDRA_ADMIN_URL", raising=False)
         monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
+        from journalctl.config import get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="(?i)hydra_admin_url.*required"):
+            self._get_settings()
+
+    def test_hydra_admin_without_public_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Hydra ADMIN_URL without PUBLIC_URL is a rejectable error."""
+        for key in ("JOURNAL_PASSWORD_HASH", "JOURNAL_HYDRA_PUBLIC_URL"):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.setenv("JOURNAL_HYDRA_ADMIN_URL", "http://hydra:4445")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
+        from journalctl.config import get_settings
+
+        get_settings.cache_clear()
+        with pytest.raises(ValueError, match="(?i)hydra_public_url.*required"):
+            self._get_settings()
+
+    def test_hydra_public_url_without_admin(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """PUBLIC_URL without ADMIN_URL is a rejectable error."""
+        for key in ("JOURNAL_PASSWORD_HASH",):
+            monkeypatch.delenv(key, raising=False)
+        monkeypatch.delenv("JOURNAL_HYDRA_ADMIN_URL", raising=False)
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_URL", "https://hydra.example.com")
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
         from journalctl.config import get_settings
 

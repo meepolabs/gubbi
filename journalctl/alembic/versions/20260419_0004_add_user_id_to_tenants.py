@@ -13,7 +13,7 @@ Three-phase migration inside one alembic transaction:
 
 This migration does NOT create any users rows or backfill data.
 The operator row must be provisioned separately (see
-journalctl/scripts/provision_operator.py). If JOURNAL_OPERATOR_EMAIL
+journalctl/users/bootstrap.py). If JOURNAL_OPERATOR_EMAIL
 is set, the app will look it up at startup; if no matching user row
 exists in ``users``, operator-identity auth reaches DB code without
 a user binding and MissingUserIdError surfaces as a 500.
@@ -95,7 +95,7 @@ def upgrade() -> None:
 
     # Pre-Phase-5 guard: fail early if any tenant rows have NULL user_id.
     # On a fresh DB this is a no-op. On a Mode 1/2 DB with existing data, this
-    # fires when provision_operator.py has not been run yet (no users row to
+    # fires when the operator row has not been scaffolded yet (no users row to
     # backfill against). The error message points operators at the fix.
     bind = op.get_bind()
     for table in _TENANT_TABLES:
@@ -105,8 +105,8 @@ def upgrade() -> None:
         if null_count > 0:
             raise RuntimeError(
                 f"Migration 0004 aborted: {null_count} row(s) in '{table}' have NULL user_id. "
-                "Run `python deployment/scaffold_self_host.py` to create the operator "
-                "row, then backfill user_id manually before re-running alembic upgrade."
+                "The operator row may not be scaffolded yet; ensure auto-scaffold runs on Mode 1/2 startup, "
+                "then backfill user_id manually before re-running alembic upgrade."
             )
 
     # Phase 5 -- promote user_id to NOT NULL now that column is present on all rows

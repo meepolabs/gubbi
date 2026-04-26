@@ -35,6 +35,7 @@ from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.embedding_service import EmbeddingService
 from journalctl.storage.pg_setup import init_pool
 from journalctl.tools.registry import register_tools
+from journalctl.users.bootstrap import scaffold_operator
 
 
 class CustomFastAPI(FastAPI):
@@ -197,6 +198,16 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     app.pool = await init_pool(settings.db_app_url)
     await app.logger.info("PostgreSQL pool ready")
 
+    # Auto-scaffold operator row in non-Hosted modes (Mode 1 API-key-only, Mode 2 full self-host).
+    # Hydra-backed hosted (Mode 3) provisions users via JIT at login time.
+    hydra_on = bool(settings.hydra_admin_url)
+    if not hydra_on:
+        pool_for_scaffold = app.admin_pool or app.pool
+        await scaffold_operator(pool_for_scaffold, settings.operator_email, settings.timezone)
+        await app.logger.info("Auto-scaffold operator row complete (Mode 1/2)")
+    else:
+        await app.logger.info("Skipping auto-scaffold -- Mode 3 (JIT provisions)")
+
     # EmbeddingService — ONNX model loaded here before workers fork.
     # entrypoint.sh pre-downloads the model to disk; this just loads it.
     app.embedding_service = EmbeddingService()
@@ -293,7 +304,8 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         required_scope=REQUIRED_OAUTH_SCOPE,
         selfhost_token_validator=token_validator,
         operator_user_id=operator_user_id,
-        jit_pool=app.admin_pool or app.pool,
+        jit_pool=app.admin_pool,  # legacy background UPSERT path
+        admin_pool=app.admin_pool,  # pre-context JWT /userinfo + collision detection
         hydra_public_url=settings.hydra_public_url if settings.hydra_admin_url else None,
         protected_resource_metadata_url=protected_resource_metadata_url,
     )
@@ -360,6 +372,18 @@ def main() -> None:
             admin_pool: asyncpg.Pool | None = None
             if settings.db_admin_url:
                 admin_pool = await init_pool(settings.db_admin_url)
+
+            # Auto-scaffold operator row in non-Hosted modes (Mode 1/2).
+            hydra_on = bool(settings.hydra_admin_url)
+            if not hydra_on:
+                pool_for_scaffold = admin_pool or pool
+                await scaffold_operator(
+                    pool_for_scaffold, settings.operator_email, settings.timezone
+                )
+                await logger.info("Auto-scaffold operator row complete (Mode 1/2)")
+            else:
+                await logger.info("Skipping auto-scaffold -- Mode 3 (JIT provisions)")
+
             embedding_service = EmbeddingService()
             settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
             settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)

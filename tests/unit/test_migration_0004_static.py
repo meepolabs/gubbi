@@ -58,7 +58,7 @@ def _check_no_pattern(pattern: str, src: str) -> None:
     match = re.search(pattern, src, re.IGNORECASE)
     assert match is None, (
         f"Source must not contain '{match.group()}' -- "
-        "user-row mutations belong in provision_operator.py, not migrations."
+        "user-row mutations belong in journalctl/users/bootstrap.py, not migrations."
     )
 
 
