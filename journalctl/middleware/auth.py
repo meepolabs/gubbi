@@ -32,7 +32,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from journalctl.audit import record_audit
+from journalctl.audit import Action, record_audit
 from journalctl.auth.hydra import (
     HydraIntrospector,
     HydraInvalidToken,
@@ -465,11 +465,28 @@ class BearerAuthMiddleware:
                             "JWT provision: new user row inserted (race, same sub)",
                             sub=str(sub),
                         )
+                        # The other concurrent request that won the race owns
+                        # the user.created audit row; we observe the outcome
+                        # but do not double-audit.
                         self._provisioned_cache.put(sub)
                         return
                     raise
 
                 logger.info("JWT provision: new user row inserted", sub=str(sub))
+                # Audit the creation. Best-effort: a failure to write the
+                # audit row must not break the auth path.
+                try:
+                    await record_audit(
+                        conn,
+                        actor_type="hydra_subject",
+                        actor_id=str(sub),
+                        action=Action.USER_CREATED,
+                        target_type="user",
+                        target_id=str(sub),
+                        metadata={"provision_path": "jit"},
+                    )
+                except Exception:
+                    logger.exception("JWT provision: user.created audit write failed")
                 self._provisioned_cache.put(sub)
             elif email is None and userinfo_resp is not None and userinfo_resp.status_code == 200:
                 # /userinfo returned 200 but has no email field; user authenticated

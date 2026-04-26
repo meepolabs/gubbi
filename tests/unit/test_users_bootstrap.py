@@ -64,7 +64,8 @@ async def test_scaffold_postgres_error_wrapped() -> None:
     pool = MagicMock()
     context_mgr = AsyncMock()
     conn = MagicMock()
-    conn.execute = AsyncMock(side_effect=asyncpg.PostgresError("connection refused"))
+    # The INSERT path uses fetchval (with RETURNING) to detect insert vs noop.
+    conn.fetchval = AsyncMock(side_effect=asyncpg.PostgresError("connection refused"))
     context_mgr.__aenter__ = AsyncMock(return_value=conn)
     context_mgr.__aexit__ = AsyncMock(return_value=False)
     pool.acquire = MagicMock(return_value=context_mgr)

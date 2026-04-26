@@ -12,12 +12,20 @@ Connects directly -- no alembic dependency.
 
 Inserts ON CONFLICT DO NOTHING on the partial unique index
 (users.email WHERE deleted_at IS NULL). If a row already exists, this is a
-no-op and proceeds to verify the row exists.
+no-op and proceeds to verify the row exists. A user.created audit row is
+written ONLY when the INSERT actually creates a row (RETURNING id is None
+on no-op).
 """
 
 from __future__ import annotations
 
+import logging
+
 import asyncpg
+
+from journalctl.audit import Action, record_audit
+
+logger = logging.getLogger(__name__)
 
 
 async def scaffold_operator(
@@ -32,15 +40,34 @@ async def scaffold_operator(
     """
     try:
         async with admin_pool.acquire() as conn:
-            # Insert operator row if it does not exist.
-            insert_sql = (
+            # INSERT and detect whether we actually created a row -- RETURNING
+            # returns the id on insert, NULL on the ON CONFLICT DO NOTHING path.
+            inserted_id = await conn.fetchval(
                 "INSERT INTO users (id, email, timezone) "
                 "VALUES (gen_random_uuid(), $1, $2) "
-                "ON CONFLICT (email) WHERE deleted_at IS NULL DO NOTHING"
+                "ON CONFLICT (email) WHERE deleted_at IS NULL DO NOTHING "
+                "RETURNING id",
+                email,
+                timezone,
             )
-            await conn.execute(insert_sql, email, timezone)
 
-            # Look up the row -- will exist regardless of whether INSERT created it.
+            if inserted_id is not None:
+                # New row -- audit the creation. Best-effort: a failure to
+                # write the audit row must not break startup.
+                try:
+                    await record_audit(
+                        conn,
+                        actor_type="system",
+                        actor_id="scaffold_operator",
+                        action=Action.USER_CREATED,
+                        target_type="user",
+                        target_id=str(inserted_id),
+                        metadata={"provision_path": "scaffold"},
+                    )
+                except Exception:
+                    logger.exception("scaffold_operator: audit write failed")
+
+            # Verify a row exists (covers both newly-created and pre-existing).
             user_id = await conn.fetchval(
                 "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
                 email,
