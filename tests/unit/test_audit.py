@@ -51,7 +51,6 @@ ALL_ACTIONS = [
     Action.SECRET_ROTATED,
     Action.ADMIN_QUERY_EXECUTED,
     Action.ENCRYPTION_KEY_ROTATED,
-    Action.AUTH_FOUNDER_IMPERSONATION,
 ]
 
 
@@ -83,7 +82,7 @@ async def test_record_audit_inserts_for_each_action(action_str: str) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("actor_type", ["user", "admin", "system", "founder"])
+@pytest.mark.parametrize("actor_type", ["user", "admin", "system", "hydra_subject"])
 async def test_valid_actor_types_accepted(actor_type: str) -> None:
     conn = _make_conn()
     await record_audit(conn, actor_type=actor_type, actor_id="x", action="user.created")
@@ -172,9 +171,9 @@ async def test_optional_fields_passed_through() -> None:
     conn = _make_conn()
     await record_audit(
         conn,
-        actor_type="founder",
-        actor_id="founder:helios@example.com",
-        action="auth.founder_impersonation",
+        actor_type="hydra_subject",
+        actor_id="11111111-2222-3333-4444-555555555555",
+        action="auth.email_collision",
         target_type="user",
         target_id="uuid-abc",
         reason="support investigation",
@@ -183,9 +182,9 @@ async def test_optional_fields_passed_through() -> None:
         user_agent="Mozilla/5.0",
     )
     args = _executed_args(conn)
-    assert args[1] == "founder"
-    assert args[2] == "founder:helios@example.com"
-    assert args[3] == "auth.founder_impersonation"
+    assert args[1] == "hydra_subject"
+    assert args[2] == "11111111-2222-3333-4444-555555555555"
+    assert args[3] == "auth.email_collision"
     assert args[4] == "user"
     assert args[5] == "uuid-abc"
     assert args[6] == "support investigation"
@@ -200,8 +199,12 @@ async def test_optional_fields_passed_through() -> None:
 
 
 def test_action_constants_count() -> None:
-    """All 13 documented actions are present in ALL_ACTIONS."""
-    assert len(ALL_ACTIONS) == 13
+    """All 12 documented actions are present in ALL_ACTIONS.
+
+    Down from 13 in 0012: ``auth.founder_impersonation`` was dropped along
+    with the ``founder`` actor_type (single-tenant-era, zero call sites).
+    """
+    assert len(ALL_ACTIONS) == 12
 
 
 def test_action_constants_are_strings() -> None:
