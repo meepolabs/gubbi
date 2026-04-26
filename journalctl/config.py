@@ -123,7 +123,8 @@ class Settings(BaseSettings):
         """
         hydra_on = bool(self.hydra_admin_url)
         password_on = bool(self.password_hash)
-        hydra_public_on = bool(self.hydra_public_issuer_url)
+        hydra_issuer_on = bool(self.hydra_public_issuer_url)
+        hydra_puburl_on = bool(self.hydra_public_url)
 
         # Existing: HYDRA_ADMIN_URL and PASSWORD_HASH are mutually exclusive.
         if hydra_on and password_on:
@@ -133,17 +134,33 @@ class Settings(BaseSettings):
                 "docs/deployment.md for the 3-shape matrix."
             )
 
-        # Mode 3 requires both Hydra fields together.
-        if hydra_on and not hydra_public_on:
+        # Mode 3 requires HYDRA_ADMIN_URL + PUBLIC_ISSUER_URL together.
+        if hydra_on and not hydra_issuer_on:
             raise ValueError(
                 "JOURNAL_HYDRA_PUBLIC_ISSUER_URL is required when "
                 "JOURNAL_HYDRA_ADMIN_URL is set -- both must be non-empty "
                 "together for Mode 3 (multi-tenant hosted)."
             )
-        if hydra_public_on and not hydra_on:
+        if hydra_issuer_on and not hydra_on:
             raise ValueError(
                 "JOURNAL_HYDRA_ADMIN_URL is required when "
                 "JOURNAL_HYDRA_PUBLIC_ISSUER_URL is set -- both must be "
+                "non-empty together for Mode 3 (multi-tenant hosted)."
+            )
+
+        # HYDRA_ADMIN_URL + PUBLIC_URL both-or-neither.
+        # PUBLIC_URL is used for JIT /userinfo calls; without it the JIT
+        # path can only no-op, which silently masks provisioning failures.
+        if hydra_on and not hydra_puburl_on:
+            raise ValueError(
+                "JOURNAL_HYDRA_PUBLIC_URL is required when "
+                "JOURNAL_HYDRA_ADMIN_URL is set -- both must be non-empty "
+                "together for Mode 3 (multi-tenant hosted)."
+            )
+        if hydra_puburl_on and not hydra_on:
+            raise ValueError(
+                "JOURNAL_HYDRA_ADMIN_URL is required when "
+                "JOURNAL_HYDRA_PUBLIC_URL is set -- both must be "
                 "non-empty together for Mode 3 (multi-tenant hosted)."
             )
 

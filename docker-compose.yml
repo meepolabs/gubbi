@@ -70,8 +70,11 @@ services:
       # Mutually exclusive with JOURNAL_PASSWORD_HASH -- setting both fails startup.
       # PUBLIC_ISSUER_URL is the external HTTPS issuer (auth-dev.meepolabs.com)
       # advertised to MCP clients; both must be set together for Mode 3.
+      # PUBLIC_URL is the Hydra base used for JIT /userinfo calls (provisioning);
+      # both must be set together -- see config.py _validate_deploy_shape.
       - JOURNAL_HYDRA_ADMIN_URL
       - JOURNAL_HYDRA_PUBLIC_ISSUER_URL
+      - JOURNAL_HYDRA_PUBLIC_URL
       # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
       - JOURNAL_PASSWORD_HASH

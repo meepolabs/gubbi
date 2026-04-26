@@ -70,7 +70,15 @@ class Action:
 
 
 # Values that the CHECK constraint on actor_type accepts.
-_VALID_ACTOR_TYPES: frozenset[str] = frozenset({"user", "admin", "system", "founder"})
+_VALID_ACTOR_TYPES: frozenset[str] = frozenset(
+    {
+        "user",
+        "admin",
+        "system",
+        "founder",
+        "hydra_subject",
+    }
+)
 
 _INSERT_SQL = """
     INSERT INTO audit_log
