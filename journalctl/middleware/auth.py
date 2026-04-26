@@ -21,6 +21,8 @@ required by MCP's streamable HTTP transport.
 from __future__ import annotations
 
 import secrets
+import time
+from collections import OrderedDict
 from collections.abc import Callable
 from uuid import UUID
 
@@ -30,6 +32,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from journalctl.audit import record_audit
 from journalctl.auth.hydra import (
     HydraIntrospector,
     HydraInvalidToken,
@@ -98,6 +101,57 @@ def _service_unavailable() -> JSONResponse:
     )
 
 
+class _EmailCollision(Exception):
+    """Raised when a Hydra subject's email collides with an active user."""
+
+    def __init__(self, colliding_sub: str, email: str) -> None:  # noqa: D107
+        self.colliding_sub = colliding_sub
+        self.email = email
+
+
+class _PreExistingSub(Exception):
+    """Raised when a sub is already provisioned (by id or by email collision)."""
+
+    pass
+
+
+# ---------------------------------------------------------------------------
+# In-process LRU cache for known-provisioned sub UUIDs.
+#
+# Short-circuits both the /userinfo HTTP call and the DB existence check for
+# subjects that have already been provisioned, which is the common case on
+# every subsequent request after the first login.  Does NOT replace the
+# introspection cache (that caches TokenClaims keyed on token fingerprint);
+# this one tracks *subjects* that exist in the database regardless of token.
+class _ProvisionedCache:
+    """In-memory LRU cache for provisioned Hydra subjects."""
+
+    max_size = 1000
+    ttl_seconds = 60.0
+
+    def __init__(self) -> None:  # noqa: D107
+        self._cache: OrderedDict[UUID, float] = OrderedDict()
+
+    def find(self, sub: UUID) -> bool:
+        """Return True if ``sub`` is provisioned and cache entry is fresh."""
+        ts = self._cache.get(sub)
+        if ts is None:
+            return False
+        if time.monotonic() - ts > self.ttl_seconds:
+            del self._cache[sub]  # expired
+            return False
+        self._cache.move_to_end(sub)
+        return True
+
+    def put(self, sub: UUID) -> None:
+        """Insert or refresh the entry for ``sub``. Evicts oldest entries on capacity."""
+        if sub in self._cache:
+            self._cache.move_to_end(sub)
+        elif len(self._cache) >= self.max_size:
+            self._cache.popitem(last=False)
+        self._cache[sub] = time.monotonic()
+
+
 class BearerAuthMiddleware:
     """ASGI middleware that enforces Bearer token authentication.
 
@@ -120,6 +174,7 @@ class BearerAuthMiddleware:
         selfhost_token_validator: Callable[[str], bool] | None = None,
         operator_user_id: UUID | None = None,
         jit_pool: asyncpg.Pool | None = None,
+        admin_pool: asyncpg.Pool | None = None,
         hydra_public_url: str | None = None,
         protected_resource_metadata_url: str | None = None,
     ) -> None:
@@ -134,19 +189,29 @@ class BearerAuthMiddleware:
         # auth modes. When None, operator-bound requests reach DB code without
         # a user binding and MissingUserIdError surfaces as a 500.
         self.operator_user_id = operator_user_id
-        # admin pool (BYPASSRLS) used for JIT user provisioning in Mode 3.
-        # When None, JIT is disabled and the path degrades gracefully.
+        # admin pool (BYPASSRLS) used for the pre-context JWT /userinfo path:
+        # email-collision detection + INSERT during first-login JIT. This path
+        # runs on the admin pool so it is RLS-policy-independent. When None,
+        # the pre-context path is skipped; only background JIT (self.jit_pool)
+        # can attempt provisioning.
+        self.admin_pool = admin_pool
+        # admin pool (alias for backwards-compatible background JIT).
+        # DEPRECATED: use admin_pool for new DB work. Kept for the legacy
+        # _jit_provision path which still uses jit_pool for UPSERT.
         self.jit_pool = jit_pool
         # Hydra public URL base for /userinfo endpoint. Fetched only on the
-        # JIT path to source an email for the users row. Null disables
-        # email fetching; provisioning skips without blocking the request.
+        # JWT-path or JIT path to source an email for the users row. Null
+        # disables email fetching; provisioning skips without blocking.
         self.hydra_public_url = hydra_public_url
         # URL of the OAuth protected-resource metadata document. Surfaced in
         # WWW-Authenticate on 401/403 per MCP spec 2025-11-25 so clients can
         # discover the authorization server. None disables the parameter
-        # (appropriate for Mode 1 API-key-only deployments with no OAuth
+        #         (appropriate for Mode 1 API-key-only deployments with no OAuth
         # routes to discover).
         self.protected_resource_metadata_url = protected_resource_metadata_url
+        # In-process LRU cache for known-provisioned sub UUIDs. Avoids
+        # redundant /userinfo HTTP calls and DB lookups after first login.
+        self._provisioned_cache = _ProvisionedCache()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -212,11 +277,63 @@ class BearerAuthMiddleware:
                 )(scope, receive, send)
                 return
 
-            # JIT provision: idempotent UPSERT for users rows missing due to
-            # failed Kratos webhook. Never blocks the request; logs warnings.
-            await self._jit_provision(claims, token)
+            # ---------- pre-context JWT provision ---------------
+            # Runs on admin_pool (BYPASSRLS) so this path is
+            # RLS-policy-independent.  Email collision causes an early
+            # 401 before any contextvar is set; the request never
+            # reaches downstream code.
 
-            token_reset = current_user_id.set(claims.sub)
+            sub = claims.sub  # noqa: SH102
+
+            if self.admin_pool is not None:
+                try:
+                    await self._pre_context_jwt_provision(sub, token)
+                except _EmailCollision as exc:  # noqa: PERF203
+                    jlog = structlog.get_logger("auth.jwt")
+                    jlog.error(
+                        "JWT email collision -- rejecting request",
+                        sub=str(sub),
+                        colliding_sub=exc.colliding_sub,
+                        email=exc.email,
+                    )
+                    # Record audit + respond 401 with WWW-Authenticate
+                    try:
+                        async with self.admin_pool.acquire() as conn:
+                            await record_audit(
+                                conn,
+                                actor_type="hydra_subject",
+                                actor_id=str(sub),
+                                action="auth.email_collision",
+                                target_type="user",
+                                target_id=exc.colliding_sub,
+                                metadata={"email": exc.email},
+                            )
+                    except Exception:
+                        jlog.exception("failed to write email_collision audit row")
+
+                    await _unauthorized(
+                        "Account email collision -- contact support",
+                        self.protected_resource_metadata_url,
+                    )(scope, receive, send)
+                    return
+                except _PreExistingSub:
+                    # Sub already exists in the DB; nothing more to do.
+                    pass
+                except Exception:
+                    jlog = structlog.get_logger("auth.jwt")
+                    jlog.exception(
+                        "JWT provision: unexpected exception during pre-context provisioning",
+                        sub=str(sub),
+                    )
+                    await _service_unavailable()(scope, receive, send)
+                    return
+            else:
+                # Backwards-compatible path for single-tenant deploys.
+                # No pre-context checks run; legacy JIT provision will
+                # UPSERT in the background (ON CONFLICT DO NOTHING).
+                await self._jit_provision(claims, token)
+
+            token_reset = current_user_id.set(sub)
             try:
                 await self.app(scope, receive, send)
             finally:
@@ -233,8 +350,142 @@ class BearerAuthMiddleware:
             scope, receive, send
         )
 
+    async def _pre_context_jwt_provision(self, sub: UUID, token: str) -> None:
+        """Check existence + optional /userinfo for a new Hydra subject.
+
+        Runs as part of the pre-context JWT validation path so that email
+        collisions are detected before the request is authenticated. This must
+        be fast (single round-trip check, then one INSERT) and never swallow
+        real errors -- only ``_PreExistingSub`` for cache-hit / DB-found subjects
+        which simply means "no new provisioning needed, skip /userinfo".
+
+        The admin_pool connection is released between the id existence check and
+        the /userinfo HTTP round-trip to prevent pool exhaustion under concurrent
+        first-logins.
+
+        Parameters
+        ----------
+        sub :
+            Subject UUID from introspected Hydra token.
+        token :
+            Raw bearer token used to call Hydra /userinfo on miss.
+
+        Raises
+        ------
+        _PreExistingSub
+            When a users row already exists for this ``sub`` (by id OR by
+            email -- the latter is also treated as pre-existing since it means
+            the subject is *known* via another sub).
+        _EmailCollision
+            An active user row has the same email but a different sub.
+            This is a hard rejection: call-site returns HTTP 401.
+        """
+        # Step 0: cache hit -> skip /userinfo + DB entirely. Fastest path.
+        if self._provisioned_cache.find(sub):
+            return
+
+        logger = structlog.get_logger("auth.jwt")
+
+        if self.admin_pool is None:
+            raise _PreExistingSub()  # no pool available; treat as existing
+
+        # First acquire block: SELECT-by-id existence check.
+        async with self.admin_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT 1 FROM users WHERE id = $1 AND deleted_at IS NULL",
+                sub,
+            )
+            if row is not None:
+                # User exists by id -> no provisioning needed.
+                logger.info("JWT provision: sub already found by id", sub=str(sub))
+                self._provisioned_cache.put(sub)
+                raise _PreExistingSub()
+        # Connection released before /userinfo HTTP call.
+
+        # Step 2: user does NOT exist -- attempt /userinfo (no DB conn held).
+        email = None
+        userinfo_resp = None
+        if (
+            self.hydra_public_url is not None
+            and self.introspector is not None
+            and self.introspector.http_client is not None
+        ):
+            try:
+                userinfo_resp = await self.introspector.http_client.get(
+                    f"{self.hydra_public_url}/userinfo",
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+                if userinfo_resp.status_code == 200:
+                    userinfo = userinfo_resp.json()
+                    email = userinfo.get("email") or None
+            except Exception:
+                logger.warning("JWT provision: /userinfo failed, continuing", sub=str(sub))
+
+        # Second acquire block: SELECT-by-email collision + INSERT.
+        async with self.admin_pool.acquire() as conn:
+            if email is not None:
+                colliding = await conn.fetchrow(
+                    "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
+                    email,
+                )
+                if colliding is not None and str(colliding["id"]) != str(sub):
+                    logger.error(
+                        "JWT provision: email collision",
+                        sub=str(sub),
+                        colliding_sub=str(colliding["id"]),
+                        email=email,
+                    )
+                    raise _EmailCollision(colliding_sub=str(colliding["id"]), email=email)
+
+                # safe to INSERT.
+                try:
+                    await conn.execute(
+                        "INSERT INTO users (id, email) VALUES ($1, $2)",
+                        sub,
+                        email,
+                    )
+                except asyncpg.exceptions.UniqueViolationError:
+                    # TOCTOU: another request inserted between our SELECT and INSERT.
+                    colliding = await conn.fetchrow(
+                        "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
+                        email,
+                    )
+                    if colliding is not None:
+                        if str(colliding["id"]) != str(sub):
+                            logger.error(
+                                "JWT provision: email collision (race)",
+                                sub=str(sub),
+                                colliding_sub=str(colliding["id"]),
+                                email=email,
+                            )
+                            raise _EmailCollision(
+                                colliding_sub=str(colliding["id"]), email=email
+                            ) from None
+                        logger.info(
+                            "JWT provision: new user row inserted (race, same sub)",
+                            sub=str(sub),
+                        )
+                        self._provisioned_cache.put(sub)
+                        return
+                    raise
+
+                logger.info("JWT provision: new user row inserted", sub=str(sub))
+                self._provisioned_cache.put(sub)
+            elif email is None and userinfo_resp is not None and userinfo_resp.status_code == 200:
+                # /userinfo returned 200 but has no email field; user authenticated
+                # but no users row created -- emit warning for observability.
+                logger.warning(
+                    "JWT provision: /userinfo returned no email; "  # noqa: E501
+                    "user authenticated but no users row created",
+                    sub=str(sub),
+                )
+
     async def _jit_provision(self, claims: TokenClaims, token: str) -> None:
-        """Idempotent UPSERT for users rows missing due to failed Kratos webhook.
+        """Background UPSERT for users rows missing due to failed Kratos webhook.
+
+        Runs AFTER the request contextvar is bound; used for backwards-compatible
+        provisioning when ``admin_pool`` is not configured (single-tenant deploys).
+        This method never blocks or rejects requests -- all errors are logged as warnings.
 
         Calls Hydra /userinfo to fetch the email mapped to this token's identity,
         then inserts or ignores (ON CONFLICT DO NOTHING) a users row keyed on
@@ -300,15 +551,14 @@ class BearerAuthMiddleware:
         """Invoke the wrapped app with current_user_id bound to the operator UUID.
 
         Used by operator-identity auth modes (static API key, self-host OAuth).
-        When no operator UUID is configured the request returns a 503 with a
-        message telling the operator how to provision a user row via the
-        scaffold_self_host script. This is not a silent security bypass.
+        When no operator UUID is configured the request returns a 503. This is
+        not a silent security bypass.
         """
         if self.operator_user_id is None:
             response = JSONResponse(
                 {
                     "error": (
-                        "operator not provisioned; run " "python deployment/scaffold_self_host.py"
+                        "operator not provisioned; app should auto-scaffold on Mode 1/2 startup"
                     ),
                 },
                 status_code=503,

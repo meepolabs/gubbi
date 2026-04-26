@@ -88,19 +88,10 @@ docker compose exec journalctl python -m journalctl.oauth.crypto 'your-password'
 
 ### Operator Provisioning (Mode 1 / Mode 2)
 
-After `alembic upgrade head`, run the operator provisioning script before
-starting the server. This creates a row in the ``users`` table so that the
-JOURNAL_OPERATOR_EMAIL config can be resolved to a concrete UUID at startup.
-
-    docker compose run journalctl python deployment/scaffold_self_host.py
-
-Or directly in a Poetry environment:
-
-    poetry run python deployment/scaffold_self_host.py
-
-This script is idempotent -- safe to re-run without side effects. It requires
-``JOURNAL_OPERATOR_EMAIL`` to be set (as an env var or via the ``--email``
-CLI flag).
+Operator row is auto-scaffolded by the app on Mode 1/2 startup. No manual
+provisioning step is needed -- after `alembic upgrade head`, just start the
+server. The operator email from ``JOURNAL_OPERATOR_EMAIL`` is resolved to a
+concrete UUID at startup in the app lifespan.
 
 ## Docker Compose
 

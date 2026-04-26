@@ -123,7 +123,7 @@ class TestAPIMode:
         ) as client:
             resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
         assert resp.status_code == 503
-        assert "scaffold_self_host" in resp.json()["error"]
+        assert "auto-scaffold" in resp.json()["error"]
 
 
 class TestHydraMode:
