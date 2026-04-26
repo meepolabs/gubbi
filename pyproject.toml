@@ -98,4 +98,5 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 markers = [
     "slow: slower tests (e.g. large-input performance checks)",
+    "hosted_live: requires live dev stack (auth-dev.meepolabs.com + identity-dev.meepolabs.com + journal.meepolabs.com); enable with JOURNAL_LIVE_STACK=1",
 ]
