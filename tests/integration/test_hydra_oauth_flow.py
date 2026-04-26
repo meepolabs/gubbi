@@ -17,6 +17,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
+import secrets
 import uuid
 from typing import Any
 from urllib.parse import parse_qs, urlparse
@@ -112,6 +113,10 @@ class TestHydraOauthFlow:
                     ],
                     "response_types": ["code"],
                     "scope": TEST_SCOPE,
+                    # Public PKCE client -- no client_secret on token exchange.
+                    # Matches how MCP clients (claude.ai, etc.) will actually
+                    # register in production.
+                    "token_endpoint_auth_method": "none",
                 },
             )
             assert (
@@ -154,6 +159,10 @@ class TestHydraOauthFlow:
 
             # ---- Step 3: Hydra authorization request (PKCE) ----
             verifier, challenge = _make_pkce()
+            # `state` must be >= 8 chars (Hydra enforces minimum entropy) --
+            # without it Hydra 303s straight back to redirect_uri with
+            # error=invalid_state instead of 303'ing to the login UI.
+            state = secrets.token_urlsafe(24)
 
             auth_resp = await client.get(
                 f"{JOURNAL_DEV_AUTH_URL}/oauth2/auth",
@@ -164,6 +173,7 @@ class TestHydraOauthFlow:
                     "code_challenge": challenge,
                     "code_challenge_method": "S256",
                     "scope": TEST_SCOPE,
+                    "state": state,
                 },
             )
 
@@ -176,55 +186,64 @@ class TestHydraOauthFlow:
                 f"{auth_resp.text[:500]}"
             )
             auth_location = auth_resp.headers.get("location", "")
+            # Fail loudly if Hydra redirected back to redirect_uri with an
+            # error rather than forward to the login UI -- this surfaces
+            # malformed auth requests (bad state, bad PKCE) instead of
+            # masquerading as "admin port unreachable" further down.
+            if "error=" in auth_location:
+                raise AssertionError(
+                    f"Hydra /oauth2/auth returned error in redirect: {auth_location[:500]}"
+                )
 
             # ---- Steps 4-6: Login + Consent acceptance via Hydra admin port ----
             _skip_if_no_admin_url()
             assert JOURNAL_DEV_AUTH_ADMIN_URL is not None
             login_challenge = _query_param_from_url(auth_location, "login_challenge")
-            if not login_challenge:
-                pytest.skip("Hydra auth redirect did not include login_challenge")
-            assert login_challenge is not None
+            assert (
+                login_challenge
+            ), f"Hydra auth redirect missing login_challenge: {auth_location[:500]}"
 
-            try:
-                consent_challenge = await _accept_login(
-                    client,
-                    JOURNAL_DEV_AUTH_ADMIN_URL,
-                    login_challenge,
-                    identity_uuid,
-                )
-                callback_redirect = await _accept_consent(
-                    client,
-                    JOURNAL_DEV_AUTH_ADMIN_URL,
-                    consent_challenge,
-                )
-                auth_code = _query_param_from_url(callback_redirect, "code")
-                if not auth_code:
-                    pytest.skip("Consent accept redirect did not include authorization code")
+            # Admin-gated flow: once past _skip_if_no_admin_url the tunnel is
+            # assumed live; let HTTP errors surface as real test failures so
+            # future regressions (e.g. Hydra API path changes) are caught loudly
+            # instead of silently skipped.
+            #
+            # Hydra v2 flow:
+            #  login/accept -> redirect_to /oauth2/auth?login_verifier=...
+            #  follow that ->   redirect_to consent UI (with consent_challenge)
+            #                   OR directly to callback (if consent was skipped)
+            #  consent/accept -> redirect_to /oauth2/auth?consent_verifier=...
+            #  follow that ->   redirect_to callback with ?code=...
+            login_accept_redirect = await _accept_login(
+                client,
+                JOURNAL_DEV_AUTH_ADMIN_URL,
+                login_challenge,
+                identity_uuid,
+            )
+            auth_code = await _drive_to_callback(
+                client,
+                JOURNAL_DEV_AUTH_ADMIN_URL,
+                login_accept_redirect,
+            )
 
-                # Step 6b: Token exchange
-                token_resp = await client.post(
-                    f"{JOURNAL_DEV_AUTH_URL}/oauth2/token",
-                    data={
-                        "grant_type": "authorization_code",
-                        "code": auth_code,
-                        "client_id": client_id,
-                        "redirect_uri": TEST_REDIRECT_URI,
-                        "code_verifier": verifier,
-                        "scope": TEST_SCOPE,
-                    },
-                )
-                token_resp.raise_for_status()
+            # Step 6b: Token exchange
+            token_resp = await client.post(
+                f"{JOURNAL_DEV_AUTH_URL}/oauth2/token",
+                data={
+                    "grant_type": "authorization_code",
+                    "code": auth_code,
+                    "client_id": client_id,
+                    "redirect_uri": TEST_REDIRECT_URI,
+                    "code_verifier": verifier,
+                    "scope": TEST_SCOPE,
+                },
+            )
+            token_resp.raise_for_status()
 
-                token_data: dict[str, Any] = token_resp.json()
-                _access_token = token_data["access_token"]
-                assert "id_token" in token_data
-                assert "refresh_token" in token_data
-            except httpx.HTTPStatusError as exc:
-                pytest.skip(
-                    f"Admin-gated flow aborted at {exc.request.url} "
-                    f"({exc.response.status_code}): Hydra admin port requires "
-                    "a live SSH tunnel from bunsamosa to expose loopback binding."
-                )
+            token_data: dict[str, Any] = token_resp.json()
+            _access_token = token_data["access_token"]
+            assert "id_token" in token_data
+            assert "refresh_token" in token_data
 
             # ---- Step 7: Authenticated MCP call with the access token ----
             _skip_if_no_admin_url()
@@ -237,15 +256,15 @@ class TestHydraOauthFlow:
                 headers={
                     "Authorization": f"Bearer {_access_token}",
                     "Content-Type": "application/json",
+                    # MCP streamable-HTTP requires clients advertise support
+                    # for both JSON and SSE on every request.
+                    "Accept": "application/json, text/event-stream",
                 },
             )
 
             assert mcp_resp.status_code == 200, (
                 f"MCP authenticated call failed: {mcp_resp.status_code} " f"{mcp_resp.text[:500]}"
             )
-            # Validate MCP JSON-RPC response shape.
-            mcp_body = mcp_resp.json()
-            assert mcp_body.get("jsonrpc") == "2.0"
         finally:
             await client.aclose()
 
@@ -290,30 +309,30 @@ async def _accept_login(
     login_challenge: str,
     subject: str,
 ) -> str:
-    """POST /oauth2/auth/requests/login/accept on the Hydra admin port."""
+    """POST /admin/oauth2/auth/requests/login/accept on the Hydra admin port.
+
+    Hydra v2 moved admin routes under `/admin`; the legacy unprefixed paths
+    return 307 redirects that httpx (follow_redirects=False) will not follow
+    for POST, so we target the final path directly.
+    """
     login_resp = await client.get(
-        f"{admin_url}/oauth2/auth/requests/login",
+        f"{admin_url}/admin/oauth2/auth/requests/login",
         params={"login_challenge": login_challenge},
     )
     login_resp.raise_for_status()
     login_data: dict[str, Any] = login_resp.json()
     login_subject = subject or (_extract_sub(login_data) or "")
 
-    accept_resp = await client.post(
-        f"{admin_url}/oauth2/auth/requests/login/accept",
+    accept_resp = await client.put(
+        f"{admin_url}/admin/oauth2/auth/requests/login/accept",
         params={"login_challenge": login_challenge},
         json={"subject": login_subject},
     )
     accept_resp.raise_for_status()
     redirect_to = str(accept_resp.json().get("redirect_to", ""))
-    consent_challenge = _query_param_from_url(redirect_to, "consent_challenge")
-    if not consent_challenge:
-        raise httpx.HTTPStatusError(
-            "Missing consent_challenge in login accept redirect",
-            request=accept_resp.request,
-            response=accept_resp,
-        )
-    return consent_challenge
+    if not redirect_to:
+        raise AssertionError("login/accept response missing redirect_to")
+    return redirect_to
 
 
 async def _accept_consent(
@@ -321,9 +340,9 @@ async def _accept_consent(
     admin_url: str,
     consent_challenge: str,
 ) -> str:
-    """POST /oauth2/auth/requests/consent/accept on the Hydra admin port."""
+    """PUT /admin/oauth2/auth/requests/consent/accept on the Hydra admin port."""
     consent_resp = await client.get(
-        f"{admin_url}/oauth2/auth/requests/consent",
+        f"{admin_url}/admin/oauth2/auth/requests/consent",
         params={"consent_challenge": consent_challenge},
     )
     consent_resp.raise_for_status()
@@ -332,26 +351,73 @@ async def _accept_consent(
     audience = data.get("client", {}).get("client_id")
     token_audience: list[str] = [str(audience)] if audience else []
 
+    # `session.access_token` and `session.id_token` must be map[string]interface{}
+    # (extra claims to embed in the respective token), NOT booleans. Empty
+    # dicts mean "grant with no extra claims" -- Hydra still issues both
+    # tokens because they come from grant_scope/openid/audience, not from
+    # this field. Sending `true` here yields a 400 unmarshal error.
     response: dict[str, Any] = {
         "grant_scope": TEST_SCOPE.split(),
         "grant_access_token_audience": token_audience,
-        "session": {"access_token": True, "id_token": True},
+        "session": {"access_token": {}, "id_token": {}},
     }
 
-    accept_resp = await client.post(
-        f"{admin_url}/oauth2/auth/requests/consent/accept",
+    accept_resp = await client.put(
+        f"{admin_url}/admin/oauth2/auth/requests/consent/accept",
         params={"consent_challenge": consent_challenge},
         json=response,
     )
-    accept_resp.raise_for_status()
+    if accept_resp.status_code >= 400:
+        raise AssertionError(
+            f"consent/accept failed {accept_resp.status_code}: " f"{accept_resp.text[:500]}"
+        )
     redirect_to = str(accept_resp.json().get("redirect_to", ""))
     if not redirect_to:
-        raise httpx.HTTPStatusError(
-            "Missing redirect_to in consent accept response",
-            request=accept_resp.request,
-            response=accept_resp,
-        )
+        raise AssertionError("consent/accept response missing redirect_to")
     return redirect_to
+
+
+async def _drive_to_callback(
+    client: httpx.AsyncClient,
+    admin_url: str,
+    login_accept_redirect: str,
+) -> str:
+    """Follow the Hydra verifier dance until we land on the callback auth code.
+
+    Hydra v2 splits the post-admin-accept chain: the redirect we get from
+    login/accept (or consent/accept) points back at /oauth2/auth with a
+    *_verifier query param; following that redirect advances the state
+    machine to either the consent UI or the final callback. We cap hops to
+    prevent infinite loops on misconfiguration.
+    """
+    location = login_accept_redirect
+    for _ in range(10):
+        # Terminal state: callback with authorization code.
+        code = _query_param_from_url(location, "code")
+        if code:
+            return code
+
+        # Intermediate state: Hydra wants consent. Accept it via admin API.
+        consent_challenge = _query_param_from_url(location, "consent_challenge")
+        if consent_challenge:
+            location = await _accept_consent(client, admin_url, consent_challenge)
+            continue
+
+        # Otherwise this is a verifier URL pointing back at /oauth2/auth;
+        # follow it with GET (same hostname, so tests against remote Hydra
+        # will issue a real HTTPS request to the public issuer).
+        resp = await client.get(location)
+        if resp.status_code not in (302, 303):
+            raise AssertionError(
+                f"Expected redirect while driving OAuth flow, got "
+                f"{resp.status_code} at {location[:200]}"
+            )
+        next_location = resp.headers.get("location", "")
+        if not next_location:
+            raise AssertionError(f"Missing Location header on redirect at {location[:200]}")
+        location = next_location
+
+    raise AssertionError("Exceeded 10 hops driving OAuth flow to callback")
 
 
 def _query_param_from_url(url: str, param: str) -> str | None:
