@@ -6,9 +6,9 @@ set -euo pipefail
 # Usage: restore-db.sh [--repair-grants] [--no-verify] <dump-file>
 #
 # Flags:
-#   --repair-grants    Replay the canonical GRANT block (migration 0002 + 0009)
-#                      inside a transaction and re-verify. Use after restoring a
-#                      dump taken with --no-acl, which strips those grants.
+#   --repair-grants    Replay the canonical GRANT block from deployment/grants.sql
+#                      and re-verify. Use after restoring a dump taken with
+#                      --no-acl, which strips those grants.
 #   --no-verify        Skip the post-restore invariant check. Discouraged: only
 #                      use when you have verified separately outside this tool.
 #
@@ -108,26 +108,7 @@ else
         if [[ "${REPAIR_GRANTS}" == "true" ]]; then
             echo "--- verify failed, replaying grants (--repair-grants) ---"
 
-            psql -v ON_ERROR_STOP=1 "${JOURNAL_DB_SUPERUSER_URL}" <<'EOF'
-BEGIN;
--- journal_app runtime grants
-GRANT CONNECT ON DATABASE journal TO journal_app;
-GRANT USAGE ON SCHEMA public TO journal_app;
-GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO journal_app;
-GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO journal_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO journal_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO journal_app;
--- journal_admin migration/admin grants
-GRANT ALL PRIVILEGES ON DATABASE journal TO journal_admin;
-GRANT ALL PRIVILEGES ON SCHEMA public TO journal_admin;
-GRANT ALL PRIVILEGES ON ALL TABLES IN SCHEMA public TO journal_admin;
-GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO journal_admin;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO journal_admin;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON SEQUENCES TO journal_admin;
--- 0009 admin option
-GRANT journal_app TO journal_admin WITH ADMIN OPTION;
-COMMIT;
-EOF
+            psql -v ON_ERROR_STOP=1 -f "${SCRIPT_DIR}/grants.sql" "${JOURNAL_DB_SUPERUSER_URL}"
 
             GRANTS_REPAIRED="yes"
             echo "--- grants replayed, re-verifying ---"
@@ -138,7 +119,7 @@ EOF
             fi
         else
             echo "ERROR: post-restore verification failed." >&2
-            echo "If your dump was taken with --no-acl, re-run with --repair-grants to replay migration 0002 + 0009 grants." >&2
+            echo "If your dump was taken with --no-acl, re-run with --repair-grants to replay grants from deployment/grants.sql." >&2
             exit 1
         fi
     fi
