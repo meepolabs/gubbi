@@ -247,9 +247,14 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
+        cipher = require_cipher(app_ctx)
         async with user_scoped_connection(app_ctx.pool) as conn:
             convs, total = await conv_repo.list_conversations(
-                conn, topic_prefix=topic_prefix, limit=limit, offset=offset
+                conn,
+                cipher,
+                topic_prefix=topic_prefix,
+                limit=limit,
+                offset=offset,
             )
         return {
             "conversations": [c.model_dump() for c in convs],
