@@ -1,4 +1,8 @@
-# Deployment Guide
+# Deployment Guide (self-host)
+
+> **Hosted deploys:** if you are operating the multi-tenant hosted variant
+> (Mode 3), see `journalctl-cloud/docs/RUNBOOK.md` in the private cloud
+> repo. This document covers the two self-host shapes only.
 
 Journalctl supports three mutually-exclusive deploy shapes, selected by
 which of `JOURNAL_HYDRA_ADMIN_URL` and `JOURNAL_PASSWORD_HASH` are set.
@@ -6,17 +10,19 @@ Setting both is a configuration error and fails startup.
 
 | Shape | `JOURNAL_HYDRA_ADMIN_URL` | `JOURNAL_PASSWORD_HASH` | API key | Hydra | Self-host OAuth |
 |-------|---------------------------|-------------------------|---------|-------|-----------------|
-| API-key-only self-host | empty | empty | yes | -- | -- |
-| Full self-host | empty | set | yes | -- | yes |
-| Multi-tenant hosted | set | empty | no | yes | -- |
+| Mode 1: API-key-only self-host | empty | empty | yes | -- | -- |
+| Mode 2: Full self-host         | empty | set   | yes | -- | yes |
+| Mode 3: Multi-tenant hosted    | set   | empty | no  | yes | -- |
 
-### API-key-only self-host
+This document covers **Mode 1** and **Mode 2** only.
+
+### Mode 1: API-key-only self-host
 
 Simplest surface. `JOURNAL_API_KEY` is the only accepted credential.
 Useful when every client supports static Bearer tokens (Claude Code,
 Claude Desktop, Cursor, Aider).
 
-### Full self-host (this document)
+### Mode 2: Full self-host (this document, primary path)
 
 One operator, one user identity. Uses the MCP SDK's built-in OAuth 2.1 +
 PKCE + RFC 7591 Dynamic Client Registration routes for OAuth clients
@@ -26,20 +32,9 @@ clients. One container, one PostgreSQL.
 Set `JOURNAL_PASSWORD_HASH` (bcrypt hash of the operator's password) to
 activate self-host OAuth.
 
-### Multi-tenant hosted
-
-Many user identities, per-user sessions, user management. Uses Ory Hydra
-for OAuth + Ory Kratos for identity + a dedicated auth Postgres. Lives
-in the private `journalctl-cloud` repo alongside the cloud-api webhook
-service; this `journalctl` repo is then the MCP backend behind a shared
-auth plane. See that repo's own deployment docs.
-
-Set `JOURNAL_HYDRA_ADMIN_URL` on the journalctl service to switch on
-Hydra introspection. The static API key path is disabled in this mode --
-operators authenticate via OAuth like any real user, or `docker exec`
-for ops work.
-
-The rest of this document covers the **full self-host** path.
+The rest of this document covers the **full self-host** path. The Mode 1
+variant is identical except `JOURNAL_PASSWORD_HASH` stays unset and the
+OAuth section below is irrelevant.
 
 ---
 
@@ -54,14 +49,14 @@ The rest of this document covers the **full self-host** path.
 One repo on the server:
 
 ```
-~/journalctl/           # This repo — server code, docker-compose.yml, Dockerfile, data/
-    └── data/           # Bind-mounted persistent data (see below)
-        ├── postgres/   #   PostgreSQL WAL + tablespaces  → /var/lib/postgresql/data
-        ├── journal/    #   oauth.db, knowledge/, conversations_json/  → /app/journal
-        └── onnx/       #   Cached ONNX embedding model  → /home/appuser/.cache/journalctl
+~/journalctl/           # This repo -- server code, docker-compose.yml, Dockerfile, data/
+    +-- data/           # Bind-mounted persistent data (see below)
+        +-- postgres/   #   PostgreSQL WAL + tablespaces  -> /var/lib/postgresql/data
+        +-- journal/    #   oauth.db, knowledge/, conversations_json/  -> /app/journal
+        +-- onnx/       #   Cached ONNX embedding model  -> /home/appuser/.cache/journalctl
 ```
 
-All persistent state lives under `./data/` in the repo root. Nothing lives in named Docker volumes — `docker compose down -v` is safe.
+All persistent state lives under `./data/` in the repo root. Nothing lives in named Docker volumes -- `docker compose down -v` is safe.
 
 ## Environment variables
 
@@ -69,14 +64,14 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
-| `JOURNAL_API_KEY` | yes (unless `JOURNAL_HYDRA_ADMIN_URL` is set) | Static Bearer token for API key auth. Must be >=32 chars. | `sk-journal-...` |
+| `JOURNAL_API_KEY` | yes (Mode 1 + Mode 2) | Static Bearer token for API key auth. Must be >=32 chars. | `sk-journal-...` |
 | `JOURNAL_DB_SUPERUSER_PASSWORD` | yes | PostgreSQL superuser bootstrap password (initdb + healthcheck). The app never connects as this role. | (random) |
 | `JOURNAL_DB_APP_PASSWORD` | yes | Password for the runtime database role (`journal_app`, RLS-enforced) created by migration 0002. Set via `ALTER ROLE ... WITH PASSWORD '<value>'`. | (random, distinct) |
 | `JOURNAL_DB_ADMIN_PASSWORD` | yes | Password for the privileged database role (`journal_admin`, BYPASSRLS) created by migration 0002. | (random, distinct) |
 | `JOURNAL_TIMEZONE` | yes | Timezone for "today" defaulting and briefing week math | `America/Los_Angeles` |
-| `JOURNAL_OPERATOR_EMAIL` | yes | Email of the single operator user. The operator's UUID is derived at startup via `users.email` lookup and bound to every API-key / self-host OAuth request. | `you@example.com` |
+| `JOURNAL_OPERATOR_EMAIL` | yes (Mode 1 + Mode 2) | Email of the single operator user. The operator's UUID is derived at startup via `users.email` lookup and bound to every API-key / self-host OAuth request. | `you@example.com` |
 | `JOURNAL_SERVER_URL` | for self-host OAuth | Public HTTPS URL advertised in the OAuth + RFC 7591 DCR metadata endpoints | `https://journal.yourdomain.com` |
-| `JOURNAL_PASSWORD_HASH` | for self-host OAuth | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty keeps the server API-key-only. Mutually exclusive with `JOURNAL_HYDRA_ADMIN_URL`. | `$2b$12$...` |
+| `JOURNAL_PASSWORD_HASH` | for self-host OAuth (Mode 2 only) | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty keeps the server API-key-only (Mode 1). | `$2b$12$...` |
 
 `JOURNAL_DB_APP_URL`, `JOURNAL_DB_ADMIN_URL`, and `JOURNAL_DB_MIGRATION_URL` are composed inside `docker-compose.yml` from the three password values above -- configure those in your secrets manager, not the full DSNs. The runtime pool uses `journal_app` (RLS-enforced, no DDL); alembic resolves its DSN from `JOURNAL_DB_MIGRATION_URL` (preferred) or `JOURNAL_DB_ADMIN_URL`, both pointing at the privileged `journal_admin` role. The OAuth SQLite file lives at `<JOURNAL_DATA_DIR>/oauth.db` and needs no separate config. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
 
@@ -86,11 +81,11 @@ Generate a bcrypt password hash via the built-in CLI:
 docker compose exec journalctl python -m journalctl.oauth.crypto 'your-password'
 ```
 
-### Operator Provisioning (Mode 1 / Mode 2)
+### Operator provisioning
 
-Operator row is auto-scaffolded by the app on Mode 1/2 startup. No manual
+Operator row is auto-scaffolded by the app on Mode 1 / Mode 2 startup. No manual
 provisioning step is needed -- after `alembic upgrade head`, just start the
-server. The operator email from ``JOURNAL_OPERATOR_EMAIL`` is resolved to a
+server. The operator email from `JOURNAL_OPERATOR_EMAIL` is resolved to a
 concrete UUID at startup in the app lifespan.
 
 ## Docker Compose
@@ -124,7 +119,7 @@ services:
       postgres:
         condition: service_healthy
     ports:
-      - "127.0.0.1:8100:8100"   # loopback only — nginx fronts it
+      - "127.0.0.1:8100:8100"   # loopback only -- nginx fronts it
     environment:
       - JOURNAL_API_KEY
       - JOURNAL_DB_APP_URL=postgresql://journal_app:${JOURNAL_DB_APP_PASSWORD}@postgres:5432/journal
@@ -179,7 +174,7 @@ The ONNX pre-download is critical: without it, multiple gunicorn workers race on
 
 nginx sits in front of the container and handles SSL termination, routing, rate limiting, and SSE passthrough.
 
-Rate limits below are placeholders — tune them for your traffic and threat model, and keep the values out of version control if you can.
+Rate limits below are placeholders -- tune them for your traffic and threat model, and keep the values out of version control if you can.
 
 ```nginx
 # Tune these for your environment.
@@ -199,7 +194,7 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
 
-    # OAuth endpoints — auth handled by the app
+    # OAuth endpoints -- auth handled by the app
     location ~ ^/(\.well-known/(oauth-authorization-server|oauth-protected-resource)|authorize|token|register|revoke) {
         limit_req zone=oauth_limit burst=<N> nodelay;
         proxy_pass http://journalctl;
@@ -209,7 +204,7 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # Login endpoint — stricter rate limit than OAuth
+    # Login endpoint -- stricter rate limit than OAuth
     location = /login {
         limit_req zone=login_limit burst=<N> nodelay;
         proxy_pass http://journalctl/login;
@@ -219,8 +214,8 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
     }
 
-    # MCP endpoint — Bearer/OAuth auth handled by the app
-    # Prefix match catches both /mcp and /mcp/ — path normalization
+    # MCP endpoint -- Bearer/OAuth auth handled by the app
+    # Prefix match catches both /mcp and /mcp/ -- path normalization
     # handled by MCPPathNormalizer middleware in the application
     location /mcp {
         proxy_pass http://journalctl;
@@ -242,7 +237,7 @@ server {
         proxy_pass http://journalctl/health;
     }
 
-    # UI placeholder — a custom viewer will land in a later phase
+    # UI placeholder -- a custom viewer will land in a later phase
     location / {
         return 404;
     }
@@ -297,7 +292,7 @@ If your client doesn't support `type: "http"` natively, use `mcp-remote` as a lo
 }
 ```
 
-### OAuth 2.1 + PKCE + RFC 7591 Dynamic Client Registration (browser/mobile clients)
+### OAuth 2.1 + PKCE + RFC 7591 Dynamic Client Registration (browser/mobile clients, Mode 2 only)
 
 For clients that require OAuth rather than a static Bearer token
 (claude.ai, ChatGPT, custom web apps), the server implements OAuth 2.1
@@ -330,9 +325,9 @@ Two things to back up:
    docker compose exec -T postgres pg_dump -U journal -Fc journal \
        > backups/journal_$(date +%Y%m%d).dump
    ```
-2. **Conversation JSON archives.** `data/journal/conversations_json/` — rsync or S3 sync. These are the rebuildable source for `conversations` and `messages` tables.
+2. **Conversation JSON archives.** `data/journal/conversations_json/` -- rsync or S3 sync. These are the rebuildable source for `conversations` and `messages` tables.
 
-The ONNX model cache (`data/onnx/`) is not worth backing up — it's re-downloaded automatically on boot if missing.
+The ONNX model cache (`data/onnx/`) is not worth backing up -- it's re-downloaded automatically on boot if missing.
 
 ## Memory requirements
 
@@ -341,8 +336,6 @@ On a small VM (2GB RAM), PostgreSQL + journalctl + nginx run comfortably for a s
 - PostgreSQL idle: ~200MB. Add ~50MB per concurrent pool connection.
 - journalctl idle: ~300MB, of which ~100MB is the loaded ONNX model.
 - nginx: negligible.
-
-For multi-tenant scale, plan for multiple vCPUs and 4+ GB RAM on a dedicated VPS.
 
 ## Restore procedure
 
