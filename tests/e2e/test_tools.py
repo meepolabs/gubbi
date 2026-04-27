@@ -31,7 +31,7 @@ class _StubEmbeddingService:
         conn: Any,
         text: str,
         limit: int = 10,
-        topic_ids: list[int] | None = None,
+        topic_prefix: str | None = None,
     ) -> list[dict]:
         return []
 
@@ -40,6 +40,9 @@ class _StubEmbeddingService:
         conn: Any,
         embedding: list[float],
         limit: int = 10,
+        topic_prefix: str | None = None,
+        date_from: Any = None,
+        date_to: Any = None,
     ) -> list[dict]:
         return []
 

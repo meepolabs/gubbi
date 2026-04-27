@@ -116,9 +116,7 @@ jobs:
           exit 1
 
       - name: Unit tests (crypto, db_context, cipher_guard, ...)
-        run: |
-          poetry run pytest tests/unit -v --tb=short \
-            --deselect tests/unit/test_embedding_service.py::TestStoreAndSearch::test_search_with_topic_ids_passes_filter
+        run: poetry run pytest tests/unit -v --tb=short
 
       - name: Integration tests - RLS isolation
         run: poetry run pytest tests/integration/test_rls_isolation.py -v --tb=short
@@ -128,6 +126,7 @@ jobs:
           poetry run pytest \
             tests/integration/test_entries_encryption.py \
             tests/integration/test_encryption_contract.py \
+            tests/integration/test_encryption_correctness.py \
             tests/integration/test_repo_inserts_under_rls.py \
             -v --tb=short
 
@@ -138,8 +137,8 @@ jobs:
             tests/integration/test_rls_isolation.py \
             tests/integration/test_entries_encryption.py \
             tests/integration/test_encryption_contract.py \
+            tests/integration/test_encryption_correctness.py \
             tests/integration/test_repo_inserts_under_rls.py \
-            --deselect tests/unit/test_embedding_service.py::TestStoreAndSearch::test_search_with_topic_ids_passes_filter \
             --cov=journalctl.core.crypto \
             --cov=journalctl.core.cipher_guard \
             --cov=journalctl.core.db_context \

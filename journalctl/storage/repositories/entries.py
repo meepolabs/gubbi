@@ -85,11 +85,11 @@ async def append(
             INSERT INTO entries
                 (topic_id, date, content_encrypted, content_nonce,
                  reasoning_encrypted, reasoning_nonce,
-                 tags, user_id, created_at, updated_at, search_text)
+                 tags, user_id, created_at, updated_at, search_vector)
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
-                $8, $8, $9
+                $8, $8, to_tsvector('english', $9)
             )
             RETURNING id
         ),
@@ -293,7 +293,7 @@ async def update(
                     updated_at=$3, indexed_at=NULL,
                     content_encrypted=$4, content_nonce=$5,
                     reasoning_encrypted=$6, reasoning_nonce=$7,
-                    search_text=$8
+                    search_vector=to_tsvector('english', $8)
                 WHERE id=$9
                 RETURNING topic_id
             )
@@ -395,9 +395,12 @@ async def get_by_date_range(
             e.id              AS doc_id,
             'entry'           AS doc_type,
             e.date::text      AS date,
-            NULL::text        AS content,
             e.content_encrypted,
             e.content_nonce,
+            NULL::bytea       AS title_encrypted,
+            NULL::bytea       AS title_nonce,
+            NULL::bytea       AS summary_encrypted,
+            NULL::bytea       AS summary_nonce,
             e.tags,
             t.path            AS topic,
             t.title           AS topic_title,
@@ -414,12 +417,15 @@ async def get_by_date_range(
             c.id                      AS doc_id,
             'conversation'            AS doc_type,
             c.created_at::date::text  AS date,
-            c.summary                 AS content,
             NULL::bytea               AS content_encrypted,
             NULL::bytea               AS content_nonce,
+            c.title_encrypted,
+            c.title_nonce,
+            c.summary_encrypted,
+            c.summary_nonce,
             c.tags,
             t.path                    AS topic,
-            c.title                   AS topic_title,
+            t.title                   AS topic_title,
             c.id                      AS conv_id
         FROM conversations c
         JOIN topics t ON t.id = c.topic_id
@@ -441,17 +447,24 @@ async def get_by_date_range(
                     f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
                 )
             content = decrypted
+            title = content.split("\n", 1)[0][:80]
         else:
-            content = r["content"] or ""
+            conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
+            summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
+            if conv_title is None or summary is None:
+                raise RuntimeError(
+                    "Conversation title/summary decrypted to None; schema invariant violated"
+                )
+            title = conv_title
+            content = summary
         if r["doc_type"] == "entry":
-            first_line = content.split("\n", 1)[0][:80]
             results.append(
                 {
                     "entry_id": r["doc_id"],
                     "conversation_id": None,
                     "doc_type": "entry",
                     "topic": r["topic"],
-                    "title": first_line if first_line else r["topic_title"],
+                    "title": title if title else r["topic_title"],
                     "description": content[:SNIPPET_PREVIEW_LEN],
                     "tags": list(r["tags"] or []),
                     "updated": r["date"],
@@ -464,7 +477,7 @@ async def get_by_date_range(
                     "conversation_id": r["conv_id"],
                     "doc_type": "conversation",
                     "topic": r["topic"],
-                    "title": r["topic_title"],
+                    "title": title,
                     "description": content[:SNIPPET_PREVIEW_LEN],
                     "tags": list(r["tags"] or []),
                     "updated": r["date"],

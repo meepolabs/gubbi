@@ -22,18 +22,12 @@ Why BYTEA + nonce split (not a single BLOB): AEAD schemes (AES-256-GCM,
  may add a UNIQUE constraint on (content_encrypted, content_nonce) to
  prevent nonce reuse -- a catastrophic AEAD failure if violated.
 
-Why a plaintext search_text column with an acknowledged tradeoff:
- full-text search needs tokenised plaintext, which AEAD does not
- decrypt server-side. Encrypting entries.content and reasoning would
- kill ``tsvector`` generation. The tradeoff: search_text is
- plaintext-only (not end-to-end encrypted). This is acceptable because:
-  (1) search_text is a subset of the already-encrypted content/reasoning,
-  (2) it is required for FTS to function at all (GIN index needs it),
-  (3) direct-read columns (content, reasoning) stay fully encrypted --
-      a compromised DBA can read search_text but not the full journal
-      body. The GIN index on search_vector (derived from search_text)
-      is significantly cheaper than encrypting and tokenising content
-      + reasoning at query time (which Postgres cannot do).
+Historical note: this migration introduced ``search_text`` as plaintext
+ and the repository wrote full content verbatim, not a subset. That
+ design was later corrected in migration 0013, which drops
+ ``entries.search_text`` / ``messages.search_text`` and writes
+ ``search_vector`` from ephemeral plaintext parameters via
+ ``to_tsvector('english', $N)`` so prose is not persisted in the DB.
 
 Explicit window risk: between this migration (02.12) and the 02.14
 backfill migration (0007), entries.search_vector will be empty because

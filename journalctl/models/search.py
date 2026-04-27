@@ -16,9 +16,10 @@ class SearchResult(BaseModel):
     source_key: str  # e.g. 'entry:42', 'conversation:17', or a memory hash key
     doc_type: Literal["entry", "conversation", "memory"]
     topic: str
-    title: str
-    snippet: str
     rank: float
     date: str
     entry_id: int | None = None
     conversation_id: int | None = None
+    content: str | None = None
+    title: str | None = None
+    summary: str | None = None

@@ -242,7 +242,6 @@ class EmbeddingService:
                 e.id          AS entry_id,
                 t.path        AS topic,
                 e.date::text  AS date,
-                e.content,
                 1 - (ee.embedding <=> $1::vector) AS similarity
             FROM entry_embeddings ee
             JOIN entries e ON e.id = ee.entry_id

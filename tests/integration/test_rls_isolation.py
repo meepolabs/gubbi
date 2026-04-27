@@ -95,12 +95,13 @@ async def test_entries_visible_only_to_owner(
 
 async def test_conversations_visible_only_to_owner(
     app_pool: asyncpg.Pool,
+    cipher: ContentCipher,
     seeded_a: TenantSeed,
     seeded_b: TenantSeed,
 ) -> None:
     """conv_repo.list_conversations under a user scope returns only that user's conversations."""
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
-        a_convs, a_total = await conv_repo.list_conversations(conn)
+        a_convs, a_total = await conv_repo.list_conversations(conn, cipher)
     assert a_total == 1
     assert a_convs[0].id == seeded_a.conversation_id
     assert a_convs[0].id != seeded_b.conversation_id
@@ -196,9 +197,9 @@ async def test_insert_into_entries_with_foreign_user_id_rejected(
                 """
                 INSERT INTO entries
                     (topic_id, user_id, date,
-                     content_encrypted, content_nonce, search_text,
+                     content_encrypted, content_nonce, search_vector,
                      tags, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8)
+                VALUES ($1, $2, $3, $4, $5, to_tsvector('english', $6), $7, $8, $8)
                 """,
                 seeded_a.topic_id,
                 tenant_b,
@@ -282,16 +283,14 @@ async def test_update_cross_tenant_affects_zero_rows(
     b_entry_id = seeded_b.entry_ids[0]
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         status = await conn.execute(
-            "UPDATE entries SET search_text = 'pwned' WHERE id = $1", b_entry_id
+            "UPDATE entries SET tags = ARRAY['pwned']::text[] WHERE id = $1", b_entry_id
         )
     assert status.endswith(" 0"), f"expected trailing ' 0' (status={status!r})"
 
-    # Row should be untouched -- search_text still reflects B's seed value.
+    # Row should be untouched.
     async with admin_pool.acquire() as conn:
-        search_text = await conn.fetchval(
-            "SELECT search_text FROM entries WHERE id = $1", b_entry_id
-        )
-    assert search_text != "pwned"
+        tags = await conn.fetchval("SELECT tags FROM entries WHERE id = $1", b_entry_id)
+    assert "pwned" not in set(tags or [])
 
 
 # ---------------------------------------------------------------------------
