@@ -363,6 +363,26 @@ class BearerAuthMiddleware:
         the /userinfo HTTP round-trip to prevent pool exhaustion under concurrent
         first-logins.
 
+        User-row write paths (M2 review #6):
+
+        * **This path (Mode 3 self-heal)** -- lazy. Fires on first
+          authenticated MCP call from a Hydra subject that has no
+          ``users`` row, typically because the Kratos webhook missed
+          (cloud-api blip during signup). Idempotent on ``users.id``;
+          on race, the loser raises ``_PreExistingSub`` and skips the
+          /userinfo + audit writes.
+        * **Kratos webhook (Mode 3 fast path)** --
+          ``journalctl-cloud/journalctl_cloud/webhooks/kratos.py``
+          ``_upsert_user``; eager + synchronous. The authoritative
+          path for a normal signup; this JIT only fires when the
+          webhook didn't.
+        * **scaffold_operator (Mode 1/2 self-host)** --
+          ``journalctl/users/bootstrap.py``; runs at startup. Disjoint
+          from Mode 3.
+
+        M3 refactor (m2-review #1): this JIT path moves into cloud-api
+        alongside the Kratos webhook; the two converge in one service.
+
         Parameters
         ----------
         sub :
