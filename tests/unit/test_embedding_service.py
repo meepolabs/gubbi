@@ -84,13 +84,14 @@ class TestStoreAndSearch:
         conn.fetch.assert_called_once()
         assert result == []
 
-    async def test_search_with_topic_ids_passes_filter(self, mock_embedding_service: Any) -> None:
+    async def test_search_with_topic_prefix_passes_filter(
+        self, mock_embedding_service: Any
+    ) -> None:
         conn = AsyncMock()
         conn.fetch.return_value = []
-        await mock_embedding_service.search(conn, "query", limit=3, topic_ids=[1, 2, 3])
+        await mock_embedding_service.search(conn, "query", limit=3, topic_prefix="work/")
         call_args = conn.fetch.call_args[0]
-        # topic_ids branch uses $2 in the SQL
-        assert "$2" in call_args[0]
+        assert "t.path LIKE" in call_args[0]
 
     async def test_search_result_format(self, mock_embedding_service: Any) -> None:
         conn = AsyncMock()
@@ -99,7 +100,6 @@ class TestStoreAndSearch:
                 "entry_id": 1,
                 "topic": "work/acme",
                 "date": "2025-06-01",
-                "content": "Test entry",
                 "similarity": 0.95,
             }
         ]
@@ -107,3 +107,4 @@ class TestStoreAndSearch:
         assert len(results) == 1
         assert results[0]["entry_id"] == 1
         assert results[0]["topic"] == "work/acme"
+        assert results[0]["similarity"] == 0.95

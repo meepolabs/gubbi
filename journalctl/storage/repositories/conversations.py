@@ -61,16 +61,37 @@ def _write_conversation_json(
     return f"conversations_json/{file_id}.json"
 
 
-def _row_to_meta(row: asyncpg.Record) -> ConversationMeta:
+def _decrypt_content_field(
+    cipher: ContentCipher,
+    row: Any,
+    encrypted_key: str,
+    nonce_key: str,
+) -> str | None:
+    ct = row[encrypted_key]
+    nonce = row[nonce_key]
+    if ct is not None and nonce is not None:
+        return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
+    if ct is None and nonce is None:
+        return None
+    raise DecryptionError("encrypted column and nonce must both be present")
+
+
+def _row_to_meta(cipher: ContentCipher, row: asyncpg.Record) -> ConversationMeta:
+    title = _decrypt_content_field(cipher, row, "title_encrypted", "title_nonce")
+    summary = _decrypt_content_field(cipher, row, "summary_encrypted", "summary_nonce")
+    if title is None or summary is None:
+        raise RuntimeError(
+            "Conversation title/summary decrypted to None; schema invariant violated"
+        )
     return ConversationMeta(
         id=row["id"],
         source=row["source"],
-        title=row["title"],
+        title=title,
         topic=row["topic"],
         tags=list(row["tags"] or []),
         created=row["created_at"].date().isoformat(),
         updated=row["updated_at"].date().isoformat(),
-        summary=row["summary"] or "",
+        summary=summary,
         participants=list(row["participants"] or []),
         message_count=row["message_count"],
     )
@@ -163,6 +184,7 @@ async def save_conversation(
     # topic_id already verified and fetched in the pre-check above — no need to re-query.
     conv_id, is_update, existing_msg_count = await _upsert_conversation_record(
         conn,
+        cipher,
         topic_id,
         title,
         slug,
@@ -196,6 +218,7 @@ async def save_conversation(
 
 async def _upsert_conversation_record(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     topic_id: int,
     title: str,
     slug: str,
@@ -225,37 +248,49 @@ async def _upsert_conversation_record(
     existing_msg_count = int(existing["message_count"]) if existing else 0
 
     now = datetime_cls.now(UTC)
+    title_ct, title_nonce = cipher.encrypt(title)
+    summary_ct, summary_nonce = cipher.encrypt(summary)
+    vector_text = f"{title} {summary}".strip()
     row = await conn.fetchrow(
         """
         INSERT INTO conversations
-            (topic_id, title, slug, source, summary, tags, participants,
-             message_count, user_id, created_at, updated_at, json_path)
+            (topic_id, title_encrypted, title_nonce, slug, source,
+             summary_encrypted, summary_nonce, tags, participants,
+             message_count, user_id, created_at, updated_at, json_path, search_vector)
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7, $8,
+            $1, $2, $3, $4, $5,
+            $6, $7, $8, $9, $10,
             (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
-            $9, $10, $11
+            $11, $12, $13, to_tsvector('english', $14)
         )
         ON CONFLICT (topic_id, slug) DO UPDATE
             SET source        = excluded.source,
-                summary       = excluded.summary,
+                title_encrypted = excluded.title_encrypted,
+                title_nonce   = excluded.title_nonce,
+                summary_encrypted = excluded.summary_encrypted,
+                summary_nonce = excluded.summary_nonce,
                 tags          = excluded.tags,
                 participants  = excluded.participants,
                 message_count = excluded.message_count,
                 updated_at    = excluded.updated_at,
-                json_path     = excluded.json_path
+                json_path     = excluded.json_path,
+                search_vector = excluded.search_vector
         RETURNING id
         """,
         topic_id,
-        title,
+        title_ct,
+        title_nonce,
         slug,
         source,
-        summary,
+        summary_ct,
+        summary_nonce,
         tags,
         participants,
         len(messages),
         datetime_cls.fromisoformat(conversation_date).replace(tzinfo=UTC),
         now,
         json_path,
+        vector_text,
     )
     if row is None:
         raise RuntimeError("INSERT/UPDATE conversations failed: no row returned")
@@ -289,9 +324,9 @@ async def _insert_messages(
         """
         INSERT INTO messages
             (conversation_id, role, timestamp, position,
-             content_encrypted, content_nonce, search_text, user_id)
+             content_encrypted, content_nonce, search_vector, user_id)
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
+            $1, $2, $3, $4, $5, $6, to_tsvector('english', $7),
             (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid)
         )
         """,
@@ -327,7 +362,7 @@ async def _upsert_linked_entry(
         # ciphertext from persisting if that invariant is ever relaxed.
         await conn.execute(
             "UPDATE entries SET content_encrypted = $1, content_nonce = $2,"
-            " search_text = $3, reasoning_encrypted = NULL,"
+            " search_vector = to_tsvector('english', $3), reasoning_encrypted = NULL,"
             " reasoning_nonce = NULL, updated_at = $4, date = $5, indexed_at = NULL"
             " WHERE id = $6",
             content_ct,
@@ -341,10 +376,10 @@ async def _upsert_linked_entry(
     row = await conn.fetchrow(
         """
         INSERT INTO entries
-            (topic_id, date, content_encrypted, content_nonce, search_text,
+            (topic_id, date, content_encrypted, content_nonce, search_vector,
              conversation_id, tags, user_id, created_at, updated_at)
         VALUES (
-            $1, $2, $3, $4, $5, $6, $7,
+            $1, $2, $3, $4, to_tsvector('english', $5), $6, $7,
             (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
             $8, $8
         )
@@ -385,6 +420,7 @@ async def count_conversations(
 
 async def list_conversations(
     conn: asyncpg.Connection,
+    cipher: ContentCipher,
     topic_prefix: str | None = None,
     limit: int | None = None,
     offset: int = 0,
@@ -407,7 +443,8 @@ async def list_conversations(
         pagination = f"LIMIT {_add_param(params, limit)} OFFSET {_add_param(params, offset)}"
 
     sql = f"""
-        SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
+        SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
+               c.summary_encrypted, c.summary_nonce, c.tags,
                c.participants, c.message_count,
                c.created_at, c.updated_at, t.path AS topic,
                COUNT(*) OVER() AS total_count
@@ -419,7 +456,7 @@ async def list_conversations(
     """
     rows = await conn.fetch(sql, *params)
     total = int(rows[0]["total_count"]) if rows else 0
-    return [_row_to_meta(r) for r in rows], total
+    return [_row_to_meta(cipher, r) for r in rows], total
 
 
 async def read_conversation(
@@ -437,7 +474,8 @@ async def read_conversation(
 
     row = await conn.fetchrow(
         """
-        SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
+        SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
+               c.summary_encrypted, c.summary_nonce, c.tags,
                c.participants, c.message_count,
                c.created_at, c.updated_at, t.path AS topic
         FROM conversations c
@@ -451,7 +489,7 @@ async def read_conversation(
         msg = f"Conversation '{title}' not found under '{topic}'"
         raise ConversationNotFoundError(msg)
 
-    meta = _row_to_meta(row)
+    meta = _row_to_meta(cipher, row)
     msg_rows = await conn.fetch(
         "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
@@ -483,7 +521,8 @@ async def read_conversation_by_id(
     """
     row = await conn.fetchrow(
         """
-        SELECT c.id, c.title, c.slug, c.source, c.summary, c.tags,
+        SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
+               c.summary_encrypted, c.summary_nonce, c.tags,
                c.participants, c.message_count,
                c.created_at, c.updated_at, t.path AS topic
         FROM conversations c
@@ -496,7 +535,7 @@ async def read_conversation_by_id(
         msg = f"Conversation id {conversation_id} not found"
         raise ConversationNotFoundError(msg)
 
-    meta = _row_to_meta(row)
+    meta = _row_to_meta(cipher, row)
     msg_rows = await conn.fetch(
         "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
@@ -513,3 +552,24 @@ async def read_conversation_by_id(
     if preview and len(messages) > 6:
         messages = messages[:3] + messages[-3:]
     return meta, messages
+
+
+async def get_title_summary(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    conversation_id: int,
+) -> tuple[str, str] | None:
+    row = await conn.fetchrow(
+        "SELECT title_encrypted, title_nonce, summary_encrypted, summary_nonce "
+        "FROM conversations WHERE id = $1",
+        conversation_id,
+    )
+    if not row:
+        return None
+    title = _decrypt_content_field(cipher, row, "title_encrypted", "title_nonce")
+    summary = _decrypt_content_field(cipher, row, "summary_encrypted", "summary_nonce")
+    if title is None or summary is None:
+        raise RuntimeError(
+            "Conversation title/summary decrypted to None; schema invariant violated"
+        )
+    return title, summary

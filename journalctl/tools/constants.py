@@ -28,8 +28,11 @@ MAX_SEARCH_RESULTS: Final = 100
 MAX_TOPICS_RESULTS: Final = 200
 MAX_CONVERSATIONS_RESULTS: Final = 200
 
-# Search query input guard — truncate before FTS5 or embedding call
+# Search query input guard - truncate before FTS5 or embedding call
 MAX_QUERY_LEN: Final = 2000
+
+# Per-result content cap for search/context responses
+MAX_SEARCH_CONTENT_CHARS: Final = 4096
 
 # Characters shown for memory content-hash previews in search results
 MEMORY_HASH_PREVIEW_LEN: Final = 12

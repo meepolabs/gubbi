@@ -9,13 +9,8 @@ unknown-version DecryptionError contract lives in
 2. ``entry_repo.read`` returns decrypted content equal to the original
    plaintext (round-trip via the repo layer).
 3. ``entry_repo.update`` re-encrypts: new ciphertext differs from old,
-   new nonce differs from old, and the old plaintext is unreachable via
-   either the repo read or the legacy plaintext column (dual-write
-   window: the plaintext column is also updated so the post-update
-   plaintext reflects the new value, not the pre-update one).
-4. tsvector FTS still matches when ``search_text`` is populated (the
-   generated ``search_vector`` column is derived from ``search_text``
-   per migration 0006, so encrypted content does not kill FTS).
+   new nonce differs from old, and the repo read returns only updated plaintext.
+4. tsvector FTS still matches encrypted entries via populated ``search_vector``.
 
 All tests seed via ``admin_pool`` (BYPASSRLS + explicit ``user_id``)
 because the repo-layer INSERT does not yet thread ``user_id`` through
@@ -86,8 +81,8 @@ async def _seed_entry(
             INSERT INTO entries
                 (topic_id, user_id, date, content_encrypted, content_nonce,
                  reasoning_encrypted, reasoning_nonce,
-                 search_text, tags, created_at, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, '{}', $9, $9)
+                 search_vector, tags, created_at, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, to_tsvector('english', $8), '{}', $9, $9)
             RETURNING id
             """,
             topic_id,
@@ -168,7 +163,8 @@ async def test_update_rotates_ciphertext_and_nonce(
 
     async with admin_pool.acquire() as conn:
         before = await conn.fetchrow(
-            "SELECT content_encrypted, content_nonce, search_text" " FROM entries WHERE id = $1",
+            "SELECT content_encrypted, content_nonce, search_vector::text AS sv "
+            "FROM entries WHERE id = $1",
             entry_id,
         )
     assert before is not None
@@ -180,7 +176,8 @@ async def test_update_rotates_ciphertext_and_nonce(
 
     async with admin_pool.acquire() as conn:
         after = await conn.fetchrow(
-            "SELECT content_encrypted, content_nonce, search_text" " FROM entries WHERE id = $1",
+            "SELECT content_encrypted, content_nonce, search_vector::text AS sv "
+            "FROM entries WHERE id = $1",
             entry_id,
         )
     assert after is not None
@@ -197,8 +194,8 @@ async def test_update_rotates_ciphertext_and_nonce(
     # three random portions to be pairwise distinct.
     third_ct, third_nonce = cipher.encrypt("third distinct value")
     assert len({bytes(old_nonce[1:]), bytes(new_nonce[1:]), bytes(third_nonce[1:])}) == 3
-    # Encrypted column tracks the latest content after update.
-    assert after["search_text"] == updated
+    assert after["sv"] is not None
+    assert "updat" in str(after["sv"])
     # Repo read should return the updated plaintext.
     async with user_scoped_connection(app_pool, tenant_a) as conn:
         result = await entry_repo.get_text(conn, cipher, entry_id)
@@ -207,18 +204,13 @@ async def test_update_rotates_ciphertext_and_nonce(
     assert content == updated
 
 
-async def test_fts_matches_on_plaintext_search_text(
+async def test_fts_matches_on_search_vector(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,
     cipher: ContentCipher,
     tenant_a: UUID,
 ) -> None:
-    """tsvector search still finds encrypted entries via their search_text column.
-
-    search_vector is GENERATED ALWAYS AS to_tsvector('english', coalesce(search_text, ''))
-    per migration 0006, so as long as search_text carries the plaintext,
-    FTS works exactly as before encryption.
-    """
+    """tsvector search still finds encrypted entries via search_vector."""
     plaintext = "watermelon crocodile polyhedron"
     topic_id = await _seed_topic(admin_pool, tenant_a, "roundtrip/fts-check")
     entry_id = await _seed_entry(admin_pool, cipher, tenant_a, topic_id, plaintext)

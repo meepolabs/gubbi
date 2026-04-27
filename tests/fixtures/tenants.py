@@ -121,8 +121,8 @@ async def seed_for(
                     (topic_id, user_id, date,
                      content_encrypted, content_nonce,
                      reasoning_encrypted, reasoning_nonce,
-                     search_text, tags, created_at, updated_at)
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $10)
+                     search_vector, tags, created_at, updated_at)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, to_tsvector('english', $8), $9, $10, $10)
                 RETURNING id
                 """,
                 topic_id,
@@ -141,24 +141,34 @@ async def seed_for(
         conv_id: int | None = None
         message_ids: list[int] = []
         if include_conversation:
+            title_plain = f"Conversation for {topic_path}"
+            summary_plain = "Seed conversation summary"
+            title_ct, title_nonce = _encrypt(title_plain)
+            summary_ct, summary_nonce = _encrypt(summary_plain)
             conv_id = await conn.fetchval(
                 """
                 INSERT INTO conversations
-                    (topic_id, user_id, title, slug, source, summary, tags,
-                     participants, message_count, created_at, updated_at, json_path)
-                VALUES ($1, $2, $3, $4, 'claude', $5, $6, $7, $8, $9, $9, $10)
+                    (topic_id, user_id, title_encrypted, title_nonce, slug, source,
+                     summary_encrypted, summary_nonce, tags,
+                     participants, message_count, created_at, updated_at, json_path,
+                     search_vector)
+                VALUES ($1, $2, $3, $4, $5, 'claude', $6, $7, $8, $9, $10, $11, $11, $12,
+                        to_tsvector('english', $13))
                 RETURNING id
                 """,
                 topic_id,
                 user_id,
-                f"Conversation for {topic_path}",
+                title_ct,
+                title_nonce,
                 f"conv-{uuid4().hex[:8]}",
-                "Seed conversation summary",
+                summary_ct,
+                summary_nonce,
                 ["seed"],
                 ["user", "assistant"],
                 n_messages,
                 now,
                 f"conversations_json/{uuid4()}.json",
+                f"{title_plain} {summary_plain}".strip(),
             )
             for i in range(n_messages):
                 msg_plain = f"Message {i} content"
@@ -167,8 +177,8 @@ async def seed_for(
                     """
                     INSERT INTO messages
                         (conversation_id, user_id, role,
-                         content_encrypted, content_nonce, search_text, position)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7)
+                         content_encrypted, content_nonce, search_vector, position)
+                    VALUES ($1, $2, $3, $4, $5, to_tsvector('english', $6), $7)
                     RETURNING id
                     """,
                     conv_id,

@@ -5,6 +5,7 @@ import logging
 import re
 from datetime import date, timedelta
 
+import asyncpg
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.cipher_guard import require_cipher
@@ -20,6 +21,7 @@ from journalctl.tools.constants import (
     BRIEFING_KEY_FACTS_QUERY,
     BRIEFING_MAX_TOPICS,
     BRIEFING_MAX_WEEK_ENTRIES,
+    MAX_SEARCH_CONTENT_CHARS,
 )
 from journalctl.tools.errors import validation_error
 
@@ -185,7 +187,15 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         key_facts_embedding,
                         limit=BRIEFING_KEY_FACTS_COUNT,
                     )
-                    facts_list = [{"content": r["content"]} for r in raw_facts]
+                    facts_list: list[dict] = []
+                    for row in raw_facts:
+                        entry_id = row.get("entry_id")
+                        if entry_id is None:
+                            continue
+                        text = await entry_repo.get_text(conn, cipher, int(entry_id))
+                        if text is None:
+                            continue
+                        facts_list.append({"content": text[0][:MAX_SEARCH_CONTENT_CHARS]})
                     if facts_list:
                         key_facts = facts_list
                         key_facts_status = "configured"
@@ -195,10 +205,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     else:
                         key_facts = None
                         key_facts_status = "missing"
-                except Exception:
+                except asyncpg.PostgresError:
                     logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
                     key_facts = [] if has_embeddings else None
                     key_facts_status = "empty" if has_embeddings else "missing"
+                except Exception:
+                    logger.exception("Key facts retrieval failed unexpectedly")
+                    raise
             else:
                 # encoding failed
                 key_facts = [] if has_embeddings else None

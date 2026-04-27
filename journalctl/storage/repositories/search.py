@@ -1,4 +1,4 @@
-"""Search repository — FTS and topic prefix lookup SQL."""
+"""Search repository - FTS and topic prefix lookup SQL."""
 
 from __future__ import annotations
 
@@ -10,24 +10,11 @@ import asyncpg
 from journalctl.models.search import SearchResult
 from journalctl.storage.repositories.base import _add_param, _escape_like
 
-# STX/ETX (0x02/0x03) are stripped from all content by sanitize_freetext(),
-# so they can never appear in stored text — guaranteed collision-free markers.
-# Passed to ts_headline as a query parameter (not interpolated into SQL).
-# Python strips them from the output — snippet selection is the value, not the markers.
-_MATCH_START = "\x02"
-_MATCH_END = "\x03"
-_SNIPPET_OPTS = f"MaxWords=20,MinWords=10,StartSel={_MATCH_START},StopSel={_MATCH_END}"
-
-
-def _format_snippet(raw: str | None) -> str:
-    return (raw or "").replace(_MATCH_START, "").replace(_MATCH_END, "")
-
 
 async def get_topic_ids_by_prefix(
     conn: asyncpg.Connection,
     topic_prefix: str,
 ) -> list[int]:
-    """Return all topic IDs whose path starts with topic_prefix."""
     rows = await conn.fetch(
         "SELECT id FROM topics WHERE path LIKE $1 ESCAPE '!'",
         _escape_like(topic_prefix) + "%",
@@ -43,12 +30,7 @@ async def fts_search(
     date_to: str | None,
     limit: int,
 ) -> list[SearchResult]:
-    """Full-text search using PostgreSQL tsvector + websearch_to_tsquery.
-
-    Single UNION ALL query across entries and conversations — one round-trip,
-    globally ranked, returns at most `limit` rows (never 2×limit).
-    """
-    params: list[Any] = [query]  # $1 = tsquery input
+    params: list[Any] = [query]
 
     entry_where = [
         "e.deleted_at IS NULL",
@@ -71,24 +53,20 @@ async def fts_search(
         entry_where.append(f"e.date <= {dt_ph}")
         conv_where.append(f"c.created_at::date <= {dt_ph}")
 
-    opts_ph = _add_param(params, _SNIPPET_OPTS)
     limit_ph = _add_param(params, limit)
     tsq = "websearch_to_tsquery('english', $1)"
     ew = " AND ".join(entry_where)
     cw = " AND ".join(conv_where)
 
     sql = f"""
-        SELECT entry_id, conversation_id, doc_type, topic, title, snippet, rank, date
+        SELECT entry_id, conversation_id, doc_type, topic, rank, date
         FROM (
             SELECT
                 e.id            AS entry_id,
                 NULL::integer   AS conversation_id,
                 'entry'::text   AS doc_type,
                 t.path          AS topic,
-                t.title         AS title,
-                ts_headline('english', e.search_text,
-                            {tsq}, {opts_ph}) AS snippet,
-                ts_rank(e.search_vector, {tsq})                      AS rank,
+                ts_rank(e.search_vector, {tsq}) AS rank,
                 e.date::text    AS date
             FROM entries e
             JOIN topics t ON t.id = e.topic_id
@@ -101,9 +79,7 @@ async def fts_search(
                 c.id                 AS conversation_id,
                 'conversation'::text AS doc_type,
                 t.path               AS topic,
-                c.title              AS title,
-                ts_headline('english', c.title || ' ' || c.summary, {tsq}, {opts_ph}) AS snippet,
-                ts_rank(c.search_vector, {tsq})                                        AS rank,
+                ts_rank(c.search_vector, {tsq}) AS rank,
                 c.created_at::date::text AS date
             FROM conversations c
             JOIN topics t ON t.id = c.topic_id
@@ -113,19 +89,15 @@ async def fts_search(
         LIMIT {limit_ph}
     """  # noqa: S608
     rows = await conn.fetch(sql, *params)
-    results = []
-    for r in rows:
-        results.append(
-            SearchResult(
-                source_key=f"{r['doc_type']}:{r['entry_id'] or r['conversation_id']}",
-                doc_type=r["doc_type"],
-                topic=r["topic"],
-                title=r["title"] or "",
-                snippet=_format_snippet(r["snippet"]),
-                rank=-float(r["rank"]),
-                date=r["date"] or "",
-                entry_id=r["entry_id"],
-                conversation_id=r["conversation_id"],
-            )
+    return [
+        SearchResult(
+            source_key=f"{r['doc_type']}:{r['entry_id'] or r['conversation_id']}",
+            doc_type=r["doc_type"],
+            topic=r["topic"],
+            rank=-float(r["rank"]),
+            date=r["date"] or "",
+            entry_id=r["entry_id"],
+            conversation_id=r["conversation_id"],
         )
-    return results
+        for r in rows
+    ]
