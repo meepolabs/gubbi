@@ -4,7 +4,7 @@ How to organize your journal topics for a system that grows with your life.
 
 ## Topic structure
 
-Topics use 1–2 level paths: `category/subject`. The first level is the **life domain**, the second is the **specific thing**. Topics are rows in the PostgreSQL `topics` table — the paths below represent the namespace, not files on disk.
+Topics use 1-2 level paths: `category/subject`. The first level is the **life domain**, the second is the **specific thing**. Topics are rows in the PostgreSQL `topics` table -- the paths below represent the namespace, not files on disk.
 
 ```
 hobbies/running
@@ -26,13 +26,13 @@ travel/trips
 
 ## Naming conventions
 
-**Category names** (first level): broad life domains. Use a generic noun that could contain 3–10 subtopics. Good: `hobbies`, `projects`, `health`. Bad: `running` (too specific for a category), `stuff` (too vague), `things-i-like` (not a domain).
+**Category names** (first level): broad life domains. Use a generic noun that could contain 3-10 subtopics. Good: `hobbies`, `projects`, `health`. Bad: `running` (too specific for a category), `stuff` (too vague), `things-i-like` (not a domain).
 
 **Subject names** (second level): the specific thing. Use lowercase, hyphenated, and descriptive enough that the name alone tells you what's inside. Good: `woodworking`, `homelab`, `side-project`. Bad: `hobby1` (meaningless), `misc` (catch-all).
 
 **Validation rules:**
 - Lowercase alphanumeric with hyphens only
-- Max 2 levels (no `hobbies/woodworking/builds` — use `hobbies/woodworking` and separate entries by date)
+- Max 2 levels (no `hobbies/woodworking/builds` -- use `hobbies/woodworking` and separate entries by date)
 - No trailing slashes in API calls
 - No spaces, underscores, or special characters
 
@@ -44,10 +44,10 @@ travel/trips
 - You'd naturally start a different conversation about it.
 
 **Keep entries in the same topic when:**
-- It's the same ongoing thing. Different aspects of a single project all go in one topic — they're facets of the same subject.
-- The timeline makes more sense together. A fitness journey includes gym sessions, runs, and recovery — they interleave chronologically and splitting them would lose the narrative.
+- It's the same ongoing thing. Different aspects of a single project all go in one topic -- they're facets of the same subject.
+- The timeline makes more sense together. A fitness journey includes gym sessions, runs, and recovery -- they interleave chronologically and splitting them would lose the narrative.
 
-**Don't over-split.** A topic with 100+ entries is fine — that's the ledger doing its job. `journal_read_topic(topic, limit=10)` returns the most recent slice, and FTS+semantic search cut across every entry. You don't need separate topics for every sub-aspect.
+**Don't over-split.** A topic with 100+ entries is fine -- that's the ledger doing its job. `journal_read_topic(topic, limit=10)` returns the most recent slice, and FTS+semantic search cut across every entry. You don't need separate topics for every sub-aspect.
 
 ## Recommended categories
 
@@ -65,20 +65,20 @@ travel/trips
 
 ## Tags vs. topics
 
-**Topics** are structural — they define *where* an entry lives in the filesystem. You choose a topic once when you write the entry.
+**Topics** are structural -- they define *where* an entry lives in the namespace. You choose a topic once when you write the entry.
 
-**Tags** are descriptive — they annotate *what kind* of entry it is. An entry can have multiple tags, and tags work across topics.
+**Tags** are descriptive -- they annotate *what kind* of entry it is. An entry can have multiple tags, and tags work across topics.
 
 Use tags for cross-cutting concerns:
 
-- `#milestone` — a significant achievement or event
-- `#decision` — a choice that was made (and why)
-- `#research` — investigation and comparison of options
-- `#conversation-summary` — auto-generated when saving a conversation
-- `#maintenance` — routine upkeep
-- `#purchase` — something bought
+- `#milestone` -- a significant achievement or event
+- `#decision` -- a choice that was made (and why)
+- `#research` -- investigation and comparison of options
+- `#conversation-summary` -- auto-generated when saving a conversation
+- `#maintenance` -- routine upkeep
+- `#purchase` -- something bought
 
-You can search by tag content using `journal_search("#decision")` — the `tsvector` FTS index treats `#decision` as a token, so it finds all entries tagged with `#decision` across all topics.
+You can search by tag content using `journal_search("#decision")` -- the `tsvector` FTS index treats `#decision` as a token, so it finds all entries tagged with `#decision` across all topics.
 
 ## Migrating from another LLM
 
@@ -88,9 +88,9 @@ If you're coming from another LLM provider with organized conversations, here's 
 
 For each active project or ongoing topic:
 
-1. **Create the journal topic** — `journal_create_topic("projects/homelab", "Home Lab Setup", ...)`
-2. **Write a seed entry** — Summarize the current state: where you are, what's been decided, what's next. This gives the LLM enough context to continue immediately.
-3. **Archive key conversations** — Save the 2–3 most important full transcripts using `journal_save_conversation`. Not every chat — just the ones with important decisions or detailed research.
+1. **Create the journal topic** -- `journal_create_topic("projects/homelab", "Home Lab Setup", ...)`
+2. **Write a seed entry** -- Summarize the current state: where you are, what's been decided, what's next. This gives the LLM enough context to continue immediately.
+3. **Archive key conversations** -- Save the 2-3 most important full transcripts using `journal_save_conversation`. Not every chat -- just the ones with important decisions or detailed research.
 
 ### Phase 2: Bulk archive (do later)
 
@@ -100,25 +100,25 @@ For the rest of your conversation history:
 2. Parse the export and save each conversation via `journal_save_conversation`.
 3. Map original projects to journal topic categories.
 
-The bulk archive doesn't need careful curation — it's just making old conversations searchable. The important context was captured in Phase 1.
+The bulk archive doesn't need careful curation -- it's just making old conversations searchable. The important context was captured in Phase 1.
 
 ### What goes where
 
 ```
 Previous LLM Project "Side Project"
-    │
-    ├── Active decisions, current state    → journal_append_entry (projects/side-project)
-    ├── Full research conversation         → journal_save_conversation
-    ├── Quick one-off questions            → skip (not worth archiving)
-    │
-    └── Atomic facts: "uses React, deployed on Vercel"
-                                           → journal_append_entry with tags=["fact"]
-                                             (surfaces via semantic search + journal_briefing)
+    |
+    +-- Active decisions, current state    -> journal_append_entry (projects/side-project)
+    +-- Full research conversation         -> journal_save_conversation
+    +-- Quick one-off questions            -> skip (not worth archiving)
+    |
+    +-- Atomic facts: "uses React, deployed on Vercel"
+                                           -> journal_append_entry with tags=["fact"]
+                                              (surfaces via semantic search + journal_briefing)
 ```
 
 ## Growing the taxonomy
 
-Your taxonomy will evolve. New hobbies appear, projects end, interests shift. That's fine — the two-level structure handles this naturally:
+Your taxonomy will evolve. New hobbies appear, projects end, interests shift. That's fine -- the two-level structure handles this naturally:
 
 - **New subtopic:** Create the topic first with `journal_create_topic`, then start appending entries.
 - **Topic gets huge:** It's still one topic row with N entry rows behind it. FTS + semantic search scope within it via `topic_prefix`. `journal_read_topic(topic, limit=5)` shows the most recent entries. Don't split unless the subtopics are genuinely different areas.
@@ -126,4 +126,4 @@ Your taxonomy will evolve. New hobbies appear, projects end, interests shift. Th
 - **Wrong category:** There's no built-in rename. Create a new topic, re-enter key entries, and let the old topic go dormant.
 - **New category:** Just start using it. Create `travel/europe-2026` and it exists.
 
-The taxonomy is a namespace. Adding topics is instant — create one and start appending.
+The taxonomy is a namespace. Adding topics is instant -- create one and start appending.

@@ -68,8 +68,9 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 | `JOURNAL_DB_SUPERUSER_PASSWORD` | yes | PostgreSQL superuser bootstrap password (initdb + healthcheck). The app never connects as this role. | (random) |
 | `JOURNAL_DB_APP_PASSWORD` | yes | Password for the runtime database role (`journal_app`, RLS-enforced) created by migration 0002. Set via `ALTER ROLE ... WITH PASSWORD '<value>'`. | (random, distinct) |
 | `JOURNAL_DB_ADMIN_PASSWORD` | yes | Password for the privileged database role (`journal_admin`, BYPASSRLS) created by migration 0002. | (random, distinct) |
+| `JOURNAL_ENCRYPTION_MASTER_KEY_V1` | yes | Base64-encoded 32-byte master key for AES-256-GCM at-rest encryption of `entries.content`, `entries.reasoning`, `messages.content`, `conversations.title`, `conversations.summary`. Generate via `python -c "import secrets, base64; print(base64.b64encode(secrets.token_bytes(32)).decode())"`. Additional versions (`_V2`, `_V3`, ...) can coexist for key rotation. | (32 random bytes, base64) |
 | `JOURNAL_TIMEZONE` | yes | Timezone for "today" defaulting and briefing week math | `America/Los_Angeles` |
-| `JOURNAL_OPERATOR_EMAIL` | yes (Mode 1 + Mode 2) | Email of the single operator user. The operator's UUID is derived at startup via `users.email` lookup and bound to every API-key / self-host OAuth request. | `you@example.com` |
+| `JOURNAL_OPERATOR_EMAIL` | yes (Mode 1 + Mode 2) | Email of the single operator user. A `users` row is auto-scaffolded at startup, and the operator's UUID is bound to every API-key / self-host OAuth request. | `you@example.com` |
 | `JOURNAL_SERVER_URL` | for self-host OAuth | Public HTTPS URL advertised in the OAuth + RFC 7591 DCR metadata endpoints | `https://journal.yourdomain.com` |
 | `JOURNAL_PASSWORD_HASH` | for self-host OAuth (Mode 2 only) | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty keeps the server API-key-only (Mode 1). | `$2b$12$...` |
 
@@ -125,6 +126,7 @@ services:
       - JOURNAL_DB_APP_URL=postgresql://journal_app:${JOURNAL_DB_APP_PASSWORD}@postgres:5432/journal
       - JOURNAL_DB_ADMIN_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
       - JOURNAL_DB_MIGRATION_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
+      - JOURNAL_ENCRYPTION_MASTER_KEY_V1
       - JOURNAL_DATA_DIR=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
