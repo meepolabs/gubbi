@@ -573,3 +573,44 @@ async def get_title_summary(
             "Conversation title/summary decrypted to None; schema invariant violated"
         )
     return title, summary
+
+
+async def get_titles_summaries(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    conversation_ids: list[int],
+) -> dict[int, tuple[str, str]]:
+    """Return {conv_id: (title, summary)} for all conversations in conversation_ids.
+
+    Missing ids are silently omitted.
+    Uses WHERE id = ANY($1) for a single round-trip.
+    """
+    if not conversation_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT id,"
+        " title_encrypted, title_nonce, summary_encrypted, summary_nonce "
+        "FROM conversations WHERE id = ANY($1)",
+        conversation_ids,
+    )
+    result: dict[int, tuple[str, str]] = {}
+    for r in rows:
+        cid = int(r["id"])
+        try:
+            title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
+            summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
+            if title is None or summary is None:
+                logger.warning(
+                    "Skipping conversation %d: title/summary decrypted to None",
+                    cid,
+                )
+                continue
+            result[cid] = (title, summary)
+        except DecryptionError as exc:
+            logger.warning(
+                "Skipping conversation %d: decryption failed (%s)",
+                cid,
+                type(exc).__name__,
+                exc_info=True,
+            )
+    return result
