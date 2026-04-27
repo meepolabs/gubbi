@@ -37,6 +37,22 @@ async def scaffold_operator(
 
     Inserts when absent; raises RuntimeError if no active user row is
     found after the insert attempt.
+
+    User-row write paths (M2 review #6):
+
+    * **This path (Mode 1/2 self-host only)** -- runs once at journalctl
+      startup to ensure the founder row exists. ON CONFLICT DO NOTHING
+      keyed on the partial unique index ``idx_users_email_active``
+      (email WHERE deleted_at IS NULL). Disjoint from Mode 3 paths.
+    * **Kratos webhook (Mode 3 fast path)** --
+      ``journalctl-cloud/journalctl_cloud/webhooks/kratos.py``
+      ``_upsert_user``; never fires in Mode 1/2 (no Kratos).
+    * **JIT (Mode 3 self-heal)** --
+      ``journalctl/middleware/auth.py`` ``_pre_context_jwt_provision``;
+      never fires in Mode 1/2 (no Hydra introspection path).
+
+    Mode 3 hosted deploys do NOT call scaffold_operator -- the founder
+    is just another user provisioned via the webhook + JIT pair.
     """
     try:
         async with admin_pool.acquire() as conn:
