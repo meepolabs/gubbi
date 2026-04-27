@@ -157,49 +157,63 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     seen_keys.add(result.source_key)
                     merged.append(result)
 
-            entry_cache: dict[int, str] = {}
-            conv_cache: dict[int, tuple[str, str]] = {}
-            hydrated: list[SearchResult] = []
-
+            # Batch-collect unique IDs for a single round-trip per entity type.
+            entry_ids: set[int] = set()
+            conv_ids: set[int] = set()
             for result in merged:
                 if result.doc_type == "entry" and result.entry_id is not None:
-                    if result.entry_id not in entry_cache:
-                        try:
-                            text = await entry_repo.get_text(conn, cipher, result.entry_id)
-                        except Exception:
-                            logger.exception(
-                                "Skipping search result: failed to hydrate entry %s",
-                                result.entry_id,
-                            )
-                            continue
-                        if text is None:
-                            continue
-                        entry_cache[result.entry_id] = _truncate_text(text[0])
-                    hydrated.append(
-                        result.model_copy(update={"content": entry_cache[result.entry_id]})
-                    )
+                    entry_ids.add(result.entry_id)
                 elif result.doc_type == "conversation" and result.conversation_id is not None:
-                    if result.conversation_id not in conv_cache:
-                        try:
-                            text = await conv_repo.get_title_summary(
-                                conn,
-                                cipher,
-                                result.conversation_id,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "Skipping search result: failed to hydrate conversation %s",
-                                result.conversation_id,
-                            )
-                            continue
-                        if text is None:
-                            continue
-                        conv_cache[result.conversation_id] = _truncate_title_summary(
-                            text[0],
-                            text[1],
+                    conv_ids.add(result.conversation_id)
+
+            # Batched fetches — one query per entity type instead of N.
+            entry_id_list = list(entry_ids)
+            conv_id_list = list(conv_ids)
+
+            decrypted_entries: dict[int, tuple[str, str | None]] = {}
+            try:
+                decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
+            except asyncpg.PostgresError:
+                logger.exception(
+                    "Entry batch query failed, skipping %d entries: %s",
+                    len(entry_id_list),
+                    repr(entry_id_list),
+                )
+
+            decrypted_convs: dict[int, tuple[str, str]] = {}
+            try:
+                decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
+            except asyncpg.PostgresError:
+                logger.exception(
+                    "Conversation batch query failed, skipping %d conversations: %s",
+                    len(conv_id_list),
+                    repr(conv_id_list),
+                )
+
+            hydrated: list[SearchResult] = []
+            for result in merged:
+                if (
+                    result.doc_type == "entry"
+                    and result.entry_id is not None
+                    and result.entry_id in decrypted_entries
+                ):
+                    content, _reasoning = decrypted_entries[result.entry_id]
+                    hydrated.append(result.model_copy(update={"content": _truncate_text(content)}))
+                elif (
+                    result.doc_type == "conversation"
+                    and result.conversation_id is not None
+                    and result.conversation_id in decrypted_convs
+                ):
+                    title, summary = decrypted_convs[result.conversation_id]
+                    truncated_title, truncated_summary = _truncate_title_summary(title, summary)
+                    hydrated.append(
+                        result.model_copy(
+                            update={
+                                "title": truncated_title,
+                                "summary": truncated_summary,
+                            }
                         )
-                    title, summary = conv_cache[result.conversation_id]
-                    hydrated.append(result.model_copy(update={"title": title, "summary": summary}))
+                    )
 
         hydrated.sort(key=lambda x: x.rank)
         hydrated = hydrated[:limit]

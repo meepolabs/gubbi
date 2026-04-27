@@ -573,6 +573,45 @@ async def get_text(
     )
 
 
+async def get_texts(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    entry_ids: list[int],
+) -> dict[int, tuple[str, str | None]]:
+    """Return {entry_id: (content, reasoning)} for all active entries in entry_ids.
+
+    Missing ids (deleted or not found) are silently omitted from the dict.
+    Uses WHERE id = ANY($1) for a single round-trip.
+    """
+    if not entry_ids:
+        return {}
+    rows = await conn.fetch(
+        "SELECT id,"
+        " content_encrypted, content_nonce,"
+        " reasoning_encrypted, reasoning_nonce"
+        " FROM entries WHERE id = ANY($1) AND deleted_at IS NULL",
+        entry_ids,
+    )
+    result: dict[int, tuple[str, str | None]] = {}
+    for r in rows:
+        eid = int(r["id"])
+        try:
+            content = cast(
+                str,
+                _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce"),
+            )
+            reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
+            result[eid] = (content, reasoning)
+        except DecryptionError as exc:
+            logger.warning(
+                "Skipping entry %d: decryption failed (%s)",
+                eid,
+                type(exc).__name__,
+                exc_info=True,
+            )
+    return result
+
+
 async def get_max_indexed_at(conn: asyncpg.Connection) -> datetime_cls | None:
     """Return the most recent indexed_at timestamp across all active entries, or None."""
     return await conn.fetchval(  # type: ignore[no-any-return]

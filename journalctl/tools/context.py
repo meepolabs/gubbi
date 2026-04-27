@@ -4,12 +4,14 @@ import asyncio
 import logging
 import re
 from datetime import date, timedelta
+from typing import Any
 
 import asyncpg
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
+from journalctl.core.crypto import DecryptionError
 from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.validation import local_today
 from journalctl.storage import knowledge
@@ -180,6 +182,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 "SELECT EXISTS(SELECT 1 FROM entry_embeddings LIMIT 1)"
             )
 
+            raw_facts: list[dict[str, Any]] = []
             if key_facts_embedding is not None:
                 try:
                     raw_facts = await app_ctx.embedding_service.search_by_vector(
@@ -187,33 +190,54 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         key_facts_embedding,
                         limit=BRIEFING_KEY_FACTS_COUNT,
                     )
-                    facts_list: list[dict] = []
-                    for row in raw_facts:
-                        entry_id = row.get("entry_id")
-                        if entry_id is None:
-                            continue
-                        text = await entry_repo.get_text(conn, cipher, int(entry_id))
-                        if text is None:
-                            continue
-                        facts_list.append({"content": text[0][:MAX_SEARCH_CONTENT_CHARS]})
-                    if facts_list:
-                        key_facts = facts_list
-                        key_facts_status = "configured"
-                    elif has_embeddings:
-                        key_facts = []
-                        key_facts_status = "empty"
-                    else:
-                        key_facts = None
-                        key_facts_status = "missing"
+                except DecryptionError as exc:
+                    logger.warning(
+                        "Key facts batch decryption failed (%s)",
+                        type(exc).__name__,
+                        exc_info=True,
+                    )
                 except asyncpg.PostgresError:
-                    logger.warning("Key facts retrieval failed, continuing without", exc_info=True)
-                    key_facts = [] if has_embeddings else None
-                    key_facts_status = "empty" if has_embeddings else "missing"
+                    logger.exception("Key facts batch query failed")
                 except Exception:
                     logger.exception("Key facts retrieval failed unexpectedly")
                     raise
+
+            if raw_facts:
+                # Batch-collect entry IDs for a single round-trip.
+                fact_entry_ids: list[int] = sorted(
+                    {int(row["entry_id"]) for row in raw_facts if row.get("entry_id") is not None}
+                )
+
+                facts_list: list[dict] = []
+                decrypted_entries: dict[int, tuple[str, str | None]] = {}
+                try:
+                    decrypted_entries = await entry_repo.get_texts(conn, cipher, fact_entry_ids)
+                except asyncpg.PostgresError:
+                    logger.exception(
+                        "Key facts entry batch query failed for %d entries",
+                        len(fact_entry_ids),
+                    )
+
+                for row in raw_facts:
+                    entry_id = row.get("entry_id")
+                    if entry_id is None:
+                        continue
+                    eid = int(entry_id)
+                    if eid in decrypted_entries:
+                        content, _reasoning = decrypted_entries[eid]
+                        facts_list.append({"content": content[:MAX_SEARCH_CONTENT_CHARS]})
+
+                if facts_list:
+                    key_facts = facts_list
+                    key_facts_status = "configured"
+                elif has_embeddings:
+                    key_facts = []
+                    key_facts_status = "empty"
+                else:
+                    key_facts = None
+                    key_facts_status = "missing"
             else:
-                # encoding failed
+                # encoding failed or no facts found
                 key_facts = [] if has_embeddings else None
                 key_facts_status = "empty" if has_embeddings else "missing"
 
