@@ -6,7 +6,7 @@ set -euo pipefail
 # Asserts that journal_app and journal_admin have the privileges expected
 # after running migrations 0002 + 0009 + 0010 on a restored database.
 # Table sets are hardcoded; the canonical source of expected state is
-# deployment/grants.sql. Exit 0 on pass, 1 on fail, 2 if no DSN.
+# deployment/scripts/grants.sql. Exit 0 on pass, 1 on fail, 2 if no DSN.
 
 # ---------------------------------------------------------------------------
 # Resolve DSN (same fallback chain as journalctl/alembic/env.py)
@@ -147,6 +147,6 @@ for f in "${FAILURES[@]}"; do
     echo "FAIL: ${f}" >&2
 done
 echo "" >&2
-echo "Remedy: run restore-db.sh --repair-grants <dump-file> to replay deployment/grants.sql." >&2
+echo "Remedy: run restore-db.sh --repair-grants <dump-file> to replay deployment/scripts/grants.sql." >&2
 
 exit 1

@@ -5,7 +5,7 @@ Usage::
     cd journalctl
     JOURNAL_ENCRYPTION_MASTER_KEY_V1="base64-key..." \\
         JOURNAL_DB_ADMIN_URL="postgresql://admin@localhost:5432/journal" \\
-        poetry run python deployment/cleanup_encrypted_xml_spill.py
+        poetry run python deployment/scripts/cleanup_encrypted_xml_spill.py
 
 Add ``--dry-run`` to count without writing.
 
@@ -21,8 +21,8 @@ What it does:
 Idempotent: a second run finds zero matching rows because the XML spill
 pattern has been removed.
 
-Lives in deployment/ rather than journalctl/scripts/ because this is a
-one-shot tool meant to be deleted after the founder runs it on prod.
+Lives in deployment/scripts/ because this is a one-shot tool meant to be
+deleted after the founder runs it on prod.
 """
 
 from __future__ import annotations

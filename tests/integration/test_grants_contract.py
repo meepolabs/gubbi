@@ -1,7 +1,7 @@
-"""Contract test: post-migration grant state matches deployment/grants.sql.
+"""Contract test: post-migration grant state matches deployment/scripts/grants.sql.
 
 Asserts that after ``alembic upgrade head`` the privileges held by
-journal_app and journal_admin match exactly what deployment/grants.sql
+journal_app and journal_admin match exactly what deployment/scripts/grants.sql
 declares. Adding a new table-grant to grants.sql requires updating
 EXPECTED_GRANTS below -- that coupling is the drift-detection signal.
 
@@ -15,7 +15,7 @@ import asyncpg
 import pytest  # noqa: F401
 
 # ---------------------------------------------------------------------------
-# Canonical privilege expectations -- mirrors deployment/grants.sql exactly.
+# Canonical privilege expectations -- mirrors deployment/scripts/grants.sql exactly.
 #
 # Format: (role, table, privilege) -> expected bool
 #
@@ -63,7 +63,7 @@ EXPECTED_GRANTS[("journal_admin", "audit_log", "DELETE")] = False
 
 @pytest.mark.asyncio
 async def test_grants_match_migrations(admin_pool: asyncpg.Pool) -> None:
-    """Post-alembic-upgrade-head grant state matches deployment/grants.sql.
+    """Post-alembic-upgrade-head grant state matches deployment/scripts/grants.sql.
 
     Failures here mean grants.sql and the migrations have drifted.
     Fix by either correcting grants.sql or adding a new migration to
@@ -83,6 +83,6 @@ async def test_grants_match_migrations(admin_pool: asyncpg.Pool) -> None:
                 direction = "True" if expected else "False"
                 failures.append(f"({role}, {table}, {priv}): expected={direction} got={actual}")
 
-    assert not failures, "Grant state diverges from deployment/grants.sql:\n" + "\n".join(
+    assert not failures, "Grant state diverges from deployment/scripts/grants.sql:\n" + "\n".join(
         f"  {f}" for f in failures
     )

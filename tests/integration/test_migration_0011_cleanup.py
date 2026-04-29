@@ -3,7 +3,7 @@
 Migration 0008 dropped ``entries.reasoning`` (plaintext), so migration 0011
 was rewritten as a no-op stub that only logs. This test confirms the
 upgrade function executes without raising. Real cleanup of encrypted XML
-spill happens via ``deployment/cleanup_encrypted_xml_spill.py``.
+spill happens via ``deployment/scripts/cleanup_encrypted_xml_spill.py``.
 """
 
 import pytest
