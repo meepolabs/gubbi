@@ -10,6 +10,7 @@ import secrets
 
 from starlette.responses import HTMLResponse
 
+from journalctl.core.scope import SCOPE_DESCRIPTIONS
 from journalctl.oauth.constants import CSRF_COOKIE_NAME
 
 LOGIN_HTML = """<!DOCTYPE html>
@@ -35,7 +36,7 @@ LOGIN_HTML = """<!DOCTYPE html>
             border-radius: 12px;
             padding: 2rem;
             width: 100%;
-            max-width: 400px;
+            max-width: 480px;
             margin: 1rem;
         }}
         h1 {{
@@ -55,6 +56,32 @@ LOGIN_HTML = """<!DOCTYPE html>
             font-size: 0.8rem;
             color: #94a3b8;
             word-break: break-all;
+        }}
+        .scopes {{
+            background: #0f172a;
+            border-radius: 8px;
+            padding: 0.75rem 1rem;
+            margin-bottom: 1.5rem;
+        }}
+        .scopes h2 {{
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: #64748b;
+            margin-bottom: 0.5rem;
+        }}
+        .scope-item {{
+            margin-bottom: 0.5rem;
+        }}
+        .scope-name {{
+            font-family: monospace;
+            font-size: 0.8rem;
+            color: #38bdf8;
+        }}
+        .scope-desc {{
+            font-size: 0.8rem;
+            color: #94a3b8;
+            margin-top: 0.125rem;
         }}
         label {{
             display: block;
@@ -104,6 +131,7 @@ LOGIN_HTML = """<!DOCTYPE html>
         <h1>Authorize Access</h1>
         <p class="subtitle">A client is requesting access to your journal.</p>
         <div class="client-info">Client: {client_id}</div>
+        {scopes_html}
         {error_html}
         <form method="POST">
             <input type="hidden" name="csrf_token" value="{csrf_token}">
@@ -122,6 +150,28 @@ LOGIN_HTML = """<!DOCTYPE html>
 </html>"""
 
 
+def _render_scopes_html(scope_str: str) -> str:
+    """Build the scopes section for the consent UI.
+
+    Loops over the requested scope string (space-delimited) and renders
+    each scope with its human-readable description from SCOPE_DESCRIPTIONS.
+    """
+    if not scope_str or not scope_str.strip():
+        return ""
+    esc = html_mod.escape
+    scopes = scope_str.split()
+    items = []
+    for s in scopes:
+        desc = SCOPE_DESCRIPTIONS.get(s, "")
+        items.append(
+            f'<div class="scope-item">'
+            f'<div class="scope-name">{esc(s)}</div>'
+            f'<div class="scope-desc">{esc(desc) if desc else "No description available."}</div>'
+            f"</div>"
+        )
+    return '<div class="scopes">' "<h2>Permissions requested</h2>" f"{''.join(items)}" "</div>"
+
+
 def render_login_page(
     client_id: str,
     redirect_uri: str,
@@ -137,6 +187,7 @@ def render_login_page(
     """Render the login page with CSRF token and XSS-escaped params."""
     esc = html_mod.escape
     error_html = f'<div class="error">{esc(error)}</div>' if error else ""
+    scopes_html = _render_scopes_html(scope)
     style_nonce = secrets.token_urlsafe(16)
     page = LOGIN_HTML.format(
         client_id=esc(client_id),
@@ -146,6 +197,7 @@ def render_login_page(
         scope=esc(scope),
         csrf_token=esc(csrf_token),
         error_html=error_html,
+        scopes_html=scopes_html,
         style_nonce=style_nonce,
     )
     response = HTMLResponse(page)

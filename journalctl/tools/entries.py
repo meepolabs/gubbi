@@ -6,10 +6,12 @@ import logging
 from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
+from journalctl.core.scope import require_scope
 from journalctl.core.validation import (
     is_future_date,
     local_today,
@@ -47,7 +49,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             logger.warning("Failed to embed entry %s: %s", entry_id, e, exc_info=True)
             return None
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Append Entry",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            openWorldHint=False,
+            idempotentHint=False,
+        ),
+    )
+    @require_scope("journal:write")
     async def journal_append_entry(
         topic: str,
         content: str,
@@ -154,7 +165,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             result["note"] = "; ".join(notes)
         return result
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Read Topic",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_read_topic(
         topic: str,
         limit: int = DEFAULT_ENTRIES_LIMIT,
@@ -222,7 +239,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "offset": offset,
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Update Entry",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            openWorldHint=False,
+            idempotentHint=True,
+        ),
+    )
+    @require_scope("journal:write")
     async def journal_update_entry(
         entry_id: int,
         content: str | None = None,
@@ -324,7 +350,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             result["note"] = "; ".join(notes)
         return result
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Delete Entry",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            openWorldHint=False,
+            idempotentHint=True,
+        ),
+    )
+    @require_scope("journal:write")
     async def journal_delete_entry(
         entry_id: int,
     ) -> dict[str, Any]:

@@ -12,6 +12,18 @@ HYDRA_INTROSPECT_TIMEOUT_SECS: Final[float] = 3.0
 # OAuth scope every MCP token must carry. Product constant, not a knob.
 REQUIRED_OAUTH_SCOPE: Final[str] = "journal"
 
+# Allowed origins for the MCP streamable HTTP endpoint.  Used by
+# OriginValidationMiddleware to prevent DNS-rebinding attacks.
+# Loopback origins are always allowed; this allowlist is for production
+# MCP clients (claude.ai, chatgpt.com, journal.meepolabs.com).
+ALLOWED_ORIGINS: Final[frozenset[str]] = frozenset(
+    {
+        "https://claude.ai",
+        "https://chatgpt.com",
+        "https://journal.meepolabs.com",
+    }
+)
+
 # OAuth token lifetimes. Protocol-level defaults; operators do not tune them.
 OAUTH_ACCESS_TOKEN_TTL_SECS: Final[int] = 3600  # 1 hour
 OAUTH_REFRESH_TOKEN_TTL_SECS: Final[int] = 2592000  # 30 days

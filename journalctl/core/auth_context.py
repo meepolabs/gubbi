@@ -1,4 +1,10 @@
-"""Request-scoped authenticated user ID, read by user_scoped_connection (TASK-02.06)."""
+"""Request-scoped authentication context for MCP requests.
+
+- ``current_user_id``: the authenticated user's UUID (used by
+  ``user_scoped_connection`` for RLS enforcement).
+- ``current_token_scopes``: the set of OAuth scopes granted to the
+  token (used by the ``@require_scope`` decorator).
+"""
 
 from __future__ import annotations
 
@@ -6,6 +12,13 @@ from contextvars import ContextVar
 from uuid import UUID
 
 current_user_id: ContextVar[UUID | None] = ContextVar("current_user_id", default=None)
+
+# Token scopes as a frozenset, set by BearerAuthMiddleware after
+# successful introspection.  None means the token has not been
+# introspected (e.g. API-key auth path).
+current_token_scopes: ContextVar[frozenset[str] | None] = ContextVar(
+    "current_token_scopes", default=None
+)
 
 
 class AuthenticationError(RuntimeError):
