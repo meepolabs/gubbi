@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage: restore-db.sh [--repair-grants] [--no-verify] <dump-file>
 #
 # Flags:
-#   --repair-grants    Replay the canonical GRANT block from deployment/grants.sql
+#   --repair-grants    Replay the canonical GRANT block from deployment/scripts/grants.sql
 #                      and re-verify. Use after restoring a dump taken with
 #                      --no-acl, which strips those grants.
 #   --no-verify        Skip the post-restore invariant check. Discouraged: only
@@ -119,7 +119,7 @@ else
             fi
         else
             echo "ERROR: post-restore verification failed." >&2
-            echo "If your dump was taken with --no-acl, re-run with --repair-grants to replay grants from deployment/grants.sql." >&2
+            echo "If your dump was taken with --no-acl, re-run with --repair-grants to replay grants from deployment/scripts/grants.sql." >&2
             exit 1
         fi
     fi

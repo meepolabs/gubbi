@@ -3,8 +3,8 @@
 One-shot deploy script paired with migrations 0013 + 0014. After every prod
 + dev DB has been backfilled and 0014 has landed, **delete this file**.
 
-Lives in ``deployment/`` rather than ``journalctl/scripts/`` because this is
-a one-shot tool meant to be deleted after operator runs it on prod (matches
+Lives in ``deployment/scripts/`` because this is a one-shot tool meant to
+be deleted after operator runs it on prod (matches
 ``cleanup_encrypted_xml_spill.py`` pattern).
 
 Usage::
@@ -12,7 +12,7 @@ Usage::
     cd journalctl
     JOURNAL_ENCRYPTION_MASTER_KEY_V1="base64-key..." \\
         JOURNAL_DB_ADMIN_URL="postgresql://admin@localhost:5432/journal" \\
-        poetry run python deployment/backfill_encrypt_conversations.py
+        poetry run python deployment/scripts/backfill_encrypt_conversations.py
 
 Add ``--dry-run`` to print pending row counts without writes.
 Add ``--verify`` to decrypt a sample and validate stored tsvector values.

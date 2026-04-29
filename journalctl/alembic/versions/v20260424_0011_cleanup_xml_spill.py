@@ -1,4 +1,4 @@
-"""Marker migration -- superseded by deployment/cleanup_encrypted_xml_spill.py.
+"""Marker migration -- superseded by deployment/scripts/cleanup_encrypted_xml_spill.py.
 
 Migration 0011 was originally written to clean up XML-spill data from
 ``entries.reasoning``, but that column was dropped by migration 0008.
@@ -12,7 +12,7 @@ Operators should instead use::
     cd journalctl
     JOURNAL_ENCRYPTION_MASTER_KEY_V1="base64-key..." \\
         JOURNAL_DB_ADMIN_URL="postgresql://admin@.../journal" \\
-        poetry run python deployment/cleanup_encrypted_xml_spill.py
+        poetry run python deployment/scripts/cleanup_encrypted_xml_spill.py
 
 to decrypt, trim, and re-encrypt affected rows.
 """
@@ -31,7 +31,7 @@ def upgrade() -> None:
     logger.info(
         "Migration 0011 is a no-op: original cleanup target (entries.reasoning) "
         "was dropped by migration 0008, and the actual encrypted spill data "
-        "must be cleaned via deployment/cleanup_encrypted_xml_spill.py "
+        "must be cleaned via deployment/scripts/cleanup_encrypted_xml_spill.py "
         "which has access to ContentCipher."
     )
 
