@@ -75,7 +75,7 @@ async def scaffold_operator(
                         conn,
                         actor_type="system",
                         actor_id="scaffold_operator",
-                        action=Action.USER_CREATED,
+                        action=Action.IDENTITY_CREATED,
                         target_type="user",
                         target_id=str(inserted_id),
                         metadata={"provision_path": "scaffold"},

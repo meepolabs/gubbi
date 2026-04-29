@@ -39,9 +39,9 @@ def _executed_args(conn: AsyncMock) -> tuple[object, ...]:
 # ---------------------------------------------------------------------------
 
 ALL_ACTIONS = [
-    Action.USER_CREATED,
-    Action.USER_DELETED,
-    Action.USER_RESTORED,
+    Action.IDENTITY_CREATED,
+    Action.IDENTITY_DELETED,
+    Action.IDENTITY_RESTORED,
     Action.TENANT_PROVISIONED,
     Action.TENANT_SUSPENDED,
     Action.TENANT_REACTIVATED,
