@@ -75,6 +75,8 @@ services:
       - JOURNAL_HYDRA_ADMIN_URL
       - JOURNAL_HYDRA_PUBLIC_ISSUER_URL
       - JOURNAL_HYDRA_PUBLIC_URL
+      # Trust gateway mode (hosted Mode 3 behind cloud-api)
+      - JOURNAL_TRUST_GATEWAY
       # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
       - JOURNAL_PASSWORD_HASH

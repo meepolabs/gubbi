@@ -701,3 +701,135 @@ class TestMode3JIT:
         assert all(r.status_code == 200 for r in responses)
         # Both requests called UPSERT -- ON CONFLICT at DB level handles the race
         assert execute_call_count == 2
+
+
+class TestTrustGateway:
+    """JOURNAL_TRUST_GATEWAY mode: skip all auth and trust X-Auth-User-Id header."""
+
+    TEST_USER_UUID = UUID("11111111-2222-3333-4444-555555555555")
+
+    async def test_valid_user_id_passes_through(self) -> None:
+        """Valid X-Auth-User-Id UUID header -> request reaches downstream app."""
+        captured: list[str | None] = []
+
+        async def capture(scope, receive, send):
+            captured.append(str(current_user_id.get()))
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 200,
+                    "headers": [],
+                }
+            )
+            await send({"type": "http.response.body", "body": b"ok"})
+
+        mw = BearerAuthMiddleware(capture, api_key="", trust_gateway=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"X-Auth-User-Id": str(self.TEST_USER_UUID)})
+        assert resp.status_code == 200
+        assert captured == [str(self.TEST_USER_UUID)]
+
+    async def test_missing_header_returns_401(self) -> None:
+        """Missing X-Auth-User-Id header -> 401."""
+        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/")
+        assert resp.status_code == 401
+        assert resp.json() == {"error": "Missing X-Auth-User-Id header"}
+
+    async def test_empty_header_returns_401(self) -> None:
+        """Empty X-Auth-User-Id header -> 401."""
+        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"X-Auth-User-Id": ""})
+        assert resp.status_code == 401
+        assert resp.json() == {"error": "Missing X-Auth-User-Id header"}
+
+    async def test_malformed_uuid_returns_401(self) -> None:
+        """Malformed X-Auth-User-Id header -> 401."""
+        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"X-Auth-User-Id": "not-a-uuid"})
+        assert resp.status_code == 401
+        assert resp.json() == {"error": "Invalid X-Auth-User-Id header"}
+
+    async def test_authorization_header_ignored_when_trust_gateway(self) -> None:
+        """Authorization header is IGNORED when trust_gateway=True.
+        Even with a forged Bearer token + missing X-Auth-User-Id, response is 401.
+        """
+        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get(
+                "/",
+                headers={
+                    "Authorization": "Bearer forged-token",
+                    "X-Auth-User-Id": "",
+                },
+            )
+        assert resp.status_code == 401
+
+    async def test_introspector_not_called_when_trust_gateway(self) -> None:
+        """When trust_gateway=True, Bearer/API-key/Hydra branches are skipped."""
+        mock_iv = AsyncMock(spec=HydraIntrospector)
+        mock_iv.introspect = AsyncMock(return_value=None)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            introspector=mock_iv,
+            trust_gateway=True,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get(
+                "/",
+                headers={
+                    "Authorization": "Bearer forged-token",
+                    "X-Auth-User-Id": str(self.TEST_USER_UUID),
+                },
+            )
+        assert resp.status_code == 200
+        mock_iv.introspect.assert_not_called()
+
+    async def test_contextvar_reset_after_trust_gateway(self) -> None:
+        """ContextVar is reset after the request completes."""
+        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            await client.get("/", headers={"X-Auth-User-Id": str(self.TEST_USER_UUID)})
+        assert current_user_id.get() is None
+
+    async def test_trust_gateway_false_still_uses_normal_auth(self) -> None:
+        """Regression: trust_gateway=False (default) still uses normal auth paths."""
+        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY, trust_gateway=False)
+        # With trust_gateway=False, missing Auth header -> 401 (normal path)
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/")
+        assert resp.status_code == 401
+
+    async def test_trust_gateway_false_with_valid_api_key_still_works(self) -> None:
+        """Regression: trust_gateway=False + valid API key -> 200 (normal path)."""
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            api_key=TEST_API_KEY,
+            operator_user_id=TEST_OP_ID,
+            trust_gateway=False,
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw), base_url="http://test"
+        ) as client:
+            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
+        assert resp.status_code == 200
