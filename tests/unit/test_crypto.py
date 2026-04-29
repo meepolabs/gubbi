@@ -452,3 +452,66 @@ def test_hypothesis_ciphertext_byte_tamper_raises_invalid_tag(
     tampered = ct[:idx] + bytes([ct[idx] ^ 0xFF]) + ct[idx + 1 :]
     with pytest.raises(InvalidTag):
         cipher.decrypt(tampered, nonce)
+
+
+# ── A. encrypt_with_version tests (TASK-03.13 Approach A) ────────────────────
+
+
+def test_encrypt_with_version_valid_version_round_trip() -> None:
+    """Encrypting at v1 with a {1,2}-key cipher round-trips under v1 nonce."""
+    keys = {1: _key(1), 2: _key(2)}
+    ct, nonce = ContentCipher(keys).encrypt_with_version("vx-test", version=1)
+    assert nonce[0] == 1
+    assert ContentCipher(keys).decrypt(ct, nonce) == "vx-test"
+
+
+def test_encrypt_with_version_non_default_version_nonce_byte() -> None:
+    """encrypt_with_version(V2) produces nonce byte-0 == 2 even if active is different."""
+    keys = {1: _key(1), 2: _key(2), 5: _key(5)}
+    ct_v2, nonce_v2 = ContentCipher(keys).encrypt_with_version("v2-only", version=2)
+    assert nonce_v2[0] == 2
+
+    ct_v1, nonce_v1 = ContentCipher(keys).encrypt_with_version("v1-specific", version=1)
+    assert nonce_v1[0] == 1
+
+
+def test_encrypt_with_version_non_default_is_independent_of_active() -> None:
+    """The active_version property does not influence encrypt_with_version output."""
+    keys = {1: _key(1), 2: _key(2)}
+    cipher = ContentCipher(keys)
+    assert cipher.active_version == 2
+
+    ct, nonce = cipher.encrypt("active-writes-v2")
+    assert nonce[0] == 2
+
+    # But encrypt_with_version(1) still targets V1.
+    ct_v1, nonce_v1 = cipher.encrypt_with_version("explicit-v1", version=1)
+    assert nonce_v1[0] == 1
+
+
+def test_encrypt_with_version_unknown_version_raises_value_error() -> None:
+    """Passing an unknown version raises ValueError."""
+    keys = {1: _key(1), 2: _key(2)}
+    with pytest.raises(ValueError, match="not known"):
+        ContentCipher(keys).encrypt_with_version("bad", version=99)
+
+
+def test_encrypt_with_version_missing_from_known_versions_raises() -> None:
+    """Specifying a key that is not in the cipher's known set must fail."""
+    keys = {1: _key(1), 2: _key(2)}
+    with pytest.raises(ValueError, match="not known"):
+        ContentCipher(keys).encrypt_with_version("no-such-key", version=3)
+
+
+def test_encrypt_with_version_zero_raises_value_error() -> None:
+    """Version 0 is below the allowed range."""
+    keys = {1: _key(1)}
+    with pytest.raises(ValueError, match="not known"):
+        ContentCipher(keys).encrypt_with_version("zero", version=0)
+
+
+def test_encrypt_with_version_256_raises_value_error() -> None:
+    """Version 256 is above the allowed range."""
+    keys = {1: _key(1)}
+    with pytest.raises(ValueError, match="not known"):
+        ContentCipher(keys).encrypt_with_version("too-high", version=256)
