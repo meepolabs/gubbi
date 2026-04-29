@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib.util
+import tempfile
+import textwrap
 from pathlib import Path
 
 TOOLS_DIR = Path(__file__).resolve().parent.parent.parent / "tools"
@@ -152,3 +154,99 @@ def test_stale_passthrough_warns_not_fails() -> None:
     assert len(stale) == 1
     assert "JOURNAL_EXTRA_STALE" in stale[0]
     assert "stale passthrough" in stale[0]
+
+
+# -- parse_settings targeted tests --------------------------------------------
+
+
+def test_parse_settings_raises_on_invalid_syntax() -> None:
+    """parse_settings raises SyntaxError when the source file has invalid Python."""
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+        f.write("def broken(\n")
+        tmp = f.name
+    import pytest
+
+    with pytest.raises(SyntaxError):
+        lint.parse_settings(tmp)
+
+
+def test_parse_settings_field_with_default_factory() -> None:
+    """Fields with default_factory=... are treated as optional (has_py_default=True)."""
+    src = textwrap.dedent("""\
+        from pydantic_settings import BaseSettings, SettingsConfigDict
+        from pydantic import Field
+
+        class Settings(BaseSettings):
+            model_config = SettingsConfigDict(env_prefix="TEST_")
+            tags: list[str] = Field(default_factory=list)
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+        f.write(src)
+        tmp = f.name
+    result = lint.parse_settings(tmp)
+    assert result["fields"]["tags"]["required"] is False
+
+
+def test_parse_settings_field_with_validation_alias() -> None:
+    """validation_alias inside Field() is used as the env var name."""
+    src = textwrap.dedent("""\
+        from pydantic_settings import BaseSettings, SettingsConfigDict
+        from pydantic import Field
+
+        class Settings(BaseSettings):
+            model_config = SettingsConfigDict(env_prefix="TEST_")
+            db_url: str = Field(validation_alias="DATABASE_URL")
+    """)
+    with tempfile.NamedTemporaryFile(suffix=".py", mode="w", delete=False) as f:
+        f.write(src)
+        tmp = f.name
+    result = lint.parse_settings(tmp)
+    assert result["fields"]["db_url"]["env_var"] == "DATABASE_URL"
+    assert result["fields"]["db_url"]["alias"] == "DATABASE_URL"
+
+
+# -- _collect_ref_vars_deep targeted tests ------------------------------------
+
+
+def _make_svc() -> dict:
+    return {"declared_keys": set(), "referenced_vars": set()}
+
+
+def test_collect_ref_vars_deep_nested_dict() -> None:
+    """Deeply nested dict structure yields all ${VAR} references."""
+    svc = _make_svc()
+    obj = {"outer": {"inner": {"deep": "${DEEP_VAR}"}}}
+    lint._collect_ref_vars_deep(obj, svc)
+    assert "DEEP_VAR" in svc["referenced_vars"]
+
+
+def test_collect_ref_vars_deep_list_of_dicts() -> None:
+    """List containing dicts with variable refs are all collected."""
+    svc = _make_svc()
+    obj = [{"key": "${VAR_A}"}, {"key": "${VAR_B}"}]
+    lint._collect_ref_vars_deep(obj, svc)
+    assert "VAR_A" in svc["referenced_vars"]
+    assert "VAR_B" in svc["referenced_vars"]
+
+
+def test_collect_ref_vars_deep_plain_string() -> None:
+    """A plain string at the root level is collected correctly."""
+    svc = _make_svc()
+    lint._collect_ref_vars_deep("${TOP_LEVEL}", svc)
+    assert "TOP_LEVEL" in svc["referenced_vars"]
+
+
+def test_collect_ref_vars_deep_no_refs_leaves_sets_empty() -> None:
+    """A structure with no ${VAR} patterns leaves sets unchanged."""
+    svc = _make_svc()
+    lint._collect_ref_vars_deep({"a": {"b": "no_vars_here"}}, svc)
+    assert svc["referenced_vars"] == set()
+
+
+# -- _find_compose_file_for_service empty-list guard --------------------------
+
+
+def test_find_compose_file_empty_list_returns_default() -> None:
+    """Empty compose_files list returns 'docker-compose.yml' without IndexError."""
+    result = lint._find_compose_file_for_service("any-service", [])
+    assert result == "docker-compose.yml"
