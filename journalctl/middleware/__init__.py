@@ -6,7 +6,13 @@ by MCP's streamable HTTP transport.
 """
 
 from journalctl.middleware.auth import BearerAuthMiddleware
+from journalctl.middleware.correlation import CorrelationIDMiddleware
 from journalctl.middleware.origin import OriginValidationMiddleware
 from journalctl.middleware.path import MCPPathNormalizer
 
-__all__ = ["BearerAuthMiddleware", "MCPPathNormalizer", "OriginValidationMiddleware"]
+__all__ = [
+    "BearerAuthMiddleware",
+    "CorrelationIDMiddleware",
+    "MCPPathNormalizer",
+    "OriginValidationMiddleware",
+]

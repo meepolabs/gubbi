@@ -37,9 +37,13 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import time
 from typing import Any, Final
 
 import asyncpg
+from opentelemetry import trace
+
+from journalctl.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 
 __all__ = ["Action", "record_audit"]
 
@@ -142,32 +146,68 @@ async def record_audit(
     ValueError
         If actor_type is not one of the four accepted values.
     """
-    if actor_type not in _VALID_ACTOR_TYPES:
-        raise ValueError(
-            f"Invalid actor_type {actor_type!r}. " f"Must be one of: {sorted(_VALID_ACTOR_TYPES)}"
-        )
+    span_name = SpanNames.AUDIT_WRITE
+    start_ns = time.monotonic_ns()
 
-    if ip_address:
+    attrs: dict[str, Any] = {
+        "event_type": action,
+    }
+    if target_id is not None:
+        attrs["target_id"] = target_id
+    if actor_type is not None:
+        attrs["actor_type"] = actor_type
+
+    with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as span:
+        safe_set_attributes(span_name, span, attrs)
+
+        # Validation — runs before the DB INSERT and raises on failure.
+        # The span records success=False when validation fails.
+        audit_success = False
         try:
-            ipaddress.ip_address(ip_address)
-        except ValueError:
-            raise ValueError(
-                f"audit.record_audit: invalid ip_address {ip_address!r}; "
-                "must be a valid IPv4 or IPv6 address"
-            ) from None
+            if actor_type not in _VALID_ACTOR_TYPES:
+                raise ValueError(
+                    f"Invalid actor_type {actor_type!r}. "
+                    f"Must be one of: {sorted(_VALID_ACTOR_TYPES)}"
+                )
 
-    resolved_metadata: dict[str, Any] = metadata if metadata is not None else {}
-    metadata_json = json.dumps(resolved_metadata)
+            if ip_address:
+                try:
+                    ipaddress.ip_address(ip_address)
+                except ValueError:
+                    raise ValueError(
+                        f"audit.record_audit: invalid ip_address {ip_address!r}; "
+                        "must be a valid IPv4 or IPv6 address"
+                    ) from None
 
-    await conn.execute(
-        _INSERT_SQL,
-        actor_type,
-        actor_id,
-        action,
-        target_type,
-        target_id,
-        reason,
-        metadata_json,
-        ip_address,
-        user_agent,
-    )
+            resolved_metadata: dict[str, Any] = metadata if metadata is not None else {}
+            metadata_json = json.dumps(resolved_metadata)
+
+            await conn.execute(
+                _INSERT_SQL,
+                actor_type,
+                actor_id,
+                action,
+                target_type,
+                target_id,
+                reason,
+                metadata_json,
+                ip_address,
+                user_agent,
+            )
+            audit_success = True
+        except Exception as exc:
+            from opentelemetry.trace import Status, StatusCode
+
+            span.record_exception(exc)
+            span.set_status(Status(StatusCode.ERROR))
+            raise
+        finally:
+            latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
+            safe_set_attributes(
+                span_name,
+                span,
+                {
+                    "success": audit_success,
+                    "latency_ms": round(latency_ms, 2),
+                },
+            )
