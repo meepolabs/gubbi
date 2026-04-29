@@ -25,8 +25,7 @@ def env_var_name(field_name: str, alias: str | None, prefix: str) -> str:
     """Return the environment-variable name for a Settings field.
 
     If the field has a validation_alias, the alias is the env var name.
-    Otherwise use ``{prefix}{field_name.upper()}`` with underscore-to-uppercase
-    normalization (standard pydantic-settings behaviour).
+    Otherwise use ``{prefix}{field_name.upper()}`` (standard pydantic-settings behaviour).
     """
     if alias:
         return alias
@@ -147,7 +146,7 @@ def _extract_field_info(
         if isinstance(value, ast.Call):
             if _is_field_call(value):
                 for kw in value.keywords:
-                    if kw.arg == "default":
+                    if kw.arg in ("default", "default_factory"):
                         has_py_default = True
                     elif kw.arg == "validation_alias" and isinstance(kw.value, ast.Constant):
                         alias = str(kw.value.value)
@@ -246,6 +245,8 @@ def _find_compose_file_for_service(service_name: str, compose_files: list[str]) 
             svcs = data.get("services")
             if isinstance(svcs, dict) and service_name in svcs:
                 return path.name
+    if not compose_files:
+        return "docker-compose.yml"
     return Path(compose_files[0]).name
 
 
@@ -266,12 +267,12 @@ def check_env_contract(
     all_declared = svc["declared_keys"] | svc["referenced_vars"]
 
     fields = settings.get("fields", {})
+    compose_file = _find_compose_file_for_service(target_service, compose_file_names)
 
     for fname, finfo in fields.items():
         if finfo["required"]:
             env_var = finfo["env_var"]
             if env_var not in all_declared:
-                compose_file = _find_compose_file_for_service(target_service, compose_file_names)
                 drifts.append(
                     f"DRIFT: field={fname} env={env_var} "
                     f"not declared in {compose_file} service {target_service}"
