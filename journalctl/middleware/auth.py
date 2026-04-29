@@ -39,7 +39,8 @@ from journalctl.auth.hydra import (
     HydraUnreachable,
     TokenClaims,
 )
-from journalctl.core.auth_context import current_user_id
+from journalctl.core.auth_context import current_token_scopes, current_user_id
+from journalctl.core.scope import check_scope
 from journalctl.oauth.constants import MAX_BEARER_TOKEN_LEN
 
 
@@ -246,10 +247,12 @@ class BearerAuthMiddleware:
                 await response(scope, receive, send)
                 return
             token_reset = current_user_id.set(user_uuid)
+            scope_reset = current_token_scopes.set(frozenset({"journal"}))
             try:
                 await self.app(scope, receive, send)
             finally:
                 current_user_id.reset(token_reset)
+                current_token_scopes.reset(scope_reset)
             return
 
         request = Request(scope)
@@ -296,11 +299,14 @@ class BearerAuthMiddleware:
                 return
 
             scopes = claims.scope.split()
-            if self.required_scope not in scopes:
+            if not check_scope(set(scopes), self.required_scope):
                 await _forbidden(self.required_scope, self.protected_resource_metadata_url)(
                     scope, receive, send
                 )
                 return
+
+            # Store scopes for @require_scope decorator (per-tool checks).
+            token_scope_reset = current_token_scopes.set(frozenset(scopes))
 
             # Defense-in-depth: TokenClaims.sub is typed UUID and parsed via UUID(sub_raw)
             # in HydraIntrospector, but mirror db_context's isinstance guard so a bypass
@@ -372,6 +378,7 @@ class BearerAuthMiddleware:
                 await self.app(scope, receive, send)
             finally:
                 current_user_id.reset(token_reset)
+                current_token_scopes.reset(token_scope_reset)
             return
 
         # Mode 3: Self-host OAuth callback
@@ -637,7 +644,9 @@ class BearerAuthMiddleware:
             await response(scope, receive, send)
             return
         token_reset = current_user_id.set(self.operator_user_id)
+        scope_reset = current_token_scopes.set(frozenset({"journal"}))
         try:
             await self.app(scope, receive, send)
         finally:
             current_user_id.reset(token_reset)
+            current_token_scopes.reset(scope_reset)

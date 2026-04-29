@@ -3,9 +3,11 @@
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
+from journalctl.core.scope import require_scope
 from journalctl.core.validation import (
     sanitize_freetext,
     sanitize_label,
@@ -19,7 +21,13 @@ from journalctl.tools.errors import already_exists, invalid_topic, validation_er
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register topic tools on the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Topics",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_list_topics(
         topic_prefix: str | None = None,
         limit: int = DEFAULT_TOPICS_LIMIT,
@@ -59,7 +67,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "limit": limit,
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Create Topic",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            openWorldHint=False,
+            idempotentHint=False,
+        ),
+    )
+    @require_scope("journal:write")
     async def journal_create_topic(
         topic: str,
         title: str,
