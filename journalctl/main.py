@@ -32,6 +32,7 @@ from journalctl.core.crypto import ContentCipher, load_master_keys_from_env
 from journalctl.core.logger import initialize_logger
 from journalctl.middleware import (
     BearerAuthMiddleware,
+    CorrelationIDMiddleware,
     MCPPathNormalizer,
     OriginValidationMiddleware,
 )
@@ -39,6 +40,7 @@ from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.embedding_service import EmbeddingService
 from journalctl.storage.pg_setup import init_pool
+from journalctl.telemetry import configure_otel
 from journalctl.tools.registry import register_tools
 from journalctl.users.bootstrap import scaffold_operator
 
@@ -182,6 +184,10 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     initialize_logger("journalctl", log_dir=str(settings.log_dir))
     app.logger = structlog.get_logger("journalctl")
+
+    # Configure OpenTelemetry (TASK-03.19)
+    configure_otel(app)
+
     await app.logger.info("Server starting up")
 
     app.settings = settings
@@ -338,7 +344,10 @@ server = CustomFastAPI(
     description="Personal journal MCP server",
     version="0.2.0",
     lifespan=lifespan,
-    middleware=[Middleware(MCPPathNormalizer)],
+    middleware=[
+        Middleware(MCPPathNormalizer),
+        Middleware(CorrelationIDMiddleware),
+    ],
 )
 
 

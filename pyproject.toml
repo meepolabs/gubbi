@@ -42,6 +42,14 @@ sqlalchemy = "^2.0.0"
 psycopg = {version = "^3.2.0", extras = ["binary"]}
 cachetools = ">=5.5.0"
 
+# OpenTelemetry — auto-instrumentation + critical-path spans + metrics (TASK-03.19)
+opentelemetry-distro = ">=0.50b0"
+opentelemetry-instrumentation-fastapi = ">=0.50b0"
+opentelemetry-instrumentation-httpx = ">=0.50b0"
+opentelemetry-instrumentation-asyncpg = ">=0.50b0"
+opentelemetry-instrumentation-redis = ">=0.50b0"
+opentelemetry-exporter-otlp-proto-grpc = ">=1.27.0"
+
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
 pytest-asyncio = "^0.25.0"
