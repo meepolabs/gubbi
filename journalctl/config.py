@@ -106,6 +106,11 @@ class Settings(BaseSettings):
     port: int = 8100
     transport: str = "streamable-http"  # or "stdio"
 
+    # Trust gateway mode -- when true, skip all internal auth and trust
+    # X-Auth-User-Id header from the upstream cloud-api gateway. Used by
+    # hosted Mode 3 deployments behind cloud-api.
+    trust_gateway: bool = False
+
     # Logging
     log_level: str = "info"
     log_dir: Path = Path("./logs")
