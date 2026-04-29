@@ -15,7 +15,7 @@ Usage pattern::
             conn,
             actor_type="admin",
             actor_id=requesting_admin,
-            action=Action.USER_DELETED,
+            action=Action.IDENTITY_DELETED,
             target_type="user",
             target_id=user_id,
             reason="GDPR erasure request",
@@ -53,9 +53,13 @@ __all__ = ["Action", "record_audit"]
 class Action:
     """Namespace for audit action string constants."""
 
-    USER_CREATED: Final = "user.created"
-    USER_DELETED: Final = "user.deleted"
-    USER_RESTORED: Final = "user.restored"
+    # Identity lifecycle events.  Values use the ``identity.*`` namespace so
+    # downstream queries can filter ``action LIKE 'identity.%'`` and pick up
+    # every identity-shaped event (created/updated/deleted/restored).
+    # Migration 0015 rewrites legacy ``user.*`` rows from M2 to ``identity.*``.
+    IDENTITY_CREATED: Final = "identity.created"
+    IDENTITY_DELETED: Final = "identity.deleted"
+    IDENTITY_RESTORED: Final = "identity.restored"
 
     TENANT_PROVISIONED: Final = "tenant.provisioned"
     TENANT_SUSPENDED: Final = "tenant.suspended"

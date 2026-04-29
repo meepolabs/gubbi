@@ -541,7 +541,7 @@ class BearerAuthMiddleware:
                         conn,
                         actor_type="hydra_subject",
                         actor_id=str(sub),
-                        action=Action.USER_CREATED,
+                        action=Action.IDENTITY_CREATED,
                         target_type="user",
                         target_id=str(sub),
                         metadata={"provision_path": "jit"},
