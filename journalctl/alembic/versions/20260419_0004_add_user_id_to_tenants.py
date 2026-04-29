@@ -5,18 +5,21 @@ entry_embeddings) gains ``user_id UUID NOT NULL REFERENCES users(id)
 ON DELETE CASCADE`` so the app layer and upcoming RLS policies (02.05)
 can scope by user.
 
-Three-phase migration inside one alembic transaction:
+All phases run unconditionally on every deployment mode:
 
 1. Add nullable user_id column to each tenant table.
+2. Null-count guard -- fail early if any tenant rows have NULL user_id.
 5. Promote user_id to NOT NULL on every tenant table.
 6. Add composite indexes for the hot-path queries under RLS.
 
-This migration does NOT create any users rows or backfill data.
-The operator row must be provisioned separately (see
-journalctl/users/bootstrap.py). If JOURNAL_OPERATOR_EMAIL
-is set, the app will look it up at startup; if no matching user row
-exists in ``users``, operator-identity auth reaches DB code without
-a user binding and MissingUserIdError surfaces as a 500.
+On a fresh database (zero tenant rows), the null-count guard at phase 2
+is vacuously true (COUNT = 0) and all phases pass without intervention.
+On a Mode 1/2 DB with pre-existing data and a missing operator users row,
+the guard fires with a clear error message directing the operator to run
+the scaffolding step. Mode 3 deployments (no JOURNAL_OPERATOR_EMAIL) are
+typically fresh DBs with no pre-existing tenant rows; all four phases run
+cleanly and the Kratos webhook populates user_id on every subsequent
+tenant INSERT.
 
 KRATOS REBIND -- when Kratos is wired later and the operator signs up with
 this same email, the internal users.id (random UUID generated separately) needs
