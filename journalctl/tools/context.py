@@ -8,11 +8,13 @@ from typing import Any
 
 import asyncpg
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.crypto import DecryptionError
 from journalctl.core.db_context import user_scoped_connection
+from journalctl.core.scope import require_scope
 from journalctl.core.validation import local_today
 from journalctl.storage import knowledge
 from journalctl.storage.constants import SNIPPET_PREVIEW_LEN
@@ -118,7 +120,13 @@ def _resolve_period(period: str, today: date) -> tuple[str, str, str]:
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register context tools on the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Journal Briefing",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_briefing() -> dict:
         """Get the user's identity, recent activity, and topic list — the complete
         context for this person.
@@ -274,7 +282,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "stats": stats,
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Journal Timeline",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_timeline(period: str) -> dict:
         """Browse what happened during a time period — "what was I doing last week?"
         or "show me this month."

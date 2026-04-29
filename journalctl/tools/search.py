@@ -7,10 +7,12 @@ from typing import Any
 
 import asyncpg
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
+from journalctl.core.scope import require_scope
 from journalctl.core.validation import validate_date, validate_topic
 from journalctl.models.search import SearchResult
 from journalctl.storage.repositories import conversations as conv_repo
@@ -44,7 +46,13 @@ def _truncate_title_summary(title: str, summary: str) -> tuple[str, str]:
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register search tool on the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Search Journal",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_search(
         query: str,
         topic_prefix: str | None = None,

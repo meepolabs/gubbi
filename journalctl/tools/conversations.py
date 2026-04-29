@@ -6,10 +6,12 @@ import logging
 from typing import Any, NotRequired, TypedDict
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.db_context import user_scoped_connection
+from journalctl.core.scope import require_scope
 from journalctl.core.validation import (
     local_today,
     reject_tool_call_syntax,
@@ -56,7 +58,16 @@ def _format_messages_as_markdown(title: str, messages: list[Message]) -> str:
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register conversation tools on the MCP server."""
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Save Conversation",
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            openWorldHint=False,
+            idempotentHint=True,
+        ),
+    )
+    @require_scope("journal:write")
     async def journal_save_conversation(
         topic: str,
         title: str,
@@ -212,7 +223,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             result["note"] = "; ".join(notes)
         return result
 
-    @mcp.tool()
+    @mcp.tool(
+        title="List Conversations",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_list_conversations(
         topic_prefix: str | None = None,
         limit: int = DEFAULT_CONVERSATIONS_LIMIT,
@@ -263,7 +280,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "offset": offset,
         }
 
-    @mcp.tool()
+    @mcp.tool(
+        title="Read Conversation",
+        annotations=ToolAnnotations(
+            readOnlyHint=True,
+        ),
+    )
+    @require_scope("journal:read")
     async def journal_read_conversation(
         conversation_id: int,
         preview: bool = False,

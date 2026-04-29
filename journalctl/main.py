@@ -21,6 +21,7 @@ from starlette.middleware import Middleware
 
 from journalctl.auth.hydra import HydraIntrospector, InMemoryHydraCache
 from journalctl.config import (
+    ALLOWED_ORIGINS,
     HYDRA_INTROSPECT_TIMEOUT_SECS,
     REQUIRED_OAUTH_SCOPE,
     Settings,
@@ -29,7 +30,11 @@ from journalctl.config import (
 from journalctl.core.context import AppContext
 from journalctl.core.crypto import ContentCipher, load_master_keys_from_env
 from journalctl.core.logger import initialize_logger
-from journalctl.middleware import BearerAuthMiddleware, MCPPathNormalizer
+from journalctl.middleware import (
+    BearerAuthMiddleware,
+    MCPPathNormalizer,
+    OriginValidationMiddleware,
+)
 from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 from journalctl.storage.embedding_service import EmbeddingService
@@ -310,7 +315,9 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         protected_resource_metadata_url=protected_resource_metadata_url,
         trust_gateway=settings.trust_gateway,
     )
-    app.mount("/mcp", authed_mcp)
+    # Origin validation: prevents DNS-rebinding attacks on the MCP endpoint.
+    origin_validated_mcp = OriginValidationMiddleware(authed_mcp, ALLOWED_ORIGINS)
+    app.mount("/mcp", origin_validated_mcp)
 
     try:
         async with app.mcp.session_manager.run():
