@@ -105,7 +105,7 @@ services:
       POSTGRES_PASSWORD: ${JOURNAL_DB_SUPERUSER_PASSWORD}
     volumes:
       - ./data/postgres:/var/lib/postgresql/data
-      - ./deployment/init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
+      - ./deployment/scripts/init.sql:/docker-entrypoint-initdb.d/01-extensions.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U journal -d journal"]
       interval: 10s
@@ -371,7 +371,7 @@ The `-Fc` format supports parallel restore and `--clean --if-exists` (idempotent
 export JOURNAL_DB_SUPERUSER_URL=postgresql://journal_admin:password@localhost:5432/journal
 
 # Standard restore with verification
-./deployment/restore-db.sh backups/journal_20260419.dump
+./deployment/scripts/restore-db.sh backups/journal_20260419.dump
 ```
 
 Flags:
