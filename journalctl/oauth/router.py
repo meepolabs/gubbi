@@ -115,6 +115,8 @@ def register_oauth_routes(
         pr_routes = create_protected_resource_routes(
             resource_url=AnyHttpUrl(f"{settings.server_url.rstrip('/')}/mcp"),
             authorization_servers=[issuer_url],
+            scopes_supported=["journal", "offline_access", "openid", "email"],
+            resource_documentation=AnyHttpUrl("https://docs.meepolabs.com/mcp"),
         )
         for route in pr_routes:
             app.routes.insert(0, route)
@@ -148,6 +150,8 @@ def register_oauth_routes(
     pr_routes = create_protected_resource_routes(
         resource_url=AnyHttpUrl(f"{settings.server_url.rstrip('/')}/mcp"),
         authorization_servers=[issuer_url],
+        scopes_supported=["journal", "offline_access", "openid", "email"],
+        resource_documentation=AnyHttpUrl("https://docs.meepolabs.com/mcp"),
     )
     for route in pr_routes:
         app.routes.insert(0, route)
