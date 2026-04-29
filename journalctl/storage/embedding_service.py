@@ -3,15 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
+import time
 from datetime import date
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+from opentelemetry import trace
 
 if TYPE_CHECKING:
     import asyncpg
+
+from journalctl.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 
 logger = logging.getLogger(__name__)
 
@@ -115,33 +120,58 @@ class EmbeddingService:
 
         Uses mean pooling over non-padding tokens followed by L2 normalisation,
         which is the standard approach for all-MiniLM-L6-v2.
+
+        Records an ``embedding.encode`` OTel span with text_hash (sha256),
+        text_len, and latency_ms. NO raw text is stored in span attributes.
         """
-        encoding = self._tokenizer.encode(text)
+        span_name = SpanNames.EMBEDDING_ENCODE
+        start_ns = time.monotonic_ns()
+        text_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        text_len = len(text)
 
-        input_ids = np.array([encoding.ids], dtype=np.int64)
-        attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
-
-        feed: dict[str, np.ndarray] = {
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
+        attrs: dict[str, Any] = {
+            "text_hash": text_hash,
+            "text_len": text_len,
         }
-        if "token_type_ids" in self._input_names:
-            feed["token_type_ids"] = np.array([encoding.type_ids], dtype=np.int64)
 
-        outputs = self._session.run(None, feed)
-        token_embeddings: np.ndarray = outputs[0]  # [1, seq_len, 384]
+        with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as span:
+            safe_set_attributes(span_name, span, attrs)
 
-        # Mean pool over non-padding positions
-        mask = attention_mask.astype(np.float32)[:, :, np.newaxis]  # [1, seq_len, 1]
-        summed = (token_embeddings * mask).sum(axis=1)  # [1, 384]
-        counts = mask.sum(axis=1).clip(min=1e-9)  # [1, 1]
-        mean_embedding = summed / counts  # [1, 384]
+            encoding = self._tokenizer.encode(text)
 
-        # L2 normalise
-        norm = np.linalg.norm(mean_embedding, axis=1, keepdims=True).clip(min=1e-9)
-        normalised: np.ndarray = mean_embedding / norm  # [1, 384]
+            input_ids = np.array([encoding.ids], dtype=np.int64)
+            attention_mask = np.array([encoding.attention_mask], dtype=np.int64)
 
-        return normalised[0].tolist()  # type: ignore[no-any-return]
+            feed: dict[str, np.ndarray] = {
+                "input_ids": input_ids,
+                "attention_mask": attention_mask,
+            }
+            if "token_type_ids" in self._input_names:
+                feed["token_type_ids"] = np.array([encoding.type_ids], dtype=np.int64)
+
+            outputs = self._session.run(None, feed)
+            token_embeddings: np.ndarray = outputs[0]  # [1, seq_len, 384]
+
+            # Mean pool over non-padding positions
+            mask = attention_mask.astype(np.float32)[:, :, np.newaxis]  # [1, seq_len, 1]
+            summed = (token_embeddings * mask).sum(axis=1)  # [1, 384]
+            counts = mask.sum(axis=1).clip(min=1e-9)  # [1, 1]
+            mean_embedding = summed / counts  # [1, 384]
+
+            # L2 normalise
+            norm = np.linalg.norm(mean_embedding, axis=1, keepdims=True).clip(min=1e-9)
+            normalised: np.ndarray = mean_embedding / norm  # [1, 384]
+
+            result = normalised[0].tolist()
+
+            latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
+            safe_set_attributes(
+                span_name,
+                span,
+                {"latency_ms": round(latency_ms, 2)},
+            )
+
+        return result  # type: ignore[no-any-return]
 
     async def store_by_vector(
         self,

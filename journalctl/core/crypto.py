@@ -18,11 +18,16 @@ import binascii
 import os
 import re
 import secrets
+import time
 from collections.abc import Mapping
 from types import MappingProxyType
+from typing import Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+from opentelemetry import trace
+
+from journalctl.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 
 _KEY_ENV_PATTERN = re.compile(r"^JOURNAL_ENCRYPTION_MASTER_KEY_V(\d+)$")
 _KEY_LEN = 32
@@ -83,13 +88,38 @@ class ContentCipher:
     def known_versions(self) -> frozenset[int]:
         return frozenset(self._keys)
 
-    def encrypt(self, plaintext: str) -> tuple[bytes, bytes]:
+    def encrypt(self, plaintext: str, field_kind: str = "unknown") -> tuple[bytes, bytes]:
         """Encrypt ``plaintext`` with the active key version.
 
         Returns ``(ciphertext, nonce)``. ``ciphertext`` includes the GCM
         auth tag. ``nonce`` is ``bytes([active_version]) + secrets.token_bytes(11)``.
+
+        ``field_kind`` is a business label for OTel attribution (e.g.
+        ``"entry.content"``). No content is stored in span attributes.
+
+        Records a ``cipher.encrypt`` OTel span with version, field_kind,
+        bytes_processed, and latency_ms.
         """
-        return self.encrypt_with_version(plaintext, self._active_version)
+        span_name = SpanNames.CIPHER_ENCRYPT
+        start_ns = time.monotonic_ns()
+        version = self._active_version
+        bytes_processed = len(plaintext.encode("utf-8"))
+
+        attrs: dict[str, Any] = {
+            "version": version,
+            "field_kind": field_kind,
+            "bytes_processed": bytes_processed,
+        }
+        with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as span:
+            safe_set_attributes(span_name, span, attrs)
+            result = self.encrypt_with_version(plaintext, version)
+            latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
+            safe_set_attributes(
+                span_name,
+                span,
+                {"latency_ms": round(latency_ms, 2)},
+            )
+        return result
 
     def encrypt_with_version(self, plaintext: str, version: int) -> tuple[bytes, bytes]:
         """Encrypt ``plaintext`` with the key for a specific *version*.
@@ -124,7 +154,12 @@ class ContentCipher:
         ciphertext = self._ciphers[version].encrypt(nonce, plaintext.encode("utf-8"), None)
         return (ciphertext, nonce)
 
-    def decrypt(self, ciphertext: bytes, nonce: bytes) -> str:
+    def decrypt(
+        self,
+        ciphertext: bytes,
+        nonce: bytes,
+        field_kind: str = "unknown",
+    ) -> str:
         """Decrypt the ``(ciphertext, nonce)`` pair produced by ``encrypt``.
 
         Accepts ``bytes`` or ``bytearray`` for either argument. Raises
@@ -132,20 +167,44 @@ class ContentCipher:
         ``cryptography.exceptions.InvalidTag`` when the GCM auth tag does
         not verify (tampered ciphertext, wrong key, truncation).
 
+        ``field_kind`` is a business label for OTel attribution (e.g.
+        ``"entry.content"``). No content is stored in span attributes.
+
         NOTE for callers: ``ValueError`` vs ``InvalidTag`` MUST NOT be
         distinguished in any response surfaced to end users. Raising
         different HTTP status codes or log verbosity for the two types
         creates a version-existence oracle. Repository layer (TASK-02.13)
         wraps both in a single opaque error.
+
+        Records a ``cipher.decrypt`` OTel span with version, field_kind,
+        bytes_processed, and latency_ms.
         """
-        if not isinstance(nonce, bytes | bytearray) or len(nonce) != _NONCE_LEN:
-            raise ValueError(f"nonce must be {_NONCE_LEN} bytes")
-        version = nonce[0]
-        aesgcm = self._ciphers.get(version)
-        if aesgcm is None:
-            raise ValueError(f"unknown key version {version}")
-        plaintext_bytes: bytes = aesgcm.decrypt(bytes(nonce), bytes(ciphertext), None)
-        return plaintext_bytes.decode("utf-8")
+        span_name = SpanNames.CIPHER_DECRYPT
+        start_ns = time.monotonic_ns()
+        bytes_processed = len(ciphertext) if isinstance(ciphertext, bytes | bytearray) else 0
+
+        attrs: dict[str, Any] = {
+            "field_kind": field_kind,
+            "bytes_processed": bytes_processed,
+        }
+        with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as span:
+            if not isinstance(nonce, bytes | bytearray) or len(nonce) != _NONCE_LEN:
+                raise ValueError(f"nonce must be {_NONCE_LEN} bytes")
+            version = nonce[0]
+            attrs["version"] = version
+            safe_set_attributes(span_name, span, attrs)
+            aesgcm = self._ciphers.get(version)
+            if aesgcm is None:
+                raise ValueError(f"unknown key version {version}")
+            plaintext_bytes: bytes = aesgcm.decrypt(bytes(nonce), bytes(ciphertext), None)
+            result = plaintext_bytes.decode("utf-8")
+            latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
+            safe_set_attributes(
+                span_name,
+                span,
+                {"latency_ms": round(latency_ms, 2)},
+            )
+        return result
 
 
 def load_master_keys_from_env(

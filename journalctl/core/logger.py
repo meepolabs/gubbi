@@ -10,10 +10,15 @@ import os
 from logging import handlers
 
 import structlog
+from opentelemetry import trace
 from structlog.types import EventDict, WrappedLogger
+
+from journalctl.telemetry.logging import get_correlation_id
 
 LOG_ROTATE_WHEN = os.getenv(key="LOG_ROTATE_WHEN", default="W6")
 LOG_ROTATE_BACKUP = int(os.getenv(key="LOG_ROTATE_BACKUP", default="4"))
+
+_logger = logging.getLogger(__name__)
 
 
 def _safe_add_logger_name(
@@ -38,9 +43,37 @@ def _safe_add_logger_name(
     return event_dict
 
 
+def _add_otel_context(
+    logger: WrappedLogger,
+    method: str,
+    event_dict: EventDict,
+) -> EventDict:
+    """Enrich log events with correlation_id, trace_id, and span_id.
+
+    Reads the current OTel span context and the correlation_id context
+    var, adding them to every log event.
+    """
+    cid = get_correlation_id()
+    if cid is not None:
+        event_dict["correlation_id"] = cid
+
+    try:
+        span = trace.get_current_span()
+        span_context = span.get_span_context()
+        if span_context and span_context.is_valid:
+            event_dict["trace_id"] = format(span_context.trace_id, "032x")
+            event_dict["span_id"] = format(span_context.span_id, "016x")
+    except Exception:
+        _logger.debug("Failed to read OTel span context for log enrichment", exc_info=True)
+
+    event_dict["service"] = os.environ.get("OTEL_SERVICE_NAME", "journalctl")
+    return event_dict
+
+
 # Shared processors used by both structlog and ProcessorFormatter
 _SHARED_PROCESSORS: list[structlog.types.Processor] = [
     _safe_add_logger_name,
+    _add_otel_context,
     structlog.stdlib.add_log_level,
     structlog.processors.TimeStamper(fmt="iso"),
     structlog.processors.StackInfoRenderer(),

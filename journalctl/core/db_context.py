@@ -20,18 +20,27 @@ which both avoids injection risk and keeps the statement prepared-plan safe.
 Admin/worker paths that must cross tenants (future admin-dashboard API, cleanup jobs)
 connect via a separate BYPASSRLS pool — see ``AppContext.admin_pool`` — and
 do NOT use this helper.
+
+The optional ``query_kind`` parameter adds a ``db.query.user_scoped`` OTel
+span around the connection lifecycle, with ``query_kind``, ``user_id``,
+``row_count``, and ``latency_ms`` attributes (TASK-03.19).
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import UUID
 
 import asyncpg
+from opentelemetry import trace
 
 from journalctl.core.auth_context import current_user_id
+from journalctl.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
+
+_tracer = trace.get_tracer(_TRACER_NAME)
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +62,7 @@ async def user_scoped_connection(
     user_id: UUID | None = None,
     *,
     hnsw_ef_search: int = DEFAULT_HNSW_EF_SEARCH,
+    query_kind: str | None = None,
 ) -> AsyncIterator[asyncpg.Connection]:
     """Acquire a pool connection with ``app.current_user_id`` bound to ``user_id``.
 
@@ -69,6 +79,10 @@ async def user_scoped_connection(
     hnsw_ef_search:
         Value for the transaction-scoped ``hnsw.ef_search`` GUC. Applies
         to every pgvector HNSW scan inside the yielded transaction.
+    query_kind:
+        Optional business-level query label for the ``db.query.user_scoped``
+        OTel span (e.g. ``"entries.get_by_topic"``). When provided, a span
+        wraps the connection lifecycle.
 
     Both GUCs are set via ``set_config(..., is_local=true)``. They are
     automatically cleared at COMMIT or ROLLBACK, so no connection state
@@ -97,13 +111,39 @@ async def user_scoped_connection(
     if not (1 <= ef_search <= 1000):
         raise ValueError(f"hnsw_ef_search must be in [1, 1000], got {hnsw_ef_search}")
 
-    async with pool.acquire() as conn, conn.transaction():
-        await conn.execute(
-            "SELECT set_config('app.current_user_id', $1, true)",
-            str(resolved),
-        )
-        await conn.execute(
-            "SELECT set_config('hnsw.ef_search', $1, true)",
-            str(ef_search),
-        )
-        yield conn
+    if query_kind is not None:
+        span_name = SpanNames.DB_QUERY_USER_SCOPED
+        start_ns = time.monotonic_ns()
+        attrs: dict[str, object] = {
+            "query_kind": query_kind,
+            "user_id": str(resolved),
+        }
+        with _tracer.start_as_current_span(span_name) as span:
+            safe_set_attributes(span_name, span, attrs)
+            async with pool.acquire() as conn, conn.transaction():
+                await conn.execute(
+                    "SELECT set_config('app.current_user_id', $1, true)",
+                    str(resolved),
+                )
+                await conn.execute(
+                    "SELECT set_config('hnsw.ef_search', $1, true)",
+                    str(ef_search),
+                )
+                yield conn
+            latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
+            safe_set_attributes(
+                span_name,
+                span,
+                {"latency_ms": round(latency_ms, 2)},
+            )
+    else:
+        async with pool.acquire() as conn, conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, true)",
+                str(resolved),
+            )
+            await conn.execute(
+                "SELECT set_config('hnsw.ef_search', $1, true)",
+                str(ef_search),
+            )
+            yield conn
