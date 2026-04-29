@@ -65,6 +65,9 @@ class Action:
     TENANT_SUSPENDED: Final = "tenant.suspended"
     TENANT_REACTIVATED: Final = "tenant.reactivated"
 
+    # auth events
+    LOGIN_FAILED: Final = "login_failed"
+
     SUBSCRIPTION_CREATED: Final = "subscription.created"
     SUBSCRIPTION_CANCELED: Final = "subscription.canceled"
     SUBSCRIPTION_OVERRIDE: Final = "subscription.override"

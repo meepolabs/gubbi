@@ -45,6 +45,7 @@ ALL_ACTIONS = [
     Action.TENANT_PROVISIONED,
     Action.TENANT_SUSPENDED,
     Action.TENANT_REACTIVATED,
+    Action.LOGIN_FAILED,
     Action.SUBSCRIPTION_CREATED,
     Action.SUBSCRIPTION_CANCELED,
     Action.SUBSCRIPTION_OVERRIDE,
@@ -199,14 +200,29 @@ async def test_optional_fields_passed_through() -> None:
 
 
 def test_action_constants_count() -> None:
-    """All 12 documented actions are present in ALL_ACTIONS.
+    """All 13 documented actions are present in ALL_ACTIONS.
 
-    Down from 13 in 0012: ``auth.founder_impersonation`` was dropped along
-    with the ``founder`` actor_type (single-tenant-era, zero call sites).
+    Restored to the 0012 count of 13; had dropped to 12 when
+    ``auth.founder_impersonation`` was removed along with the ``founder``
+    actor_type (single-tenant-era, zero call sites). LOGIN_FAILED added in
+    TASK-03.22a brings it back to 13.
     """
-    assert len(ALL_ACTIONS) == 12
+    assert len(ALL_ACTIONS) == 13
 
 
 def test_action_constants_are_strings() -> None:
     for action in ALL_ACTIONS:
         assert isinstance(action, str), f"Expected str, got {type(action)} for {action!r}"
+
+
+# ---------------------------------------------------------------------------
+# Action constant value checks
+# ---------------------------------------------------------------------------
+
+
+def test_tenant_provisioned_value() -> None:
+    assert Action.TENANT_PROVISIONED == "tenant.provisioned"
+
+
+def test_login_failed_value() -> None:
+    assert Action.LOGIN_FAILED == "login_failed"
