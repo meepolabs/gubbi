@@ -65,9 +65,8 @@ class CorrelationIDMiddleware:
             if message["type"] == "http.response.start":
                 headers = message.get("headers", [])
                 # Check if header already set
-                header_present = any(
-                    k.lower() == _CORRELATION_ID_HEADER.lower() for k, v in headers
-                )
+                _corr_header_bytes = _CORRELATION_ID_HEADER.lower().encode("latin-1")
+                header_present = any(k.lower() == _corr_header_bytes for k, v in headers)
                 if not header_present:
                     # headers is a list of (bytes, bytes) tuples
                     new_headers = list(headers)
