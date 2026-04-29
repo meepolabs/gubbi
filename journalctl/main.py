@@ -308,6 +308,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         admin_pool=app.admin_pool,  # pre-context JWT /userinfo + collision detection
         hydra_public_url=settings.hydra_public_url if settings.hydra_admin_url else None,
         protected_resource_metadata_url=protected_resource_metadata_url,
+        trust_gateway=settings.trust_gateway,
     )
     app.mount("/mcp", authed_mcp)
 

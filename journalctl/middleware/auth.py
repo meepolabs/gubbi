@@ -177,12 +177,14 @@ class BearerAuthMiddleware:
         admin_pool: asyncpg.Pool | None = None,
         hydra_public_url: str | None = None,
         protected_resource_metadata_url: str | None = None,
+        trust_gateway: bool = False,
     ) -> None:
         self.app = app
         self.api_key = api_key
         self.introspector = introspector
         self.required_scope = required_scope
         self.selfhost_token_validator = selfhost_token_validator
+        self.trust_gateway = trust_gateway
         # Static API key + self-host OAuth paths both authenticate as a single
         # operator. Binding their requests to this UUID lets
         # user_scoped_connection set app.current_user_id uniformly across all
@@ -216,6 +218,38 @@ class BearerAuthMiddleware:
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
+            return
+
+        # Trust gateway mode: skip all auth logic and trust the upstream
+        # X-Auth-User-Id header set by cloud-api. This is used by hosted
+        # Mode 3 deployments behind cloud-api.
+        # DEPLOYMENT INVARIANT: this path trusts upstream cloud-api;
+        # journalctl must not be directly internet-reachable when
+        # trust_gateway=True.
+        if self.trust_gateway:
+            request = Request(scope)
+            user_id_header = request.headers.get("x-auth-user-id", "")
+            if not user_id_header:
+                response = JSONResponse(
+                    {"error": "Missing X-Auth-User-Id header"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+            try:
+                user_uuid = UUID(user_id_header)
+            except (ValueError, AttributeError):
+                response = JSONResponse(
+                    {"error": "Invalid X-Auth-User-Id header"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+            token_reset = current_user_id.set(user_uuid)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                current_user_id.reset(token_reset)
             return
 
         request = Request(scope)
