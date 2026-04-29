@@ -89,10 +89,39 @@ class ContentCipher:
         Returns ``(ciphertext, nonce)``. ``ciphertext`` includes the GCM
         auth tag. ``nonce`` is ``bytes([active_version]) + secrets.token_bytes(11)``.
         """
-        nonce = bytes([self._active_version]) + secrets.token_bytes(_NONCE_LEN - 1)
-        ciphertext = self._ciphers[self._active_version].encrypt(
-            nonce, plaintext.encode("utf-8"), None
-        )
+        return self.encrypt_with_version(plaintext, self._active_version)
+
+    def encrypt_with_version(self, plaintext: str, version: int) -> tuple[bytes, bytes]:
+        """Encrypt ``plaintext`` with the key for a specific *version*.
+
+        Unlike :meth:`encrypt`, this does **not** require the target version
+        to be the active (highest) version.  Useful for one-shot key rotation
+        scripts that must write V2-encrypted rows while still holding a V1
+        cipher instance (which keeps the active_version at V1).
+
+        Parameters
+        ----------
+        plaintext:
+            The string to encrypt.
+        version:
+            Key version in ``[_VERSION_MIN, _VERSION_MAX]`` that MUST be
+            present in this cipher's known set.
+
+        Returns
+        -------
+        ``(ciphertext, nonce)`` with the version byte baked into byte 0 of
+        the nonce.
+
+        Raises
+        ------
+        ValueError
+            If *version* is not in the cipher's ``known_versions`` set or is
+            outside the allowed range.
+        """
+        if version not in self._keys:
+            raise ValueError(f"key version {version} not known")
+        nonce = bytes([version]) + secrets.token_bytes(_NONCE_LEN - 1)
+        ciphertext = self._ciphers[version].encrypt(nonce, plaintext.encode("utf-8"), None)
         return (ciphertext, nonce)
 
     def decrypt(self, ciphertext: bytes, nonce: bytes) -> str:
