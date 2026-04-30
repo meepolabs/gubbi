@@ -1,20 +1,28 @@
-"""Marker migration -- superseded by deployment/scripts/cleanup_encrypted_xml_spill.py.
+"""Marker migration -- companion script ran on bunsamosa 2026-04-30, then deleted.
 
 Migration 0011 was originally written to clean up XML-spill data from
 ``entries.reasoning``, but that column was dropped by migration 0008.
-The actual spill data lives in ``entries.reasoning_encrypted`` (BYTEA,
-AES-GCM via ContentCipher), which an alembic migration has no access to
-because it lacks the encryption key and the runtime app context needed to
-construct a ContentCipher.
+The actual spill lived in ``entries.reasoning_encrypted`` (BYTEA,
+AES-GCM via ContentCipher), which an alembic migration cannot touch
+because it lacks the encryption key and runtime app context.
 
-Operators should instead use::
+A companion one-shot script
+``deployment/scripts/cleanup_encrypted_xml_spill.py`` was used to
+decrypt, trim ``<parameter`` tails, and re-encrypt affected rows. It
+ran on bunsamosa 2026-04-30 (matched 9 entries; audit_log carries 9
+``cleanup_xml_spill_v2`` rows from that run). Then deleted from the
+repo since bunsamosa was the only deployment.
 
-    cd journalctl
-    JOURNAL_ENCRYPTION_MASTER_KEY_V1="base64-key..." \\
-        JOURNAL_DB_ADMIN_URL="postgresql://admin@.../journal" \\
-        poetry run python deployment/scripts/cleanup_encrypted_xml_spill.py
+If a future fresh deployment imports the bunsamosa data dump, the
+spill is already cleaned at rest; nothing to re-run. If a fresh
+deployment seeds entirely from current journalctl source-of-truth
+(no legacy import), the spill never existed and there is nothing to
+clean. So the script no longer has a use case in any going-forward
+deploy.
 
-to decrypt, trim, and re-encrypt affected rows.
+Keeping this migration in the chain so revision IDs stay stable and
+``alembic upgrade`` from any older snapshot still arrives at the
+correct head.
 """
 
 import logging
@@ -29,10 +37,9 @@ depends_on = None
 
 def upgrade() -> None:
     logger.info(
-        "Migration 0011 is a no-op: original cleanup target (entries.reasoning) "
-        "was dropped by migration 0008, and the actual encrypted spill data "
-        "must be cleaned via deployment/scripts/cleanup_encrypted_xml_spill.py "
-        "which has access to ContentCipher."
+        "Migration 0011 is a no-op marker: companion script "
+        "deployment/scripts/cleanup_encrypted_xml_spill.py ran on "
+        "bunsamosa 2026-04-30 and was deleted from the repo."
     )
 
 
