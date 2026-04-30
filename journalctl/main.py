@@ -371,9 +371,17 @@ async def general_exception_handler(
 
 
 @server.get("/health")
-@server.get("/mcp/")
 async def mcp_health() -> dict:
-    """Liveness probe for Docker health checks."""
+    """Liveness probe for Docker health checks.
+
+    NOTE: do NOT add @server.get("/mcp/") here -- it shadows the
+    FastMCP streamable-http app mounted at /mcp via app.mount(...).
+    Claude.ai opens a GET to /mcp/ to start the SSE handshake; if
+    this route intercepts it, the client receives application/json
+    instead of text/event-stream and bails with "Authorization
+    failed" (a misleading client-side error). Bug caught during
+    M3 deploy on bunsamosa 2026-04-30.
+    """
     return {"status": "ok"}
 
 
