@@ -347,7 +347,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "messages_shown": len(messages),
             "messages_total": total_messages,
         }
-        err = _assert_response_ok(result)
+        err = _assert_response_ok(result, tool_name="journal_read_conversation")
         if err:
             await _report_oversized("journal_read_conversation", err)
             return err
