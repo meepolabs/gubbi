@@ -25,9 +25,16 @@ from journalctl.models.conversation import Message
 from journalctl.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
 from journalctl.storage.repositories import conversations as conv_repo
 from journalctl.storage.repositories import entries as entry_repo
+from journalctl.storage.repositories.conversations import (
+    read_conversation_by_id,
+    read_conversation_by_id_paginated,
+)
+from journalctl.tools._response_size import _assert_response_ok, _report_oversized
 from journalctl.tools.constants import (
+    DEFAULT_CONVERSATION_MESSAGES_LIMIT,
     DEFAULT_CONVERSATIONS_LIMIT,
     KEEP_ROLES,
+    MAX_CONVERSATION_MESSAGES,
     MAX_CONVERSATIONS_RESULTS,
     MAX_MESSAGES_PER_CONVERSATION,
     MAX_MSG_CHARS,
@@ -290,6 +297,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     async def journal_read_conversation(
         conversation_id: int,
         preview: bool = False,
+        messages_limit: int = DEFAULT_CONVERSATION_MESSAGES_LIMIT,
+        messages_offset: int = 0,
     ) -> dict[str, Any]:
         """Read the full transcript of a saved conversation.
 
@@ -299,25 +308,47 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             conversation_id: The conversation's ID (from list or search results).
             preview: If True, return only first and last 3 messages instead of
                      the full transcript. Use for long conversations to avoid
-                     consuming the entire context window.
+                     consuming the entire context window. When True,
+                     messages_limit/messages_offset are ignored.
+            messages_limit: When preview=False, max messages to return
+                            (default 20, max 100). Used as SQL LIMIT.
+            messages_offset: When preview=False, messages to skip for
+                             pagination (default 0). Used as SQL OFFSET.
 
         Returns:
             metadata (title, topic, summary, dates, participants),
-            content (full transcript as markdown), messages_shown, messages_total.
+            content (full transcript or subset as markdown),
+            messages_shown, messages_total (total in conversation).
         """
         cipher = require_cipher(app_ctx)
         try:
             async with user_scoped_connection(app_ctx.pool) as conn:
-                meta, messages = await conv_repo.read_conversation_by_id(
-                    conn, cipher, conversation_id, preview=preview
-                )
+                if preview:
+                    meta, messages, total_messages = await read_conversation_by_id(
+                        conn, cipher, conversation_id, preview=True
+                    )
+                else:
+                    messages_limit = max(1, min(messages_limit, MAX_CONVERSATION_MESSAGES))
+                    messages_offset = max(0, messages_offset)
+                    meta, messages, total_messages = await read_conversation_by_id_paginated(
+                        conn,
+                        cipher,
+                        conversation_id,
+                        messages_limit=messages_limit,
+                        messages_offset=messages_offset,
+                    )
         except ConversationNotFoundError:
             return not_found("Conversation", conversation_id)
         content = _format_messages_as_markdown(meta.title, messages)
-        return {
+        result = {
             "metadata": meta.model_dump(),
             "content": content,
             "preview": preview,
             "messages_shown": len(messages),
-            "messages_total": meta.message_count,
+            "messages_total": total_messages,
         }
+        err = _assert_response_ok(result)
+        if err:
+            await _report_oversized("journal_read_conversation", err)
+            return err
+        return result

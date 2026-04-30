@@ -23,6 +23,7 @@ from journalctl.core.validation import (
 )
 from journalctl.storage.exceptions import EntryNotFoundError, TopicNotFoundError
 from journalctl.storage.repositories import entries as entry_repo
+from journalctl.tools._response_size import _assert_response_ok, _report_oversized
 from journalctl.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
 from journalctl.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 
@@ -231,13 +232,18 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         except TopicNotFoundError:
             return not_found("Topic", topic)
 
-        return {
+        result = {
             "metadata": meta.model_dump(exclude={"id", "created", "updated"}),
             "entries": [e.model_dump() for e in entries],
             "total": total,
             "limit": limit,
             "offset": offset,
         }
+        err = _assert_response_ok(result)
+        if err:
+            await _report_oversized("journal_read_topic", err)
+            return err
+        return result
 
     @mcp.tool(
         title="Update Entry",

@@ -510,14 +510,15 @@ async def read_conversation_by_id(
     cipher: ContentCipher,
     conversation_id: int,
     preview: bool = False,
-) -> tuple[ConversationMeta, list[Message]]:
+) -> tuple[ConversationMeta, list[Message], int]:
     """Read a conversation by its stable integer ID.
 
     Args:
         conversation_id: Database primary key.
         preview: If True, return only first 3 and last 3 messages.
 
-    Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
+    Returns (ConversationMeta, messages, total_messages).
+    Raises ConversationNotFoundError if not found.
     """
     row = await conn.fetchrow(
         """
@@ -536,6 +537,8 @@ async def read_conversation_by_id(
         raise ConversationNotFoundError(msg)
 
     meta = _row_to_meta(cipher, row)
+    total_messages = int(row["message_count"]) if row["message_count"] is not None else 0
+
     msg_rows = await conn.fetch(
         "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC",
@@ -551,7 +554,65 @@ async def read_conversation_by_id(
     ]
     if preview and len(messages) > 6:
         messages = messages[:3] + messages[-3:]
-    return meta, messages
+    return meta, messages, total_messages
+
+
+async def read_conversation_by_id_paginated(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    conversation_id: int,
+    messages_limit: int,
+    messages_offset: int = 0,
+) -> tuple[ConversationMeta, list[Message], int]:
+    """Read a conversation with pagination on messages (no preview).
+
+    Pushes LIMIT and OFFSET into the SQL query so only the requested
+    page of messages is decrypted and returned.
+
+    Args:
+        conversation_id: Database primary key.
+        messages_limit: Max messages to return.
+        messages_offset: Messages to skip before returning.
+
+    Returns (ConversationMeta, paged_messages, total_messages).
+    Raises ConversationNotFoundError if not found.
+    """
+    row = await conn.fetchrow(
+        """
+        SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
+               c.summary_encrypted, c.summary_nonce, c.tags,
+               c.participants, c.message_count,
+               c.created_at, c.updated_at, t.path AS topic
+        FROM conversations c
+        JOIN topics t ON t.id = c.topic_id
+        WHERE c.id = $1
+        """,
+        conversation_id,
+    )
+    if not row:
+        msg = f"Conversation id {conversation_id} not found"
+        raise ConversationNotFoundError(msg)
+
+    meta = _row_to_meta(cipher, row)
+    total_messages = int(row["message_count"]) if row["message_count"] is not None else 0
+
+    msg_rows = await conn.fetch(  # noqa: S608
+        "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
+        " WHERE conversation_id = $1 ORDER BY position ASC"
+        " LIMIT $2 OFFSET $3",
+        conversation_id,
+        messages_limit,
+        messages_offset,
+    )
+    messages = [
+        Message(
+            role=r["role"],
+            content=_decrypt_message_content(cipher, r),
+            timestamp=r["timestamp"].isoformat() if r["timestamp"] else None,
+        )
+        for r in msg_rows
+    ]
+    return meta, messages, total_messages
 
 
 async def get_title_summary(

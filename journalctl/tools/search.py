@@ -18,6 +18,7 @@ from journalctl.models.search import SearchResult
 from journalctl.storage.repositories import conversations as conv_repo
 from journalctl.storage.repositories import entries as entry_repo
 from journalctl.storage.repositories import search as search_repo
+from journalctl.tools._response_size import _assert_response_ok, _report_oversized
 from journalctl.tools.constants import (
     DEFAULT_SEARCH_LIMIT,
     MAX_QUERY_LEN,
@@ -252,8 +253,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     }
                 )
 
-        return {
+        search_result = {
             "results": payload,
             "total": len(payload),
             "query": query,
         }
+        err = _assert_response_ok(search_result)
+        if err:
+            await _report_oversized("journal_search", err)
+            return err
+        return search_result
