@@ -80,6 +80,11 @@ services:
       # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
       - JOURNAL_PASSWORD_HASH
+      # OpenTelemetry (TASK-03.19a). OTEL_ENABLED=false bypasses the
+      # exporter entirely; useful when the Collector isn't deployed yet.
+      - OTEL_ENABLED
+      - OTEL_EXPORTER_OTLP_ENDPOINT
+      - OTEL_RESOURCE_ATTRIBUTES
     networks:
       - default
       - auth
