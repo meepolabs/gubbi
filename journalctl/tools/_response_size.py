@@ -20,14 +20,16 @@ _SUGGESTED_LIMIT_HEADROOM_FACTOR: float = 0.5
 def _assert_response_ok(
     payload: Any,  # noqa: ANN401
     *,
+    tool_name: str | None = None,
     error_threshold_chars: int = _ERROR_THRESHOLD_CHARS,
 ) -> dict[str, Any] | None:
     """Check payload size. Returns None if OK, returns error dict if too large.
 
     Caller pattern::
 
-        err = _assert_response_ok(result)
-        if err:
+        err = _assert_response_ok(payload, tool_name="journal_timeline")
+        if err is not None:
+            await _report_oversized(tool_name, err)
             return err
         return result
     """
@@ -35,6 +37,13 @@ def _assert_response_ok(
         size = len(json.dumps(payload))
     except (TypeError, ValueError):
         return None  # un-serializable payloads pass through; serialization will fail later
+
+    # Always record the histogram so we have telemetry coverage on the
+    # happy path as well.
+    if tool_name is not None:
+        from journalctl.telemetry.metrics import record_tool_response_size
+
+        record_tool_response_size(size, tool_name)
     if size > error_threshold_chars:
         record_count = max(1, _estimate_record_count(payload))
         size_per_record = size / record_count
