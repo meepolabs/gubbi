@@ -20,12 +20,15 @@ from journalctl.storage import knowledge
 from journalctl.storage.constants import SNIPPET_PREVIEW_LEN
 from journalctl.storage.repositories import entries as entry_repo
 from journalctl.storage.repositories import topics as topic_repo
+from journalctl.tools._response_size import _assert_response_ok, _report_oversized
 from journalctl.tools.constants import (
     BRIEFING_KEY_FACTS_COUNT,
     BRIEFING_KEY_FACTS_QUERY,
     BRIEFING_MAX_TOPICS,
     BRIEFING_MAX_WEEK_ENTRIES,
+    DEFAULT_TIMELINE_LIMIT,
     MAX_SEARCH_CONTENT_CHARS,
+    MAX_TIMELINE_ENTRIES,
 )
 from journalctl.tools.errors import validation_error
 
@@ -266,7 +269,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 entry["conversation_id"] = e["conversation_id"]
             clean_entries.append(entry)
 
-        return {
+        briefing_payload = {
             "user_profile": user_profile,
             "user_profile_status": user_profile_status,
             "key_facts": key_facts,
@@ -281,6 +284,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "topic_count": topic_count,
             "stats": stats,
         }
+        err = _assert_response_ok(briefing_payload)
+        if err:
+            await _report_oversized("journal_briefing", err)
+            return err
+        return briefing_payload
 
     @mcp.tool(
         title="Journal Timeline",
@@ -289,34 +297,50 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:read")
-    async def journal_timeline(period: str) -> dict:
-        """Browse what happened during a time period — "what was I doing last week?"
-        or "show me this month."
+    async def journal_timeline(
+        period: str,
+        limit: int = DEFAULT_TIMELINE_LIMIT,
+        offset: int = 0,
+    ) -> dict:
+        """navigation index -- use to find interesting dates, then drill in via
+        journal_read_topic / journal_search for full content.
 
-        Use when the user asks about activity during a day, week, month, or year.
-        Returns entries and conversations in chronological order.
-
-        Do NOT use for keyword search — use journal_search instead.
+        Browse what happened during a time period. Returns only IDs, dates,
+        topics, and short titles (no decrypted body text). Use this to pick
+        which entries/conversations warrant a deeper read.
 
         Args:
             period: Time period. Accepts:
                     'today', 'this-week', 'last-week', 'this-month', 'last-month',
                     'YYYY' (e.g. '2026'), 'YYYY-MM' (e.g. '2026-03'),
                     'YYYY-WNN' (e.g. '2026-W14').
+            limit: Max timeline records to return (default 20, max 50).
+            offset: Records to skip for pagination (default 0).
 
         Returns:
-            period, label (human-readable), date_from, date_to,
-            entries (flat chronological list), count.
+            period, label, date_from, date_to,
+            entries (flat list of lightweight record dicts), count.
         """
         try:
             _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
             date_from, date_to, label = _resolve_period(period, today=_today)
         except ValueError as e:
             return validation_error(str(e))
+        limit = max(1, min(limit, MAX_TIMELINE_ENTRIES))
+        offset = max(0, offset)
         cipher = require_cipher(app_ctx)
         async with user_scoped_connection(app_ctx.pool) as conn:
-            entries = await entry_repo.get_by_date_range(conn, cipher, date_from, date_to)
-        return {
+            entries = await entry_repo.get_by_date_range(
+                conn,
+                cipher,
+                date_from,
+                date_to,
+                limit=limit,
+                ascending=True,
+                offset=offset,
+                title_only=True,
+            )
+        payload = {
             "period": period,
             "label": label,
             "date_from": date_from,
@@ -324,3 +348,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "entries": entries,
             "count": len(entries),
         }
+        err = _assert_response_ok(payload)
+        if err:
+            await _report_oversized("journal_timeline", err)
+            return err
+        return payload
