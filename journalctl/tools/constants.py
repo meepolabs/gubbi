@@ -15,18 +15,22 @@ BRIEFING_KEY_FACTS_QUERY: Final = "user identity preferences habits goals curren
 BRIEFING_KEY_FACTS_COUNT: Final = 7
 
 # Upper-bound cap for journal_read_topic n parameter — prevents loading entire journal into memory
-MAX_READ_ENTRIES: Final = 500
+MAX_READ_ENTRIES: Final = 20
 
 # Default pagination / result limits for tool parameters
 DEFAULT_ENTRIES_LIMIT: Final = 10
 DEFAULT_SEARCH_LIMIT: Final = 10
-DEFAULT_TOPICS_LIMIT: Final = 50
-DEFAULT_CONVERSATIONS_LIMIT: Final = 50
+DEFAULT_TOPICS_LIMIT: Final = 20
+DEFAULT_CONVERSATIONS_LIMIT: Final = 20
+DEFAULT_TIMELINE_LIMIT: Final = 20
 
 # Upper-bound caps for unbounded list/search parameters
-MAX_SEARCH_RESULTS: Final = 100
-MAX_TOPICS_RESULTS: Final = 200
-MAX_CONVERSATIONS_RESULTS: Final = 200
+MAX_SEARCH_RESULTS: Final = 20
+MAX_TOPICS_RESULTS: Final = 20
+MAX_CONVERSATIONS_RESULTS: Final = 20
+MAX_TIMELINE_ENTRIES: Final = 50
+MAX_CONVERSATION_MESSAGES: Final = 100
+DEFAULT_CONVERSATION_MESSAGES_LIMIT: Final = 20
 
 # Search query input guard - truncate before FTS5 or embedding call
 MAX_QUERY_LEN: Final = 2000

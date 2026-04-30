@@ -182,7 +182,7 @@ async def test_conversation_title_summary_are_encrypted(
     assert len(bytes(row["summary_nonce"])) == 12
 
     async with user_scoped_connection(app_pool, user_id=user_id) as conn:
-        meta, _messages = await conv_repo.read_conversation_by_id(conn, cipher, conv_id)
+        meta, _messages, _total = await conv_repo.read_conversation_by_id(conn, cipher, conv_id)
     assert meta.title == title
     assert meta.summary == summary
 

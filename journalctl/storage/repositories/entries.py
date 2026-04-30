@@ -372,11 +372,13 @@ async def reset_indexed_at(conn: asyncpg.Connection) -> None:
 
 async def get_by_date_range(
     conn: asyncpg.Connection,
-    cipher: ContentCipher,
+    cipher: ContentCipher | None,
     date_from: str,
     date_to: str,
     limit: int | None = None,
     ascending: bool = True,
+    offset: int = 0,
+    title_only: bool = False,
 ) -> list[dict]:
     """Get entries and conversations updated within a date range.
 
@@ -386,9 +388,23 @@ async def get_by_date_range(
 
     ascending=True  (default): oldest-first - use for timeline/date-range views.
     ascending=False: newest-first - use with limit for briefing (most-recent N).
+
+    Args:
+        conn: asyncpg connection.
+        cipher: ContentCipher for decryption. May be None when title_only=True.
+        date_from: Start date string (YYYY-MM-DD).
+        date_to: End date string (YYYY-MM-DD).
+        limit: Max rows to return (passed as SQL LIMIT, None = no limit).
+        ascending: Sort direction.
+        offset: Number of rows to skip for pagination.
+        title_only: When True, return only IDs/titles/fields -- skips decryption
+                    entirely. Use for timeline index views.  Briefing uses
+                    title_only=False so it retains full content previews.
     """
     order = "ASC" if ascending else "DESC"
-    limit_clause = f"LIMIT {limit}" if limit is not None else ""
+    limit_clause = f" LIMIT {limit}" if limit is not None else ""
+    offset_clause = f" OFFSET {offset}" if offset > 0 else ""
+
     rows = await conn.fetch(
         f"""
         SELECT
@@ -432,58 +448,118 @@ async def get_by_date_range(
         WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
 
         ORDER BY date {order}, doc_type ASC, doc_id {order}
-        {limit_clause}
+        {limit_clause or ''}{offset_clause}
         """,
         date_cls.fromisoformat(date_from),
         date_cls.fromisoformat(date_to),
     )
 
+    if cipher is None and not title_only:
+        raise RuntimeError("get_by_date_range requires cipher when title_only=False")
+
     results: list[dict] = []
     for r in rows:
-        if r["doc_type"] == "entry":
-            decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
-            if decrypted is None:
-                raise RuntimeError(
-                    f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
+        if title_only:
+            # Minimal metadata -- no decryption at all (or best-effort conv title decode).
+            if r["doc_type"] == "entry":
+                results.append(
+                    {
+                        "entry_id": r["doc_id"],
+                        "conversation_id": None,
+                        "doc_type": "entry",
+                        "topic": r["topic"],
+                        "topic_title": r["topic_title"],
+                        "title": _build_entry_title(r),
+                        "updated": r["date"],
+                        "tags": list(r["tags"] or []),
+                    }
                 )
-            content = decrypted
-            title = content.split("\n", 1)[0][:80]
-        else:
-            conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
-            summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
-            if conv_title is None or summary is None:
-                raise RuntimeError(
-                    "Conversation title/summary decrypted to None; schema invariant violated"
+            else:
+                results.append(
+                    {
+                        "entry_id": None,
+                        "conversation_id": r["conv_id"],
+                        "doc_type": "conversation",
+                        "topic": r["topic"],
+                        "topic_title": r["topic_title"],
+                        "title": _decrypt_conv_title_or_none(cipher, r),
+                        "updated": r["date"],
+                        "tags": list(r["tags"] or []),
+                    }
                 )
-            title = conv_title
-            content = summary
-        if r["doc_type"] == "entry":
-            results.append(
-                {
-                    "entry_id": r["doc_id"],
-                    "conversation_id": None,
-                    "doc_type": "entry",
-                    "topic": r["topic"],
-                    "title": title if title else r["topic_title"],
-                    "description": content[:SNIPPET_PREVIEW_LEN],
-                    "tags": list(r["tags"] or []),
-                    "updated": r["date"],
-                }
-            )
         else:
-            results.append(
-                {
-                    "entry_id": None,
-                    "conversation_id": r["conv_id"],
-                    "doc_type": "conversation",
-                    "topic": r["topic"],
-                    "title": title,
-                    "description": content[:SNIPPET_PREVIEW_LEN],
-                    "tags": list(r["tags"] or []),
-                    "updated": r["date"],
-                }
-            )
+            if cipher is None:
+                raise RuntimeError("get_by_date_range: cipher required when title_only=False")
+            # Full content path (used by journal_briefing).
+            if r["doc_type"] == "entry":
+                decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+                if decrypted is None:
+                    raise RuntimeError(
+                        f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
+                    )
+                content = decrypted
+                title = content.split("\n", 1)[0][:80]
+            else:
+                conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
+                summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
+                if conv_title is None or summary is None:
+                    raise RuntimeError(
+                        "Conversation title/summary decrypted to None; schema invariant violated"
+                    )
+                title = conv_title
+                content = summary
+            if r["doc_type"] == "entry":
+                results.append(
+                    {
+                        "entry_id": r["doc_id"],
+                        "conversation_id": None,
+                        "doc_type": "entry",
+                        "topic": r["topic"],
+                        "title": title if title else r["topic_title"],
+                        "description": content[:SNIPPET_PREVIEW_LEN],
+                        "tags": list(r["tags"] or []),
+                        "updated": r["date"],
+                    }
+                )
+            else:
+                results.append(
+                    {
+                        "entry_id": None,
+                        "conversation_id": r["conv_id"],
+                        "doc_type": "conversation",
+                        "topic": r["topic"],
+                        "title": title,
+                        "description": content[:SNIPPET_PREVIEW_LEN],
+                        "tags": list(r["tags"] or []),
+                        "updated": r["date"],
+                    }
+                )
     return results
+
+
+def _build_entry_title(row: asyncpg.Record) -> str:
+    """Short label for a timeline entry row (no decryption available).
+
+    Combines topic title + date so same-topic entries on different days
+    are distinguishable in the navigation index.
+    """
+    topic_title = str(row.get("topic_title") or "")
+    date_val = row.get("date")
+    date_str = str(date_val) if date_val is not None else ""
+    if topic_title and date_str:
+        return f"{topic_title} ({date_str})"
+    return topic_title or date_str
+
+
+def _decrypt_conv_title_or_none(cipher: ContentCipher | None, row: asyncpg.Record) -> str:
+    """Return decrypted conversation title or an empty string if unavailable."""
+    if cipher is None:
+        return str(row.get("topic_title") or "")
+    try:
+        title = _decrypt_content_field(cipher, row, "title_encrypted", "title_nonce")
+        return title or ""
+    except DecryptionError:
+        return str(row.get("topic_title") or "")
 
 
 async def get_stats(conn: asyncpg.Connection) -> dict[str, int]:
