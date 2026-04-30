@@ -239,7 +239,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "limit": limit,
             "offset": offset,
         }
-        err = _assert_response_ok(result)
+        err = _assert_response_ok(result, tool_name="journal_read_topic")
         if err:
             await _report_oversized("journal_read_topic", err)
             return err

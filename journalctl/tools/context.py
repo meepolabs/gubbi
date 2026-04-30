@@ -284,7 +284,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "topic_count": topic_count,
             "stats": stats,
         }
-        err = _assert_response_ok(briefing_payload)
+        err = _assert_response_ok(briefing_payload, tool_name="journal_briefing")
         if err:
             await _report_oversized("journal_briefing", err)
             return err
@@ -348,7 +348,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "entries": entries,
             "count": len(entries),
         }
-        err = _assert_response_ok(payload)
+        err = _assert_response_ok(payload, tool_name="journal_timeline")
         if err:
             await _report_oversized("journal_timeline", err)
             return err

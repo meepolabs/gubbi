@@ -258,7 +258,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "total": len(payload),
             "query": query,
         }
-        err = _assert_response_ok(search_result)
+        err = _assert_response_ok(search_result, tool_name="journal_search")
         if err:
             await _report_oversized("journal_search", err)
             return err
