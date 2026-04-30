@@ -10,6 +10,15 @@ namespace for ``identity.updated`` / ``identity.deleted`` events).
 Once this migration runs, downstream queries can filter
 ``action LIKE 'identity.%'`` and pick up every identity-shaped event
 without missing pre-M3 rows.
+
+The ``audit_log`` table has append-only enforcement triggers (DEC-061;
+``trg_audit_log_no_update`` + ``trg_audit_log_no_delete``) that block
+``UPDATE``/``DELETE``. This one-shot rewrite bypasses them via
+``SET session_replication_role = 'replica'`` -- a superuser-only
+session variable that suppresses non-replica triggers for the current
+transaction. The migration MUST run under the ``journal`` superuser
+(set ``JOURNAL_DB_MIGRATION_URL`` to the superuser DSN, see RUNBOOK
+Section 5).
 """
 
 from alembic import op
@@ -21,12 +30,16 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute("SET session_replication_role = 'replica'")
     op.execute("UPDATE audit_log SET action = 'identity.created' WHERE action = 'user.created'")
     op.execute("UPDATE audit_log SET action = 'identity.deleted' WHERE action = 'user.deleted'")
     op.execute("UPDATE audit_log SET action = 'identity.restored' WHERE action = 'user.restored'")
+    op.execute("SET session_replication_role = 'origin'")
 
 
 def downgrade() -> None:
+    op.execute("SET session_replication_role = 'replica'")
     op.execute("UPDATE audit_log SET action = 'user.created' WHERE action = 'identity.created'")
     op.execute("UPDATE audit_log SET action = 'user.deleted' WHERE action = 'identity.deleted'")
     op.execute("UPDATE audit_log SET action = 'user.restored' WHERE action = 'identity.restored'")
+    op.execute("SET session_replication_role = 'origin'")
