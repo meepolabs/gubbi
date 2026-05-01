@@ -1,4 +1,4 @@
-"""Tests for db_context.user_scoped_connection GUC wiring (TASK-02.06).
+"""Tests for gubbi_common.db.user_scoped user_scoped_connection GUC wiring (TASK-02.06).
 
 These tests verify the transaction-scoped contract of `user_scoped_connection`:
 ``app.current_user_id`` and ``hnsw.ef_search`` are set inside the yielded
@@ -16,9 +16,9 @@ from collections.abc import Iterator
 
 import asyncpg
 import pytest
+from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 
 from journalctl.core.auth_context import current_user_id
-from journalctl.core.db_context import MissingUserIdError, user_scoped_connection
 
 # The ``pool`` fixture is session-scoped. pytest-asyncio 0.25+ requires every
 # test using session-scoped async fixtures to explicitly pin the loop scope,
@@ -89,14 +89,16 @@ async def test_cleared_after_rollback(pool: asyncpg.Pool) -> None:
         assert await conn.fetchval("SELECT current_setting('app.current_user_id', true)") == ""
 
 
-async def test_uses_contextvar_when_user_id_omitted(
+async def test_explicit_user_id_from_contextvar(
     pool: asyncpg.Pool,
     reset_user_ctxvar: None,
 ) -> None:
-    """When user_id is None, the helper reads from the ContextVar."""
+    """Resolve user_id from ContextVar first, then pass it explicitly."""
     user_b = uuid.uuid4()
     current_user_id.set(user_b)
-    async with user_scoped_connection(pool) as conn:
+    user_id = current_user_id.get()
+    assert user_id is not None
+    async with user_scoped_connection(pool, user_id=user_id) as conn:
         bound_user = await conn.fetchval("SELECT current_setting('app.current_user_id', true)")
         assert bound_user == str(user_b)
 
@@ -104,7 +106,7 @@ async def test_uses_contextvar_when_user_id_omitted(
 async def test_raises_when_no_user(pool: asyncpg.Pool, reset_user_ctxvar: None) -> None:
     """MissingUserIdError when neither user_id arg nor ContextVar is set."""
     with pytest.raises(MissingUserIdError):
-        async with user_scoped_connection(pool):
+        async with user_scoped_connection(pool, user_id=None):  # type: ignore[arg-type]
             pytest.fail("should not reach body")
 
 

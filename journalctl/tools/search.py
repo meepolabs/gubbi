@@ -6,12 +6,13 @@ from datetime import date as date_cls
 from typing import Any
 
 import asyncpg
+from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.auth_context import current_user_id
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.scope import require_scope
 from journalctl.core.validation import validate_date, validate_topic
 from journalctl.models.search import SearchResult
@@ -119,9 +120,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         df = date_cls.fromisoformat(date_from) if date_from else None
         dt = date_cls.fromisoformat(date_to) if date_to else None
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
 
-        async with user_scoped_connection(app_ctx.pool) as conn:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             fts_results = await search_repo.fts_search(
                 conn, query, topic_prefix, date_from, date_to, limit
             )

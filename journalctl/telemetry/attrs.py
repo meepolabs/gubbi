@@ -39,7 +39,6 @@ class SpanNames:
 
     MCP_TOOL_CALL: Final[str] = "mcp.tool_call"
     MCP_TOOL_RESPONSE_SIZE_CHECK: Final[str] = "mcp.tool_response_size_check"
-    DB_QUERY_USER_SCOPED: Final[str] = "db.query.user_scoped"
     EMBEDDING_ENCODE: Final[str] = "embedding.encode"
     CIPHER_ENCRYPT: Final[str] = "cipher.encrypt"
     CIPHER_DECRYPT: Final[str] = "cipher.decrypt"
@@ -99,13 +98,6 @@ JOURNALCTL_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "version",
             "field_kind",
             "bytes_processed",
-            "latency_ms",
-        }
-    ),
-    SpanNames.DB_QUERY_USER_SCOPED: frozenset(
-        {
-            "query_kind",
-            "user_id",
             "latency_ms",
         }
     ),

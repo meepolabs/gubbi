@@ -2,11 +2,12 @@
 
 from typing import Any
 
+from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.auth_context import current_user_id
 from journalctl.core.context import AppContext
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.scope import require_scope
 from journalctl.core.validation import (
     sanitize_freetext,
@@ -57,7 +58,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
-        async with user_scoped_connection(app_ctx.pool) as conn:
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             page, total = await topic_repo.list_all(
                 conn, topic_prefix=topic_prefix, limit=limit, offset=offset
             )
@@ -115,8 +119,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             return validation_error("title cannot be empty after sanitization")
         if description:
             description = sanitize_freetext(description, max_len=500)
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 topic_id = await topic_repo.create(
                     conn,
                     topic=topic,

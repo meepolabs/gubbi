@@ -4,13 +4,15 @@ journal_delete_entry."""
 import asyncio
 import logging
 from typing import Any, Literal
+from uuid import UUID
 
+from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.auth_context import current_user_id
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.scope import require_scope
 from journalctl.core.validation import (
     is_future_date,
@@ -34,6 +36,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register entry tools on the MCP server."""
 
     async def _embed_entry(
+        user_id: UUID,
         entry_id: int,
         content: str,
     ) -> list[float] | None:
@@ -43,7 +46,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         """
         try:
             embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
             return embedding
         except Exception as e:
@@ -130,10 +133,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 return invalid_date(date)
 
         resolved_date = date or local_today(app_ctx.settings.timezone)
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
 
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 entry_id = await entry_repo.append(
                     conn,
                     cipher,
@@ -147,8 +153,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             return not_found("Topic", topic)
 
         # Embed after the transaction commits (embedding is best-effort)
-        if await _embed_entry(entry_id, content) is not None:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+        if await _embed_entry(user_id, entry_id, content) is not None:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 await entry_repo.mark_indexed(conn, entry_id)
 
         result: dict[str, Any] = {
@@ -217,9 +223,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 return invalid_date(date_to)
         limit = max(1, min(limit, MAX_READ_ENTRIES))
         offset = max(0, offset)
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 meta, entries, total = await entry_repo.read(
                     conn,
                     cipher,
@@ -307,13 +316,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             tags = [s for t in tags if (s := sanitize_label(t))]
             tags_dropped = original_tag_count - len(tags)
 
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
 
         # Read committed text inside the same transaction — avoids a second round-trip.
         # Within a transaction, reads see writes from the same transaction (savepoint).
         row_data: tuple[str, str | None] | None = None
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 await entry_repo.update(
                     conn,
                     cipher,
@@ -336,7 +348,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 embedding = await asyncio.to_thread(
                     app_ctx.embedding_service.encode, embed_text.strip()
                 )
-                async with user_scoped_connection(app_ctx.pool) as conn:
+                async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                     await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
                     await entry_repo.mark_indexed(conn, entry_id)
             except Exception as e:
@@ -382,8 +394,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Returns:
             Confirmation with deleted entry_id.
         """
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 # delete_entry soft-deletes the entry and removes its embedding
                 await entry_repo.delete(conn, entry_id)
         except EntryNotFoundError:
