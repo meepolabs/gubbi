@@ -52,6 +52,8 @@ _FLAT_TO_NESTED_ENV: dict[str, str] = {
     "JOURNAL_HOST": "JOURNAL_SERVER__HOST",
     "JOURNAL_PORT": "JOURNAL_SERVER__PORT",
     "JOURNAL_TRANSPORT": "JOURNAL_SERVER__TRANSPORT",
+    "JOURNAL_LLM_API_KEY": "JOURNAL_LLM__API_KEY",
+    "JOURNAL_LLM_MODEL": "JOURNAL_LLM__MODEL",
 }
 
 
@@ -112,6 +114,17 @@ class ServerConfig(BaseModel):
     transport: str = "streamable-http"  # or "stdio"
 
 
+class LLMConfig(BaseModel):
+    """Optional LLM configuration for extraction services.
+
+    All fields are optional (empty-string defaults) so self-hosters who
+    do not use extraction can ignore them entirely.
+    """
+
+    api_key: str = ""
+    model: str = ""
+
+
 class Settings(BaseSettings):
     """Application settings, loaded from environment variables.
 
@@ -144,6 +157,7 @@ class Settings(BaseSettings):
     db: DbConfig
     auth: AuthConfig = AuthConfig()
     server: ServerConfig = ServerConfig()
+    llm: LLMConfig = LLMConfig()
 
     # Paths
     data_dir: Path = Path("./journal")
