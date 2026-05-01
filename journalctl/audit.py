@@ -26,6 +26,11 @@ Usage pattern::
 Caller owns transaction lifecycle. record_audit() executes a single INSERT
 inside whatever transaction (or autocommit context) the caller has open.
 
+The ``Action`` enum and the underlying SQL template now live in
+:mod:`gubbi_common.audit` (the cross-repo single source of truth);
+this module wraps the SQL with the journalctl-specific OTel span and
+re-exports ``Action`` so existing imports keep working.
+
 Security contract:
 - Do NOT log secret values. Log which secret rotated, not its content.
 - Do NOT log PII. Log entity IDs, not email addresses or journal content.
@@ -35,69 +40,17 @@ Security contract:
 
 from __future__ import annotations
 
-import ipaddress
-import json
 import time
-from typing import Any, Final
+from typing import Any
 
 import asyncpg
+from gubbi_common.audit.actions import Action
+from gubbi_common.audit.sql import record_audit_async
 from opentelemetry import trace
 
 from journalctl.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 
 __all__ = ["Action", "record_audit"]
-
-# ---------------------------------------------------------------------------
-# Action constants
-# ---------------------------------------------------------------------------
-# These mirror the "events captured at minimum" list from TASK-02.20.
-# Callers import from here to get IDE autocomplete and avoid raw string typos.
-
-
-class Action:
-    """Namespace for audit action string constants."""
-
-    # Identity lifecycle events.  Values use the ``identity.*`` namespace so
-    # downstream queries can filter ``action LIKE 'identity.%'`` and pick up
-    # every identity-shaped event (created/updated/deleted/restored).
-    # Migration 0015 rewrites legacy ``user.*`` rows from M2 to ``identity.*``.
-    IDENTITY_CREATED: Final = "identity.created"
-    IDENTITY_DELETED: Final = "identity.deleted"
-    IDENTITY_RESTORED: Final = "identity.restored"
-
-    TENANT_PROVISIONED: Final = "tenant.provisioned"
-    TENANT_SUSPENDED: Final = "tenant.suspended"
-    TENANT_REACTIVATED: Final = "tenant.reactivated"
-
-    # auth events
-    LOGIN_FAILED: Final = "login_failed"
-
-    SUBSCRIPTION_CREATED: Final = "subscription.created"
-    SUBSCRIPTION_CANCELED: Final = "subscription.canceled"
-    SUBSCRIPTION_OVERRIDE: Final = "subscription.override"
-
-    SECRET_ROTATED: Final = "secret.rotated"  # noqa: S105 -- action label, not a password
-    ADMIN_QUERY_EXECUTED: Final = "admin.query_executed"
-    ENCRYPTION_KEY_ROTATED: Final = "encryption.key_rotated"
-
-
-# Values that the CHECK constraint on actor_type accepts.
-# Must stay in sync with migration 0012's CHECK definition.
-_VALID_ACTOR_TYPES: frozenset[str] = frozenset(
-    {
-        "user",
-        "admin",
-        "system",
-        "hydra_subject",
-    }
-)
-
-_INSERT_SQL = """
-    INSERT INTO audit_log
-        (actor_type, actor_id, action, target_type, target_id,
-         reason, metadata, ip_address, user_agent)
-    VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8::inet, $9)
-"""
 
 
 async def record_audit(
@@ -112,39 +65,13 @@ async def record_audit(
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> None:
-    """Insert one immutable row into audit_log.
+    """Insert one immutable row into audit_log, wrapped in an OTel span.
 
-    Parameters
-    ----------
-    conn:
-        Active asyncpg connection. Caller owns transaction lifecycle.
-    actor_type:
-        Must be one of: 'user', 'admin', 'system', 'hydra_subject'.
-        Raises ValueError on any other value.
-    actor_id:
-        Opaque identifier for the actor (UUID string, 'system:<worker-name>',
-        'script:<name>', etc.).
-    action:
-        Event string. Use Action.* constants for the 13 documented events.
-        Custom strings are accepted for extensibility.
-    target_type:
-        Optional entity kind ('user', 'tenant', 'subscription', 'secret', ...).
-    target_id:
-        Optional entity identifier.
-    reason:
-        Optional human-readable explanation.
-    metadata:
-        Optional dict of action-specific context. Must be JSON-serializable.
-        Defaults to empty dict. Never include secret values or PII.
-    ip_address:
-        Optional originating IP. Passed as TEXT; PostgreSQL casts to INET.
-    user_agent:
-        Optional HTTP User-Agent string.
-
-    Raises
-    ------
-    ValueError
-        If actor_type is not one of the four accepted values.
+    Thin instrumentation layer over
+    :func:`gubbi_common.audit.sql.record_audit_async`. See that function
+    for parameter documentation; the only difference is that this
+    wrapper records an ``audit.write`` OTel span with success / latency
+    attributes.
     """
     span_name = SpanNames.AUDIT_WRITE
     start_ns = time.monotonic_ns()
@@ -160,39 +87,19 @@ async def record_audit(
     with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as span:
         safe_set_attributes(span_name, span, attrs)
 
-        # Validation — runs before the DB INSERT and raises on failure.
-        # The span records success=False when validation fails.
         audit_success = False
         try:
-            if actor_type not in _VALID_ACTOR_TYPES:
-                raise ValueError(
-                    f"Invalid actor_type {actor_type!r}. "
-                    f"Must be one of: {sorted(_VALID_ACTOR_TYPES)}"
-                )
-
-            if ip_address:
-                try:
-                    ipaddress.ip_address(ip_address)
-                except ValueError:
-                    raise ValueError(
-                        f"audit.record_audit: invalid ip_address {ip_address!r}; "
-                        "must be a valid IPv4 or IPv6 address"
-                    ) from None
-
-            resolved_metadata: dict[str, Any] = metadata if metadata is not None else {}
-            metadata_json = json.dumps(resolved_metadata)
-
-            await conn.execute(
-                _INSERT_SQL,
-                actor_type,
-                actor_id,
-                action,
-                target_type,
-                target_id,
-                reason,
-                metadata_json,
-                ip_address,
-                user_agent,
+            await record_audit_async(
+                conn,
+                actor_type=actor_type,
+                actor_id=actor_id,
+                action=action,
+                target_type=target_type,
+                target_id=target_id,
+                reason=reason,
+                metadata=metadata,
+                ip_address=ip_address,
+                user_agent=user_agent,
             )
             audit_success = True
         except Exception as exc:

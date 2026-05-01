@@ -28,6 +28,7 @@ from uuid import UUID
 
 import asyncpg
 import structlog
+from gubbi_common.auth.bearer_challenge import build_bearer_challenge as _build_bearer_challenge
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -43,25 +44,9 @@ from journalctl.core.auth_context import current_token_scopes, current_user_id
 from journalctl.core.scope import check_scope
 from journalctl.oauth.constants import MAX_BEARER_TOKEN_LEN
 
-
-def _build_bearer_challenge(
-    error: str,
-    resource_metadata_url: str | None,
-    *,
-    required_scope: str | None = None,
-) -> str:
-    """Build an RFC 6750 WWW-Authenticate Bearer challenge.
-
-    Per MCP spec 2025-11-25, a protected MCP resource must include a
-    ``resource_metadata`` parameter pointing to its OAuth protected-resource
-    metadata document so clients can discover the authorization server.
-    """
-    parts = [f'error="{error}"']
-    if required_scope is not None:
-        parts.append(f'required_scope="{required_scope}"')
-    if resource_metadata_url is not None:
-        parts.append(f'resource_metadata="{resource_metadata_url}"')
-    return "Bearer " + ", ".join(parts)
+# RFC 6750 / RFC 9728 Bearer challenges are now built via
+# gubbi_common.auth.bearer_challenge.build_bearer_challenge; the local
+# alias above keeps existing call sites unchanged.
 
 
 def _unauthorized(detail: str, resource_metadata_url: str | None = None) -> JSONResponse:

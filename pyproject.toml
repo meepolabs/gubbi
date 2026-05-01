@@ -49,6 +49,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0"
 opentelemetry-instrumentation-redis = ">=0.50b0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27.0"
+gubbi-common = { git = "ssh://git@github.com/meepolabs/gubbi-common.git", tag = "v0.1.1" }
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
