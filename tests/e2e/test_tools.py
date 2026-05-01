@@ -216,6 +216,40 @@ class TestConversationFlow:
         read = await tools["journal_read_conversation"](conversation_id=conv_id)
         assert read["metadata"]["message_count"] == 4
 
+    async def test_resave_same_count_different_content(self, tools: dict) -> None:
+        """Regression: resaving same topic+title with same message count but
+        different content must reflect the new messages, not stale ones."""
+        await tools["journal_create_topic"](topic="test/stale-resave", title="Stale Resave Test")
+        msgs_v1 = [
+            {"role": "user", "content": "V1 question"},
+            {"role": "assistant", "content": "V1 answer"},
+        ]
+        msgs_v2 = [
+            {"role": "user", "content": "V2 edited question"},
+            {"role": "assistant", "content": "V2 edited answer"},
+        ]
+
+        r1 = await tools["journal_save_conversation"](
+            "test/stale-resave", "Same Title", msgs_v1, summary="V1 summary."
+        )
+        assert r1["status"] == "saved"
+
+        r2 = await tools["journal_save_conversation"](
+            "test/stale-resave", "Same Title", msgs_v2, summary="V2 summary."
+        )
+        assert r2["status"] == "updated"
+        conv_id = r2["conversation_id"]
+
+        read = await tools["journal_read_conversation"](conversation_id=conv_id)
+        content = read["content"]
+
+        # Must contain V2 content
+        assert "V2 edited question" in content
+        assert "V2 edited answer" in content
+        # Must NOT contain stale V1 content
+        assert "V1 question" not in content
+        assert "V1 answer" not in content
+
     async def test_list_truncates_long_summary(self, tools: dict) -> None:
         """journal_list_conversations truncates summaries exceeding LIST_SUMMARY_PREVIEW_CHARS."""
         long_summary = "Long summary. " * 100  # ~1500 chars, well over LIST_SUMMARY_PREVIEW_CHARS
