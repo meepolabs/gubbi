@@ -10,6 +10,7 @@ from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import get_settings
 from journalctl.core.context import AppContext
+from journalctl.tools.constants import LIST_SUMMARY_PREVIEW_CHARS
 from journalctl.tools.registry import register_tools
 
 
@@ -214,6 +215,41 @@ class TestConversationFlow:
         conv_id = r2["conversation_id"]
         read = await tools["journal_read_conversation"](conversation_id=conv_id)
         assert read["metadata"]["message_count"] == 4
+
+    async def test_list_truncates_long_summary(self, tools: dict) -> None:
+        """journal_list_conversations truncates summaries exceeding LIST_SUMMARY_PREVIEW_CHARS."""
+        long_summary = "Long summary. " * 100  # ~1500 chars, well over LIST_SUMMARY_PREVIEW_CHARS
+        assert len(long_summary) > LIST_SUMMARY_PREVIEW_CHARS
+        await tools["journal_create_topic"](topic="test/truncation", title="Truncation Test")
+        result = await tools["journal_save_conversation"](
+            topic="test/truncation",
+            title="Long Chat",
+            messages=[{"role": "user", "content": "Hello"}, {"role": "assistant", "content": "Hi"}],
+            summary=long_summary,
+        )
+        assert result["status"] == "saved"
+
+        listed = await tools["journal_list_conversations"](topic_prefix="test/truncation")
+        assert listed["total"] >= 1
+        conv = listed["conversations"][0]
+        assert len(conv["summary"]) == LIST_SUMMARY_PREVIEW_CHARS
+        assert conv["summary_truncated"] is True
+
+    async def test_list_short_summary_not_truncated(self, tools: dict) -> None:
+        """Short summaries are returned as-is with summary_truncated=False."""
+        await tools["journal_create_topic"](topic="test/short-summary", title="Short Summary Test")
+        short_summary = "Brief."
+        await tools["journal_save_conversation"](
+            topic="test/short-summary",
+            title="Short Chat",
+            messages=[{"role": "user", "content": "Hi"}, {"role": "assistant", "content": "Hey"}],
+            summary=short_summary,
+        )
+        listed = await tools["journal_list_conversations"](topic_prefix="test/short-summary")
+        assert listed["total"] >= 1
+        conv = listed["conversations"][0]
+        assert conv["summary"] == short_summary
+        assert conv["summary_truncated"] is False
 
 
 class TestTopicManagement:

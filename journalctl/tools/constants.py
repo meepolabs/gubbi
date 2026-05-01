@@ -46,3 +46,6 @@ REINDEX_BATCH_SIZE: Final = 100
 
 # Maximum messages accepted per journal_save_conversation call
 MAX_MESSAGES_PER_CONVERSATION: Final = 1000
+
+# Truncation length for conversation summaries in list view
+LIST_SUMMARY_PREVIEW_CHARS: Final = 400
