@@ -214,15 +214,27 @@ def test_correlation_id_extracted_from_header() -> None:
 def test_safe_set_attributes_unknown_span_name(
     in_memory_tracer: tuple[Any, InMemoryExporter],
 ) -> None:
-    """Unknown span names should not allow any attributes through."""
+    """Unknown span names: banned keys still dropped, other keys pass through.
+
+    Behaviour after the gubbi_common.telemetry.allowlist migration: unknown
+    span names log a warning and apply the global deny-list only. Strict
+    allowlist enforcement is reserved for span names listed in
+    SPAN_ALLOWLIST. This matches the historical cloud-api behaviour and
+    lets new spans roll out without a release of the shared package.
+    """
     tracer, exporter = in_memory_tracer
 
     with tracer.start_as_current_span("unknown.span") as span:
-        safe_set_attributes("unknown.span", span, {"some_key": "value"})
+        safe_set_attributes(
+            "unknown.span",
+            span,
+            {"some_key": "value", "content": "should-be-banned"},
+        )
 
     assert len(exporter.spans) == 1
     attrs = dict(exporter.spans[0].attributes) if exporter.spans[0].attributes else {}
-    assert "some_key" not in attrs
+    assert attrs.get("some_key") == "value"
+    assert "content" not in attrs
 
 
 # ---------------------------------------------------------------------------
