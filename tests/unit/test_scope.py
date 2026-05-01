@@ -22,6 +22,9 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import httpx
+import pytest
+from mcp.server.fastmcp import FastMCP
+from mcp.types import ListToolsRequest, ListToolsResult, ServerResult
 
 from journalctl.auth.hydra import HydraIntrospector, TokenClaims
 from journalctl.core.auth_context import current_token_scopes
@@ -38,6 +41,7 @@ from journalctl.tools.registry import (
     ALL_TOOLS,
     READ_TOOLS,
     WRITE_TOOLS,
+    _wire_scope_filter,
     filter_tools_by_scope,
 )
 
@@ -727,3 +731,88 @@ class TestRenderScopesHtml:
         out = _render_scopes_html("journal email")
         # journal item should appear before email item
         assert out.index("journal") < out.index("email")
+
+
+# ---------------------------------------------------------------------------
+# _wire_scope_filter integration with FastMCP
+# ---------------------------------------------------------------------------
+
+
+class TestScopeFilterWired:
+    """_wire_scope_filter restricts tools/list output by token scopes.
+
+    Constructs a FastMCP instance, registers dummy tools, wires the scope
+    filter, then exercises the lowlevel handler with various
+    current_token_scopes values.
+    """
+
+    @pytest.fixture
+    def mcp(self) -> FastMCP:
+        return FastMCP("test-filter")
+
+    @pytest.fixture
+    def wired_mcp(self, mcp: FastMCP) -> FastMCP:
+        """FastMCP with dummy tools + scope filter wired."""
+        _register_dummy_tools(mcp)
+        _wire_scope_filter(mcp)
+        return mcp
+
+    async def _list_tool_names(self, mcp: FastMCP) -> set[str]:
+        """Call the lowlevel tools/list handler and return tool names."""
+        handler = mcp._mcp_server.request_handlers[ListToolsRequest]
+        server_result = await handler(None)
+        assert isinstance(server_result, ServerResult)
+        list_result = server_result.root
+        assert isinstance(list_result, ListToolsResult)
+        return {t.name for t in list_result.tools}
+
+    # -- empty scopes -> zero tools --
+
+    async def test_empty_scopes_returns_no_tools(self, wired_mcp: FastMCP) -> None:
+        token_reset = current_token_scopes.set(frozenset())
+        try:
+            names = await self._list_tool_names(wired_mcp)
+            assert names == set()
+        finally:
+            current_token_scopes.reset(token_reset)
+
+    # -- journal:read -> only read tools --
+
+    async def test_read_scope_returns_only_read_tools(self, wired_mcp: FastMCP) -> None:
+        token_reset = current_token_scopes.set(frozenset({"journal:read"}))
+        try:
+            names = await self._list_tool_names(wired_mcp)
+            assert names == READ_TOOLS
+        finally:
+            current_token_scopes.reset(token_reset)
+
+    # -- journal:write -> only write tools --
+
+    async def test_write_scope_returns_only_write_tools(self, wired_mcp: FastMCP) -> None:
+        token_reset = current_token_scopes.set(frozenset({"journal:write"}))
+        try:
+            names = await self._list_tool_names(wired_mcp)
+            assert names == WRITE_TOOLS
+        finally:
+            current_token_scopes.reset(token_reset)
+
+    # -- journal (legacy) -> all tools --
+
+    async def test_legacy_journal_scope_returns_all_tools(self, wired_mcp: FastMCP) -> None:
+        token_reset = current_token_scopes.set(frozenset({"journal"}))
+        try:
+            names = await self._list_tool_names(wired_mcp)
+            assert names == ALL_TOOLS
+        finally:
+            current_token_scopes.reset(token_reset)
+
+
+def _register_dummy_tools(mcp: FastMCP) -> None:
+    """Register one dummy async function per tool name so the tool_manager
+    has entries for _wire_scope_filter to filter against."""
+
+    async def _dummy(**kwargs: Any) -> dict[str, Any]:
+        return {}
+
+    for name in ALL_TOOLS:
+        mcp._tool_manager.add_tool(_dummy, name=name, description=f"Dummy {name}")
