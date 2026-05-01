@@ -1,30 +1,28 @@
-"""Span name constants + re-export of the unified allowlist (DEC-070 / TASK-03.19).
+"""Span name constants + journalctl-specific span attribute allowlist.
 
-The privacy allowlist (BANNED_KEYS, SPAN_ALLOWLIST, safe_set_attributes)
-now lives in :mod:`gubbi_common.telemetry.allowlist`. This module
-keeps the journalctl-specific span and metric name constants and
-re-exports the shared symbols so existing imports such as ::
+The global SPAN_ALLOWLIST was removed in gubbi-common v0.2.0;
+``safe_set_attributes`` now requires an ``allowlist`` kwarg. This module
+maintains the journalctl-specific allowlist and a local wrapper so that
+existing call sites do not need to change.
 
-    from journalctl.telemetry.attrs import safe_set_attributes, SpanNames
-
-continue to work without touching every call site.
-
-Substring matching is now applied uniformly to ``BANNED_KEYS``, so
-attribute keys such as ``content_hash``, ``email_hash`` and
-``client_user_agent_hash`` are dropped even when not enumerated. This
-matches the historical journalctl behaviour and is the conservative
-interpretation of DEC-070.
+``BANNED_KEYS`` is re-exported from gubbi-common for convenience.
 """
 
 from __future__ import annotations
 
-from typing import Final
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any, Final
 
 from gubbi_common.telemetry.allowlist import (
     BANNED_KEYS,
-    SPAN_ALLOWLIST,
-    safe_set_attributes,
+    _is_banned,
 )
+from gubbi_common.telemetry.allowlist import (
+    safe_set_attributes as _gc_safe_set_attributes,
+)
+
+if TYPE_CHECKING:
+    from opentelemetry.trace import Span
 
 # ---------------------------------------------------------------------------
 # Shared constants
@@ -35,9 +33,7 @@ _NS_PER_MS: Final[int] = 1_000_000
 
 # ---------------------------------------------------------------------------
 # Span name constants -- single source of truth for journalctl critical-path
-# spans. Kept here (not in gubbi-common) because they are journalctl-specific
-# string constants used by callers; the shared module only owns the
-# allowlist tables keyed by span-name strings.
+# spans.
 # ---------------------------------------------------------------------------
 class SpanNames:
     """Canonical span names for journalctl critical-path spans."""
@@ -64,10 +60,84 @@ class MetricNames:
     AUDIT_PERSISTENCE_FAILURE: Final[str] = "audit.persistence_failure"
 
 
+# ---------------------------------------------------------------------------
+# Journalctl-specific span attribute allowlist
+# ---------------------------------------------------------------------------
+# Built from the actual safe_set_attributes call sites in this repo.
+# Every span name that journalctl uses gets a frozenset of the attribute
+# keys actually passed to it.  Keys not listed here are dropped for
+# known span names.
+# ---------------------------------------------------------------------------
+JOURNALCTL_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
+    SpanNames.MCP_TOOL_CALL: frozenset(
+        {
+            "tool.name",
+            "user_id",
+            "tool.scope_required",
+            "result",
+            "result.size_chars",
+            "latency_ms",
+            "correlation_id",
+        }
+    ),
+    SpanNames.MCP_TOOL_RESPONSE_SIZE_CHECK: frozenset(
+        {
+            "tool.name",
+            "size_chars",
+            "error_threshold_hit",
+        }
+    ),
+    SpanNames.CIPHER_ENCRYPT: frozenset(
+        {
+            "version",
+            "field_kind",
+            "bytes_processed",
+            "latency_ms",
+        }
+    ),
+    SpanNames.CIPHER_DECRYPT: frozenset(
+        {
+            "version",
+            "field_kind",
+            "bytes_processed",
+            "latency_ms",
+        }
+    ),
+    SpanNames.DB_QUERY_USER_SCOPED: frozenset(
+        {
+            "query_kind",
+            "user_id",
+            "latency_ms",
+        }
+    ),
+    SpanNames.AUDIT_WRITE: frozenset(
+        {
+            "event_type",
+            "target_id",
+            "actor_type",
+            "success",
+            "latency_ms",
+        }
+    ),
+    SpanNames.EMBEDDING_ENCODE: frozenset(
+        {
+            "text_hash",
+            "text_len",
+            "latency_ms",
+        }
+    ),
+    SpanNames.HTTP_REQUEST: frozenset(
+        {
+            "correlation_id",
+        }
+    ),
+}
+
+
 # Per-span attribute schemas referenced directly by tests and by callers
 # that pre-validate keys before passing them to safe_set_attributes.
-# These remain authoritative for the constants they name, but are
-# narrower than the unified SPAN_ALLOWLIST (which adds correlation_id).
+# These are a subset of the JOURNALCTL_SPAN_ALLOWLIST entries (they omit
+# correlation_id which is added by the allowlist).
 MCP_TOOL_CALL_ATTRS: Final[frozenset[str]] = frozenset(
     {
         "tool.name",
@@ -80,13 +150,38 @@ MCP_TOOL_CALL_ATTRS: Final[frozenset[str]] = frozenset(
 )
 
 
+def safe_set_attributes(
+    span_name: str,
+    span: Span,
+    attrs: Mapping[str, Any],
+) -> None:
+    """Set span attributes filtered through the journalctl allowlist.
+
+    Known span names use the strict per-span allowlist (unknown attributes
+    are dropped). Unknown span names apply banned-key filtering only, so
+    new spans can be instrumented without an allowlist update.
+    """
+    allowed = JOURNALCTL_SPAN_ALLOWLIST.get(span_name)
+    if allowed is not None:
+        _gc_safe_set_attributes(span_name, span, attrs, allowlist=JOURNALCTL_SPAN_ALLOWLIST)
+        return
+
+    # Unknown span name: drop banned keys, keep everything else.
+    filtered: dict[str, Any] = {}
+    for key, value in attrs.items():
+        if _is_banned(key):
+            continue
+        filtered[key] = value
+    span.set_attributes(filtered)
+
+
 def get_allowlisted_attrs(span_name: str) -> frozenset[str]:
     """Return the allowlisted attribute set for *span_name*.
 
     Falls back to an empty frozenset for unknown span names so callers
     always get a predictable value (no attributes pass through).
     """
-    allowed: frozenset[str] | None = SPAN_ALLOWLIST.get(span_name)
+    allowed: frozenset[str] | None = JOURNALCTL_SPAN_ALLOWLIST.get(span_name)
     if allowed is None:
         return frozenset()
     return allowed
@@ -94,9 +189,9 @@ def get_allowlisted_attrs(span_name: str) -> frozenset[str]:
 
 __all__ = [
     "BANNED_KEYS",
+    "JOURNALCTL_SPAN_ALLOWLIST",
     "MCP_TOOL_CALL_ATTRS",
     "MetricNames",
-    "SPAN_ALLOWLIST",
     "SpanNames",
     "_NS_PER_MS",
     "_TRACER_NAME",
