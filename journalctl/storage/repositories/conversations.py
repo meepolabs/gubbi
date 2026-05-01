@@ -155,16 +155,17 @@ async def save_conversation(
     now = datetime_cls.now(UTC)
     participants = sorted({m.role for m in messages})
 
-    # Pre-check: validate topic exists early and get canonical_created for re-saves.
+    # Pre-check: validate topic exists early and get canonical_created + json_path for re-saves.
     topic_id = await get_topic_id(conn, topic)
     existing_row = await conn.fetchrow(
-        "SELECT created_at FROM conversations WHERE topic_id = $1 AND slug = $2",
+        "SELECT created_at, json_path FROM conversations WHERE topic_id = $1 AND slug = $2",
         topic_id,
         slug,
     )
     canonical_created = (
         existing_row["created_at"].date().isoformat() if existing_row else conversation_date
     )
+    old_json_path: str | None = existing_row["json_path"] if existing_row else None
 
     # --- Phase 1: Write JSON archive BEFORE transaction ---
     meta = ConversationMeta(
@@ -196,6 +197,15 @@ async def save_conversation(
         conversation_date,
         json_path,
     )
+
+    # Clean up orphan JSON archive file from previous save, if any.
+    if is_update and old_json_path and old_json_path != json_path:
+        try:
+            candidate = Path(conversations_json_dir / Path(old_json_path).name)
+            if not candidate.is_symlink():
+                candidate.unlink(missing_ok=True)
+        except OSError:
+            logger.exception("Failed to delete orphan JSON archive: %s", old_json_path)
 
     # Always rewrite messages on save (insert or update).
     # DELETE is a no-op for new conversations (no messages yet) and ensures
@@ -235,17 +245,9 @@ async def _upsert_conversation_record(
     Returns (conversation_id, is_update).
 
     Uses ON CONFLICT DO UPDATE (race-safe upsert).
-    is_update is detected via a pre-check SELECT — avoids relying on the
-    undocumented xmax implementation detail.
+    is_update is detected via (xmax != 0) in the RETURNING clause.
     created_at is preserved on conflict (not included in DO UPDATE).
     """
-    existing = await conn.fetchrow(
-        "SELECT id FROM conversations WHERE topic_id = $1 AND slug = $2",
-        topic_id,
-        slug,
-    )
-    is_update = existing is not None
-
     now = datetime_cls.now(UTC)
     title_ct, title_nonce = cipher.encrypt(title)
     summary_ct, summary_nonce = cipher.encrypt(summary)
@@ -274,7 +276,7 @@ async def _upsert_conversation_record(
                 updated_at    = excluded.updated_at,
                 json_path     = excluded.json_path,
                 search_vector = excluded.search_vector
-        RETURNING id
+        RETURNING id, (xmax != 0) AS was_update
         """,
         topic_id,
         title_ct,
@@ -295,6 +297,7 @@ async def _upsert_conversation_record(
         raise RuntimeError("INSERT/UPDATE conversations failed: no row returned")
 
     conv_id = int(row["id"])
+    is_update = bool(row["was_update"]) if row["was_update"] is not None else False
     return conv_id, is_update
 
 
