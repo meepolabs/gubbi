@@ -3,22 +3,37 @@
 from fastapi import FastAPI
 from pydantic import AnyHttpUrl
 
-from journalctl.config import Settings
+from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
 from journalctl.oauth.wellknown import register
 
 
-def _make_settings(**overrides: str) -> Settings:
-    defaults: dict[str, str] = {
-        "api_key": "testkey123",
-        "password_hash": "",
-        "hydra_admin_url": "",
-        "hydra_public_issuer_url": "",
-        "server_url": "http://localhost:8100",
-        "db_app_url": "sqlite:///memory:",
-        "operator_email": "admin@example.com",
-    }
-    defaults.update(overrides)
-    return Settings.model_construct(**defaults)  # type: ignore[call-arg, arg-type]
+def _make_settings(
+    api_key: str = "testkey123",
+    password_hash: str = "",
+    hydra_admin_url: str = "",
+    hydra_public_issuer_url: str = "",
+    server_url: str = "http://localhost:8100",
+    db_app_url: str = "sqlite:///memory:",
+    operator_email: str = "admin@example.com",
+) -> Settings:
+    return Settings.model_construct(
+        db=DbConfig.model_construct(app_url=db_app_url, admin_url=""),
+        auth=AuthConfig.model_construct(
+            api_key=api_key,
+            password_hash=password_hash,
+            hydra_admin_url=hydra_admin_url,
+            hydra_public_issuer_url=hydra_public_issuer_url,
+            hydra_public_url=None,
+            operator_email=operator_email,
+            trust_gateway=False,
+        ),
+        server=ServerConfig.model_construct(
+            url=server_url,
+            host="0.0.0.0",  # noqa: S104
+            port=8100,
+            transport="streamable-http",
+        ),
+    )  # type: ignore[call-arg]
 
 
 class TestWellknownRegister:
