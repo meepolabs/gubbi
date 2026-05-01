@@ -21,7 +21,7 @@ def register(
 ) -> None:
     """Register the /.well-known/oauth-protected-resource/mcp route."""
     pr_routes = create_protected_resource_routes(
-        resource_url=AnyHttpUrl(f"{settings.server_url.rstrip('/')}/mcp"),
+        resource_url=AnyHttpUrl(f"{settings.server.url.rstrip('/')}/mcp"),
         authorization_servers=list(authorization_servers),
         scopes_supported=["journal", "offline_access", "openid", "email"],
         resource_documentation=AnyHttpUrl("https://docs.meepolabs.com/mcp"),
