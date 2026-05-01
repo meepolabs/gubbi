@@ -63,8 +63,8 @@ def _resolve_admin_dsn() -> str:
         from journalctl.config import get_settings  # noqa: PLC0415
 
         settings = get_settings()
-        if settings.db_admin_url:
-            return str(settings.db_admin_url)
+        if settings.db.admin_url:
+            return str(settings.db.admin_url)
     except Exception as exc:
         logger.debug("Config fallback failed: %s", exc)
         pass

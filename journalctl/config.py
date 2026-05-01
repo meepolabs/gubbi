@@ -1,9 +1,15 @@
+import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Final, Self
+from typing import Any, Final, Self
 
-from pydantic import field_validator, model_validator
-from pydantic_settings import BaseSettings
+from pydantic import BaseModel, field_validator, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    EnvSettingsSource,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+)
 
 # Hydra admin-introspect HTTP timeout, seconds. 3s is comfortable on a local
 # docker network; it is not an operator-tunable.
@@ -29,6 +35,82 @@ OAUTH_ACCESS_TOKEN_TTL_SECS: Final[int] = 3600  # 1 hour
 OAUTH_REFRESH_TOKEN_TTL_SECS: Final[int] = 2592000  # 30 days
 OAUTH_AUTH_CODE_TTL_SECS: Final[int] = 300  # 5 minutes
 
+# Maps old flat env var names (without JOURNAL_ prefix) to new double-underscore
+# nested names that pydantic-settings v2 understands with env_nested_delimiter="__".
+# JOURNAL_DB_APP_URL -> JOURNAL_DB__APP_URL -> settings.db.app_url
+_FLAT_TO_NESTED_ENV: dict[str, str] = {
+    "JOURNAL_DB_APP_URL": "JOURNAL_DB__APP_URL",
+    "JOURNAL_DB_ADMIN_URL": "JOURNAL_DB__ADMIN_URL",
+    "JOURNAL_HYDRA_ADMIN_URL": "JOURNAL_AUTH__HYDRA_ADMIN_URL",
+    "JOURNAL_HYDRA_PUBLIC_ISSUER_URL": "JOURNAL_AUTH__HYDRA_PUBLIC_ISSUER_URL",
+    "JOURNAL_HYDRA_PUBLIC_URL": "JOURNAL_AUTH__HYDRA_PUBLIC_URL",
+    "JOURNAL_PASSWORD_HASH": "JOURNAL_AUTH__PASSWORD_HASH",
+    "JOURNAL_API_KEY": "JOURNAL_AUTH__API_KEY",
+    "JOURNAL_OPERATOR_EMAIL": "JOURNAL_AUTH__OPERATOR_EMAIL",
+    "JOURNAL_TRUST_GATEWAY": "JOURNAL_AUTH__TRUST_GATEWAY",
+    "JOURNAL_SERVER_URL": "JOURNAL_SERVER__URL",
+    "JOURNAL_HOST": "JOURNAL_SERVER__HOST",
+    "JOURNAL_PORT": "JOURNAL_SERVER__PORT",
+    "JOURNAL_TRANSPORT": "JOURNAL_SERVER__TRANSPORT",
+}
+
+
+class _FlatCompatEnvSource(EnvSettingsSource):
+    """Env source that remaps legacy flat env vars to nested double-underscore form.
+
+    pydantic-settings v2 caches os.environ at source __init__ time, so the
+    injection must happen before super().__init__() loads env_vars. The
+    injected keys are cleaned up in __del__ to avoid polluting the process env.
+
+    This allows JOURNAL_DB_APP_URL (flat, legacy) to coexist with
+    JOURNAL_DB__APP_URL (nested, new-style). When both are set, the nested
+    form takes precedence (injection is skipped).
+    """
+
+    def __init__(self, settings_cls: type, **kwargs: Any) -> None:
+        self._injected: list[str] = []
+        for flat, nested in _FLAT_TO_NESTED_ENV.items():
+            if flat in os.environ and nested not in os.environ:
+                os.environ[nested] = os.environ[flat]
+                self._injected.append(nested)
+        super().__init__(settings_cls, **kwargs)
+
+    def __del__(self) -> None:
+        for k in self._injected:
+            os.environ.pop(k, None)
+
+
+class DbConfig(BaseModel):
+    app_url: str
+    admin_url: str = ""
+
+
+class AuthConfig(BaseModel):
+    api_key: str = ""
+    hydra_admin_url: str = ""
+    hydra_public_issuer_url: str = ""
+    hydra_public_url: str | None = None
+    password_hash: str = ""
+    operator_email: str = ""
+    trust_gateway: bool = False
+
+    @field_validator("api_key")
+    @classmethod
+    def validate_api_key(cls, v: str) -> str:
+        # Non-empty keys must still be strong. Length enforcement for the
+        # "required vs optional" contract lives in the model validator below,
+        # so Mode 3 can leave this empty without tripping the length check.
+        if v and len(v) < 32:
+            raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
+        return v
+
+
+class ServerConfig(BaseModel):
+    url: str = "http://localhost:8100"
+    host: str = "0.0.0.0"  # noqa: S104 -- bind all interfaces for Docker
+    port: int = 8100
+    transport: str = "streamable-http"  # or "stdio"
+
 
 class Settings(BaseSettings):
     """Application settings, loaded from environment variables.
@@ -52,59 +134,16 @@ class Settings(BaseSettings):
 
     Setting both HYDRA_ADMIN_URL and PASSWORD_HASH is a configuration
     error and fails startup.
+
+    Legacy flat env var names (JOURNAL_DB_APP_URL, JOURNAL_API_KEY, etc.) are
+    supported via _FlatCompatEnvSource. New-style double-underscore names
+    (JOURNAL_DB__APP_URL, JOURNAL_AUTH__API_KEY) also work and take precedence
+    when both are set.
     """
 
-    # Auth -- static Bearer token. Required in Modes 1/2; ignored (and not
-    # required) in Mode 3 where Hydra owns every request.
-    api_key: str = ""
-
-    @field_validator("api_key")
-    @classmethod
-    def validate_api_key(cls, v: str) -> str:
-        # Non-empty keys must still be strong. Length enforcement for the
-        # "required vs optional" contract lives in the model validator below,
-        # so Mode 3 can leave this empty without tripping the length check.
-        if v and len(v) < 32:
-            raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
-        return v
-
-    # Hydra OAuth 2.1 introspection -- empty = Mode 3 (hosted) disabled.
-    hydra_admin_url: str = ""
-
-    # Hydra public issuer -- the HTTPS base URL of the external Hydra
-    # deployment that issues tokens. Required whenever hydra_admin_url is
-    # set so the protected-resource endpoint can advertise the authorization
-    # server identity to MCP clients.
-    hydra_public_issuer_url: str = ""
-
-    # Hydra public /userinfo URL -- used for JIT user provisioning to fetch
-    # the email of a new identity. Optional; when unset, JIT provisioning
-    # skips without blocking the request. No env var prefix needed since it
-    # is only active when hydra_admin_url is set (Mode 3).
-    hydra_public_url: str | None = None
-
-    # Self-host OAuth -- empty password_hash = Mode 2 (full self-host) disabled.
-    password_hash: str = ""
-    server_url: str = "http://localhost:8100"
-
-    # Runtime database DSN (role: journal_app, no BYPASSRLS). Required; pydantic
-    # raises a missing-field ValidationError if unset.
-    db_app_url: str
-
-    # Admin DSN (role: journal_admin, BYPASSRLS). Used by reindex and cross-
-    # tenant ops. Empty = fall back to the runtime pool (OK in single-tenant
-    # dev before RLS is live).
-    db_admin_url: str = ""
-
-    # Operator identity -- binds the static API key + self-host OAuth paths
-    # to a concrete user UUID so user_scoped_connection works uniformly
-    # regardless of auth mode. The UUID is resolved at startup by looking up
-    # users.email = JOURNAL_OPERATOR_EMAIL. Empty = no operator binding;
-    # operator-identity tool calls reach DB code without a user id and
-    # MissingUserIdError surfaces as a 500. Required in Modes 1/2 (enforced
-    # by _validate_deploy_shape below); ignored in Mode 3 where every request
-    # carries its own user UUID in the Hydra token.
-    operator_email: str = ""
+    db: DbConfig
+    auth: AuthConfig = AuthConfig()
+    server: ServerConfig = ServerConfig()
 
     # Paths
     data_dir: Path = Path("./journal")
@@ -112,16 +151,6 @@ class Settings(BaseSettings):
     # Timezone -- controls the "today" default for journal_append_entry and
     # journal_save_conversation when no explicit date is provided.
     timezone: str = "UTC"
-
-    # Server
-    host: str = "0.0.0.0"  # noqa: S104 -- bind all interfaces for Docker
-    port: int = 8100
-    transport: str = "streamable-http"  # or "stdio"
-
-    # Trust gateway mode -- when true, skip all internal auth and trust
-    # X-Auth-User-Id header from the upstream cloud-api gateway. Used by
-    # hosted Mode 3 deployments behind cloud-api.
-    trust_gateway: bool = False
 
     # Logging
     log_level: str = "info"
@@ -138,10 +167,10 @@ class Settings(BaseSettings):
 
         Also enforce that JOURNAL_API_KEY is present unless Hydra is on.
         """
-        hydra_on = bool(self.hydra_admin_url)
-        password_on = bool(self.password_hash)
-        hydra_issuer_on = bool(self.hydra_public_issuer_url)
-        hydra_puburl_on = bool(self.hydra_public_url)
+        hydra_on = bool(self.auth.hydra_admin_url)
+        password_on = bool(self.auth.password_hash)
+        hydra_issuer_on = bool(self.auth.hydra_public_issuer_url)
+        hydra_puburl_on = bool(self.auth.hydra_public_url)
 
         # Existing: HYDRA_ADMIN_URL and PASSWORD_HASH are mutually exclusive.
         if hydra_on and password_on:
@@ -181,12 +210,12 @@ class Settings(BaseSettings):
                 "non-empty together for Mode 3 (multi-tenant hosted)."
             )
 
-        if not hydra_on and not self.api_key:
+        if not hydra_on and not self.auth.api_key:
             raise ValueError(
                 "JOURNAL_API_KEY is required unless JOURNAL_HYDRA_ADMIN_URL "
                 "is set (hosted mode disables the static API key path)."
             )
-        if not hydra_on and not self.operator_email:
+        if not hydra_on and not self.auth.operator_email:
             raise ValueError(
                 "JOURNAL_OPERATOR_EMAIL is required unless JOURNAL_HYDRA_ADMIN_URL "
                 "is set -- Modes 1/2 bind every authenticated request to the "
@@ -207,7 +236,23 @@ class Settings(BaseSettings):
         """SQLite file backing the self-host OAuth server (Mode 2)."""
         return self.data_dir / "oauth.db"
 
-    model_config = {"env_prefix": "JOURNAL_"}
+    model_config = SettingsConfigDict(env_prefix="JOURNAL_", env_nested_delimiter="__")
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            _FlatCompatEnvSource(settings_cls),
+            dotenv_settings,
+            file_secret_settings,
+        )
 
 
 @lru_cache

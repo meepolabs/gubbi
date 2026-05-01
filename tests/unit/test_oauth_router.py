@@ -6,29 +6,44 @@ import pytest
 from fastapi import FastAPI
 from starlette.routing import Route
 
-from journalctl.config import Settings
+from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
 from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 
 
-def _make_settings(**overrides: str) -> Settings:
+def _make_settings(
+    api_key: str = "",
+    password_hash: str = "",
+    hydra_admin_url: str = "",
+    hydra_public_issuer_url: str = "",
+    server_url: str = "http://localhost:8100",
+    db_app_url: str = "sqlite:///memory:",
+    operator_email: str = "",
+) -> Settings:
     """Build a Settings instance bypassing validation (model_construct).
 
     This sidesteps the deploy-shape validator so tests can exercise
     combinations the validator normally forbids (e.g. Mode 3 without an
     API key).
     """
-    defaults: dict[str, str] = {
-        "api_key": "",
-        "password_hash": "",
-        "hydra_admin_url": "",
-        "hydra_public_issuer_url": "",
-        "server_url": "http://localhost:8100",
-        "db_app_url": "sqlite:///memory:",
-        "operator_email": "",
-    }
-    defaults.update(overrides)
-    return Settings.model_construct(**defaults)  # type: ignore[call-arg, arg-type]
+    return Settings.model_construct(
+        db=DbConfig.model_construct(app_url=db_app_url, admin_url=""),
+        auth=AuthConfig.model_construct(
+            api_key=api_key,
+            password_hash=password_hash,
+            hydra_admin_url=hydra_admin_url,
+            hydra_public_issuer_url=hydra_public_issuer_url,
+            hydra_public_url=None,
+            operator_email=operator_email,
+            trust_gateway=False,
+        ),
+        server=ServerConfig.model_construct(
+            url=server_url,
+            host="0.0.0.0",  # noqa: S104
+            port=8100,
+            transport="streamable-http",
+        ),
+    )  # type: ignore[call-arg]
 
 
 def _routes_exist(app: FastAPI, desired_paths: list[str]) -> bool:
@@ -181,9 +196,9 @@ class TestDeployShapeValidator:
         self._patch_mode3(monkeypatch)
         # Should succeed when both hydra fields are present
         settings = self._get_settings()
-        assert settings.hydra_admin_url
-        assert settings.hydra_public_issuer_url
-        assert settings.hydra_public_url
+        assert settings.auth.hydra_admin_url
+        assert settings.auth.hydra_public_issuer_url
+        assert settings.auth.hydra_public_url
 
     def test_hydra_admin_without_issuer(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("JOURNAL_PASSWORD_HASH", raising=False)

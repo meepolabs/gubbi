@@ -88,10 +88,10 @@ def register(
     """Register self-host OAuth routes and return token validator."""
     provider = JournalOAuthProvider(
         storage=storage,
-        server_url=settings.server_url,
+        server_url=settings.server.url,
     )
 
-    issuer_url = AnyHttpUrl(settings.server_url)
+    issuer_url = AnyHttpUrl(settings.server.url)
 
     # SDK auth routes: discovery, authorize, token, register, revoke
     auth_routes = create_auth_routes(
@@ -109,9 +109,9 @@ def register(
 
     login_handler = create_login_handler(
         storage=storage,
-        password_hash=settings.password_hash,
+        password_hash=settings.auth.password_hash,
         auth_code_ttl=OAUTH_AUTH_CODE_TTL_SECS,
-        secure_cookies=settings.server_url.startswith("https"),
+        secure_cookies=settings.server.url.startswith("https"),
     )
     app.routes.insert(
         0,
