@@ -48,8 +48,8 @@ async def scaffold_operator(
       ``journalctl-cloud/journalctl_cloud/webhooks/kratos.py``
       ``_upsert_user``; never fires in Mode 1/2 (no Kratos).
     * **JIT (Mode 3 self-heal)** --
-      ``journalctl/middleware/auth.py`` ``_pre_context_jwt_provision``;
-      never fires in Mode 1/2 (no Hydra introspection path).
+      cloud-api Kratos webhook fallback; never fires in Mode 1/2
+      (no Hydra introspection path).
 
     Mode 3 hosted deploys do NOT call scaffold_operator -- the founder
     is just another user provisioned via the webhook + JIT pair.
