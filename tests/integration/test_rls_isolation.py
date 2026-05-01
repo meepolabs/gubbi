@@ -131,6 +131,29 @@ async def test_entries_get_stats_scoped_per_user(
     assert b_stats["total_documents"] == expected_b
 
 
+async def test_entries_get_stats_topics_count_excludes_empty_topics(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    seeded_a: TenantSeed,
+) -> None:
+    """get_stats topic_count excludes topics that have no entries for the current user."""
+    # Create a second topic with no entries at all.
+    async with admin_pool.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO topics (path, title, description, user_id, created_at, updated_at)"
+            " VALUES ($1, $2, '', $3, now(), now())",
+            "tenant-a/empty",
+            "Empty topic",
+            tenant_a,
+        )
+
+    # The empty topic must NOT inflate topic_count.
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+        stats = await entry_repo.get_stats(conn)
+    assert stats["topics"] == 1  # seeded_a's topic (has entries), not the empty one
+
+
 # ---------------------------------------------------------------------------
 # SECTION 2 - LOOKUP BY PRIMARY KEY
 # ---------------------------------------------------------------------------
