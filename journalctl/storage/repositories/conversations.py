@@ -182,7 +182,7 @@ async def save_conversation(
 
     # --- Phase 2: All DB writes in a single transaction, json_path included ---
     # topic_id already verified and fetched in the pre-check above — no need to re-query.
-    conv_id, is_update, existing_msg_count = await _upsert_conversation_record(
+    conv_id, is_update = await _upsert_conversation_record(
         conn,
         cipher,
         topic_id,
@@ -197,12 +197,12 @@ async def save_conversation(
         json_path,
     )
 
-    # Skip delete+reinsert when only metadata changed (same message count).
-    # This avoids deleting and re-inserting potentially thousands of rows
-    # when the caller is just updating the summary or tags.
-    if not is_update or existing_msg_count != len(messages):
-        await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
-        await _insert_messages(conn, cipher, conv_id, messages)
+    # Always rewrite messages on save (insert or update).
+    # DELETE is a no-op for new conversations (no messages yet) and ensures
+    # updated conversations reflect the current message content regardless
+    # of whether the count changed.
+    await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
+    await _insert_messages(conn, cipher, conv_id, messages)
     linked_entry_id = await _upsert_linked_entry(
         conn, cipher, topic_id, conv_id, title, summary, conversation_date, now
     )
@@ -229,10 +229,10 @@ async def _upsert_conversation_record(
     messages: list[Message],
     conversation_date: str,
     json_path: str,
-) -> tuple[int, bool, int]:
+) -> tuple[int, bool]:
     """Insert or update the conversations row.
 
-    Returns (conversation_id, is_update, existing_msg_count).
+    Returns (conversation_id, is_update).
 
     Uses ON CONFLICT DO UPDATE (race-safe upsert).
     is_update is detected via a pre-check SELECT — avoids relying on the
@@ -240,12 +240,11 @@ async def _upsert_conversation_record(
     created_at is preserved on conflict (not included in DO UPDATE).
     """
     existing = await conn.fetchrow(
-        "SELECT id, message_count FROM conversations WHERE topic_id = $1 AND slug = $2",
+        "SELECT id FROM conversations WHERE topic_id = $1 AND slug = $2",
         topic_id,
         slug,
     )
     is_update = existing is not None
-    existing_msg_count = int(existing["message_count"]) if existing else 0
 
     now = datetime_cls.now(UTC)
     title_ct, title_nonce = cipher.encrypt(title)
@@ -296,7 +295,7 @@ async def _upsert_conversation_record(
         raise RuntimeError("INSERT/UPDATE conversations failed: no row returned")
 
     conv_id = int(row["id"])
-    return conv_id, is_update, existing_msg_count
+    return conv_id, is_update
 
 
 async def _insert_messages(
