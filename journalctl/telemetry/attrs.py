@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Final
 
 from gubbi_common.telemetry.allowlist import (
     BANNED_KEYS,
-    _is_banned,
 )
 from gubbi_common.telemetry.allowlist import (
     safe_set_attributes as _gc_safe_set_attributes,
@@ -157,22 +156,11 @@ def safe_set_attributes(
 ) -> None:
     """Set span attributes filtered through the journalctl allowlist.
 
-    Known span names use the strict per-span allowlist (unknown attributes
-    are dropped). Unknown span names apply banned-key filtering only, so
-    new spans can be instrumented without an allowlist update.
+    Span names not present in JOURNALCTL_SPAN_ALLOWLIST have ALL attributes
+    dropped (only a DEBUG log is emitted). Register new span names in the
+    allowlist before instrumenting.
     """
-    allowed = JOURNALCTL_SPAN_ALLOWLIST.get(span_name)
-    if allowed is not None:
-        _gc_safe_set_attributes(span_name, span, attrs, allowlist=JOURNALCTL_SPAN_ALLOWLIST)
-        return
-
-    # Unknown span name: drop banned keys, keep everything else.
-    filtered: dict[str, Any] = {}
-    for key, value in attrs.items():
-        if _is_banned(key):
-            continue
-        filtered[key] = value
-    span.set_attributes(filtered)
+    _gc_safe_set_attributes(span_name, span, attrs, allowlist=JOURNALCTL_SPAN_ALLOWLIST)
 
 
 def get_allowlisted_attrs(span_name: str) -> frozenset[str]:
