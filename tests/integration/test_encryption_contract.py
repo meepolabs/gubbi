@@ -30,9 +30,9 @@ from uuid import UUID
 import asyncpg
 import pytest
 from cryptography.exceptions import InvalidTag
+from gubbi_common.db.user_scoped import user_scoped_connection
 
 from journalctl.core.crypto import ContentCipher, DecryptionError
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.storage.repositories import entries as entry_repo
 
 # Session-scoped asyncpg pools (admin_pool, app_pool) require tests to

@@ -7,13 +7,14 @@ from datetime import date, timedelta
 from typing import Any
 
 import asyncpg
+from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.auth_context import current_user_id
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.crypto import DecryptionError
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.scope import require_scope
 from journalctl.core.validation import local_today
 from journalctl.storage import knowledge
@@ -178,11 +179,15 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         except Exception:
             logger.warning("Key facts encoding failed, continuing without", exc_info=True)
 
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+
         cipher = require_cipher(app_ctx)
         key_facts: list[dict] | None = None
         key_facts_status: str = "missing"
 
-        async with user_scoped_connection(app_ctx.pool) as conn:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             week_entries = await entry_repo.get_by_date_range(
                 conn, cipher, date_from, date_to, limit=BRIEFING_MAX_WEEK_ENTRIES, ascending=False
             )
@@ -328,8 +333,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             return validation_error(str(e))
         limit = max(1, min(limit, MAX_TIMELINE_ENTRIES))
         offset = max(0, offset)
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
-        async with user_scoped_connection(app_ctx.pool) as conn:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             entries = await entry_repo.get_by_date_range(
                 conn,
                 cipher,

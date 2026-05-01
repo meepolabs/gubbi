@@ -10,13 +10,13 @@ import asyncpg
 import pytest
 import pytest_asyncio
 import structlog
+from gubbi_common.db.user_scoped import user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 
 from journalctl.config import get_settings
 from journalctl.core.auth_context import current_user_id
 from journalctl.core.context import AppContext
 from journalctl.core.crypto import ContentCipher
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.models.conversation import Message
 from journalctl.storage.embedding_service import EmbeddingService
 from journalctl.storage.repositories import conversations as conv_repo

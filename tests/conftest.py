@@ -371,7 +371,7 @@ RLS_ADMIN_URL = _rls_derived_dsn("journal_admin", _RLS_ADMIN_PASSWORD)
 async def app_pool(_rls_provisioned: None) -> AsyncIterator[asyncpg.Pool]:
     """asyncpg pool authenticated as ``journal_app`` (RLS-enforced, NO BYPASSRLS).
 
-    Use this pool with ``core.db_context.user_scoped_connection`` for RLS
+    Use this pool with ``gubbi_common.db.user_scoped.user_scoped_connection`` for RLS
     assertions. Direct ``pool.acquire()`` without the helper will see zero
     rows — that's intentional default-deny.
     """

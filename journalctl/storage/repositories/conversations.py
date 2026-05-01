@@ -132,7 +132,7 @@ async def save_conversation(
     """Save a conversation. Idempotent — same topic+title overwrites.
 
     The caller MUST supply ``conn`` already inside a transaction — e.g. from
-    ``core.db_context.user_scoped_connection`` — because this function issues
+    ``gubbi_common.db.user_scoped.user_scoped_connection`` — because this function issues
     multiple writes (upsert conversation, delete/insert messages, upsert
     linked entry, update topic) that only stay consistent when grouped into
     one atomic commit.
