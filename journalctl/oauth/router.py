@@ -37,14 +37,14 @@ def register_oauth_routes(
     # Mode 3: Hydra-backed multi-tenant. Only advertise the resource
     # metadata route so MCP clients can discover the Hydra authorization
     # server. Token validation is handled by Hydra introspection middleware.
-    if settings.hydra_admin_url:
-        issuer_url = AnyHttpUrl(settings.hydra_public_issuer_url)
+    if settings.auth.hydra_admin_url:
+        issuer_url = AnyHttpUrl(settings.auth.hydra_public_issuer_url)
         register_wellknown(app, settings, authorization_servers=[issuer_url])
         _logger.info("Registered protected-resource routes (Mode 3: Hydra)")
         return None
 
     # Mode 1: no OAuth path configured.
-    if not settings.password_hash:
+    if not settings.auth.password_hash:
         register_disabled(app)
         return None
 
