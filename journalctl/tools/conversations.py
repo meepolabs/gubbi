@@ -9,6 +9,7 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.audit_decorator import ACTION_CONVERSATION_SAVED, audited
 from journalctl.core.auth_context import current_user_id
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
@@ -77,6 +78,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
+    @audited(ACTION_CONVERSATION_SAVED, target_type="conversation", app_ctx=app_ctx)
     async def journal_save_conversation(
         topic: str,
         title: str,
