@@ -5,12 +5,13 @@ import asyncio
 import logging
 from typing import Any, NotRequired, TypedDict
 
+from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.auth_context import current_user_id
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
-from journalctl.core.db_context import user_scoped_connection
 from journalctl.core.scope import require_scope
 from journalctl.core.validation import (
     local_today,
@@ -181,10 +182,14 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         empty_dropped = len(keepable) - len(parsed_messages)
 
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+
         cipher = require_cipher(app_ctx)
 
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 (
                     conv_id,
                     saved_summary,
@@ -209,7 +214,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         linked_content = f"Conversation saved: {title}\n\n{summary}"
         try:
             embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, linked_content)
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 await app_ctx.embedding_service.store_by_vector(conn, linked_entry_id, embedding)
                 await entry_repo.mark_indexed(conn, linked_entry_id)
         except Exception as e:
@@ -272,8 +277,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 topic_prefix = validate_topic(topic_prefix)
             except ValueError as e:
                 return invalid_topic(topic_prefix, str(e))
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
-        async with user_scoped_connection(app_ctx.pool) as conn:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             convs, total = await conv_repo.list_conversations(
                 conn,
                 cipher,
@@ -337,9 +345,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             content (full transcript or subset as markdown),
             messages_shown, messages_total (total in conversation).
         """
+        user_id = current_user_id.get()
+        if user_id is None:
+            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
         try:
-            async with user_scoped_connection(app_ctx.pool) as conn:
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                 if preview:
                     meta, messages, total_messages = await read_conversation_by_id(
                         conn, cipher, conversation_id, preview=True

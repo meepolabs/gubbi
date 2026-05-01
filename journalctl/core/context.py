@@ -27,7 +27,7 @@ class AppContext:
 
     ``pool`` is the runtime pool (``journal_app`` role — NOT BYPASSRLS).
     Every tenant-scoped tool call wraps its DB work with
-    ``core.db_context.user_scoped_connection(pool)``.
+    ``gubbi_common.db.user_scoped.user_scoped_connection(pool)``.
 
     ``admin_pool`` is the optional cross-tenant pool (``journal_admin`` role,
     BYPASSRLS). Reserved for admin/worker paths (like ``_run_reindex``) and the future

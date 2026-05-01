@@ -219,7 +219,8 @@ class BearerAuthMiddleware:
             token_scope_reset = current_token_scopes.set(frozenset(scopes))
 
             # Defense-in-depth: claims.sub is typed UUID and parsed via UUID(sub_raw)
-            # in HydraIntrospector, but mirror db_context's isinstance guard so a bypass
+            # in HydraIntrospector, but mirror gubbi_common.db.user_scoped
+            # isinstance guard so a bypass
             # path (test mock, future cache deserializer) cannot stash a str into the ctxvar.
             if not isinstance(claims.sub, UUID):
                 await _unauthorized(
