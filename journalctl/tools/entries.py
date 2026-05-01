@@ -10,6 +10,12 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.audit_decorator import (
+    ACTION_ENTRY_CREATED,
+    ACTION_ENTRY_DELETED,
+    ACTION_ENTRY_UPDATED,
+    audited,
+)
 from journalctl.core.auth_context import current_user_id
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
@@ -63,6 +69,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
+    @audited(ACTION_ENTRY_CREATED, target_type="entry", app_ctx=app_ctx)
     async def journal_append_entry(
         topic: str,
         content: str,
@@ -264,6 +271,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
+    @audited(ACTION_ENTRY_UPDATED, target_type="entry", app_ctx=app_ctx)
     async def journal_update_entry(
         entry_id: int,
         content: str | None = None,
@@ -378,6 +386,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
+    @audited(ACTION_ENTRY_DELETED, target_type="entry", app_ctx=app_ctx)
     async def journal_delete_entry(
         entry_id: int,
     ) -> dict[str, Any]:

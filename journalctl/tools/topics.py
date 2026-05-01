@@ -6,6 +6,7 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
+from journalctl.core.audit_decorator import ACTION_TOPIC_CREATED, audited
 from journalctl.core.auth_context import current_user_id
 from journalctl.core.context import AppContext
 from journalctl.core.scope import require_scope
@@ -87,6 +88,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
+    @audited(ACTION_TOPIC_CREATED, target_type="topic", app_ctx=app_ctx)
     async def journal_create_topic(
         topic: str,
         title: str,
