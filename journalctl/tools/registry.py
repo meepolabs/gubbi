@@ -25,15 +25,19 @@ from __future__ import annotations
 import functools
 import logging
 import time
+from collections.abc import Collection
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools import ToolManager
+from mcp.types import Tool as MCPTool
 
 # Imported for type info when available; but we monkey-patch via ToolManager
 from opentelemetry import trace
 
+from journalctl.core.auth_context import current_token_scopes
 from journalctl.core.context import AppContext
+from journalctl.core.scope import SCOPE_GRANTS
 from journalctl.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 from journalctl.tools import (
     context,
@@ -74,19 +78,18 @@ ALL_TOOLS = READ_TOOLS | WRITE_TOOLS
 
 def filter_tools_by_scope(
     tool_names: list[str],
-    token_scopes: set[str],
+    token_scopes: Collection[str],
 ) -> list[str]:
     """Filter a tool list by the token's scopes.
 
-    v1: a token with ``journal`` scope sees every tool; tokens without it
-    see nothing.  This is the second line of defense behind
-    ``BearerAuthMiddleware``, which already rejects no-scope tokens at the
-    HTTP layer; if that check is ever bypassed or relaxed, this filter
-    must not fail open.
+    Expands each token scope through ``SCOPE_GRANTS`` to determine which
+    permissions are granted, then returns only the tools matching those
+    permissions.  A token with both ``journal:read`` and ``journal:write``
+    (or the legacy ``journal`` scope) sees every tool.
 
-    After the ``journal:read`` / ``journal:write`` split, replace the
-    short-circuit with the per-scope mapping (``READ_TOOLS`` for
-    ``journal:read``, ``READ_TOOLS | WRITE_TOOLS`` for ``journal:write``).
+    This is the second line of defense behind ``BearerAuthMiddleware``,
+    which already rejects no-scope tokens at the HTTP layer; if that check
+    is ever bypassed or relaxed, this filter must not fail open.
 
     Parameters
     ----------
@@ -100,11 +103,23 @@ def filter_tools_by_scope(
     list[str]
         The subset of ``tool_names`` the token is authorized to call.
     """
-    if "journal" in token_scopes:
-        return tool_names
+    granted: set[str] = set()
+    for ts in token_scopes:
+        if ts in SCOPE_GRANTS:
+            granted.update(SCOPE_GRANTS[ts])
+    if not granted:
+        return []
 
-    # Default-deny: tokens without journal scope see no tools.
-    return []
+    # Both read and write -> all known tools
+    if "journal:read" in granted and "journal:write" in granted:
+        return [t for t in tool_names if t in ALL_TOOLS]
+
+    visible: list[str] = []
+    if "journal:read" in granted:
+        visible.extend(t for t in tool_names if t in READ_TOOLS)
+    if "journal:write" in granted:
+        visible.extend(t for t in tool_names if t in WRITE_TOOLS)
+    return visible
 
 
 logger = logging.getLogger(__name__)
@@ -177,6 +192,25 @@ def _patch_tool_manager(tm: ToolManager) -> None:
     tm.call_tool = bound_patched  # type: ignore[assignment]
 
 
+def _wire_scope_filter(mcp: FastMCP) -> None:
+    """Wire scope filter into tools/list handler (defense in depth).
+
+    Replaces the lowlevel handler set by FastMCP._setup_handlers() so
+    that the ``tools/list`` response respects the token's scopes.
+    ``mcp._mcp_server`` is a private attribute but stable across FastMCP
+    versions; last call to ``list_tools()(handler)`` wins.
+    """
+    original_list_tools = mcp.list_tools  # bound async method
+
+    async def _scope_filtered_list_tools() -> list[MCPTool]:
+        all_tools = await original_list_tools()
+        scopes = current_token_scopes.get() or frozenset()
+        visible = set(filter_tools_by_scope([t.name for t in all_tools], scopes))
+        return [t for t in all_tools if t.name in visible]
+
+    mcp._mcp_server.list_tools()(_scope_filtered_list_tools)
+
+
 def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register all MCP tools. Semantic memory is internal -- not exposed to LLM.
 
@@ -207,3 +241,5 @@ def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
     else:
         _patch_tool_manager(tool_manager)
         logger.debug("OTel tool-call span wrapper installed on ToolManager")
+
+    _wire_scope_filter(mcp)

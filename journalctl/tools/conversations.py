@@ -34,6 +34,7 @@ from journalctl.tools.constants import (
     DEFAULT_CONVERSATION_MESSAGES_LIMIT,
     DEFAULT_CONVERSATIONS_LIMIT,
     KEEP_ROLES,
+    LIST_SUMMARY_PREVIEW_CHARS,
     MAX_CONVERSATION_MESSAGES,
     MAX_CONVERSATIONS_RESULTS,
     MAX_MESSAGES_PER_CONVERSATION,
@@ -248,9 +249,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         specific content within them. For keyword search across both entries AND
         conversations, use journal_search instead.
 
-        Returns titles, dates, and summaries.
-
-        To read a full transcript, pass the 'id' field to journal_read_conversation.
+        Returns titles, dates, and summaries.  Summaries in list view are
+        truncated to LIST_SUMMARY_PREVIEW_CHARS characters; call
+        journal_read_conversation for the full text.
 
         Args:
             topic_prefix: Filter by topic prefix (e.g. 'work').
@@ -280,12 +281,28 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 limit=limit,
                 offset=offset,
             )
-        return {
-            "conversations": [c.model_dump() for c in convs],
+        conversations_list = []
+        for c in convs:
+            rec = c.model_dump()
+            summary = rec.get("summary", "") or ""
+            if len(summary) > LIST_SUMMARY_PREVIEW_CHARS:
+                rec["summary"] = summary[:LIST_SUMMARY_PREVIEW_CHARS]
+                rec["summary_truncated"] = True
+            else:
+                rec["summary_truncated"] = False
+            conversations_list.append(rec)
+
+        result = {
+            "conversations": conversations_list,
             "total": total,
             "limit": limit,
             "offset": offset,
         }
+        err = _assert_response_ok(result, tool_name="journal_list_conversations")
+        if err:
+            await _report_oversized("journal_list_conversations", err)
+            return err
+        return result
 
     @mcp.tool(
         title="Read Conversation",

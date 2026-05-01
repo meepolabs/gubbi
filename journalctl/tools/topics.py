@@ -14,6 +14,7 @@ from journalctl.core.validation import (
     validate_topic,
 )
 from journalctl.storage.repositories import topics as topic_repo
+from journalctl.tools._response_size import _assert_response_ok, _report_oversized
 from journalctl.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
 from journalctl.tools.errors import already_exists, invalid_topic, validation_error
 
@@ -60,12 +61,17 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             page, total = await topic_repo.list_all(
                 conn, topic_prefix=topic_prefix, limit=limit, offset=offset
             )
-        return {
+        result = {
             "topics": [t.model_dump() for t in page],
             "total": total,
             "offset": offset,
             "limit": limit,
         }
+        err = _assert_response_ok(result, tool_name="journal_list_topics")
+        if err:
+            await _report_oversized("journal_list_topics", err)
+            return err
+        return result
 
     @mcp.tool(
         title="Create Topic",
