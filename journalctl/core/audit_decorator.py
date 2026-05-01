@@ -105,6 +105,6 @@ def _extract_target_id(result: dict[str, Any]) -> str | None:
     """
     for key in ("entry_id", "conversation_id", "topic"):
         value = result.get(key)
-        if value is not None:
+        if value:
             return str(value)
     return None
