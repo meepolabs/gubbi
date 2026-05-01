@@ -402,8 +402,16 @@ async def get_by_date_range(
                     title_only=False so it retains full content previews.
     """
     order = "ASC" if ascending else "DESC"
-    limit_clause = f" LIMIT {limit}" if limit is not None else ""
-    offset_clause = f" OFFSET {offset}" if offset > 0 else ""
+    params: list[Any] = [
+        date_cls.fromisoformat(date_from),
+        date_cls.fromisoformat(date_to),
+    ]
+    limit_clause = ""
+    offset_clause = ""
+    if limit is not None:
+        limit_clause = f" LIMIT {_add_param(params, limit)}"
+    if offset > 0:
+        offset_clause = f" OFFSET {_add_param(params, offset)}"
 
     rows = await conn.fetch(
         f"""
@@ -448,10 +456,9 @@ async def get_by_date_range(
         WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
 
         ORDER BY date {order}, doc_type ASC, doc_id {order}
-        {limit_clause or ''}{offset_clause}
+        {limit_clause}{offset_clause}
         """,
-        date_cls.fromisoformat(date_from),
-        date_cls.fromisoformat(date_to),
+        *params,
     )
 
     if cipher is None and not title_only:
@@ -569,7 +576,9 @@ async def get_stats(conn: asyncpg.Connection) -> dict[str, int]:
         SELECT
             (SELECT COUNT(*) FROM entries WHERE deleted_at IS NULL) AS entry_count,
             (SELECT COUNT(*) FROM conversations)                    AS conv_count,
-            (SELECT COUNT(*) FROM topics)                           AS topic_count
+            (SELECT COUNT(DISTINCT t.id) FROM topics t WHERE EXISTS (
+                SELECT 1 FROM entries e WHERE e.topic_id = t.id AND e.deleted_at IS NULL
+            ))                                                      AS topic_count
         """
     )
     if row is None:
