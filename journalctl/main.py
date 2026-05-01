@@ -314,6 +314,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     app.embedding_service = app_ctx.embedding_service
     app.cipher = app_ctx.cipher
     app.mcp = mcp
+    app.state.app_ctx = app_ctx
 
     operator_user_id = app_ctx.operator_user_id
 
@@ -408,6 +409,12 @@ server = CustomFastAPI(
         Middleware(CorrelationIDMiddleware),
     ],
 )
+
+
+# Register REST API routers
+from journalctl.api.v1.ingest import router as ingest_router  # noqa: E402
+
+server.include_router(ingest_router, prefix="/api/v1")
 
 
 @server.exception_handler(Exception)
