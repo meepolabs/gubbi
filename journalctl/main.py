@@ -113,23 +113,23 @@ async def _resolve_operator_user_id(
     JOURNAL_OPERATOR_EMAIL. None is a valid outcome; callers treat it as
     "operator binding absent" and fail loud on DB code paths.
     """
-    if not settings.operator_email:
+    if not settings.auth.operator_email:
         return None
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id FROM users WHERE email = $1 AND deleted_at IS NULL",
-            settings.operator_email,
+            settings.auth.operator_email,
         )
     if row is None:
         await logger.warning(
             "Operator email not found in users table -- operator-identity auth will be unbound",
-            email=settings.operator_email,
+            email=settings.auth.operator_email,
         )
         return None
     resolved = row["id"]
     await logger.info(
         "Resolved operator_user_id from DB",
-        email=settings.operator_email,
+        email=settings.auth.operator_email,
         operator_user_id=str(resolved),
     )
     return resolved if isinstance(resolved, UUID) else UUID(str(resolved))
@@ -173,7 +173,7 @@ def create_mcp_server(app_ctx: AppContext) -> FastMCP:
             Before writing, confirm the topic exists (check briefing)"""),
         stateless_http=True,
         streamable_http_path="/",
-        host=app_ctx.settings.host,
+        host=app_ctx.settings.server.host,
     )
     register_tools(mcp, app_ctx)
     return mcp
@@ -237,6 +237,59 @@ async def _check_trust_gateway_bind_address(
         )
 
 
+async def _build_app_ctx(
+    settings: Settings,
+    logger: structlog.stdlib.AsyncBoundLogger,
+) -> tuple[AppContext, asyncpg.Pool, asyncpg.Pool | None, FastMCP]:
+    """Build shared startup state used by both lifespan and _run_stdio.
+
+    Returns (app_ctx, pool, admin_pool, mcp). Cleanup (pool.close()) is the
+    caller's responsibility since lifecycle differs between HTTP and stdio.
+    """
+    admin_pool: asyncpg.Pool | None = None
+    if settings.db.admin_url:
+        admin_pool = await init_pool(settings.db.admin_url)
+        await logger.info("Admin PG pool ready (BYPASSRLS)")
+
+    pool = await init_pool(settings.db.app_url)
+    await logger.info("PostgreSQL pool ready")
+
+    hydra_on = bool(settings.auth.hydra_admin_url)
+    if not hydra_on:
+        pool_for_scaffold = admin_pool or pool
+        await scaffold_operator(pool_for_scaffold, settings.auth.operator_email, settings.timezone)
+        await logger.info("Auto-scaffold operator row complete (Mode 1/2)")
+    else:
+        await logger.info("Skipping auto-scaffold -- Mode 3 (cloud-api provisions)")
+
+    embedding_service = EmbeddingService()
+    await logger.info("EmbeddingService ready")
+
+    settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
+    settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
+
+    if admin_pool is None and settings.auth.operator_email:
+        await logger.warning(
+            "Operator lookup will use app pool -- safe only while users table "
+            "has no RLS policy. Configure JOURNAL_DB_ADMIN_URL for safety."
+        )
+    operator_user_id = await _resolve_operator_user_id(settings, admin_pool or pool, logger)
+
+    cipher = await _build_content_cipher(logger)
+
+    app_ctx = AppContext(
+        pool=pool,
+        embedding_service=embedding_service,
+        settings=settings,
+        logger=logger,
+        admin_pool=admin_pool,
+        operator_user_id=operator_user_id,
+        cipher=cipher,
+    )
+    mcp = create_mcp_server(app_ctx)
+    return app_ctx, pool, admin_pool, mcp
+
+
 @asynccontextmanager
 async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
@@ -245,69 +298,26 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     initialize_logger("journalctl", log_dir=str(settings.log_dir))
     app.logger = structlog.get_logger("journalctl")
 
-    # Configure OpenTelemetry (TASK-03.19)
     configure_otel(app)
 
     await app.logger.info("Server starting up")
 
     app.settings = settings
-    settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-    settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
 
-    # Fail fast if trust-gateway is paired with a public-routable bind address.
-    await _check_trust_gateway_bind_address(settings.host, settings.trust_gateway, app.logger)
-
-    # PostgreSQL pools -- each gunicorn worker creates its own (no --preload).
-    # Schema is owned by alembic; run `alembic upgrade head` before first boot.
-    # The runtime pool is journal_app (RLS-enforced); the admin pool is
-    # journal_admin (BYPASSRLS) for cross-tenant worker paths like
-    # future admin-dashboard API and cleanup. User-scoped tool calls must never touch
-    # the admin pool. Empty admin DSN falls back to the runtime pool, which
-    # is fine in single-tenant dev before RLS is live.
-    app.admin_pool = None
-    if settings.db_admin_url:
-        app.admin_pool = await init_pool(settings.db_admin_url)
-        await app.logger.info("Admin PG pool ready (BYPASSRLS)")
-
-    app.pool = await init_pool(settings.db_app_url)
-    await app.logger.info("PostgreSQL pool ready")
-
-    # Auto-scaffold operator row in non-Hosted modes (Mode 1 API-key-only, Mode 2 full self-host).
-    # Hydra-backed hosted (Mode 3) provisions users via cloud-api, not journalctl.
-    hydra_on = bool(settings.hydra_admin_url)
-    if not hydra_on:
-        pool_for_scaffold = app.admin_pool or app.pool
-        await scaffold_operator(pool_for_scaffold, settings.operator_email, settings.timezone)
-        await app.logger.info("Auto-scaffold operator row complete (Mode 1/2)")
-    else:
-        await app.logger.info("Skipping auto-scaffold -- Mode 3 (cloud-api provisions)")
-
-    # EmbeddingService — ONNX model loaded here before workers fork.
-    # entrypoint.sh pre-downloads the model to disk; this just loads it.
-    app.embedding_service = EmbeddingService()
-    await app.logger.info("EmbeddingService ready")
-
-    # Operator UUID -- binds static API key + self-host OAuth paths to a concrete
-    # tenant so user_scoped_connection works uniformly. Look up against the admin
-    # pool when available so the query bypasses RLS (once 02.05 ships, the app
-    # pool would return zero rows with app.current_user_id unset). users has no
-    # RLS today (migration 0005 only enables it on the 5 tenant tables), so the
-    # app-pool fallback works -- warn loudly so the assumption is visible if
-    # users ever gets an RLS policy.
-    if app.admin_pool is None and settings.operator_email:
-        await app.logger.warning(
-            "Operator lookup will use app pool -- safe only while users table "
-            "has no RLS policy. Configure JOURNAL_DB_ADMIN_URL for safety."
-        )
-    operator_user_id = await _resolve_operator_user_id(
-        settings,
-        app.admin_pool or app.pool,
-        app.logger,
+    await _check_trust_gateway_bind_address(
+        settings.server.host, settings.auth.trust_gateway, app.logger
     )
 
-    app.cipher = await _build_content_cipher(app.logger)
+    app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, app.logger)
+    app.pool = pool
+    app.admin_pool = admin_pool
+    app.embedding_service = app_ctx.embedding_service
+    app.cipher = app_ctx.cipher
+    app.mcp = mcp
 
-    # OAuth (stays SQLite — own connection, out of scope for PG migration)
+    operator_user_id = app_ctx.operator_user_id
+
+    # OAuth (stays SQLite -- own connection, out of scope for PG migration)
     oauth_storage = OAuthStorage(settings.oauth_db_path)
     _ = oauth_storage.conn
     expired = oauth_storage.cleanup_expired()
@@ -318,38 +328,27 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     if token_validator:
         await app.logger.info("OAuth endpoints registered")
 
-    app_ctx = AppContext(
-        pool=app.pool,
-        embedding_service=app.embedding_service,
-        settings=settings,
-        logger=app.logger,
-        admin_pool=app.admin_pool,
-        operator_user_id=operator_user_id,
-        cipher=app.cipher,
-    )
-
-    app.mcp = create_mcp_server(app_ctx)
     mcp_http = app.mcp.streamable_http_app()
 
     # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
     # When on, the static API key path is disabled (hosted mode is OAuth-only).
     introspector: HydraIntrospector | None = None
     hydra_http_client: httpx.AsyncClient | None = None
-    if settings.hydra_admin_url:
+    if settings.auth.hydra_admin_url:
         hydra_http_client = httpx.AsyncClient(timeout=HYDRA_INTROSPECT_TIMEOUT_SECS)
         introspector = HydraIntrospector(
-            admin_url=settings.hydra_admin_url,
+            admin_url=settings.auth.hydra_admin_url,
             http_client=hydra_http_client,
             logger=app.logger,
             cache=InMemoryHydraCache(),
             timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
         )
-        await app.logger.info("Hydra introspector ready", admin_url=settings.hydra_admin_url)
+        await app.logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
 
     # Mode 3 (hosted) disables the shared static API key path -- operators
     # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
     # compare in the middleware can never match (every token is >= one char).
-    effective_api_key = "" if introspector is not None else settings.api_key
+    effective_api_key = "" if introspector is not None else settings.auth.api_key
 
     # Point clients at the OAuth protected-resource metadata doc so they can
     # discover the authorization server (MCP spec 2025-11-25). Only surface
@@ -363,9 +362,9 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # (which uses the same /mcp suffix); a mismatch breaks discovery.
     protected_resource_metadata_url: str | None = None
     if introspector is not None or token_validator is not None:
-        server_base = settings.server_url.rstrip("/")
+        server_base = settings.server.url.rstrip("/")
         protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource/mcp"
-        # Guard: resource_metadata must be an absolute URI (RFC 8414 §3).
+        # Guard: resource_metadata must be an absolute URI (RFC 8414 s3).
         if protected_resource_metadata_url and not any(
             protected_resource_metadata_url.startswith(pre) for pre in ("http://", "https://")
         ):
@@ -379,7 +378,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         selfhost_token_validator=token_validator,
         operator_user_id=operator_user_id,
         protected_resource_metadata_url=protected_resource_metadata_url,
-        trust_gateway=settings.trust_gateway,
+        trust_gateway=settings.auth.trust_gateway,
     )
     # Origin validation: prevents DNS-rebinding attacks on the MCP endpoint.
     origin_validated_mcp = OriginValidationMiddleware(authed_mcp, ALLOWED_ORIGINS)
@@ -449,41 +448,12 @@ def main() -> None:
     """Entry point for running the server."""
     settings = get_settings()
 
-    if settings.transport == "stdio":
+    if settings.server.transport == "stdio":
 
         async def _run_stdio() -> None:
+            initialize_logger("journalctl", log_dir=str(settings.log_dir))
             logger = structlog.get_logger("journalctl")
-            pool = await init_pool(settings.db_app_url)
-            admin_pool: asyncpg.Pool | None = None
-            if settings.db_admin_url:
-                admin_pool = await init_pool(settings.db_admin_url)
-
-            # Auto-scaffold operator row in non-Hosted modes (Mode 1/2).
-            hydra_on = bool(settings.hydra_admin_url)
-            if not hydra_on:
-                pool_for_scaffold = admin_pool or pool
-                await scaffold_operator(
-                    pool_for_scaffold, settings.operator_email, settings.timezone
-                )
-                await logger.info("Auto-scaffold operator row complete (Mode 1/2)")
-            else:
-                await logger.info("Skipping auto-scaffold -- Mode 3 (cloud-api provisions)")
-
-            embedding_service = EmbeddingService()
-            settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
-            settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
-            operator_user_id = await _resolve_operator_user_id(settings, admin_pool or pool, logger)
-            cipher = await _build_content_cipher(logger)
-            app_ctx = AppContext(
-                pool=pool,
-                embedding_service=embedding_service,
-                settings=settings,
-                logger=logger,
-                admin_pool=admin_pool,
-                operator_user_id=operator_user_id,
-                cipher=cipher,
-            )
-            mcp = create_mcp_server(app_ctx)
+            _app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, logger)
             try:
                 mcp.run(transport="stdio")
             finally:
@@ -497,8 +467,8 @@ def main() -> None:
 
         uvicorn.run(
             "journalctl.main:server",
-            host=settings.host,
-            port=settings.port,
+            host=settings.server.host,
+            port=settings.server.port,
             reload=False,
         )
 

@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from journalctl.config import Settings
+from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
 from journalctl.oauth.router import register_oauth_routes
 from journalctl.oauth.storage import OAuthStorage
 
@@ -13,13 +13,23 @@ from journalctl.oauth.storage import OAuthStorage
 def _make_mode3_settings() -> Settings:
     """Build a Mode 3 Settings instance (Hydra-backed) bypassing validation."""
     return Settings.model_construct(
-        password_hash="",
-        hydra_admin_url="http://hydra:4445",
-        hydra_public_issuer_url="https://auth-dev.meepolabs.com",
-        server_url="http://localhost:8100",
-        db_app_url="sqlite:///memory:",
-        operator_email="",
-    )
+        db=DbConfig.model_construct(app_url="sqlite:///memory:", admin_url=""),
+        auth=AuthConfig.model_construct(
+            password_hash="",
+            hydra_admin_url="http://hydra:4445",
+            hydra_public_issuer_url="https://auth-dev.meepolabs.com",
+            hydra_public_url=None,
+            api_key="",
+            operator_email="",
+            trust_gateway=False,
+        ),
+        server=ServerConfig.model_construct(
+            url="http://localhost:8100",
+            host="0.0.0.0",  # noqa: S104
+            port=8100,
+            transport="streamable-http",
+        ),
+    )  # type: ignore[call-arg]
 
 
 def _make_app(storage: OAuthStorage) -> FastAPI:

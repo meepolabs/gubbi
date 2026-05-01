@@ -5,7 +5,7 @@ Idempotent function. Safe to call on every startup.
 Usage:
     from journalctl.users.bootstrap import scaffold_operator
     # called during app lifespan before first request
-    await scaffold_operator(admin_pool, settings.operator_email, settings.timezone)
+    await scaffold_operator(admin_pool, settings.auth.operator_email, settings.timezone)
 
 Requires a pre-existing asyncpg pool (usually the admin pool).
 Connects directly -- no alembic dependency.
