@@ -88,12 +88,7 @@ async def test_conversation_insert_under_scoped_conn_binds_user_id(
                 timestamp=None,
             ),
         ]
-        (
-            conv_id,
-            summary,
-            is_update,
-            linked_entry_id,
-        ) = await conv_repo.save_conversation(
+        save_result = await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=tmp_path,
@@ -102,6 +97,8 @@ async def test_conversation_insert_under_scoped_conn_binds_user_id(
             messages=messages,
             summary="Test summary",
         )
+        conv_id = save_result.conversation_id
+        linked_entry_id = save_result.linked_entry_id
 
     async with admin_pool.acquire() as conn:
         conv_row = await conn.fetchrow("SELECT user_id FROM conversations WHERE id = $1", conv_id)

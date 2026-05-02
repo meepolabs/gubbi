@@ -192,12 +192,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         try:
             async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                (
-                    conv_id,
-                    saved_summary,
-                    is_update,
-                    linked_entry_id,
-                ) = await conv_repo.save_conversation(
+                save_result = await conv_repo.save_conversation(
                     conn,
                     cipher,
                     conversations_json_dir=app_ctx.settings.conversations_json_dir,
@@ -211,6 +206,16 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 )
         except TopicNotFoundError:
             return not_found("Topic", topic)
+
+        if save_result.superseded_json_path is not None:
+            conv_repo.delete_superseded_json_archive(
+                app_ctx.settings.conversations_json_dir, save_result.superseded_json_path
+            )
+
+        conv_id = save_result.conversation_id
+        saved_summary = save_result.summary
+        is_update = save_result.is_update
+        linked_entry_id = save_result.linked_entry_id
 
         # Embed linked entry after transaction commits (best-effort)
         linked_content = f"Conversation saved: {title}\n\n{summary}"

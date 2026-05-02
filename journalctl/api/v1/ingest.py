@@ -132,6 +132,7 @@ async def ingest_conversations(
 
     conversations_saved = 0
     conversations_skipped_dedupe = 0
+    superseded_json_paths: list[str] = []
 
     async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
         # Ensure the inbox topic exists before saving conversations
@@ -167,32 +168,43 @@ async def ingest_conversations(
                 for msg in conv.messages
             ]
 
-            conv_id, _summary, _is_update, _linked_entry_id = await conv_repo.save_conversation(
-                conn,
-                cipher,
-                conversations_json_dir=app_ctx.settings.conversations_json_dir,
-                topic=DEFAULT_INBOX_TOPIC,
-                title=title,
-                messages=messages,
-                summary="",
-                source=conv.platform,
-                date=conv.created_at.date().isoformat(),
-            )
-
+            # Wrap the save + platform UPDATE in a savepoint so that a
+            # UniqueViolationError on the platform-id race does not abort
+            # the outer per-request transaction (which would break every
+            # subsequent loop iteration).
             try:
-                await conn.execute(
-                    "UPDATE conversations SET platform = $1, platform_id = $2 WHERE id = $3",
-                    conv.platform,
-                    conv.platform_id,
-                    conv_id,
-                )
-                conversations_saved += 1
+                async with conn.transaction():
+                    save_result = await conv_repo.save_conversation(
+                        conn,
+                        cipher,
+                        conversations_json_dir=app_ctx.settings.conversations_json_dir,
+                        topic=DEFAULT_INBOX_TOPIC,
+                        title=title,
+                        messages=messages,
+                        summary="",
+                        source=conv.platform,
+                        date=conv.created_at.date().isoformat(),
+                    )
+                    await conn.execute(
+                        "UPDATE conversations SET platform = $1, platform_id = $2 WHERE id = $3",
+                        conv.platform,
+                        conv.platform_id,
+                        save_result.conversation_id,
+                    )
             except asyncpg.UniqueViolationError:
                 logger.warning(
                     "Dedupe race: platform_id already exists, treating as skip",
                     extra={"platform": conv.platform, "platform_id": conv.platform_id},
                 )
                 conversations_skipped_dedupe += 1
+                continue
+
+            if save_result.superseded_json_path is not None:
+                superseded_json_paths.append(save_result.superseded_json_path)
+            conversations_saved += 1
+
+    for path in superseded_json_paths:
+        conv_repo.delete_superseded_json_archive(app_ctx.settings.conversations_json_dir, path)
 
     return IngestConversationResponse(
         conversations_saved=conversations_saved,
