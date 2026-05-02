@@ -132,7 +132,7 @@ async def test_conversation_title_summary_are_encrypted(
 
     async with user_scoped_connection(app_pool, user_id=user_id) as conn:
         await topic_repo.create(conn, topic="enc/conversations", title="Encryption Conversations")
-        conv_id, _summary, _is_update, _linked_entry_id = await conv_repo.save_conversation(
+        save_result = await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=tmp_journal / "conversations_json",
@@ -144,6 +144,7 @@ async def test_conversation_title_summary_are_encrypted(
             ],
             summary=summary,
         )
+        conv_id = save_result.conversation_id
 
     async with admin_pool.acquire() as conn:
         title_exists = await conn.fetchval(
@@ -210,7 +211,7 @@ async def test_journal_search_returns_full_content_for_fts_and_semantic(
             topic="enc/search",
             content="orchid once",
         )
-        conv_id, _summary, _is_update, _linked_entry_id = await conv_repo.save_conversation(
+        search_result = await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=get_settings().conversations_json_dir,
@@ -219,6 +220,7 @@ async def test_journal_search_returns_full_content_for_fts_and_semantic(
             messages=[Message(role="user", content="Need coping plan", timestamp=None)],
             summary="Full summary for search tool output",
         )
+        conv_id = search_result.conversation_id
         await embedding_service.store_by_vector(conn, strong_entry_id, [1.0] + [0.0] * 383)
         await embedding_service.store_by_vector(conn, weak_entry_id, [0.0, 1.0] + [0.0] * 382)
 
