@@ -12,7 +12,7 @@ from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import uuid4
 
 import asyncpg
@@ -117,6 +117,24 @@ def _decrypt_message_content(
 # ── Save ──────────────────────────────────────────────────────────────────────
 
 
+class SaveConversationResult(NamedTuple):
+    """Result of ``save_conversation``.
+
+    ``superseded_json_path`` is the **previous** ``json_path`` of an
+    updated conversation whose archive file has been replaced by a new
+    one, else ``None``. The caller is responsible for deleting the
+    superseded file via ``delete_superseded_json_archive`` AFTER the
+    enclosing transaction has committed -- see ``save_conversation`` for
+    the full contract.
+    """
+
+    conversation_id: int
+    summary: str
+    is_update: bool
+    linked_entry_id: int
+    superseded_json_path: str | None
+
+
 async def save_conversation(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
@@ -128,25 +146,39 @@ async def save_conversation(
     source: str = "claude",
     tags: list[str] | None = None,
     date: str | None = None,
-) -> tuple[int, str, bool, int]:
-    """Save a conversation. Idempotent — same topic+title overwrites.
+) -> SaveConversationResult:
+    """Save a conversation. Idempotent -- same topic+title overwrites.
 
-    The caller MUST supply ``conn`` already inside a transaction — e.g. from
-    ``gubbi_common.db.user_scoped.user_scoped_connection`` — because this function issues
+    The caller MUST supply ``conn`` already inside a transaction -- e.g. from
+    ``gubbi_common.db.user_scoped.user_scoped_connection`` -- because this function issues
     multiple writes (upsert conversation, delete/insert messages, upsert
     linked entry, update topic) that only stay consistent when grouped into
     one atomic commit.
 
-    Returns (conversation_id, summary, is_update, linked_entry_id).
+    Returns a ``SaveConversationResult`` named tuple. The
+    ``superseded_json_path`` field is the **previous** ``json_path`` of
+    an updated conversation that has been replaced by a new archive
+    file, else ``None``.
+
+    The caller is responsible for deleting the superseded file via
+    ``delete_superseded_json_archive`` AFTER the enclosing transaction has
+    committed. If the transaction rolls back, the conversations row
+    reverts to the previous ``json_path`` -- so the file MUST still exist
+    on disk at that point. Performing the delete inside the transaction
+    body would leave a dangling reference on rollback.
 
     Design: JSON archive is written to disk BEFORE the DB writes using a
     UUID filename. That way ``json_path`` is known at INSERT time and can be
-    committed atomically with the rest of the row — no separate UPDATE needed.
+    committed atomically with the rest of the row -- no separate UPDATE needed.
 
     Failure modes:
-    - File write fails → DB writes never run, clean state.
-    - Caller's transaction rolls back → orphan UUID file on disk, harmless
-      (nothing points to it).
+    - File write fails -> DB writes never run, clean state.
+    - Caller's transaction rolls back -> the new UUID archive file is
+      unreferenced (no row points to it); harmless on disk.
+    - Caller's transaction rolls back on a re-save -> the previous
+      archive file survives because ``save_conversation`` never deletes
+      it; the row reverts to that path and remains internally
+      consistent.
     """
     topic = validate_topic(topic)
     title = validate_title(title)
@@ -198,15 +230,6 @@ async def save_conversation(
         json_path,
     )
 
-    # Clean up orphan JSON archive file from previous save, if any.
-    if is_update and old_json_path and old_json_path != json_path:
-        try:
-            candidate = Path(conversations_json_dir / Path(old_json_path).name)
-            if not candidate.is_symlink():
-                candidate.unlink(missing_ok=True)
-        except OSError:
-            logger.exception("Failed to delete orphan JSON archive: %s", old_json_path)
-
     # Always rewrite messages on save (insert or update).
     # DELETE is a no-op for new conversations (no messages yet) and ensures
     # updated conversations reflect the current message content regardless
@@ -223,7 +246,38 @@ async def save_conversation(
         topic_id,
     )
 
-    return conv_id, summary, is_update, linked_entry_id
+    superseded_json_path = (
+        old_json_path if is_update and old_json_path and old_json_path != json_path else None
+    )
+    return SaveConversationResult(
+        conversation_id=conv_id,
+        summary=summary,
+        is_update=is_update,
+        linked_entry_id=linked_entry_id,
+        superseded_json_path=superseded_json_path,
+    )
+
+
+def delete_superseded_json_archive(conversations_json_dir: Path, json_path: str) -> None:
+    """Delete a superseded conversation JSON archive. Best-effort.
+
+    Callers MUST invoke this only AFTER the database transaction that
+    updated the row's ``json_path`` has committed. Deleting earlier
+    would leave a dangling reference if the transaction rolls back.
+
+    Only the basename of ``json_path`` is used; any directory components
+    are stripped via ``Path(json_path).name``. Symlinks are skipped (the
+    function is a no-op if the resolved candidate is a symlink) so a
+    deliberately-symlinked archive is never silently followed and
+    unlinked. ``OSError`` from ``unlink`` is logged and swallowed --
+    archive cleanup must not fail the surrounding request.
+    """
+    try:
+        candidate = Path(conversations_json_dir / Path(json_path).name)
+        if not candidate.is_symlink():
+            candidate.unlink(missing_ok=True)
+    except OSError:
+        logger.exception("Failed to delete superseded JSON archive: %s", json_path)
 
 
 async def _upsert_conversation_record(
