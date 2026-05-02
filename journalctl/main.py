@@ -412,9 +412,11 @@ server = CustomFastAPI(
 
 
 # Register REST API routers
+from journalctl.api.v1.extraction import router as extraction_router  # noqa: E402
 from journalctl.api.v1.ingest import router as ingest_router  # noqa: E402
 
 server.include_router(ingest_router, prefix="/api/v1")
+server.include_router(extraction_router, prefix="/api/v1")
 
 
 @server.exception_handler(Exception)
