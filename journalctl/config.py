@@ -162,6 +162,10 @@ class Settings(BaseSettings):
     # Paths
     data_dir: Path = Path("./journal")
 
+    # Redis -- used by extraction pub/sub SSE endpoint and worker queue.
+    # Read from JOURNAL_REDIS_URL env var; falls back to localhost.
+    redis_url: str = "redis://localhost:6379"
+
     # Timezone -- controls the "today" default for journal_append_entry and
     # journal_save_conversation when no explicit date is provided.
     timezone: str = "UTC"
