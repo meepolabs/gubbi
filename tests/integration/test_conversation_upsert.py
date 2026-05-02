@@ -1,11 +1,8 @@
-"""Integration tests for conversation upsert TOCTOU fix (9.2) and orphan cleanup (9.3).
+"""Integration tests for conversation upsert correctness.
 
-Fix 9.2: ``_upsert_conversation_record`` no longer runs a pre-check SELECT.
-Instead it derives ``is_update`` from ``(xmax != 0) AS was_update`` in the
-RETURNING clause — race-free single round-trip.
-
-Fix 9.3: On re-save the old JSON archive file is deleted after the DB upsert
-succeeds, preventing orphan file accumulation on disk.
+Covers ``is_update`` tracking via the ``xmax`` RETURNING trick,
+deferred cleanup of the superseded JSON archive on re-save, and
+rollback safety of the previous archive file.
 """
 
 from __future__ import annotations
@@ -30,8 +27,9 @@ async def test_upsert_is_update_tracking(
     tmp_path: Path,
     tenant_a: UUID,
 ) -> None:
-    """Verify that ``_upsert_conversation_record`` returns ``is_update``
-    correctly for both insert and update paths using the ``xmax`` trick."""
+    """``_upsert_conversation_record`` must report ``is_update`` correctly
+    for both insert and update paths via the single-round-trip xmax
+    derivation."""
     async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
         await topic_repo.create(conn, topic="upsert-test", title="Upsert Test")
 
@@ -40,8 +38,7 @@ async def test_upsert_is_update_tracking(
             Message(role="assistant", content="Hi there", timestamp=None),
         ]
 
-        # First save — should be an insert (is_update=False).
-        _conv_id, _summary, is_update, _linked_id = await conv_repo.save_conversation(
+        first = await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=tmp_path,
@@ -50,14 +47,13 @@ async def test_upsert_is_update_tracking(
             messages=messages,
             summary="First summary",
         )
-        assert is_update is False, "first save should report is_update=False"
+        assert first.is_update is False, "first save should report is_update=False"
 
-        # Second save with same topic+title — should be an update (is_update=True).
         messages_v2 = messages + [
             Message(role="user", content="Follow up", timestamp=None),
             Message(role="assistant", content="Sure thing", timestamp=None),
         ]
-        _conv_id, _summary, is_update, _linked_id = await conv_repo.save_conversation(
+        second = await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=tmp_path,
@@ -66,66 +62,71 @@ async def test_upsert_is_update_tracking(
             messages=messages_v2,
             summary="Updated summary",
         )
-        assert is_update is True, "re-save should report is_update=True"
+        assert second.is_update is True, "re-save should report is_update=True"
 
 
-async def test_orphan_json_is_deleted_on_resave(
+async def test_superseded_json_is_deleted_on_resave(
     app_pool,  #: asyncpg.Pool (RLS-enforced)
     admin_pool,  #: asyncpg.Pool (BYPASSRLS)
     cipher: ContentCipher,
     tmp_path: Path,
     tenant_a: UUID,
 ) -> None:
-    """Verify that re-saving a conversation deletes the old JSON archive file."""
+    """Re-saving a conversation supersedes the previous JSON archive;
+    the caller deletes it after the transaction commits."""
     async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
-        await topic_repo.create(conn, topic="orphan-test", title="Orphan Test")
+        await topic_repo.create(conn, topic="superseded-test", title="Superseded Test")
 
         messages = [
             Message(role="user", content="Version 1", timestamp=None),
         ]
 
-        # First save.
-        _conv_id, _summary, _is_update, _linked_id = await conv_repo.save_conversation(
+        await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=tmp_path,
-            topic="orphan-test",
+            topic="superseded-test",
             title="Same Title",
             messages=messages,
             summary="V1",
         )
 
-    # Read back the json_path from admin pool.
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT json_path FROM conversations WHERE slug = $1",
-            "same-title",  # slugified title
+            "same-title",
         )
     assert row is not None
     old_json_path = str(row["json_path"])
     old_file = tmp_path / Path(old_json_path).name
-    assert old_file.exists(), f"old JSON archive should exist at first save: {old_file}"
+    assert old_file.exists(), f"first-save archive should exist: {old_file}"
 
-    # Second save — same topic+title triggers update.
     messages_v2 = [
         Message(role="user", content="Version 2", timestamp=None),
         Message(role="assistant", content="Response", timestamp=None),
     ]
     async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
-        _conv_id, _summary, _is_update, _linked_id = await conv_repo.save_conversation(
+        result = await conv_repo.save_conversation(
             conn,
             cipher,
             conversations_json_dir=tmp_path,
-            topic="orphan-test",
+            topic="superseded-test",
             title="Same Title",
             messages=messages_v2,
             summary="V2",
         )
 
-    # Old file should be gone; new file should exist.
-    assert not old_file.exists(), f"old JSON archive should be deleted after resave: {old_file}"
+    assert (
+        result.superseded_json_path is not None
+    ), "re-save should return a superseded json_path to clean up"
+    assert old_file.exists(), (
+        "save_conversation must NOT delete the previous archive itself -- "
+        "rollback would leave the row pointing at a deleted file"
+    )
+    conv_repo.delete_superseded_json_archive(tmp_path, result.superseded_json_path)
 
-    # The new file should exist.
+    assert not old_file.exists(), f"superseded archive should be deleted: {old_file}"
+
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT json_path FROM conversations WHERE slug = $1",
@@ -134,5 +135,85 @@ async def test_orphan_json_is_deleted_on_resave(
     assert row is not None
     new_json_path = str(row["json_path"])
     new_file = tmp_path / Path(new_json_path).name
-    assert new_file.exists(), f"new JSON archive should exist after resave: {new_file}"
-    assert old_json_path != new_json_path, "json_path should have changed after resave"
+    assert new_file.exists(), f"new archive should exist: {new_file}"
+    assert old_json_path != new_json_path, "json_path should have changed"
+
+
+class _Rollback(Exception):
+    """Sentinel to abort a transaction after probing intra-transaction state."""
+
+    def __init__(self, superseded: str | None, file_present: bool) -> None:
+        super().__init__()
+        self.superseded = superseded
+        self.file_present = file_present
+
+
+async def test_old_archive_survives_transaction_rollback(
+    app_pool,  #: asyncpg.Pool (RLS-enforced)
+    admin_pool,  #: asyncpg.Pool (BYPASSRLS)
+    cipher: ContentCipher,
+    tmp_path: Path,
+    tenant_a: UUID,
+) -> None:
+    """If the transaction wrapping a re-save rolls back, the previous
+    archive file must still exist on disk -- otherwise the conversations
+    row would revert to a ``json_path`` that points at a deleted file.
+
+    Asserts that ``save_conversation`` does not delete the old archive
+    itself; deletion is the caller's job and must happen only after the
+    transaction commits.
+    """
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+        await topic_repo.create(conn, topic="rollback-test", title="Rollback Test")
+
+        first = await conv_repo.save_conversation(
+            conn,
+            cipher,
+            conversations_json_dir=tmp_path,
+            topic="rollback-test",
+            title="Rollback Title",
+            messages=[Message(role="user", content="V1", timestamp=None)],
+            summary="V1",
+        )
+    assert first.superseded_json_path is None, "first save has nothing to clean up"
+
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT json_path FROM conversations WHERE slug = $1",
+            "rollback-title",
+        )
+    assert row is not None
+    persisted_json_path = str(row["json_path"])
+    persisted_file = tmp_path / Path(persisted_json_path).name
+    assert persisted_file.exists()
+
+    async def _resave_then_rollback() -> None:
+        async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+            result = await conv_repo.save_conversation(
+                conn,
+                cipher,
+                conversations_json_dir=tmp_path,
+                topic="rollback-test",
+                title="Rollback Title",
+                messages=[Message(role="user", content="V2", timestamp=None)],
+                summary="V2",
+            )
+            file_still_present = persisted_file.exists()
+            raise _Rollback(result.superseded_json_path, file_still_present)
+
+    with pytest.raises(_Rollback) as excinfo:
+        await _resave_then_rollback()
+    assert excinfo.value.superseded == persisted_json_path
+    assert excinfo.value.file_present, "old file must still exist while txn is open"
+
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT json_path FROM conversations WHERE slug = $1",
+            "rollback-title",
+        )
+    assert row is not None
+    assert str(row["json_path"]) == persisted_json_path, "rollback should revert json_path"
+    assert persisted_file.exists(), (
+        "old archive file MUST survive a rolled-back re-save -- "
+        "the row points at it after rollback"
+    )
