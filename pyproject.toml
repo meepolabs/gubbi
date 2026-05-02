@@ -49,7 +49,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0"
 opentelemetry-instrumentation-redis = ">=0.50b0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27.0"
-gubbi-common = { git = "ssh://git@github.com/meepolabs/gubbi-common.git", tag = "v0.3.0", extras = ["db"] }
+gubbi-common = { git = "ssh://git@github.com/meepolabs/gubbi-common.git", tag = "v0.4.1", extras = ["db"] }
 
 # LLM extraction — Arq worker + Anthropic API
 arq = "^0.26.0"
