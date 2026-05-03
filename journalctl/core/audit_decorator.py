@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import functools
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ParamSpec, TypeVar
 
 from gubbi_common.db.user_scoped import user_scoped_connection
@@ -53,7 +53,7 @@ from journalctl.telemetry.metrics import record_audit_persistence_failure
 logger = logging.getLogger(__name__)
 
 P = ParamSpec("P")
-R = TypeVar("R", bound=dict[str, Any])
+R = TypeVar("R", bound=Mapping[str, Any])
 
 ACTION_ENTRY_CREATED = "entry.created"
 ACTION_ENTRY_UPDATED = "entry.updated"

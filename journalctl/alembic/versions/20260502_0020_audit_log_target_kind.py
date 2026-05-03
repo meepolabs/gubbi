@@ -16,6 +16,8 @@ to avoid blocking concurrent audit writes during deployment; the ALTER TABLE
 runs inside Alembic's transaction but the index builds run outside it.
 """
 
+from typing import Any
+
 from alembic import op
 
 revision = "0020_audit_log_target_kind"
@@ -37,8 +39,8 @@ def upgrade() -> None:
     op.execute("COMMIT")
 
     conn = op.get_bind()
-    raw = conn.connection  # psycopg.Connection  # type: ignore[attr-defined]
-    raw.autocommit = True  # type: ignore[attr-defined]
+    raw: Any = conn.connection  # psycopg.Connection
+    raw.autocommit = True
     try:
         # ------------------------------------------------------------------
         # Step 2: Rebuild the dedup index with target_kind to prevent
@@ -59,7 +61,7 @@ def upgrade() -> None:
             "ON audit_log (target_kind, target_id)"
         )
     finally:
-        raw.autocommit = False  # type: ignore[attr-defined]
+        raw.autocommit = False
 
 
 def downgrade() -> None:

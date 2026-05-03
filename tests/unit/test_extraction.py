@@ -1,7 +1,7 @@
 """Tests for the extraction package.
 
 Covers:
-  - LLMProvider ABC cannot be instantiated; mock concrete provider works.
+  - LLMProvider Protocol runtime isinstance checks with mock provider.
   - ExtractionService builds correct prompts and parses structured output.
   - AnthropicProvider constructs correct API call (mock anthropic client).
   - Health endpoint returns 200.
@@ -9,6 +9,8 @@ Covers:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -17,7 +19,7 @@ from starlette.testclient import TestClient
 from journalctl.config import LLMConfig
 from journalctl.extraction.health import app as health_app
 from journalctl.extraction.llm import AnthropicProvider
-from journalctl.extraction.llm.provider import LLMProvider, LLMResponse
+from journalctl.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
 from journalctl.extraction.service import (
     CategorizationResult,
     ExtractedEntry,
@@ -25,22 +27,17 @@ from journalctl.extraction.service import (
 )
 
 # ---------------------------------------------------------------------------
-# LLMProvider ABC
+# LLMProvider Protocol
 # ---------------------------------------------------------------------------
-
-
-def test_llm_provider_abc_cannot_be_instantiated() -> None:
-    with pytest.raises(TypeError):
-        LLMProvider()  # type: ignore[abstract]
 
 
 def test_mock_concrete_provider_works() -> None:
     class MockProvider(LLMProvider):
         async def complete(
             self,
-            messages: list[dict],
+            messages: list[LLMMessage],
             system_prompt: str,
-            output_schema: dict | None = None,
+            output_schema: Mapping[str, Any] | None = None,
         ) -> LLMResponse:
             return LLMResponse(content="ok", input_tokens=0, output_tokens=0, model="mock")
 
@@ -62,9 +59,9 @@ class _MockCategorizeProvider(LLMProvider):
 
     async def complete(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         system_prompt: str,
-        output_schema: dict | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> LLMResponse:
         return LLMResponse(
             content={
@@ -87,9 +84,9 @@ class _MockExtractProvider(LLMProvider):
 
     async def complete(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         system_prompt: str,
-        output_schema: dict | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> LLMResponse:
         return LLMResponse(
             content={
