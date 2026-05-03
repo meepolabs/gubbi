@@ -69,7 +69,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_ENTRY_CREATED, target_type="entry", app_ctx=app_ctx)
+    @audited(ACTION_ENTRY_CREATED, target_type="entry", target_kind="entry", app_ctx=app_ctx)
     async def journal_append_entry(
         topic: str,
         content: str,
@@ -271,7 +271,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_ENTRY_UPDATED, target_type="entry", app_ctx=app_ctx)
+    @audited(ACTION_ENTRY_UPDATED, target_type="entry", target_kind="entry", app_ctx=app_ctx)
     async def journal_update_entry(
         entry_id: int,
         content: str | None = None,
@@ -386,7 +386,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_ENTRY_DELETED, target_type="entry", app_ctx=app_ctx)
+    @audited(ACTION_ENTRY_DELETED, target_type="entry", target_kind="entry", app_ctx=app_ctx)
     async def journal_delete_entry(
         entry_id: int,
     ) -> dict[str, Any]:
