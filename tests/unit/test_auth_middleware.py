@@ -293,7 +293,7 @@ class TestMissingAndOversizedTokens:
 
 class TestSelfhostValidator:
     async def test_selfhost_validator_rejects(self) -> None:
-        mock_validator = MagicMock(return_value=False)
+        mock_validator = MagicMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,
@@ -307,7 +307,7 @@ class TestSelfhostValidator:
         mock_validator.assert_called_once()
 
     async def test_selfhost_validator_accepts(self) -> None:
-        mock_validator = MagicMock(return_value=True)
+        mock_validator = MagicMock(return_value=frozenset({"journal:read", "journal:write"}))
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,
@@ -322,7 +322,7 @@ class TestSelfhostValidator:
 
     async def test_ory_token_no_introspector_falls_to_selfhost_validator(self) -> None:
         """Ory token with no introspector falls through to self-host validator check."""
-        mock_validator = MagicMock(return_value=False)
+        mock_validator = MagicMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             api_key=TEST_API_KEY,

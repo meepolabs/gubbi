@@ -13,6 +13,14 @@ shapes (see docs/deployment.md for the full matrix):
 3. Hydra OAuth 2.1 access tokens (Mode 3 -- multi-tenant hosted,
    activated when JOURNAL_HYDRA_ADMIN_URL is set).
 
+## Breaking change (M4 H-1)
+
+- ``selfhost_token_validator`` callback type changed from
+  ``Callable[[str], bool]`` to ``Callable[[str], frozenset[str] | None]``.
+  ``None`` means invalid token; a frozenset means granted scopes. The
+  previous ``True`` return is replaced by ``frozenset({"journal:read",
+  "journal:write"})``. Custom self-host token validators MUST be updated.
+
 Uses a lightweight ASGI wrapper (NOT BaseHTTPMiddleware) to avoid
 buffering responses -- BaseHTTPMiddleware breaks SSE streaming
 required by MCP's streamable HTTP transport.
@@ -20,11 +28,17 @@ required by MCP's streamable HTTP transport.
 
 from __future__ import annotations
 
+import logging
 import secrets
 from collections.abc import Callable
 from uuid import UUID
 
 from gubbi_common.auth.bearer_challenge import build_bearer_challenge as _build_bearer_challenge
+from gubbi_common.auth.gateway_signature import (
+    GATEWAY_CONTRACT_VERSION,
+    SignatureError,
+    verify_signature,
+)
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -37,6 +51,8 @@ from journalctl.auth.hydra import (
 from journalctl.core.auth_context import current_token_scopes, current_user_id
 from journalctl.core.scope import check_scope
 from journalctl.oauth.constants import MAX_BEARER_TOKEN_LEN
+
+_logger = logging.getLogger("journalctl.middleware.auth")
 
 # RFC 6750 / RFC 9728 Bearer challenges are now built via
 # gubbi_common.auth.bearer_challenge.build_bearer_challenge; the local
@@ -81,6 +97,24 @@ def _service_unavailable() -> JSONResponse:
     )
 
 
+_LEGACY_DEFAULT_SCOPES: frozenset[str] = frozenset({"journal:read", "journal:write"})
+
+
+def _resolve_scopes(scopes_header: str) -> frozenset[str]:
+    """Parse X-Auth-Scopes header into a frozenset, falling back to legacy default.
+
+    Returns the resolved frozenset. On empty scopes applies the legacy
+    default and emits a debug log.
+    """
+    parsed = frozenset(s for s in scopes_header.split() if s)
+    if not parsed:
+        _logger.debug(
+            "Empty X-Auth-Scopes -- falling back to legacy default scopes",
+        )
+        parsed = _LEGACY_DEFAULT_SCOPES
+    return parsed
+
+
 class BearerAuthMiddleware:
     """ASGI middleware that enforces Bearer token authentication.
 
@@ -102,10 +136,13 @@ class BearerAuthMiddleware:
         api_key: str,
         introspector: HydraIntrospector | None = None,
         required_scope: str = "journal",
-        selfhost_token_validator: Callable[[str], bool] | None = None,
+        selfhost_token_validator: Callable[[str], frozenset[str] | None] | None = None,
         operator_user_id: UUID | None = None,
         protected_resource_metadata_url: str | None = None,
         trust_gateway: bool = False,
+        gateway_secret: bytes | None = None,
+        gateway_require_signature: bool = False,
+        api_key_scopes: frozenset[str] = _LEGACY_DEFAULT_SCOPES,
     ) -> None:
         self.app = app
         self.api_key = api_key
@@ -125,15 +162,17 @@ class BearerAuthMiddleware:
         # (appropriate for Mode 1 API-key-only deployments with no OAuth
         # routes to discover).
         self.protected_resource_metadata_url = protected_resource_metadata_url
+        self.gateway_secret = gateway_secret
+        self.gateway_require_signature = gateway_require_signature
+        self.api_key_scopes = api_key_scopes
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        # Trust gateway mode: skip all auth logic and trust the upstream
-        # X-Auth-User-Id header set by cloud-api. This is used by hosted
-        # Mode 3 deployments behind cloud-api.
+        # Trust gateway mode: verify HMAC envelope from cloud-api.
+        # See https://gubbi-common.readthedocs.io/auth/gateway-signature
         # DEPLOYMENT INVARIANT: this path trusts upstream cloud-api;
         # journalctl must not be directly internet-reachable when
         # trust_gateway=True.
@@ -156,8 +195,90 @@ class BearerAuthMiddleware:
                 )
                 await response(scope, receive, send)
                 return
+
+            # Read all X-Auth-* headers
+            contract_version = request.headers.get("x-auth-contract-version", "")
+            scopes_header = request.headers.get("x-auth-scopes", "")
+            timestamp_header = request.headers.get("x-auth-timestamp", "")
+            signature_header = request.headers.get("x-auth-signature", "")
+            # X-Auth-Token-Fp is optional, used only for log correlation
+            token_fp = request.headers.get("x-auth-token-fp", "")
+
+            sig_present = bool(signature_header)
+            sig_required = self.gateway_require_signature
+
+            # Legacy path: no signature header and not enforced
+            if not sig_present and not sig_required:
+                resolved_scopes = _resolve_scopes(scopes_header)
+                scope_reset = current_token_scopes.set(resolved_scopes)
+                token_reset = current_user_id.set(user_uuid)
+                try:
+                    await self.app(scope, receive, send)
+                finally:
+                    current_user_id.reset(token_reset)
+                    current_token_scopes.reset(scope_reset)
+                return
+
+            # Verification path: signature present or REQUIRE_SIGNATURE=true
+            if contract_version != str(GATEWAY_CONTRACT_VERSION):
+                response = JSONResponse(
+                    {"error": "Unsupported X-Auth-Contract-Version"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+
+            if self.gateway_secret is None:
+                # Deployment misconfiguration when REQUIRE_SIGNATURE=true
+                _logger.warning(
+                    "gateway_require_signature=true but secret not configured on app.state",
+                    extra={"user_id": user_id_header},
+                )
+                response = JSONResponse(
+                    {"error": "gateway secret not configured"},
+                    status_code=503,
+                )
+                await response(scope, receive, send)
+                return
+
+            try:
+                verify_signature(
+                    self.gateway_secret,
+                    signature_header,
+                    str(user_uuid),
+                    scopes_header,
+                    timestamp_header,
+                    request.method.upper(),
+                    request.url.path,
+                )
+            except SignatureError as exc:
+                _logger.warning(
+                    "Gateway signature verification failed",
+                    extra={
+                        "error_type": type(exc).__name__,
+                        "user_id": user_id_header,
+                        "token_fp": token_fp,
+                    },
+                )
+                response = JSONResponse(
+                    {"error": "Invalid gateway signature"},
+                    status_code=401,
+                )
+                await response(scope, receive, send)
+                return
+
+            # Signature verified -- parse scopes
+            parsed_scopes = frozenset(s for s in scopes_header.split() if s)
+            if not parsed_scopes:
+                _logger.debug(
+                    "Empty X-Auth-Scopes in signed gateway request -- "
+                    "falling back to legacy default scopes",
+                    extra={"user_id": user_id_header, "token_fp": token_fp},
+                )
+                parsed_scopes = _LEGACY_DEFAULT_SCOPES
+
+            scope_reset = current_token_scopes.set(parsed_scopes)
             token_reset = current_user_id.set(user_uuid)
-            scope_reset = current_token_scopes.set(frozenset({"journal"}))
             try:
                 await self.app(scope, receive, send)
             finally:
@@ -192,7 +313,7 @@ class BearerAuthMiddleware:
         # Empty api_key disables the path entirely (Mode 3 passes ""); the
         # explicit truthiness check prevents an empty-vs-empty match.
         if self.api_key and secrets.compare_digest(token, self.api_key):
-            await self._call_with_operator(scope, receive, send)
+            await self._call_with_operator(scope, receive, send, scopes=self.api_key_scopes)
             return
 
         # Mode 3: Hydra introspection (Ory access tokens)
@@ -238,21 +359,32 @@ class BearerAuthMiddleware:
             return
 
         # Mode 2: Self-host OAuth callback
-        if self.selfhost_token_validator is not None and self.selfhost_token_validator(token):
-            await self._call_with_operator(scope, receive, send)
-            return
+        if self.selfhost_token_validator is not None:
+            granted = self.selfhost_token_validator(token)
+            if granted is not None:
+                await self._call_with_operator(scope, receive, send, scopes=granted)
+                return
 
         # None of the modes accepted the token
         await _unauthorized("Invalid or expired token", self.protected_resource_metadata_url)(
             scope, receive, send
         )
 
-    async def _call_with_operator(self, scope: Scope, receive: Receive, send: Send) -> None:
+    async def _call_with_operator(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        scopes: frozenset[str],
+    ) -> None:
         """Invoke the wrapped app with current_user_id bound to the operator UUID.
 
         Used by operator-identity auth modes (static API key, self-host OAuth).
         When no operator UUID is configured the request returns a 503. This is
         not a silent security bypass.
+
+        ``scopes`` are the granted token scopes to store in the context var
+        for per-tool ``@require_scope`` checks.
         """
         if self.operator_user_id is None:
             response = JSONResponse(
@@ -266,7 +398,7 @@ class BearerAuthMiddleware:
             await response(scope, receive, send)
             return
         token_reset = current_user_id.set(self.operator_user_id)
-        scope_reset = current_token_scopes.set(frozenset({"journal"}))
+        scope_reset = current_token_scopes.set(scopes)
         try:
             await self.app(scope, receive, send)
         finally:
