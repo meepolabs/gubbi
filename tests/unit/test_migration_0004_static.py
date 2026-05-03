@@ -1,4 +1,4 @@
-"""Static verification that migration 0004 contains no user-row mutations.
+"""Static verification that migrations contain no user-row mutations.
 
 This test never requires a DB -- it reads the migration source file directly.
 Run on every ``pytest tests/unit`` invocation to catch regressions early.
@@ -15,6 +15,14 @@ _MIGRATION_FILE = (
     / "alembic"
     / "versions"
     / "20260419_0004_add_user_id_to_tenants.py"
+)
+
+_MIGRATION_0021_FILE = (
+    pathlib.Path(__file__).resolve().parents[2]
+    / "journalctl"
+    / "alembic"
+    / "versions"
+    / "20260503_0021_perf_audit_log_actor_idx.py"
 )
 
 
@@ -78,3 +86,53 @@ def test_migration_0004_has_no_delete_from_users() -> None:
     """Migration file must not contain DELETE FROM users."""
     src = _strip_comments(_MIGRATION_FILE.read_text(encoding="utf-8"))
     _check_no_pattern(r"DELETE\s+FROM\s+users\b", src)
+
+
+# ---- Migration 0021: composite index on idx_audit_log_actor_id -----------
+
+
+def test_migration_0021_upgrade_drops_old_bare_index() -> None:
+    """Upgrade must drop the old bare idx_audit_log_actor_id index."""
+    src = _strip_comments(_MIGRATION_0021_FILE.read_text(encoding="utf-8"))
+    assert re.search(
+        r"DROP\s+INDEX\s+(IF\s+EXISTS\s+)?idx_audit_log_actor_id\b",
+        src,
+        re.IGNORECASE,
+    ), "upgrade() must drop idx_audit_log_actor_id"
+
+
+def test_migration_0021_upgrade_creates_composite_index() -> None:
+    """Upgrade must create the composite (actor_id, occurred_at DESC) index."""
+    src = _strip_comments(_MIGRATION_0021_FILE.read_text(encoding="utf-8"))
+    assert re.search(
+        r"CREATE\s+INDEX.*?idx_audit_log_actor_id\b",
+        src,
+        re.IGNORECASE,
+    ), "upgrade() must create idx_audit_log_actor_id index"
+    assert re.search(
+        r"audit_log\s*\(\s*actor_id\s*,\s*occurred_at\s+DESC\s*\)",
+        src,
+        re.IGNORECASE,
+    ), "index columns must be (actor_id, occurred_at DESC)"
+
+
+def test_migration_0021_upgrade_contains_both_drop_and_create() -> None:
+    """Upgrade body (between def upgrade and def downgrade) has both ops."""
+    raw = _MIGRATION_0021_FILE.read_text(encoding="utf-8")
+    up_start = raw.find("def upgrade()")
+    down_start = raw.find("def downgrade()")
+    assert up_start >= 0, "upgrade() function not found in migration"
+    assert down_start > up_start, "downgrade() must follow upgrade()"
+    body = raw[up_start:down_start]
+    has_drop = re.search(
+        r"DROP\s+INDEX.*?idx_audit_log_actor_id\b",
+        body,
+        re.IGNORECASE | re.DOTALL,
+    )
+    has_create = re.search(
+        r"CREATE\s+INDEX.*?ON\s+audit_log\s*\(.*?actor_id.*?occurred_at\s+DESC",
+        body,
+        re.IGNORECASE | re.DOTALL,
+    )
+    assert has_drop, "upgrade() must contain DROP for idx_audit_log_actor_id"
+    assert has_create, "upgrade() must create composite (actor_id, occurred_at DESC) index"
