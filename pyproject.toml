@@ -11,36 +11,42 @@ package-mode = false
 python = "^3.11"
 fastapi = "^0.115.6"
 uvicorn = "^0.34.0"
-pydantic = "^2.10.5"
+pydantic = "^2.13.2"  # Harmonised floor with journalctl-cloud.
 pydantic-settings = "^2.7.0"
 structlog = "^24.4.0"
 gunicorn = "^23.0.0"
-mcp = "^1.26.0"
+# TIGHT: journalctl/tools/registry.py and 4 test files reach into
+# mcp._mcp_server / mcp._tool_manager._tools (private FastMCP internals).
+# Hold to the 1.26 minor until we either upstream a public API or add
+# an upgrade-time guard test.
+mcp = ">=1.26,<1.27"
 bcrypt = "^5.0.0"
 # PostgreSQL async driver + pgvector extension codec
 asyncpg = "^0.30.0"
 pgvector = "^0.3.6"
 # ONNX embeddings (all-MiniLM-L6-v2, CPU-only, ~80MB)
-onnxruntime = ">=1.14.1"
-tokenizers = ">=0.22.2"
-numpy = ">=1.24.0"
-requests = ">=2.33.0"
-httpx = ">=0.24.0"
-PyJWT = {version = ">=2.12.0", extras = ["crypto"]}
-cryptography = ">=46.0.6"
+onnxruntime = ">=1.14,<2"
+tokenizers = ">=0.22,<0.23"  # TIGHT: 0.x; BPE semantics have shipped breaking minor changes.
+numpy = ">=1.24,<3"  # Already crossed 1->2 silently; cap to gate the next major.
+requests = ">=2.33,<3"
+httpx = ">=0.28,<0.29"  # Harmonised with journalctl-cloud (which overrides the private _merge_cookies).
+PyJWT = {version = ">=2.12,<3", extras = ["crypto"]}  # TIGHT: token verification; major bumps changed default algorithms.
+cryptography = ">=46,<47"  # TIGHT: crypto primitives; major bumps deprecate algorithms.
 # Database migrations
 alembic = "^1.14.0"
 sqlalchemy = "^2.0.0"
-psycopg = {version = "^3.2.0", extras = ["binary"]}
-cachetools = ">=5.5.0"
+psycopg = {version = "^3.2.0", extras = ["binary"]}  # Required by alembic env.py URL rewrite to postgresql+psycopg://.
+cachetools = ">=5.5,<6"
 
-# OpenTelemetry — auto-instrumentation + critical-path spans + metrics (TASK-03.19)
-opentelemetry-distro = ">=0.50b0"
-opentelemetry-instrumentation-fastapi = ">=0.50b0"
-opentelemetry-instrumentation-httpx = ">=0.50b0"
-opentelemetry-instrumentation-asyncpg = ">=0.50b0"
-opentelemetry-instrumentation-redis = ">=0.50b0"
-opentelemetry-exporter-otlp-proto-grpc = ">=1.27.0"
+# OpenTelemetry instrumentation packages are pre-1.0 betas with breaking
+# instrumentor-class signature changes between minor versions. Cap below
+# 1.0 to surface those bumps as PR review work, not silent updates.
+opentelemetry-distro = ">=0.50b0,<1.0"
+opentelemetry-instrumentation-fastapi = ">=0.50b0,<1.0"
+opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
+opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
+opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
+opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
 gubbi-common = { git = "ssh://git@github.com/meepolabs/gubbi-common.git", tag = "v0.4.2", extras = ["db"] }
 
 # LLM extraction — Arq worker + Anthropic API
@@ -50,12 +56,14 @@ anthropic = "^0.49.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.0.0"
-pytest-asyncio = "^0.25.0"
+pytest-asyncio = "^0.25.0"  # TIGHT: pre-1.0; minor bumps shift loop-scope semantics. Harmonised across the workspace.
 pytest-cov = "^6.0.0"
 pre-commit = "^3.5.0"
+# TIGHT: ruff format-rule changes between minors mass-rewrite source.
+# Caret on a 0.x already means <0.9; do not relax without a coordinated reformat commit.
 ruff = "^0.8.0"
 mypy = "^1.13.0"
-types-requests = ">=2.32.0"
+types-requests = ">=2.32,<3"
 types-pyyaml = "^6.0.12.20260408"
 hypothesis = "^6.152.1"
 
