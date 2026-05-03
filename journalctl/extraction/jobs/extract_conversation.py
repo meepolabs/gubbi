@@ -205,12 +205,16 @@ async def extract_conversation(
         )
 
     # --- Publish progress event ---
+    job_id = ctx.get("job_id", "unknown")
     event = {
         "topic_path": topic_path,
         "entries_created": entries_created,
+        "job_id": str(job_id),
+        "conversation_id": conversation_id,
     }
     try:
-        await redis.publish(f"extraction:{user_id}", json.dumps(event))
+        channel = f"extraction:user:{user_id}:job:{job_id}"
+        await redis.publish(channel, json.dumps(event))
     except Exception:
         log.warning(
             "Failed to publish extraction event to Redis",
