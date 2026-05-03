@@ -8,13 +8,32 @@ Stacking order (outermost to innermost)::
 
     @mcp.tool()
     @require_scope("journal:write")
-    @audited("entry.created", target_type="entry", app_ctx=app_ctx)
+    @audited("entry.created", target_type="entry", target_kind="entry", app_ctx=app_ctx)
     async def journal_append_entry(...) -> dict:
         ...
 
-The decorator runs the handler first, then — only on success (no ``"error"``
-key in the returned dict) — opens its own database connection and appends
-an audit row.
+Contract (success heuristic)
+-----------------------------
+The decorator inspects the handler's return value to decide success/failure:
+
+* If the return value is a ``mcp.types.CallToolResult``, the ``.isError``
+  attribute decides success (``isError=False`` → success).
+* Otherwise (a plain ``dict``), the heuristic is
+  ``result.get("success", True)`` — a result is assumed successful unless
+  it explicitly sets ``success=False``.
+
+  *Rationale:* The old ``"error" not in result`` heuristic falsely treated
+  ``CallToolResult(isError=True, ...)`` as success (the dict surrogate for
+  MCP errors in this codebase uses an ``"error"`` key, but the
+  ``CallToolResult`` envelope does not).  See H-3 audit-decorator-fix.
+
+Actor context
+--------------
+The decorator reads ``current_user_id`` from the request context.  If the
+ContextVar is unset (e.g. Arq worker path) the audit is silently skipped
+and a warning is logged.  This is safe: extraction workers and other
+non-MCP code paths call ``record_audit`` directly with an explicit
+``actor_id``.
 """
 
 from __future__ import annotations
@@ -47,6 +66,8 @@ def audited(
     action: str,
     target_type: str,
     app_ctx: AppContext,
+    *,
+    target_kind: str | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorate an MCP write-tool handler to record an audit event on success.
 
@@ -58,6 +79,10 @@ def audited(
         Type of the target resource (e.g. ``"entry"``, ``"topic"``).
     app_ctx :
         Application context (provides the database pool).
+    target_kind :
+        Namespace discriminator for ``target_id`` (e.g. ``"entry"``,
+        ``"conversation"``, ``"topic"``).  Required by ``record_audit``
+        when ``target_id`` is derived from the handler result.
     """
 
     def decorator(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
@@ -65,11 +90,21 @@ def audited(
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             result = await fn(*args, **kwargs)
 
-            # Only audit successful operations (no "error" key in result dict)
-            if "error" not in result:
+            # Determine success/failure.  CallToolResult uses .isError;
+            # plain dicts use a "success" key (defaulting to True).
+            is_success = _result_is_success(result)
+            if is_success:
                 user_id = current_user_id.get()
                 if user_id is not None:
-                    target_id = _extract_target_id(result)
+                    if isinstance(result, dict):
+                        target_id, derived_kind = _extract_target_id(result)
+                    else:
+                        target_id, derived_kind = None, None
+                    # caller-supplied target_kind takes precedence over
+                    # the derived one (e.g. conversations returns
+                    # conversation_id but callers may set
+                    # target_kind="conversation").
+                    effective_kind = target_kind or derived_kind
                     try:
                         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
                             await record_audit(
@@ -79,6 +114,7 @@ def audited(
                                 action=action,
                                 target_type=target_type,
                                 target_id=target_id,
+                                target_kind=effective_kind,
                             )
                     except Exception:
                         logger.warning(
@@ -97,14 +133,33 @@ def audited(
     return decorator
 
 
-def _extract_target_id(result: dict[str, Any]) -> str | None:
-    """Extract a target ID from a tool result dict.
+def _result_is_success(result: Any) -> bool:
+    """Decide whether the handler result represents a success.
+
+    * ``CallToolResult`` (or any object with ``.isError``) → ``not result.isError``
+    * ``dict`` → ``result.get("success", True)``
+    * anything else → ``True`` (assume success)
+    """
+    # Duck-type CallToolResult: any object with a boolean .isError attribute.
+    if hasattr(result, "isError"):
+        return not result.isError
+    if isinstance(result, dict):
+        return bool(result.get("success", True))
+    return True
+
+
+def _extract_target_id(result: dict[str, Any]) -> tuple[str | None, str | None]:
+    """Extract (target_id, target_kind) from a tool result dict.
 
     Checks common keys in order: entry_id, conversation_id, topic.
-    Returns the value as a string, or None if none are found.
+    Returns (None, None) if none are found.
     """
-    for key in ("entry_id", "conversation_id", "topic"):
+    for key, kind in (
+        ("entry_id", "entry"),
+        ("conversation_id", "conversation"),
+        ("topic", "topic"),
+    ):
         value = result.get(key)
-        if value:
-            return str(value)
-    return None
+        if value is not None:
+            return str(value), kind
+    return None, None
