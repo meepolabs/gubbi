@@ -1,10 +1,11 @@
 import asyncio
+from collections.abc import Mapping
 from typing import Any
 
 from anthropic import AsyncAnthropic
 
 from journalctl.config import LLMConfig
-from journalctl.extraction.llm.provider import LLMProvider, LLMResponse
+from journalctl.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
 
 # Model pricing in $USD per million tokens (input, output).
 # Values are approximate and should be updated when pricing changes.
@@ -30,9 +31,9 @@ class AnthropicProvider(LLMProvider):
 
     async def complete(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         system_prompt: str,
-        output_schema: dict | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> LLMResponse:
         system_block: dict[str, Any] = {
             "type": "text",
