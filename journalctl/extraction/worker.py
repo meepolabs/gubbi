@@ -15,6 +15,7 @@ from arq.connections import RedisSettings
 
 from journalctl.config import get_settings
 from journalctl.core.crypto import ContentCipher, load_master_keys_from_env
+from journalctl.extraction.context import ExtractionContext
 from journalctl.extraction.health import app as health_app
 from journalctl.extraction.jobs.extract_conversation import extract_conversation
 from journalctl.extraction.llm.anthropic_provider import AnthropicProvider
@@ -47,7 +48,7 @@ def _build_content_cipher() -> ContentCipher | None:
     return ContentCipher(master_keys)
 
 
-async def startup(ctx: dict) -> None:
+async def startup(ctx: ExtractionContext) -> None:
     # Health server thread (existing behaviour).
     health_thread = threading.Thread(
         target=_run_health_server,
@@ -79,7 +80,7 @@ async def startup(ctx: dict) -> None:
     logger.info("Extraction worker Redis client ready")
 
 
-async def shutdown(ctx: dict) -> None:
+async def shutdown(ctx: ExtractionContext) -> None:
     pool = ctx.get("pool")
     if pool is not None:
         await pool.close()

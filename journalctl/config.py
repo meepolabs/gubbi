@@ -297,4 +297,4 @@ class Settings(BaseSettings):
 def get_settings() -> Settings:
     """Create and cache settings instance from environment variables."""
     # pydantic-settings reads required fields from env; no Python-level kwargs needed.
-    return Settings()  # type: ignore[call-arg]
+    return Settings()

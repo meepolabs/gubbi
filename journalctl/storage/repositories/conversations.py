@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Mapping, Sequence
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
@@ -63,7 +64,7 @@ def _write_conversation_json(
 
 def _decrypt_content_field(
     cipher: ContentCipher,
-    row: Any,
+    row: asyncpg.Record | Mapping[str, Any],
     encrypted_key: str,
     nonce_key: str,
 ) -> str | None:
@@ -144,7 +145,7 @@ async def save_conversation(
     messages: list[Message],
     summary: str,
     source: str = "claude",
-    tags: list[str] | None = None,
+    tags: Sequence[str] | None = None,
     date: str | None = None,
 ) -> SaveConversationResult:
     """Save a conversation. Idempotent -- same topic+title overwrites.
@@ -288,8 +289,8 @@ async def _upsert_conversation_record(
     slug: str,
     source: str,
     summary: str,
-    tags: list[str],
-    participants: list[str],
+    tags: Sequence[str],
+    participants: Sequence[str],
     messages: list[Message],
     conversation_date: str,
     json_path: str,
