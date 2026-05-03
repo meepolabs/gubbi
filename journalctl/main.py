@@ -329,6 +329,37 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     if token_validator:
         await app.logger.info("OAuth endpoints registered")
 
+    # Gateway HMAC secret: decode the hex-encoded shared secret from config.
+    # If empty or invalid, stash None (verification will fall through to
+    # legacy path or 503 depending on gateway_require_signature).
+    gateway_secret: bytes | None = None
+    if settings.auth.gateway_secret:
+        try:
+            decoded = bytes.fromhex(settings.auth.gateway_secret)
+            if len(decoded) >= 32:
+                gateway_secret = decoded
+            else:
+                await app.logger.warning(
+                    "JOURNAL_GATEWAY_SECRET decodes to less than 32 bytes "
+                    "-- gateway signature verification disabled"
+                )
+        except ValueError:
+            await app.logger.warning(
+                "JOURNAL_GATEWAY_SECRET is not valid hex "
+                "-- gateway signature verification disabled"
+            )
+    if settings.auth.gateway_require_signature and gateway_secret is None:
+        await app.logger.warning(
+            "JOURNAL_GATEWAY_REQUIRE_SIGNATURE=true but gateway secret "
+            "is missing or invalid -- signed requests will fail with 503"
+        )
+    if settings.auth.trust_gateway and not settings.auth.gateway_require_signature:
+        await app.logger.warning(
+            "trust_gateway=true but gateway_require_signature=false -- "
+            "requests are accepted without HMAC verification"
+        )
+    app.state.journalctl_gateway_secret = gateway_secret
+
     mcp_http = app.mcp.streamable_http_app()
 
     # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
@@ -380,6 +411,9 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         operator_user_id=operator_user_id,
         protected_resource_metadata_url=protected_resource_metadata_url,
         trust_gateway=settings.auth.trust_gateway,
+        gateway_secret=gateway_secret,
+        gateway_require_signature=settings.auth.gateway_require_signature,
+        api_key_scopes=frozenset(settings.auth.api_key_scopes),
     )
     # Origin validation: prevents DNS-rebinding attacks on the MCP endpoint.
     origin_validated_mcp = OriginValidationMiddleware(authed_mcp, ALLOWED_ORIGINS)
