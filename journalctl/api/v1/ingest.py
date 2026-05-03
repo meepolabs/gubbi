@@ -8,16 +8,16 @@ No LLM calls. Pure data ingest.
 from __future__ import annotations
 
 import logging
-import secrets
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
 import asyncpg
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Request
 from gubbi_common.db.user_scoped import user_scoped_connection
 from pydantic import BaseModel, Field
 
+from journalctl.api.v1.auth import require_scope
 from journalctl.core.cipher_guard import require_cipher
 from journalctl.core.context import AppContext
 from journalctl.core.validation import validate_title
@@ -81,45 +81,11 @@ def _get_app_ctx(request: Request) -> AppContext:
     return ctx
 
 
-async def _resolve_user_id(request: Request) -> UUID:
-    """Authenticate request and return the resolved user UUID.
-
-    In cloud-api mode (trust_gateway=True), X-Auth-User-Id is injected by the
-    gateway and required. In self-host mode (trust_gateway=False), only
-    Authorization: Bearer <api_key> is accepted.
-    """
-    app_ctx = _get_app_ctx(request)
-
-    if app_ctx.settings.auth.trust_gateway:
-        user_id_str = request.headers.get("x-auth-user-id", "")
-        if not user_id_str:
-            raise HTTPException(status_code=401, detail="Missing X-Auth-User-Id header")
-        try:
-            return UUID(user_id_str)
-        except (ValueError, AttributeError):
-            raise HTTPException(status_code=401, detail="Invalid X-Auth-User-Id header") from None
-
-    auth_header = request.headers.get("authorization", "")
-    if not auth_header.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
-
-    token = auth_header[7:]
-    if not app_ctx.settings.auth.api_key or not secrets.compare_digest(
-        token, app_ctx.settings.auth.api_key
-    ):
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    if app_ctx.operator_user_id is None:
-        raise HTTPException(status_code=503, detail="Operator not provisioned")
-
-    return app_ctx.operator_user_id
-
-
 @router.post("/conversations", response_model=IngestConversationResponse)
 async def ingest_conversations(
     request: Request,
     body: IngestConversationRequest,
-    user_id: Annotated[UUID, Depends(_resolve_user_id)],
+    auth: Annotated[tuple[UUID, frozenset[str]], Depends(require_scope("journal:write"))],
 ) -> IngestConversationResponse:
     """Ingest normalized conversation batches from browser extension clients.
 
@@ -127,6 +93,7 @@ async def ingest_conversations(
     saved under the default "inbox" topic, and returns counts of saved
     vs skipped conversations.
     """
+    user_id, _scopes = auth
     app_ctx = _get_app_ctx(request)
     cipher = require_cipher(app_ctx)
 
