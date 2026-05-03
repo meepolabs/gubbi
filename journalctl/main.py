@@ -15,6 +15,7 @@ from uuid import UUID
 
 import asyncpg
 import httpx
+import redis.asyncio as aioredis
 import structlog
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -360,6 +361,11 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         )
     app.state.journalctl_gateway_secret = gateway_secret
 
+    # Expose auth dependencies on app.state for REST API routes
+    app.state.hydra_introspector = None  # may be replaced below
+    app.state.selfhost_token_validator = token_validator  # may be None
+    app.state.operator_user_id = operator_user_id  # may be None
+
     mcp_http = app.mcp.streamable_http_app()
 
     # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
@@ -376,6 +382,11 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
             timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
         )
         await app.logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
+        app.state.hydra_introspector = introspector
+
+    # Shared Redis client for SSE pub/sub (extraction progress).
+    redis_client = aioredis.from_url(str(settings.redis_url))
+    app.state.redis_client = redis_client
 
     # Mode 3 (hosted) disables the shared static API key path -- operators
     # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
@@ -430,6 +441,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
             await app.admin_pool.close()
         await app.pool.close()
         oauth_storage.close()
+        await redis_client.aclose()
 
 
 # Create FastAPI app
