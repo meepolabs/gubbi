@@ -21,7 +21,7 @@ def register_oauth_routes(
     app: FastAPI,
     oauth_storage: OAuthStorage,
     settings: Settings,
-) -> Callable[[str], bool] | None:
+) -> Callable[[str], frozenset[str] | None] | None:
     """Register OAuth endpoints on the FastAPI app if configured.
 
     Dispatches across three deploy shapes:

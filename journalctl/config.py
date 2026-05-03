@@ -1,3 +1,4 @@
+import logging
 import os
 from functools import lru_cache
 from pathlib import Path
@@ -35,6 +36,8 @@ OAUTH_ACCESS_TOKEN_TTL_SECS: Final[int] = 3600  # 1 hour
 OAUTH_REFRESH_TOKEN_TTL_SECS: Final[int] = 2592000  # 30 days
 OAUTH_AUTH_CODE_TTL_SECS: Final[int] = 300  # 5 minutes
 
+_config_logger = logging.getLogger("journalctl.config")
+
 # Maps old flat env var names (without JOURNAL_ prefix) to new double-underscore
 # nested names that pydantic-settings v2 understands with env_nested_delimiter="__".
 # JOURNAL_DB_APP_URL -> JOURNAL_DB__APP_URL -> settings.db.app_url
@@ -48,6 +51,9 @@ _FLAT_TO_NESTED_ENV: dict[str, str] = {
     "JOURNAL_API_KEY": "JOURNAL_AUTH__API_KEY",
     "JOURNAL_OPERATOR_EMAIL": "JOURNAL_AUTH__OPERATOR_EMAIL",
     "JOURNAL_TRUST_GATEWAY": "JOURNAL_AUTH__TRUST_GATEWAY",
+    "JOURNAL_GATEWAY_SECRET": "JOURNAL_AUTH__GATEWAY_SECRET",
+    "JOURNAL_GATEWAY_REQUIRE_SIGNATURE": "JOURNAL_AUTH__GATEWAY_REQUIRE_SIGNATURE",
+    "JOURNAL_API_KEY_SCOPES": "JOURNAL_AUTH__API_KEY_SCOPES",
     "JOURNAL_SERVER_URL": "JOURNAL_SERVER__URL",
     "JOURNAL_HOST": "JOURNAL_SERVER__HOST",
     "JOURNAL_PORT": "JOURNAL_SERVER__PORT",
@@ -95,6 +101,9 @@ class AuthConfig(BaseModel):
     password_hash: str = ""
     operator_email: str = ""
     trust_gateway: bool = False
+    gateway_secret: str = ""
+    gateway_require_signature: bool = False
+    api_key_scopes: list[str] = ["journal:read", "journal:write"]
 
     @field_validator("api_key")
     @classmethod
@@ -105,6 +114,17 @@ class AuthConfig(BaseModel):
         if v and len(v) < 32:
             raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
         return v
+
+    @model_validator(mode="after")
+    def _warn_on_require_signature_without_secret(self) -> Self:
+        if self.gateway_require_signature and not self.gateway_secret:
+            _config_logger.warning(
+                "JOURNAL_GATEWAY_REQUIRE_SIGNATURE=true but "
+                "JOURNAL_GATEWAY_SECRET is empty -- set a hex-encoded "
+                "shared secret (>= 64 hex chars) before enabling this "
+                "feature in production"
+            )
+        return self
 
 
 class ServerConfig(BaseModel):

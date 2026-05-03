@@ -79,4 +79,4 @@ class TestSelfhostRegister:
         storage = _make_storage(tmp_path)
         validator = _make_token_validator(storage)
         storage.close()
-        assert validator("nonexistent") is False
+        assert validator("nonexistent") is None

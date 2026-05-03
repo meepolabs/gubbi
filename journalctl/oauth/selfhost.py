@@ -26,19 +26,30 @@ from journalctl.oauth.wellknown import register as register_wellknown
 _logger = logging.getLogger("journalctl.oauth.selfhost")
 
 
-def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], bool]:
-    """Return a closure that validates OAuth access tokens."""
+def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], frozenset[str] | None]:
+    """Return a closure that validates OAuth access tokens.
 
-    def validate(token: str) -> bool:
+    Returns ``frozenset({"journal:read", "journal:write"})`` on success,
+    ``None`` on invalid/expired token.
+
+    .. note::
+        **Breaking change (M4 H-1):** Previously returned ``bool``. Custom
+        self-host token validators must now return ``frozenset[str] | None``.
+        ``None`` means invalid token; a frozenset means granted scopes.
+    """
+
+    def validate(token: str) -> frozenset[str] | None:
         try:
             at = oauth_storage.get_access_token(token)
-            return at is not None and (at.expires_at is None or at.expires_at > int(time.time()))
+            if at is not None and (at.expires_at is None or at.expires_at > int(time.time())):
+                return frozenset({"journal:read", "journal:write"})
+            return None
         except (sqlite3.Error, ValueError, KeyError):
             _logger.warning("Token validation failed", exc_info=True)
-            return False
+            return None
         except Exception:
             _logger.exception("Unexpected error during token validation")
-            return False
+            return None
 
     return validate
 
@@ -84,7 +95,7 @@ def register(
     app: FastAPI,
     storage: OAuthStorage,
     settings: Settings,
-) -> Callable[[str], bool]:
+) -> Callable[[str], frozenset[str] | None]:
     """Register self-host OAuth routes and return token validator."""
     provider = JournalOAuthProvider(
         storage=storage,

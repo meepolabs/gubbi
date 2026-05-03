@@ -312,7 +312,7 @@ class TestMiddlewareScopeStorage:
             await client.get("/", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
 
         assert len(captured_scopes) == 1
-        assert captured_scopes[0] == frozenset({"journal"})
+        assert captured_scopes[0] == frozenset({"journal:read", "journal:write"})
 
 
 # ---------------------------------------------------------------------------
