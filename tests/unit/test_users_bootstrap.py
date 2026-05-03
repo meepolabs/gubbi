@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-pytestmark = [pytest.mark.asyncio(loop_scope="session")]
+pytestmark = [pytest.mark.asyncio(loop_scope="function")]
 
 _FAKE_UUID = "550e8400-e29b-41d4-a716-446655440000"
 _EMAIL = "op@test.local"
