@@ -61,6 +61,12 @@ ACTION_ENTRY_DELETED = "entry.deleted"
 ACTION_TOPIC_CREATED = "topic.created"
 ACTION_CONVERSATION_SAVED = "conversation.saved"
 
+_TARGET_KEYS: dict[str, tuple[str, str]] = {
+    "entry": ("entry_id", "entry"),
+    "conversation": ("conversation_id", "conversation"),
+    "topic": ("topic", "topic"),
+}
+
 
 def audited(
     action: str,
@@ -97,7 +103,7 @@ def audited(
                 user_id = current_user_id.get()
                 if user_id is not None:
                     if isinstance(result, dict):
-                        target_id, derived_kind = _extract_target_id(result)
+                        target_id, derived_kind = _extract_target_id(result, target_type)
                     else:
                         target_id, derived_kind = None, None
                     # caller-supplied target_kind takes precedence over
@@ -148,18 +154,20 @@ def _result_is_success(result: Any) -> bool:
     return True
 
 
-def _extract_target_id(result: dict[str, Any]) -> tuple[str | None, str | None]:
-    """Extract (target_id, target_kind) from a tool result dict.
+def _extract_target_id(
+    result: dict[str, Any],
+    target_type: str,
+) -> tuple[str | None, str | None]:
+    """Look up the target_id by target_type rather than positional walk.
 
-    Checks common keys in order: entry_id, conversation_id, topic.
-    Returns (None, None) if none are found.
+    Returns (target_id, target_kind) for the named target_type if its
+    key is present in the result dict; (None, None) otherwise.
     """
-    for key, kind in (
-        ("entry_id", "entry"),
-        ("conversation_id", "conversation"),
-        ("topic", "topic"),
-    ):
-        value = result.get(key)
-        if value is not None:
-            return str(value), kind
-    return None, None
+    mapping = _TARGET_KEYS.get(target_type)
+    if mapping is None:
+        return None, None
+    result_key, kind = mapping
+    value = result.get(result_key)
+    if value is None:
+        return None, None
+    return str(value), kind
