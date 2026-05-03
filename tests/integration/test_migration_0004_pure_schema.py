@@ -19,7 +19,7 @@ import re
 import asyncpg
 import pytest
 
-pytestmark = [pytest.mark.integration, pytest.mark.asyncio(loop_scope="session")]
+pytestmark = [pytest.mark.integration]
 
 _TENANT_TABLES = ("topics", "entries", "conversations", "messages", "entry_embeddings")
 
@@ -32,9 +32,13 @@ _MIGRATION_FILE = (
 )  # noqa: E501
 
 
-async def test_migration_0004_has_no_user_mutations() -> None:
+def test_migration_0004_has_no_user_mutations() -> None:
     """Migration file source must not contain INSERT/UPDATE/DELETE targeting users."""
-    src = _MIGRATION_FILE.read_text(encoding="utf-8")
+    full_src = _MIGRATION_FILE.read_text(encoding="utf-8")
+    # Skip the module-level docstring; only inspect executable code.
+    # The docstring itself may contain example SQL as warnings/comments.
+    first_import = re.search(r"^import ", full_src, re.MULTILINE)
+    src = full_src[first_import.start() :] if first_import else full_src
 
     insert_users = re.search(r"INSERT\s+INTO\s+users\b", src, re.IGNORECASE)
     assert insert_users is None, (
@@ -52,6 +56,7 @@ async def test_migration_0004_has_no_user_mutations() -> None:
     assert delete_users is None, "Migration 0004 must not contain DELETE FROM users."
 
 
+@pytest.mark.asyncio(loop_scope="session")
 async def test_tenant_tables_have_not_null_user_id(pool: asyncpg.Pool) -> None:
     """Every tenant table's user_id column must have is_nullable = 'NO'."""
     query = (
