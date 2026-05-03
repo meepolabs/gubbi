@@ -34,6 +34,7 @@ async def init_pool(
         command_timeout=30,
         statement_cache_size=0,
         init=_init_connection,
+        server_settings={"application_name": "journalctl"},
     )
     return pool
 
