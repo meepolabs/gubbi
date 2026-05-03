@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -195,11 +196,19 @@ class TestExtractConversationJob:
                 conversation_id,
             )
 
-            # 9. Redis publish
-            mock_ctx["redis"].publish.assert_awaited_once_with(
-                f"extraction:{user_id}",
-                '{"topic_path": "health/fitness", "entries_created": 2}',
-            )
+            # 9. Redis publish (new channel format with job_id)
+            expected_event = {
+                "topic_path": "health/fitness",
+                "entries_created": 2,
+                "job_id": "unknown",
+                "conversation_id": 42,
+            }
+            mock_ctx["redis"].publish.assert_awaited_once()
+            call_args = mock_ctx["redis"].publish.await_args
+            assert call_args is not None
+            channel, payload = call_args.args
+            assert channel == f"extraction:user:{user_id}:job:unknown"
+            assert json.loads(payload) == expected_event
 
     # ------------------------------------------------------------------
     # Idempotent skip
@@ -312,8 +321,17 @@ class TestExtractConversationJob:
 
             await extract_conversation(mock_ctx, conversation_id, user_id)
 
-            # Verify Redis publish was called with correct channel and JSON.
-            mock_ctx["redis"].publish.assert_awaited_once_with(
-                f"extraction:{user_id}",
-                '{"topic_path": "work/dev", "entries_created": 1}',
-            )
+            # Verify Redis publish was called with correct channel and JSON
+            # (new format: extraction:user:{user_id}:job:{job_id}).
+            expected_event = {
+                "topic_path": "work/dev",
+                "entries_created": 1,
+                "job_id": "unknown",
+                "conversation_id": 7,
+            }
+            mock_ctx["redis"].publish.assert_awaited_once()
+            call_args = mock_ctx["redis"].publish.await_args
+            assert call_args is not None
+            channel, payload = call_args.args
+            assert channel == f"extraction:user:{user_id}:job:unknown"
+            assert json.loads(payload) == expected_event
