@@ -8,11 +8,15 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import cast
 from uuid import UUID
 
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from journalctl.audit import record_audit
+from journalctl.core.crypto import ContentCipher
+from journalctl.extraction.context import ExtractionContext
+from journalctl.extraction.llm.provider import LLMMessage
 from journalctl.storage.exceptions import TopicNotFoundError
 from journalctl.storage.repositories import conversations as conv_repo
 from journalctl.storage.repositories import entries as entry_repo
@@ -22,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 async def extract_conversation(
-    ctx: dict,
+    ctx: ExtractionContext,
     conversation_id: int,
     user_id: str,
 ) -> dict:
@@ -62,7 +66,7 @@ async def extract_conversation(
         (bool, True if idempotency check short-circuited).
     """
     pool = ctx["pool"]
-    cipher = ctx["cipher"]
+    cipher = cast(ContentCipher, ctx["cipher"])
     extraction_service = ctx["extraction_service"]
     redis = ctx["redis"]
 
@@ -115,7 +119,7 @@ async def extract_conversation(
         existing_topics = [t.topic for t in existing_topic_metas]
 
         # --- Categorize ---
-        message_dicts = [{"role": m.role, "content": m.content} for m in messages]
+        message_dicts: list[LLMMessage] = [{"role": m.role, "content": m.content} for m in messages]
         try:
             categorization = await extraction_service.categorize_conversation(
                 message_dicts, existing_topics
