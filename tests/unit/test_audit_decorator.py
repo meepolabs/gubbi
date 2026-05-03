@@ -314,3 +314,34 @@ class TestExtractTargetId:
 
     def test_none_for_empty_dict(self) -> None:
         assert _extract_target_id({}, "entry") == (None, None)
+
+
+class TestAuditedTargetTypeWarning:
+    """Verify @audited warns at decoration time for unmapped target_type."""
+
+    def test_unmapped_target_type_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Decorating with target_type not in _TARGET_KEYS logs a warning."""
+        ctx = _make_app_ctx()
+        with caplog.at_level("WARNING", logger="journalctl.core.audit_decorator"):
+
+            @audited("user.flagged", target_type="user", app_ctx=ctx)
+            async def _handler() -> dict[str, Any]:
+                return {"success": True}
+
+        assert any(
+            "target_type='user'" in r.message and "no _TARGET_KEYS entry" in r.message
+            for r in caplog.records
+        ), f"Expected warning for unmapped target_type; got: {[r.message for r in caplog.records]}"
+
+    def test_mapped_target_type_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
+        """Decorating with a mapped target_type does NOT warn."""
+        ctx = _make_app_ctx()
+        with caplog.at_level("WARNING", logger="journalctl.core.audit_decorator"):
+
+            @audited("entry.created", target_type="entry", app_ctx=ctx)
+            async def _handler() -> dict[str, Any]:
+                return {"success": True}
+
+        assert not any(
+            "no _TARGET_KEYS entry" in r.message for r in caplog.records
+        ), "Mapped target_type should not log unmapped-warning"
