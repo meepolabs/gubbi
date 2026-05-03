@@ -91,6 +91,14 @@ def audited(
         when ``target_id`` is derived from the handler result.
     """
 
+    if target_type not in _TARGET_KEYS:
+        logger.warning(
+            "audited() target_type=%r has no _TARGET_KEYS entry; "
+            "audit rows for action=%r will be written with target_id=None",
+            target_type,
+            action,
+        )
+
     def decorator(fn: Callable[P, Awaitable[R]]) -> Callable[P, Awaitable[R]]:
         @functools.wraps(fn)
         async def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
