@@ -1,4 +1,8 @@
-"""Arq job: extract structured topics and entries from a saved conversation."""
+"""Arq job: extract structured topics and entries from a saved conversation.
+
+See ``extract_conversation`` function docstring for the CALLER CONTRACT
+(security-critical).
+"""
 
 from __future__ import annotations
 
@@ -8,6 +12,7 @@ from uuid import UUID
 
 from gubbi_common.db.user_scoped import user_scoped_connection
 
+from journalctl.audit import record_audit
 from journalctl.storage.exceptions import TopicNotFoundError
 from journalctl.storage.repositories import conversations as conv_repo
 from journalctl.storage.repositories import entries as entry_repo
@@ -25,6 +30,24 @@ async def extract_conversation(
 
     NOTE: conversation_id is ``int`` (DB integer primary key) even though the
     original spec said ``UUID`` -- the conversations table uses integer PKs.
+
+    CALLER CONTRACT (security-critical):
+    The caller MUST authenticate that ``user_id`` owns ``conversation_id``
+    BEFORE enqueueing this job. Today this is the API endpoint that
+    enqueues extraction (POST /api/v1/extraction) -- it derives user_id
+    from the authenticated request and only enqueues against
+    conversations that belong to that user (verified via RLS-scoped
+    SELECT).
+
+    The job runs under user_scoped_connection(user_id=...), so all reads
+    and writes are RLS-protected. A wrong user_id at enqueue time will:
+      - Read the wrong tenant's conversation (RLS blocks; results in 0
+        rows; the job loads an empty conversation and returns).
+      - Or, if a future caller bypasses the API path with admin pool:
+        could read across tenants. Don't bypass the API path.
+
+    See llm_context/audit_contract.md for actor_type semantics on the
+    summary audit row this job produces.
 
     Args:
         ctx: Arq worker context (pool, cipher, extraction_service, redis
@@ -164,6 +187,21 @@ async def extract_conversation(
         await conn.execute(
             "UPDATE conversations SET processed_at = now() WHERE id = $1",
             conversation_id,
+        )
+
+        # --- Summary audit row (last DB write; committed only when everything succeeds) ---
+        await record_audit(
+            conn,
+            actor_type="user",
+            actor_id=str(user_uuid),
+            action="conversation.extracted",
+            target_kind="conversation",
+            target_id=str(conversation_id),
+            metadata={
+                "via": "extraction-worker",
+                "entries_created": entries_created,
+                "topics_touched": 1,
+            },
         )
 
     # --- Publish progress event ---

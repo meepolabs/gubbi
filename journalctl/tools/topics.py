@@ -88,7 +88,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_TOPIC_CREATED, target_type="topic", app_ctx=app_ctx)
+    @audited(ACTION_TOPIC_CREATED, target_type="topic", target_kind="topic", app_ctx=app_ctx)
     async def journal_create_topic(
         topic: str,
         title: str,
