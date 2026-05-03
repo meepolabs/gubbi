@@ -1,10 +1,15 @@
 """Unit tests for the @audited decorator (M3 requirement).
 
 Tests cover:
-    - Successful handler triggers an audit write
-    - Failed handler (returns dict with "error" key) does NOT trigger an audit write
+    - Successful handler triggers an audit write (with target_kind)
+    - Failed handler (returns dict with "error" key converted to "success": False) does NOT trigger
+    - CallToolResult with isError=True triggers failure path
+    - CallToolResult with isError=False triggers success path
     - Audit write failure is swallowed (handler result returned, warning logged)
-    - target_id extraction from result dict
+    - No user ID skips audit silently
+    - Handler exceptions propagate unchanged
+    - target_id extraction returns (target_id, target_kind) tuple
+    - caller-supplied target_kind takes precedence over derived kind
 """
 
 from __future__ import annotations
@@ -15,7 +20,7 @@ from uuid import UUID
 
 import pytest
 
-from journalctl.core.audit_decorator import _extract_target_id, audited
+from journalctl.core.audit_decorator import _extract_target_id, _result_is_success, audited
 from journalctl.core.context import AppContext
 
 pytestmark = pytest.mark.unit
@@ -41,8 +46,8 @@ async def _ok_handler(**kwargs: Any) -> dict[str, Any]:
 
 
 async def _error_handler(**kwargs: Any) -> dict[str, Any]:
-    """A mock failed tool handler (returns error)."""
-    return {"error": "something went wrong"}
+    """A mock failed tool handler (returns with success=False)."""
+    return {"status": "error", "success": False, "error": "something went wrong"}
 
 
 async def _ok_handler_no_target(**kwargs: Any) -> dict[str, Any]:
@@ -68,16 +73,17 @@ async def test_successful_handler_triggers_audit(
     mock_user_scoped_conn: MagicMock,
     mock_current_user_id: MagicMock,
 ) -> None:
-    """A successful handler should call record_audit with correct args."""
+    """A successful handler should call record_audit with correct args, including target_kind."""
     # Arrange
     mock_current_user_id.get.return_value = _USER_ID
     mock_conn = AsyncMock()
-    # user_scoped_connection is an async context manager
     mock_user_scoped_conn.return_value.__aenter__.return_value = mock_conn
 
     app_ctx = _make_app_ctx()
 
-    decorated = audited("entry.created", target_type="entry", app_ctx=app_ctx)(_ok_handler)
+    decorated = audited("entry.created", target_type="entry", target_kind="entry", app_ctx=app_ctx)(
+        _ok_handler
+    )
 
     # Act
     with patch(
@@ -93,12 +99,13 @@ async def test_successful_handler_triggers_audit(
     assert call_kwargs["actor_id"] == str(_USER_ID)
     assert call_kwargs["action"] == "entry.created"
     assert call_kwargs["target_type"] == "entry"
+    assert call_kwargs["target_kind"] == "entry"
     assert call_kwargs["target_id"] == "42"
     mock_persistence_failure.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
-# Failed handler does NOT trigger audit
+# Failed handler (dict with success=False) does NOT trigger audit
 # ---------------------------------------------------------------------------
 
 
@@ -108,7 +115,7 @@ async def test_failed_handler_does_not_audit(
     mock_user_scoped_conn: MagicMock,
     mock_current_user_id: MagicMock,
 ) -> None:
-    """A handler that returns an error dict should skip the audit write."""
+    """A handler that returns success=False should skip the audit write."""
     # Arrange
     mock_current_user_id.get.return_value = _USER_ID
     mock_conn = AsyncMock()
@@ -116,7 +123,9 @@ async def test_failed_handler_does_not_audit(
 
     app_ctx = _make_app_ctx()
 
-    decorated = audited("entry.created", target_type="entry", app_ctx=app_ctx)(_error_handler)
+    decorated = audited("entry.created", target_type="entry", target_kind="entry", app_ctx=app_ctx)(
+        _error_handler
+    )
 
     # Act
     with patch(
@@ -125,7 +134,7 @@ async def test_failed_handler_does_not_audit(
         result = await decorated()
 
     # Assert
-    assert result == {"error": "something went wrong"}
+    assert result == {"status": "error", "success": False, "error": "something went wrong"}
     mock_record_audit.assert_not_awaited()
     mock_record_audit.assert_not_called()
 
@@ -153,7 +162,9 @@ async def test_audit_failure_swallowed(
 
     app_ctx = _make_app_ctx()
 
-    decorated = audited("entry.created", target_type="entry", app_ctx=app_ctx)(_ok_handler)
+    decorated = audited("entry.created", target_type="entry", target_kind="entry", app_ctx=app_ctx)(
+        _ok_handler
+    )
 
     # Act
     with patch("journalctl.core.audit_decorator.record_audit") as mock_record_audit:
@@ -183,7 +194,9 @@ async def test_no_user_id_skips_audit(
     """No authenticated user should skip audit write silently."""
     mock_current_user_id.get.return_value = None
     app_ctx = _make_app_ctx()
-    decorated = audited("entry.created", target_type="entry", app_ctx=app_ctx)(_ok_handler)
+    decorated = audited("entry.created", target_type="entry", target_kind="entry", app_ctx=app_ctx)(
+        _ok_handler
+    )
 
     with patch(
         "journalctl.core.audit_decorator.record_audit", new=AsyncMock()
@@ -208,7 +221,9 @@ async def test_handler_exception_propagates(
     """Handler exceptions must be re-raised and skip audit write."""
     mock_current_user_id.get.return_value = _USER_ID
     app_ctx = _make_app_ctx()
-    decorated = audited("entry.created", target_type="entry", app_ctx=app_ctx)(_raising_handler)
+    decorated = audited("entry.created", target_type="entry", target_kind="entry", app_ctx=app_ctx)(
+        _raising_handler
+    )
 
     with (
         patch("journalctl.core.audit_decorator.record_audit", new=AsyncMock()) as mock_record_audit,
@@ -220,7 +235,46 @@ async def test_handler_exception_propagates(
 
 
 # ---------------------------------------------------------------------------
-# target_id extraction
+# _result_is_success — CallToolResult vs. dict
+# ---------------------------------------------------------------------------
+
+
+class MockCallToolResult:
+    """Minimal stand-in for mcp.types.CallToolResult so we don't need the real import."""
+
+    def __init__(self, isError: bool = False) -> None:  # noqa: N803
+        self.isError = isError
+
+
+class TestResultIsSuccess:
+    """Verify success heuristic for both CallToolResult and dict."""
+
+    def test_call_tool_result_is_error_true(self) -> None:
+        assert _result_is_success(MockCallToolResult(isError=True)) is False
+
+    def test_call_tool_result_is_error_false(self) -> None:
+        assert _result_is_success(MockCallToolResult(isError=False)) is True
+
+    def test_dict_success_true(self) -> None:
+        assert _result_is_success({"success": True}) is True
+
+    def test_dict_success_false(self) -> None:
+        assert _result_is_success({"success": False}) is False
+
+    def test_dict_no_success_key(self) -> None:
+        """A dict without a 'success' key is assumed successful."""
+        assert _result_is_success({"status": "ok"}) is True
+
+    def test_dict_empty(self) -> None:
+        assert _result_is_success({}) is True
+
+    def test_dict_success_none(self) -> None:
+        """Edge case: success=None should be treated as falsy."""
+        assert _result_is_success({"success": None}) is False
+
+
+# ---------------------------------------------------------------------------
+# target_id extraction — now returns (target_id, target_kind) tuple
 # ---------------------------------------------------------------------------
 
 
@@ -228,25 +282,25 @@ class TestExtractTargetId:
     """Verify target ID extraction from various result shapes."""
 
     def test_entry_id(self) -> None:
-        assert _extract_target_id({"entry_id": 42}) == "42"
+        assert _extract_target_id({"entry_id": 42}) == ("42", "entry")
 
     def test_entry_id_str(self) -> None:
-        assert _extract_target_id({"entry_id": "abc-123"}) == "abc-123"
+        assert _extract_target_id({"entry_id": "abc-123"}) == ("abc-123", "entry")
 
     def test_conversation_id(self) -> None:
-        assert _extract_target_id({"conversation_id": 99}) == "99"
+        assert _extract_target_id({"conversation_id": 99}) == ("99", "conversation")
 
     def test_topic(self) -> None:
-        assert _extract_target_id({"topic": "work/test"}) == "work/test"
+        assert _extract_target_id({"topic": "work/test"}) == ("work/test", "topic")
 
     def test_prefers_entry_id_over_topic(self) -> None:
-        assert _extract_target_id({"entry_id": 1, "topic": "work"}) == "1"
+        assert _extract_target_id({"entry_id": 1, "topic": "work"}) == ("1", "entry")
 
     def test_prefers_conversation_id_over_topic(self) -> None:
-        assert _extract_target_id({"conversation_id": 5, "topic": "work"}) == "5"
+        assert _extract_target_id({"conversation_id": 5, "topic": "work"}) == ("5", "conversation")
 
     def test_none_when_no_match(self) -> None:
-        assert _extract_target_id({"status": "ok"}) is None
+        assert _extract_target_id({"status": "ok"}) == (None, None)
 
     def test_none_for_empty_dict(self) -> None:
-        assert _extract_target_id({}) is None
+        assert _extract_target_id({}) == (None, None)

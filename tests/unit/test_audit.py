@@ -72,7 +72,7 @@ async def test_record_audit_inserts_for_each_action(action_str: str) -> None:
     conn.execute.assert_called_once()
     args = _executed_args(conn)
     # args: (sql, actor_type, actor_id, action, target_type, target_id,
-    #        reason, metadata_json, ip_address, user_agent)
+    #        target_kind, reason, metadata_json, ip_address, user_agent)
     assert args[1] == "admin"
     assert args[2] == "admin@example.com"
     assert args[3] == action_str
@@ -106,6 +106,49 @@ async def test_various_invalid_actor_types(bad: str) -> None:
 
 
 # ---------------------------------------------------------------------------
+# target_kind validation
+# ---------------------------------------------------------------------------
+
+
+async def test_target_kind_required_when_target_id_set() -> None:
+    conn = _make_conn()
+    with pytest.raises(ValueError, match="target_kind is required when target_id is supplied"):
+        await record_audit(
+            conn,
+            actor_type="user",
+            actor_id="uuid-123",
+            action="entry.created",
+            target_id="42",
+        )
+    conn.execute.assert_not_called()
+
+
+async def test_target_kind_nullable_when_target_id_null() -> None:
+    """target_kind should be optional (None) when target_id is also None."""
+    conn = _make_conn()
+    await record_audit(conn, actor_type="user", actor_id="uuid-123", action="entry.created")
+    conn.execute.assert_called_once()
+    args = _executed_args(conn)
+    assert args[5] is None  # target_id
+    assert args[6] is None  # target_kind
+
+
+async def test_target_kind_passed_through() -> None:
+    conn = _make_conn()
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id="uuid-123",
+        action="entry.created",
+        target_id="42",
+        target_kind="entry",
+    )
+    args = _executed_args(conn)
+    assert args[5] == "42"  # target_id
+    assert args[6] == "entry"  # target_kind
+
+
+# ---------------------------------------------------------------------------
 # metadata defaults
 # ---------------------------------------------------------------------------
 
@@ -119,8 +162,8 @@ async def test_metadata_defaults_to_empty_dict() -> None:
 
     # Assert
     args = _executed_args(conn)
-    # metadata_json is the 7th positional arg after the SQL string (index 7)
-    assert json.loads(str(args[7])) == {}
+    # metadata_json is the 8th positional arg after the SQL string (index 8)
+    assert json.loads(str(args[8])) == {}
 
 
 async def test_metadata_none_treated_as_empty_dict() -> None:
@@ -129,7 +172,7 @@ async def test_metadata_none_treated_as_empty_dict() -> None:
         conn, actor_type="system", actor_id="w", action="secret.rotated", metadata=None
     )
     args = _executed_args(conn)
-    assert json.loads(str(args[7])) == {}
+    assert json.loads(str(args[8])) == {}
 
 
 async def test_metadata_dict_is_serialized() -> None:
@@ -139,7 +182,7 @@ async def test_metadata_dict_is_serialized() -> None:
         conn, actor_type="admin", actor_id="ops", action="encryption.key_rotated", metadata=meta
     )
     args = _executed_args(conn)
-    assert json.loads(str(args[7])) == meta
+    assert json.loads(str(args[8])) == meta
 
 
 # ---------------------------------------------------------------------------
@@ -156,16 +199,18 @@ async def test_all_optional_fields_none_by_default() -> None:
 
     # Assert
     args = _executed_args(conn)
-    # target_type=args[5], target_id=args[6], reason=args[8 - wait, recount]
     # SQL positional: $1=actor_type $2=actor_id $3=action $4=target_type
-    #                 $5=target_id $6=reason $7=metadata $8=ip_address $9=user_agent
+    #                 $5=target_id $6=target_kind $7=reason $8=metadata
+    #                 $9=ip_address $10=user_agent
     # args[0]=sql, [1]=actor_type, [2]=actor_id, [3]=action, [4]=target_type,
-    #         [5]=target_id, [6]=reason, [7]=metadata_json, [8]=ip_address, [9]=user_agent
+    #         [5]=target_id, [6]=target_kind, [7]=reason, [8]=metadata_json,
+    #         [9]=ip_address, [10]=user_agent
     assert args[4] is None  # target_type
     assert args[5] is None  # target_id
-    assert args[6] is None  # reason
-    assert args[8] is None  # ip_address
-    assert args[9] is None  # user_agent
+    assert args[6] is None  # target_kind
+    assert args[7] is None  # reason
+    assert args[9] is None  # ip_address
+    assert args[10] is None  # user_agent
 
 
 async def test_optional_fields_passed_through() -> None:
@@ -177,6 +222,7 @@ async def test_optional_fields_passed_through() -> None:
         action="auth.email_collision",
         target_type="user",
         target_id="uuid-abc",
+        target_kind="user",
         reason="support investigation",
         metadata={"ticket": "CS-9001"},
         ip_address="203.0.113.42",
@@ -188,10 +234,11 @@ async def test_optional_fields_passed_through() -> None:
     assert args[3] == "auth.email_collision"
     assert args[4] == "user"
     assert args[5] == "uuid-abc"
-    assert args[6] == "support investigation"
-    assert json.loads(str(args[7])) == {"ticket": "CS-9001"}
-    assert args[8] == "203.0.113.42"
-    assert args[9] == "Mozilla/5.0"
+    assert args[6] == "user"
+    assert args[7] == "support investigation"
+    assert json.loads(str(args[8])) == {"ticket": "CS-9001"}
+    assert args[9] == "203.0.113.42"
+    assert args[10] == "Mozilla/5.0"
 
 
 # ---------------------------------------------------------------------------

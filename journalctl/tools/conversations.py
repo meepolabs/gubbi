@@ -78,7 +78,12 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_CONVERSATION_SAVED, target_type="conversation", app_ctx=app_ctx)
+    @audited(
+        ACTION_CONVERSATION_SAVED,
+        target_type="conversation",
+        target_kind="conversation",
+        app_ctx=app_ctx,
+    )
     async def journal_save_conversation(
         topic: str,
         title: str,
