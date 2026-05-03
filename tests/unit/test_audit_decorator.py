@@ -282,25 +282,35 @@ class TestExtractTargetId:
     """Verify target ID extraction from various result shapes."""
 
     def test_entry_id(self) -> None:
-        assert _extract_target_id({"entry_id": 42}) == ("42", "entry")
+        assert _extract_target_id({"entry_id": 42}, "entry") == ("42", "entry")
 
     def test_entry_id_str(self) -> None:
-        assert _extract_target_id({"entry_id": "abc-123"}) == ("abc-123", "entry")
+        assert _extract_target_id({"entry_id": "abc-123"}, "entry") == ("abc-123", "entry")
 
     def test_conversation_id(self) -> None:
-        assert _extract_target_id({"conversation_id": 99}) == ("99", "conversation")
+        assert _extract_target_id({"conversation_id": 99}, "conversation") == ("99", "conversation")
 
     def test_topic(self) -> None:
-        assert _extract_target_id({"topic": "work/test"}) == ("work/test", "topic")
+        assert _extract_target_id({"topic": "work/test"}, "topic") == ("work/test", "topic")
 
-    def test_prefers_entry_id_over_topic(self) -> None:
-        assert _extract_target_id({"entry_id": 1, "topic": "work"}) == ("1", "entry")
+    def test_entry_type_picks_entry_id_when_both_present(self) -> None:
+        """target_type=entry picks entry_id even when topic is also in result."""
+        assert _extract_target_id({"entry_id": 1, "topic": "work"}, "entry") == ("1", "entry")
 
-    def test_prefers_conversation_id_over_topic(self) -> None:
-        assert _extract_target_id({"conversation_id": 5, "topic": "work"}) == ("5", "conversation")
+    def test_topic_type_picks_topic_when_both_present(self) -> None:
+        """target_type=topic picks topic even when entry_id is also in result."""
+        assert _extract_target_id({"entry_id": 1, "topic": "work"}, "topic") == ("work", "topic")
+
+    def test_conversation_type_picks_conversation_id(self) -> None:
+        """target_type=conversation picks conversation_id."""
+        assert _extract_target_id({"conversation_id": 5}, "conversation") == ("5", "conversation")
+
+    def test_unknown_type_returns_none_none(self) -> None:
+        """target_type not in _TARGET_KEYS returns (None, None)."""
+        assert _extract_target_id({"entry_id": 1, "topic": "work"}, "unknown_type") == (None, None)
 
     def test_none_when_no_match(self) -> None:
-        assert _extract_target_id({"status": "ok"}) == (None, None)
+        assert _extract_target_id({"status": "ok"}, "entry") == (None, None)
 
     def test_none_for_empty_dict(self) -> None:
-        assert _extract_target_id({}) == (None, None)
+        assert _extract_target_id({}, "entry") == (None, None)
