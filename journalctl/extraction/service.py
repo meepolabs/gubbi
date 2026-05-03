@@ -1,9 +1,10 @@
 import json
 import pathlib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from journalctl.extraction.llm.provider import LLMProvider
+from journalctl.extraction.llm.provider import LLMMessage, LLMProvider
 
 
 @dataclass
@@ -22,7 +23,7 @@ class ExtractedEntry:
     entry_date: str | None = None
 
 
-_CATEGORIZE_SCHEMA: dict[str, Any] = {
+_CATEGORIZE_SCHEMA: Mapping[str, Any] = {
     "type": "object",
     "properties": {
         "topic_path": {"type": "string"},
@@ -33,7 +34,7 @@ _CATEGORIZE_SCHEMA: dict[str, Any] = {
     "required": ["topic_path", "topic_title", "summary", "confidence"],
 }
 
-_EXTRACT_SCHEMA: dict[str, Any] = {
+_EXTRACT_SCHEMA: Mapping[str, Any] = {
     "type": "object",
     "properties": {
         "entries": {
@@ -61,7 +62,7 @@ class ExtractionService:
 
     async def categorize_conversation(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         existing_topics: list[str],
     ) -> CategorizationResult:
         system_prompt = self._read_prompt("categorize.md")
@@ -71,7 +72,7 @@ class ExtractionService:
                 "existing_topics": existing_topics,
             }
         )
-        user_msg: dict[str, str] = {"role": "user", "content": user_content}
+        user_msg: LLMMessage = {"role": "user", "content": user_content}
         response = await self._llm.complete([user_msg], system_prompt, _CATEGORIZE_SCHEMA)
 
         parsed = self._parse_content(response.content)
@@ -84,7 +85,7 @@ class ExtractionService:
 
     async def extract_entries(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         topic: str,
     ) -> list[ExtractedEntry]:
         system_prompt = self._read_prompt("extract_entries.md")
@@ -94,7 +95,7 @@ class ExtractionService:
                 "topic": topic,
             }
         )
-        user_msg: dict[str, str] = {"role": "user", "content": user_content}
+        user_msg: LLMMessage = {"role": "user", "content": user_content}
         response = await self._llm.complete([user_msg], system_prompt, _EXTRACT_SCHEMA)
 
         parsed = self._parse_content(response.content)

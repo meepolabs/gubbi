@@ -1,6 +1,11 @@
-from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, TypedDict, runtime_checkable
+
+
+class LLMMessage(TypedDict):
+    role: str
+    content: str
 
 
 @dataclass
@@ -11,14 +16,13 @@ class LLMResponse:
     model: str
 
 
-class LLMProvider(ABC):
-    @abstractmethod
+@runtime_checkable
+class LLMProvider(Protocol):
     async def complete(
         self,
-        messages: list[dict],
+        messages: list[LLMMessage],
         system_prompt: str,
-        output_schema: dict | None = None,
+        output_schema: Mapping[str, Any] | None = None,
     ) -> LLMResponse: ...
 
-    @abstractmethod
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float: ...

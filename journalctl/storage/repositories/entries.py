@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping, Sequence
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
@@ -27,7 +28,7 @@ logger = logging.getLogger(__name__)
 
 def _decrypt_content_field(
     cipher: ContentCipher,
-    row: Any,
+    row: asyncpg.Record | Mapping[str, Any],
     encrypted_key: str,
     nonce_key: str,
 ) -> str | None:
@@ -58,7 +59,7 @@ async def append(
     topic: str,
     content: str,
     reasoning: str | None = None,
-    tags: list[str] | None = None,
+    tags: Sequence[str] | None = None,
     date: str | None = None,
 ) -> int:
     """Append a dated entry to a topic. Returns the new entry_id.
@@ -218,7 +219,7 @@ async def update(
     reasoning: str | None = None,
     mode: str = "replace",
     date: str | None = None,
-    tags: list[str] | None = None,
+    tags: Sequence[str] | None = None,
 ) -> None:
     """Update an entry by its stable ID.
 
@@ -272,7 +273,7 @@ async def update(
             new_reasoning = old_reasoning
 
         new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
-        new_tags: list[str] = tags if tags is not None else list(row["tags"] or [])
+        new_tags: Sequence[str] = tags if tags is not None else list(row["tags"] or [])
         now = datetime_cls.now(UTC)
 
         # Encrypt new content and reasoning (if not None); else None pair for reasoning.
