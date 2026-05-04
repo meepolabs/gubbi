@@ -259,6 +259,15 @@ class Settings(BaseSettings):
                 "non-empty together for Mode 3 (multi-tenant hosted)."
             )
 
+        # Mode 3: operator_email is irrelevant when Hydra handles
+        # authentication; mixing them yields opaque failures, so reject.
+        if hydra_on and self.auth.operator_email:
+            raise ValueError(
+                "JOURNAL_OPERATOR_EMAIL must not be set when JOURNAL_HYDRA_ADMIN_URL "
+                "is set -- mode 3 (multi-tenant hosted) has no operator concept; "
+                "remove the variable or unset Hydra to switch to mode 1/2."
+            )
+
         if not hydra_on and not self.auth.api_key:
             raise ValueError(
                 "JOURNAL_API_KEY is required unless JOURNAL_HYDRA_ADMIN_URL "

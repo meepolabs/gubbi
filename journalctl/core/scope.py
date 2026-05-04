@@ -59,6 +59,24 @@ SCOPE_GRANTS: dict[str, frozenset[str]] = {
 }
 
 # ---------------------------------------------------------------------------
+# Precomputed permission resolution (compiled once at import)
+# ---------------------------------------------------------------------------
+
+# Merges every grant set into one membership -- short-circuits mapped match
+# when the required scope is ungrantable by any known scope.
+_GRANTS_UNION: frozenset[str] = frozenset(
+    perm for grants in SCOPE_GRANTS.values() for perm in grants
+)
+
+# Inverse index: permission -> set-of-scopes that can grant it.  Replaces
+# the O(n) per-call loop over token scopes with a single intersection test.
+_GRANT_INVERSE: dict[str, frozenset[str]] = {
+    perm: frozenset(scope for scope, grants in SCOPE_GRANTS.items() if perm in grants)
+    for perm in _GRANTS_UNION
+}
+
+
+# ---------------------------------------------------------------------------
 # Scope checker
 # ---------------------------------------------------------------------------
 
@@ -75,7 +93,7 @@ def check_scope(token_scopes: Collection[str], required_scope: str) -> bool:
        ``SCOPE_GRANTS``.
 
     In v1 the Hydra-issued ``journal`` scope directly matches the
-    middleware's ``required_scope="journal"`` (stage 1).  The per-tool
+    middleware's ``required_scope="journal"`` (v1).  The per-tool
     decorator checks ``"journal:read"`` / ``"journal:write"`` which are
     granted via the mapping (stage 2).
 
@@ -106,13 +124,13 @@ def check_scope(token_scopes: Collection[str], required_scope: str) -> bool:
     if required_scope in token_scopes:
         return True
 
-    # Stage 2: mapped permission (per-tool decorator checks
-    # "journal:read" / "journal:write" which are granted by "journal")
-    granted: set[str] = set()
-    for ts in token_scopes:
-        if ts in SCOPE_GRANTS:
-            granted.update(SCOPE_GRANTS[ts])
-    return required_scope in granted
+    # Stage 2: mapped permission -- use the precomputed inverse index to avoid
+    # iterating over every token scope.  _GRANT_INVERSE[perm] is O(1), so the
+    # intersection test is O(k) where k is the size of the grant set for this
+    # specific required_scope (tiny, typically 1).
+    return bool(_GRANTS_UNION & {required_scope}) and bool(
+        _GRANT_INVERSE.get(required_scope, frozenset()) & set(token_scopes)
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -77,6 +77,8 @@ _SKIP_KEYWORDS = frozenset(
         "entry",
         # Common English word that appears as false positive after FROM in prose
         "the",
+        # PL/pgSQL variables captured by INTO (DO-block locals, not tables)
+        "nxt",
     }
 )
 

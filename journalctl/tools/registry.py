@@ -152,8 +152,7 @@ def _patch_tool_manager(tm: ToolManager) -> None:
             safe_set_attributes(span_name, span, attrs)
             try:
                 result = await original_call_tool(name, arguments or {}, **kwargs)
-                result_str = str(result)
-                result_size = len(result_str)
+                result_size = len(str(result))
                 latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
                 safe_set_attributes(
                     span_name,
