@@ -11,6 +11,7 @@ POST compares the cookie value to the form value (timing-safe).
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import secrets
 import time
@@ -37,15 +38,29 @@ logger = logging.getLogger("journalctl.oauth.forms")
 
 
 def client_ip(request: Request) -> str:
-    """Extract client IP, honoring X-Forwarded-For from the nginx proxy.
+    """Extract client IP, optionally honouring X-Forwarded-For.
 
-    NOTE: X-Forwarded-For is trusted here. This assumes nginx is always in
-    front of the application server. Do not expose journalctl directly to the
-    internet without a reverse proxy.
+    Honours JOURNAL_AUTH__TRUST_FORWARDED_HEADERS (default False).  When
+    True the leftmost X-Forwarded-For value is treated as the original
+    client IP; when False only request.client.host is used so reverse-
+    proxy headers cannot forge the caller address.
+
+    Operators enabling this flag MUST ensure a trusted reverse proxy is in
+    front of journalctl and that direct access to the application is not
+    possible.  (M-9.3).
     """
+    from journalctl.config import get_settings
+
+    if not get_settings().auth.trust_forwarded_headers:
+        return request.client.host if request.client else "unknown"
     xff: str = request.headers.get("x-forwarded-for", "") or ""
     if xff:
-        return xff.split(",")[0].strip()
+        candidate = xff.split(",")[0].strip()
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            return request.client.host if request.client else "unknown"
+        return candidate
     return request.client.host if request.client else "unknown"
 
 

@@ -146,10 +146,6 @@ def _patch_tool_manager(tm: ToolManager) -> None:
         start_ns = time.monotonic_ns()
         attrs: dict[str, Any] = {
             "tool.name": name,
-            # TODO(TASK-03.19a): wire user_id and tool.scope_required from
-            # request context when available.
-            "user_id": "",
-            "tool.scope_required": "",
         }
 
         with _tracer.start_as_current_span(span_name) as span:
@@ -190,6 +186,25 @@ def _patch_tool_manager(tm: ToolManager) -> None:
     # We use a closure that wraps the original, bypassing descriptor protocol.
     bound_patched = patched_call_tool.__get__(tm, type(tm))  # type: ignore[attr-defined]
     tm.call_tool = bound_patched  # type: ignore[assignment]
+
+    # Sanity-check: verify we actually wrapped the SDK call_tool. A future MCP
+    # SDK refactor could change how ToolManager exposes call_tool (e.g. make it
+    # a property or replace it with a wrapper that lacks __wrapped__). Use
+    # explicit raises rather than `assert` so the check still runs under
+    # python -O (which strips assertions). Failure here means telemetry is
+    # silently broken; we want it loud at startup.
+    wrapped = getattr(tm.call_tool, "__wrapped__", None)
+    if wrapped is None:
+        raise RuntimeError("ToolManager.call_tool was not wrapped by _patch_tool_manager")
+    if not hasattr(wrapped, "__func__"):
+        raise RuntimeError(
+            "Wrapped call_tool lacks __func__ -- SDK refactor may have broken wrapping"
+        )
+    if wrapped is not original_call_tool:
+        raise RuntimeError(
+            "ToolManager.call_tool.__wrapped__ is not our captured reference; "
+            "SDK refactor may have changed how call_tool is exposed"
+        )
 
 
 def _wire_scope_filter(mcp: FastMCP) -> None:

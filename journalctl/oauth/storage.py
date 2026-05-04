@@ -11,6 +11,7 @@ deleted/recreated without affecting journal data.
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -21,6 +22,8 @@ from mcp.shared.auth import OAuthClientInformationFull
 
 from journalctl.oauth.constants import RATE_LIMIT_EVENT_RETENTION_SECS
 from journalctl.storage.constants import DB_BUSY_TIMEOUT_MS
+
+logger = logging.getLogger(__name__)
 
 SCHEMA = """
 PRAGMA journal_mode=WAL;
@@ -134,7 +137,9 @@ class OAuthStorage:
     def _backfill_expires_at(self) -> None:
         """One-time backfill of expires_at column from JSON blob data.
 
-        Safe to run on every startup — only updates rows where expires_at IS NULL.
+        Safe to run on every startup -- only updates rows where expires_at IS NULL.
+        Limited to 10 000 rows per startup (M-9.11); excess rows are picked up
+        on subsequent startups.
         """
         # Table names and column names are internal constants — not user input.
         for table, key_col in (
@@ -143,8 +148,14 @@ class OAuthStorage:
             ("refresh_tokens", "token"),
         ):
             rows = self._conn.execute(  # type: ignore[union-attr]
-                f"SELECT {key_col}, data FROM {table} WHERE expires_at IS NULL"  # noqa: S608
+                f"SELECT {key_col}, data FROM {table} WHERE expires_at IS NULL LIMIT 10000"  # noqa: S608
             ).fetchall()
+            if len(rows) >= 10000:
+                logger.warning(
+                    "oauth backfill: %s has >=10000 rows missing expires_at; "
+                    "processing first 10000 this startup, remainder on next restart",
+                    table,
+                )
             for row in rows:
                 try:
                     expires_at = json.loads(row["data"]).get("expires_at")
