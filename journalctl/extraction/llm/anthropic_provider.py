@@ -1,8 +1,9 @@
 import asyncio
+import random
 from collections.abc import Mapping
 from typing import Any
 
-from anthropic import AsyncAnthropic
+from anthropic import AsyncAnthropic, RateLimitError
 
 from journalctl.config import LLMConfig
 from journalctl.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
@@ -89,10 +90,12 @@ class AnthropicProvider(LLMProvider):
         for attempt in range(max_retries):
             try:
                 return await self._client.messages.create(**kwargs)
-            except Exception as exc:
-                status = getattr(exc, "status_code", None)
-                if status == 429 and attempt < max_retries - 1:
-                    delay = base_delay * (2**attempt)
+            except RateLimitError:
+                if attempt < max_retries - 1:
+                    base = base_delay * (2**attempt)
+                    # Not cryptographic -- simple jitter to prevent thundering herd.
+                    jitter = random.uniform(0, base * 0.1)  # noqa: S311
+                    delay = base + jitter
                     await asyncio.sleep(delay)
                     continue
                 raise

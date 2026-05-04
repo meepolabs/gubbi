@@ -729,6 +729,5 @@ async def get_titles_summaries(
                 "Skipping conversation %d: decryption failed (%s)",
                 cid,
                 type(exc).__name__,
-                exc_info=True,
             )
     return result
