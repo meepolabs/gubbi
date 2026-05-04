@@ -72,7 +72,7 @@ async def record_audit(
     conn: asyncpg.Connection,
     actor_type: str,
     actor_id: str,
-    action: str,
+    action: Action | str,
     target_type: str | None = None,
     target_id: str | None = None,
     target_kind: str | None = None,
@@ -94,7 +94,8 @@ async def record_audit(
         Opaque actor identifier (UUID string,
         ``system:<worker-name>``, ``script:<name>``, ...).
     action :
-        Event string. Use values from ``gubbi_common.audit.actions.Action``.
+        Event string. Prefer ``Action.X`` enum values; raw strings are
+        accepted for legacy callers.
     target_type :
         Optional entity kind (``user``, ``tenant``, ``subscription``,
         ``secret``, ...).
@@ -123,6 +124,12 @@ async def record_audit(
         If ``target_id`` is supplied without ``target_kind``, or if
         ``actor_type`` is not one of the four accepted values, or if
         ``ip_address`` is not a valid IPv4 / IPv6 address.
+    Exception
+        Any exception raised by asyncpg during the INSERT (e.g.
+        ``asyncpg.PostgresError``, ``asyncpg.InterfaceError``) is
+        annotated on the span and re-raised.  Callers are responsible
+        for handling infra failures; the ``@audited`` decorator handles
+        this for MCP tool handlers.
     """
     if target_id is not None and target_kind is None:
         raise ValueError("target_kind is required when target_id is supplied")
