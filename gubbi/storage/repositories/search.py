@@ -101,3 +101,8 @@ async def fts_search(
         )
         for r in rows
     ]
+
+
+async def has_embeddings(conn: asyncpg.Connection) -> bool:
+    """Return True if the entry_embeddings table has at least one row."""
+    return bool(await conn.fetchval("SELECT EXISTS(SELECT 1 FROM entry_embeddings LIMIT 1)"))

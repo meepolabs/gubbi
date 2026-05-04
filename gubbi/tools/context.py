@@ -20,6 +20,7 @@ from gubbi.core.validation import local_today
 from gubbi.storage import knowledge
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.repositories import entries as entry_repo
+from gubbi.storage.repositories import search as search_repo
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.tools._response_size import _assert_response_ok, _report_oversized
 from gubbi.tools.constants import (
@@ -194,9 +195,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             all_topics, topic_count = await topic_repo.list_all(conn, limit=BRIEFING_MAX_TOPICS)
             stats = await entry_repo.get_stats(conn)
 
-            has_embeddings: bool = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM entry_embeddings LIMIT 1)"
-            )
+            has_embeddings: bool = await search_repo.has_embeddings(conn)
 
             raw_facts: list[dict[str, Any]] = []
             if key_facts_embedding is not None:
