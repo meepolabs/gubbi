@@ -3,6 +3,7 @@
 import pytest
 
 from journalctl.core.validation import (
+    harden_llm_topic_path,
     sanitize_freetext,
     sanitize_label,
     slugify,
@@ -168,3 +169,36 @@ class TestSlugify:
 
     def test_strips_edges(self) -> None:
         assert slugify("  hello world  ") == "hello-world"
+
+
+class TestHardenLLMTopicPath:
+    """Validation + sanitization of LLM-sourced topic paths."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            (None, None),
+            ("", None),
+            ("a" * 257, None),
+            ("a" * 256, "a" * 256),
+            ("work\x00/acme", "work/acme"),
+            ("../etc/passwd", None),
+            ("Work/Acme", "work/acme"),
+            ("  work/acme  ", "work/acme"),
+            ("\t\n\r", None),
+            # Interior whitespace stripped (LLM-glitch tolerance).
+            ("work / acme", "work/acme"),
+            ("work\t/acme", "work/acme"),
+            ("work \t/ \nacme", "work/acme"),
+            # Unicode survives the ASCII-only strip and falls to validate_topic
+            # which rejects non-ASCII via [a-z0-9-/] regex.
+            ("work\u200b/acme", None),
+        ],
+    )
+    def test_contract(self, raw: str | None, expected: str | None) -> None:
+        assert harden_llm_topic_path(raw) == expected
+
+    def test_custom_max_len(self) -> None:
+        short_path = "a" * 10
+        assert harden_llm_topic_path(short_path, max_len=5) is None
+        assert harden_llm_topic_path(short_path, max_len=10) == short_path

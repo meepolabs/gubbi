@@ -76,6 +76,46 @@ def validate_topic(value: str) -> str:
     return value
 
 
+def harden_llm_topic_path(raw: str | None, *, max_len: int = 256) -> str | None:
+    """Validate + sanitize a topic_path from an LLM or untrusted source.
+
+    Pipeline:
+      1. Empty / None / over max_len  -> None
+      2. Strip ALL ASCII whitespace + control chars (NUL through space + DEL)
+      3. Empty after step 2          -> None
+      4. validate_topic(...)         -> raises ValueError -> None
+      5. Otherwise                   -> the validated path
+
+    Use when the topic_path is NOT user-typed (LLM categorization,
+    webhook payloads, batch imports). User-typed input goes through
+    ``validate_topic`` directly. The max_len guard here is defense-in-depth
+    for untrusted ingestion paths; validate_topic remains the canonical
+    syntax validator.
+    """
+    # Step 1: reject empty / None / oversize early
+    if not raw or len(raw) > max_len:
+        return None
+
+    # Step 2: strip all ASCII whitespace + control chars before validation.
+    # LLMs commonly emit trailing newlines, inadvertent spaces, or interior
+    # tabs; strip them defensively rather than rejecting an otherwise-valid
+    # path. Anything else non-conforming (Unicode punctuation, smart quotes,
+    # em-dashes, underscores, non-ASCII letters) flows through to
+    # validate_topic which rejects via regex.
+    # \x00-\x20 covers control range 0-31 plus space (32); \x7f is DEL.
+    cleaned = re.sub(r"[\x00-\x20\x7f]", "", raw)
+
+    # Step 3: reject empty after sanitization
+    if not cleaned:
+        return None
+
+    # Step 4-5: delegate to canonical validator; convert exception to None
+    try:
+        return validate_topic(cleaned)
+    except ValueError:
+        return None
+
+
 def validate_title(value: str) -> str:
     """Sanitize and validate a conversation title.
 
