@@ -15,7 +15,14 @@ from journalctl.tools.constants import REINDEX_BATCH_SIZE
 
 logger = logging.getLogger(__name__)
 
-_REINDEX_ADVISORY_LOCK_KEY = 3141592653  # stable app-wide key
+# PostgreSQL advisory lock key for reindex coordination.
+# Must be unique across all advisory locks used by this application so that a
+# concurrent reindex never collides with backup, migration, or maintenance
+# locks picked by other subsystems.  The value is a large prime (no special
+# meaning beyond "not any other constant we already use"); any integer >= 2^31
+# works but must be positive to avoid conflicting with PG's negative-range API.
+_REINDEX_ADVISORY_LOCK_KEY: int = 2048976971  # large prime, not pi
+
 _REINDEX_COOLDOWN_SECONDS = 60
 
 

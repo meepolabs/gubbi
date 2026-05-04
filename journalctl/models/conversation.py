@@ -1,8 +1,12 @@
 """Conversation data models: ConversationMeta and Message."""
 
-from pydantic import BaseModel, field_validator
+from typing import Annotated
+
+from pydantic import BaseModel, StringConstraints, field_validator
 
 from journalctl.core.validation import validate_topic
+
+Tag128 = Annotated[str, StringConstraints(max_length=128)]
 
 
 class ConversationMeta(BaseModel):
@@ -12,7 +16,7 @@ class ConversationMeta(BaseModel):
     source: str = "claude"
     title: str
     topic: str
-    tags: list[str] = []
+    tags: list[Tag128] = []
     created: str  # YYYY-MM-DD
     updated: str  # YYYY-MM-DD
     summary: str = ""

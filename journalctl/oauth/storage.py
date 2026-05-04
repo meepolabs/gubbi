@@ -125,7 +125,12 @@ class OAuthStorage:
                 self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {column_def}")  # type: ignore[union-attr]
                 self._conn.commit()  # type: ignore[union-attr]
             except sqlite3.OperationalError as e:
-                if "duplicate column name" not in str(e):
+                # Swallow only duplicate-column errors (SQLite error starts with
+                # the exact words "duplicate column name:"), re-raise everything
+                # else — in particular don't mask "table has no column" or
+                # type-mismatch errors that point to a real schema defect.
+                msg = str(e)
+                if not msg.startswith("duplicate column name:"):
                     raise
 
     def _run_post_migration_indexes(self) -> None:

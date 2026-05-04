@@ -176,7 +176,7 @@ class TestDeployShapeValidator:
 
     def _patch_mode3(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Clear env vars that would interfere, then set Mode 3 triples."""
-        for key in ("JOURNAL_PASSWORD_HASH",):
+        for key in ("JOURNAL_PASSWORD_HASH", "JOURNAL_OPERATOR_EMAIL"):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("JOURNAL_HYDRA_ADMIN_URL", "http://hydra:4445")
         monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")

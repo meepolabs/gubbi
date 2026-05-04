@@ -5,6 +5,9 @@ Runs as a one-shot operator tool (NOT under ``deployment/``).  It reads every
 row whose source-version nonce-byte matches ``--from-version``, decrypts with
 that key, re-encrypts with the ``--to-version`` key, and writes back in place.
 
+# m234-review LOW: skipped -- noqa S608 comments are only in this single file
+# (1-2 uses per the centralization heuristic; leave them in place).
+
 AUDIT STRATEGY:
     Each batch writes ONE ``audit_log`` row per (table, column-pair) covering
     that batch's rotated rows.  Each audit record carries ``count``,

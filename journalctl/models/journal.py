@@ -1,8 +1,12 @@
 """Journal data models: TopicMeta and Entry."""
 
-from pydantic import BaseModel, field_validator
+from typing import Annotated
+
+from pydantic import BaseModel, StringConstraints, field_validator
 
 from journalctl.core.validation import validate_topic
+
+Tag128 = Annotated[str, StringConstraints(max_length=128)]
 
 
 class TopicMeta(BaseModel):
@@ -30,4 +34,4 @@ class Entry(BaseModel):
     content: str  # what happened (headline)
     reasoning: str | None = None  # why it happened (loaded on demand)
     conversation_id: int | None = None  # FK to conversations table
-    tags: list[str] = []
+    tags: list[Tag128] = []
