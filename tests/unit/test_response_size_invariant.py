@@ -12,12 +12,12 @@ from pathlib import Path
 
 import pytest
 
-from journalctl.tools.registry import READ_TOOLS
+from gubbi.tools.registry import READ_TOOLS
 
 pytestmark = pytest.mark.unit
 
 # All read/list tool names that must include the response-size guard.
-# This set mirrors the tools in ``journalctl.tools.registry.READ_TOOLS``.
+# This set mirrors the tools in ``gubbi.tools.registry.READ_TOOLS``.
 READ_AND_LIST_TOOLS: frozenset[str] = READ_TOOLS
 
 # Maps tool name to the source file it lives in.
@@ -54,7 +54,7 @@ def _function_contains_call_assert_response_ok(tree: ast.AST, func_name: str) ->
 class TestResponseSizeGuardInvariant:
     """Every read/list tool must call _assert_response_ok before returning."""
 
-    tools_dir = Path(__file__).resolve().parents[2] / "journalctl" / "tools"
+    tools_dir = Path(__file__).resolve().parents[2] / "gubbi" / "tools"
 
     def test_all_read_tools_have_guard(self) -> None:
         missing: list[str] = []

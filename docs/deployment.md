@@ -1,10 +1,10 @@
 # Deployment Guide (self-host)
 
 > **Hosted deploys:** if you are operating the multi-tenant hosted variant
-> (Mode 3), see `journalctl-cloud/docs/RUNBOOK.md` in the private cloud
+> (Mode 3), see `gubbi-cloud/docs/RUNBOOK.md` in the private cloud
 > repo. This document covers the two self-host shapes only.
 
-Journalctl supports three mutually-exclusive deploy shapes, selected by
+Gubbi supports three mutually-exclusive deploy shapes, selected by
 which of `JOURNAL_HYDRA_ADMIN_URL` and `JOURNAL_PASSWORD_HASH` are set.
 Setting both is a configuration error and fails startup.
 
@@ -49,11 +49,11 @@ OAuth section below is irrelevant.
 One repo on the server:
 
 ```
-~/journalctl/           # This repo -- server code, docker-compose.yml, Dockerfile, data/
+~/gubbi/           # This repo -- server code, docker-compose.yml, Dockerfile, data/
     +-- data/           # Bind-mounted persistent data (see below)
         +-- postgres/   #   PostgreSQL WAL + tablespaces  -> /var/lib/postgresql/data
         +-- journal/    #   oauth.db, knowledge/, conversations_json/  -> /app/journal
-        +-- onnx/       #   Cached ONNX embedding model  -> /home/appuser/.cache/journalctl
+        +-- onnx/       #   Cached ONNX embedding model  -> /home/appuser/.cache/gubbi
 ```
 
 All persistent state lives under `./data/` in the repo root. Nothing lives in named Docker volumes -- `docker compose down -v` is safe.
@@ -79,7 +79,7 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 Generate a bcrypt password hash via the built-in CLI:
 
 ```bash
-docker compose exec journalctl python -m journalctl.oauth.crypto 'your-password'
+docker compose exec gubbi python -m gubbi.oauth.crypto 'your-password'
 ```
 
 ### Operator provisioning
@@ -91,13 +91,13 @@ concrete UUID at startup in the app lifespan.
 
 ## Docker Compose
 
-The stack is two services: `postgres` (pgvector/pgvector:pg17) and `journalctl`. Both use bind mounts under `./data/`.
+The stack is two services: `postgres` (pgvector/pgvector:pg17) and `gubbi`. Both use bind mounts under `./data/`.
 
 ```yaml
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: journalctl-postgres
+    container_name: gubbi-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: journal
@@ -110,11 +110,11 @@ services:
       test: ["CMD-SHELL", "pg_isready -U journal -d journal"]
       interval: 10s
 
-  journalctl:
+  gubbi:
     build:
       context: .
       dockerfile: deployment/Dockerfile
-    container_name: journalctl
+    container_name: gubbi
     restart: unless-stopped
     depends_on:
       postgres:
@@ -136,7 +136,7 @@ services:
     volumes:
       - ./data/journal:/app/journal
       - ./logs:/app/logs
-      - ./data/onnx:/home/appuser/.cache/journalctl
+      - ./data/onnx:/home/appuser/.cache/gubbi
     deploy:
       resources:
         limits: { memory: 1024M }
@@ -150,11 +150,11 @@ docker compose --env-file .env up -d
 # or pipe env through your secrets manager of choice
 ```
 
-PostgreSQL will come up first, then journalctl waits for the healthcheck before starting. Before the very first `docker compose up`, run `alembic upgrade head` against the database to create the schema; alembic owns all schema changes. Subsequent restarts do not require re-running migrations unless a new revision has been added.
+PostgreSQL will come up first, then gubbi waits for the healthcheck before starting. Before the very first `docker compose up`, run `alembic upgrade head` against the database to create the schema; alembic owns all schema changes. Subsequent restarts do not require re-running migrations unless a new revision has been added.
 
 ### Docker permissions (the gosu pattern)
 
-The journalctl container starts as root, reads the UID/GID of the bind mount owner (`/app/journal`), then drops to a matching non-root user via `gosu`. Same pattern used by the official PostgreSQL and Redis images.
+The gubbi container starts as root, reads the UID/GID of the bind mount owner (`/app/journal`), then drops to a matching non-root user via `gosu`. Same pattern used by the official PostgreSQL and Redis images.
 
 ```
 entrypoint.sh:
@@ -183,7 +183,7 @@ Rate limits below are placeholders -- tune them for your traffic and threat mode
 limit_req_zone $binary_remote_addr zone=login_limit:10m rate=<CHOOSE_A_LOW_VALUE>;
 limit_req_zone $binary_remote_addr zone=oauth_limit:10m rate=<CHOOSE_A_HIGHER_VALUE>;
 
-upstream journalctl {
+upstream gubbi {
     server 127.0.0.1:8100;
 }
 
@@ -199,7 +199,7 @@ server {
     # OAuth endpoints -- auth handled by the app
     location ~ ^/(\.well-known/(oauth-authorization-server|oauth-protected-resource)|authorize|token|register|revoke) {
         limit_req zone=oauth_limit burst=<N> nodelay;
-        proxy_pass http://journalctl;
+        proxy_pass http://gubbi;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -209,7 +209,7 @@ server {
     # Login endpoint -- stricter rate limit than OAuth
     location = /login {
         limit_req zone=login_limit burst=<N> nodelay;
-        proxy_pass http://journalctl/login;
+        proxy_pass http://gubbi/login;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -220,7 +220,7 @@ server {
     # Prefix match catches both /mcp and /mcp/ -- path normalization
     # handled by MCPPathNormalizer middleware in the application
     location /mcp {
-        proxy_pass http://journalctl;
+        proxy_pass http://gubbi;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -236,7 +236,7 @@ server {
 
     # Health check (unprotected)
     location /health {
-        proxy_pass http://journalctl/health;
+        proxy_pass http://gubbi/health;
     }
 
     # UI placeholder -- a custom viewer will land in a later phase
@@ -333,10 +333,10 @@ The ONNX model cache (`data/onnx/`) is not worth backing up -- it's re-downloade
 
 ## Memory requirements
 
-On a small VM (2GB RAM), PostgreSQL + journalctl + nginx run comfortably for a single user (hundreds of topics, thousands of entries). Sizing guidance:
+On a small VM (2GB RAM), PostgreSQL + gubbi + nginx run comfortably for a single user (hundreds of topics, thousands of entries). Sizing guidance:
 
 - PostgreSQL idle: ~200MB. Add ~50MB per concurrent pool connection.
-- journalctl idle: ~300MB, of which ~100MB is the loaded ONNX model.
+- gubbi idle: ~300MB, of which ~100MB is the loaded ONNX model.
 - nginx: negligible.
 
 ## Restore procedure
@@ -360,7 +360,7 @@ docker compose exec -T postgres pg_dump -U journal_admin -Fc journal > backups/j
 
 The `-Fc` format supports parallel restore and `--clean --if-exists` (idempotent re-runs).
 
-**Important:** Do NOT pass `--no-acl` to `pg_dump`. The flag strips all access-control-list entries from the dump, which removes the GRANT statements set up by [migration 0002](../journalctl/alembic/versions/20260419_0002_create_db_roles.py) and migration 0009 (the `GRANT journal_app TO journal_admin` admin option). After a restore, all privileges are gone -- tables and RLS policies survive because they are part of the DDL, but the GRANTs are stripped. Journalctl will accept traffic on the first read but return `permission denied for table users`, causing 500 errors until grants are manually replayed.
+**Important:** Do NOT pass `--no-acl` to `pg_dump`. The flag strips all access-control-list entries from the dump, which removes the GRANT statements set up by [migration 0002](../gubbi/alembic/versions/20260419_0002_create_db_roles.py) and migration 0009 (the `GRANT journal_app TO journal_admin` admin option). After a restore, all privileges are gone -- tables and RLS policies survive because they are part of the DDL, but the GRANTs are stripped. Gubbi will accept traffic on the first read but return `permission denied for table users`, causing 500 errors until grants are manually replayed.
 
 `--no-owner` is safe and often necessary. On cross-restore scenarios (e.g., restoring a production dump into a dev environment), role names may differ; `--no-owner` avoids ownership conflicts on restored tables and roles.
 
@@ -401,7 +401,7 @@ Use it when:
 
 ### Reference: who owns what
 
-[Migration 0002](../journalctl/alembic/versions/20260419_0002_create_db_roles.py) sets up two database roles:
+[Migration 0002](../gubbi/alembic/versions/20260419_0002_create_db_roles.py) sets up two database roles:
 
 - **`journal_app`**: runtime role, RLS-enforced. Granted `SELECT, INSERT, UPDATE, DELETE` on all current and future tenant tables in the public schema (migration 0002 + ALTER DEFAULT PRIVILEGES).
 - **`journal_admin`**: privileged admin role, BYPASSRLS. Granted `ALL PRIVILEGES` on database/schema/tables/sequences (migration 0002). Also granted membership on `journal_app` with ADMIN OPTION (migration 0009).

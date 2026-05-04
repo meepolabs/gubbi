@@ -2,7 +2,7 @@
 
 import pytest
 
-from journalctl.tools.constants import (
+from gubbi.tools.constants import (
     DEFAULT_CONVERSATION_MESSAGES_LIMIT,
     DEFAULT_CONVERSATIONS_LIMIT,
     DEFAULT_TIMELINE_LIMIT,

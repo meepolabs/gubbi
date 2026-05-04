@@ -36,7 +36,7 @@ def _make_mode3(*, extra: dict[str, str] | None = None) -> object:
         "JOURNAL_OPERATOR_EMAIL": "",
     }
     with patch.dict(os.environ, env):
-        from journalctl.config import Settings  # noqa: PLC0415
+        from gubbi.config import Settings  # noqa: PLC0415
 
         return Settings()
 
@@ -66,7 +66,7 @@ class TestMode3OperatorEmailRejection:
             "JOURNAL_AUTH__OPERATOR_EMAIL": "op@example.com",
         }
         with patch.dict(os.environ, {**env, "JOURNAL_AUTH__HYDRA_ADMIN_URL": ""}):
-            from journalctl.config import Settings  # noqa: PLC0415
+            from gubbi.config import Settings  # noqa: PLC0415
 
             Settings()
 
@@ -80,7 +80,7 @@ class TestTagsMaxLen:
     """Pydantic input validation rejects tags exceeding 128 characters."""
 
     def test_conversation_accepts_128_char_tag(self) -> None:
-        from journalctl.models.conversation import ConversationMeta  # noqa: PLC0415
+        from gubbi.models.conversation import ConversationMeta  # noqa: PLC0415
 
         long_ok = "a" * 128
         meta = ConversationMeta(title="t", topic="x", created="2025-01-01", updated="2025-01-01")
@@ -90,7 +90,7 @@ class TestTagsMaxLen:
     def test_conversation_rejects_129_char_tag(self) -> None:
         from pydantic import ValidationError  # noqa: PLC0415 from Pydantic v2
 
-        from journalctl.models.conversation import ConversationMeta  # noqa: PLC0415
+        from gubbi.models.conversation import ConversationMeta  # noqa: PLC0415
 
         with pytest.raises(ValidationError):
             ConversationMeta(
@@ -102,7 +102,7 @@ class TestTagsMaxLen:
             )
 
     def test_entry_accepts_128_char_tag(self) -> None:
-        from journalctl.models.journal import Entry  # noqa: PLC0415
+        from gubbi.models.journal import Entry  # noqa: PLC0415
 
         e = Entry(id=1, date="2025-01-01", content="hi")
         long_ok = "b" * 128
@@ -112,7 +112,7 @@ class TestTagsMaxLen:
     def test_entry_rejects_129_char_tag(self) -> None:
         from pydantic import ValidationError  # noqa: PLC0415 -- Pydantic v2
 
-        from journalctl.models.journal import Entry  # noqa: PLC0415
+        from gubbi.models.journal import Entry  # noqa: PLC0415
 
         with pytest.raises(ValidationError):
             Entry(id=1, date="2025-01-01", content="hi", tags=["b" * 129])

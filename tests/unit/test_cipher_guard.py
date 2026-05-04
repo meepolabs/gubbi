@@ -1,4 +1,4 @@
-"""Tests for journalctl.core.cipher_guard (TASK-02.13)."""
+"""Tests for gubbi.core.cipher_guard (TASK-02.13)."""
 
 from __future__ import annotations
 
@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from journalctl.core.cipher_guard import require_cipher
-from journalctl.core.crypto import ContentCipher
+from gubbi.core.cipher_guard import require_cipher
+from gubbi.core.crypto import ContentCipher
 
 
 def _make_cipher() -> ContentCipher:

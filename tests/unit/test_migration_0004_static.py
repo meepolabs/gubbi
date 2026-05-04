@@ -11,7 +11,7 @@ import re
 
 _MIGRATION_FILE = (
     pathlib.Path(__file__).resolve().parents[2]
-    / "journalctl"
+    / "gubbi"
     / "alembic"
     / "versions"
     / "20260419_0004_add_user_id_to_tenants.py"
@@ -19,7 +19,7 @@ _MIGRATION_FILE = (
 
 _MIGRATION_0021_FILE = (
     pathlib.Path(__file__).resolve().parents[2]
-    / "journalctl"
+    / "gubbi"
     / "alembic"
     / "versions"
     / "20260503_0021_perf_audit_log_actor_idx.py"
@@ -66,7 +66,7 @@ def _check_no_pattern(pattern: str, src: str) -> None:
     match = re.search(pattern, src, re.IGNORECASE)
     assert match is None, (
         f"Source must not contain '{match.group()}' -- "
-        "user-row mutations belong in journalctl/users/bootstrap.py, not migrations."
+        "user-row mutations belong in gubbi/users/bootstrap.py, not migrations."
     )
 
 

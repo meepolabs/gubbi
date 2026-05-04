@@ -30,11 +30,11 @@ import pytest_asyncio
 import structlog
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.config import get_settings
-from journalctl.core.auth_context import current_user_id
-from journalctl.core.context import AppContext
-from journalctl.core.crypto import ContentCipher
-from journalctl.tools.registry import register_tools
+from gubbi.config import get_settings
+from gubbi.core.auth_context import current_user_id
+from gubbi.core.context import AppContext
+from gubbi.core.crypto import ContentCipher
+from gubbi.tools.registry import register_tools
 from tests.fixtures.tenants import TenantSeed, seed_for  # noqa: F401 -- pytest discovery
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -131,7 +131,7 @@ async def rls_tools(app_pool: asyncpg.Pool, tmp_path_factory: Any) -> dict:
     (tmp_dir / "knowledge").mkdir(exist_ok=True)
     (tmp_dir / "conversations_json").mkdir(exist_ok=True)
 
-    mcp = FastMCP("test-journalctl-isolation")
+    mcp = FastMCP("test-gubbi-isolation")
     register_tools(mcp, app_ctx)
 
     return {name: tool.fn for name, tool in mcp._tool_manager._tools.items()}

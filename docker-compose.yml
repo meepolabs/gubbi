@@ -20,7 +20,7 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
-    container_name: journalctl-postgres
+    container_name: gubbi-postgres
     restart: unless-stopped
     environment:
       POSTGRES_DB: journal
@@ -35,12 +35,12 @@ services:
       timeout: 5s
       retries: 5
 
-  journalctl:
-    container_name: journalctl
+  gubbi:
+    container_name: gubbi
     build:
       context: .
       dockerfile: deployment/Dockerfile
-    image: journalctl:latest
+    image: gubbi:latest
     restart: unless-stopped
     depends_on:
       postgres:
@@ -68,7 +68,7 @@ services:
       - JOURNAL_ENCRYPTION_MASTER_KEY_V1
       # Hydra introspection (leave empty to disable Hydra auth path).
       # Mutually exclusive with JOURNAL_PASSWORD_HASH -- setting both fails startup.
-      # PUBLIC_ISSUER_URL is the external HTTPS issuer (auth-dev.meepolabs.com)
+      # PUBLIC_ISSUER_URL is the external HTTPS issuer (auth-dev.gubbi.ai)
       # advertised to MCP clients; both must be set together for Mode 3.
       # PUBLIC_URL is the Hydra base used for JIT /userinfo calls (provisioning);
       # both must be set together -- see config.py _validate_deploy_shape.
@@ -91,7 +91,7 @@ services:
     volumes:
       - ./data/journal:/app/journal
       - ./logs:/app/logs
-      - ./data/onnx:/home/appuser/.cache/journalctl
+      - ./data/onnx:/home/appuser/.cache/gubbi
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
       interval: 30s
@@ -108,4 +108,4 @@ networks:
   default:
   auth:
     external: true
-    name: journalctl-auth
+    name: gubbi-auth

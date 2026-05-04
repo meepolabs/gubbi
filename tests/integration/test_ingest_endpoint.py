@@ -19,12 +19,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 
-from journalctl.api.v1.ingest import IngestConversationResponse
-from journalctl.api.v1.ingest import router as ingest_router
-from journalctl.config import Settings
-from journalctl.core.context import AppContext
-from journalctl.core.crypto import ContentCipher
-from journalctl.storage.embedding_service import EmbeddingService
+from gubbi.api.v1.ingest import IngestConversationResponse
+from gubbi.api.v1.ingest import router as ingest_router
+from gubbi.config import Settings
+from gubbi.core.context import AppContext
+from gubbi.core.crypto import ContentCipher
+from gubbi.storage.embedding_service import EmbeddingService
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 

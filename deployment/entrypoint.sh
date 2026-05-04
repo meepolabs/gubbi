@@ -28,7 +28,7 @@ chown -R appuser:appuser /src /app/journal /app/logs /home/appuser/.cache 2>/dev
 # Exit with non-zero status on failure so Docker can restart the container
 # rather than starting a degraded server with no embedding capability.
 gosu appuser python -c "
-from journalctl.storage.embedding_service import EmbeddingService
+from gubbi.storage.embedding_service import EmbeddingService
 EmbeddingService()
 " 2>&1
 

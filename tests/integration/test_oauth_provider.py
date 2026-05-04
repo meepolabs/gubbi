@@ -11,9 +11,9 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull
 
-from journalctl.config import OAUTH_ACCESS_TOKEN_TTL_SECS
-from journalctl.oauth.provider import JournalOAuthProvider
-from journalctl.oauth.storage import OAuthStorage
+from gubbi.config import OAUTH_ACCESS_TOKEN_TTL_SECS
+from gubbi.oauth.provider import JournalOAuthProvider
+from gubbi.oauth.storage import OAuthStorage
 
 
 def _make_client(client_id: str = "test-client") -> OAuthClientInformationFull:

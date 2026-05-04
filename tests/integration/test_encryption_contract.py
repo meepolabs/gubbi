@@ -32,8 +32,8 @@ import pytest
 from cryptography.exceptions import InvalidTag
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from journalctl.core.crypto import ContentCipher, DecryptionError
-from journalctl.storage.repositories import entries as entry_repo
+from gubbi.core.crypto import ContentCipher, DecryptionError
+from gubbi.storage.repositories import entries as entry_repo
 
 # Session-scoped asyncpg pools (admin_pool, app_pool) require tests to
 # run in the same event loop they were created in.

@@ -19,8 +19,8 @@ from uuid import UUID
 import httpx
 from gubbi_common.auth.gateway_signature import build_signature
 
-from journalctl.core.auth_context import current_token_scopes, current_user_id
-from journalctl.middleware.auth import BearerAuthMiddleware
+from gubbi.core.auth_context import current_token_scopes, current_user_id
+from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_GATEWAY_SECRET = bytes.fromhex("a" * 64)  # 32 bytes / 64 hex chars
 TEST_USER_UUID = UUID("11111111-2222-3333-4444-555555555555")

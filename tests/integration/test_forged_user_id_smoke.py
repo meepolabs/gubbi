@@ -18,7 +18,7 @@ from uuid import UUID
 import httpx
 import pytest
 
-from journalctl.middleware.auth import BearerAuthMiddleware
+from gubbi.middleware.auth import BearerAuthMiddleware
 
 VICTIM_UUID = UUID("99999999-8888-7777-6666-555555555555")
 TEST_GATEWAY_SECRET = bytes.fromhex("b" * 64)  # 32 bytes
