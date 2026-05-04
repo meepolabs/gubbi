@@ -3,7 +3,7 @@
 from fastapi import FastAPI
 from starlette.routing import Route
 
-from journalctl.oauth.disabled import register
+from gubbi.oauth.disabled import register
 
 
 class TestDisabledRegister:

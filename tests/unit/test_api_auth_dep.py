@@ -1,4 +1,4 @@
-"""Unit tests for the shared auth dependency in journalctl/api/v1/auth.py.
+"""Unit tests for the shared auth dependency in gubbi/api/v1/auth.py.
 
 Tests all four auth modes (trust-gateway, static API key, Hydra bearer,
 self-host OAuth), token-length cap, scope mismatch, and route integration.
@@ -13,7 +13,7 @@ import pytest
 from fastapi import Depends, FastAPI, Request
 from fastapi.testclient import TestClient
 
-from journalctl.api.v1.auth import require_scope
+from gubbi.api.v1.auth import require_scope
 
 TEST_USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 TEST_OP_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
@@ -60,7 +60,7 @@ def _make_app(
     app.state.operator_user_id = operator_user_id
     app.state.hydra_introspector = hydra_introspector
     app.state.selfhost_token_validator = selfhost_token_validator
-    app.state.journalctl_gateway_secret = gateway_secret
+    app.state.gubbi_gateway_secret = gateway_secret
 
     @app.get("/test-auth")
     async def test_route(
@@ -128,7 +128,7 @@ class TestTrustGatewayEnvelopeVerification:
     """Auth mode (a) -- H-1 HMAC envelope verification on REST.
 
     Mirrors the contract that BearerAuthMiddleware enforces on /mcp.
-    Without these checks, anything on the journalctl private network
+    Without these checks, anything on the gubbi private network
     could forge X-Auth-User-Id and bypass auth (the brief explicitly
     required reusing the middleware's verification path).
     """
@@ -307,7 +307,7 @@ class TestHydraBearerMode:
 
     @pytest.fixture
     def mock_introspector(self) -> AsyncMock:
-        from journalctl.auth.hydra import TokenClaims
+        from gubbi.auth.hydra import TokenClaims
 
         mock_iv = AsyncMock()
         mock_iv.introspect = AsyncMock(
@@ -331,7 +331,7 @@ class TestHydraBearerMode:
         assert sorted(data["scopes"]) == ["journal:read", "journal:write"]
 
     async def test_hydra_unreachable_returns_503(self, mock_introspector: AsyncMock) -> None:
-        from journalctl.auth.hydra import HydraUnreachable
+        from gubbi.auth.hydra import HydraUnreachable
 
         mock_introspector.introspect = AsyncMock(side_effect=HydraUnreachable("timeout"))
         app = _make_app(api_key=TEST_API_KEY, hydra_introspector=mock_introspector)
@@ -340,7 +340,7 @@ class TestHydraBearerMode:
         assert resp.status_code == 503
 
     async def test_hydra_invalid_token_returns_401(self, mock_introspector: AsyncMock) -> None:
-        from journalctl.auth.hydra import HydraInvalidToken
+        from gubbi.auth.hydra import HydraInvalidToken
 
         mock_introspector.introspect = AsyncMock(side_effect=HydraInvalidToken("bad"))
         app = _make_app(api_key=TEST_API_KEY, hydra_introspector=mock_introspector)
@@ -428,7 +428,7 @@ class TestScopeMismatch:
 
     async def test_missing_required_scope_returns_403(self) -> None:
         """Token has journal:read but requires journal:write -> 403."""
-        from journalctl.auth.hydra import TokenClaims
+        from gubbi.auth.hydra import TokenClaims
 
         mock_iv = AsyncMock()
         mock_iv.introspect = AsyncMock(
@@ -455,7 +455,7 @@ class TestRouteIntegration:
 
     async def test_ingest_route_accepts_shared_dep(self) -> None:
         """Verify the /api/v1/ingest/conversations route uses require_scope."""
-        from journalctl.api.v1.ingest import router as ingest_router
+        from gubbi.api.v1.ingest import router as ingest_router
 
         app = FastAPI()
         app.include_router(ingest_router, prefix="/api/v1")
@@ -471,7 +471,7 @@ class TestRouteIntegration:
 
     async def test_extraction_progress_route_accepts_shared_dep(self) -> None:
         """Verify the /api/v1/extraction/progress route uses require_scope."""
-        from journalctl.api.v1.extraction import router as extraction_router
+        from gubbi.api.v1.extraction import router as extraction_router
 
         app = FastAPI()
         app.include_router(extraction_router, prefix="/api/v1")

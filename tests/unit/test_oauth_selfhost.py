@@ -5,9 +5,9 @@ from pathlib import Path
 from fastapi import FastAPI
 from starlette.routing import Route
 
-from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
-from journalctl.oauth.selfhost import _make_token_validator, register
-from journalctl.oauth.storage import OAuthStorage
+from gubbi.config import AuthConfig, DbConfig, ServerConfig, Settings
+from gubbi.oauth.selfhost import _make_token_validator, register
+from gubbi.oauth.storage import OAuthStorage
 
 
 def _make_settings(

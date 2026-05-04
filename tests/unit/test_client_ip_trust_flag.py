@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from unittest.mock import MagicMock
 
-from journalctl.config import get_settings
+from gubbi.config import get_settings
 
 
 class TestClientIpTrustFlag:
@@ -13,7 +13,7 @@ class TestClientIpTrustFlag:
 
     async def test_client_ip_trust_flag_default_off(self) -> None:
         """Default: request.client.host wins; XFF header is ignored."""
-        from journalctl.oauth.forms import client_ip
+        from gubbi.oauth.forms import client_ip
 
         mock_request = MagicMock()
         mock_request.headers.get.return_value = "10.0.0.5, 172.16.0.1"
@@ -36,7 +36,7 @@ class TestClientIpTrustFlag:
 
     async def test_client_ip_trust_flag_enabled(self) -> None:
         """When trust flag set to 'true', leftmost XFF wins."""
-        from journalctl.oauth.forms import client_ip
+        from gubbi.oauth.forms import client_ip
 
         mock_request = MagicMock()
         mock_request.headers.get.return_value = "10.0.0.5, 172.16.0.1"
@@ -55,7 +55,7 @@ class TestClientIpTrustFlag:
 
     async def test_client_ip_no_xff_falls_back_to_host(self) -> None:
         """When no XFF header, falls back to request.client.host."""
-        from journalctl.oauth.forms import client_ip
+        from gubbi.oauth.forms import client_ip
 
         mock_request = MagicMock()
         mock_request.headers.get.return_value = ""

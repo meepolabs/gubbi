@@ -26,11 +26,11 @@ import httpx
 import pytest
 
 # -- URL overrides via env vars (defaults point at bunsamosa dev stack) --
-JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.meepolabs.com")
+JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.gubbi.ai")
 JOURNAL_DEV_IDENTITY_URL: str = os.environ.get(
-    "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.meepolabs.com"
+    "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.gubbi.ai"
 )
-JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://journal.meepolabs.com")
+JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://mcp-dev.gubbi.ai")
 
 # Optionally override the Hydra admin port (4445, loopback on bunsamosa).
 # When set, drives login/consent acceptance and completes the full flow.
@@ -41,7 +41,7 @@ EMAIL_PREFIX = "test-hydra-oauth-"  # TASK-04.16 cleanup API filters on this
 # Randomized per module load: each live-stack test run registers a Kratos
 # identity with a password no-one else knows. Leaking a static password into
 # the public AGPL repo would let anyone authenticate as these identities on
-# identity-dev.meepolabs.com until TASK-04.16 cleanup API catches up.
+# identity-dev.gubbi.ai until TASK-04.16 cleanup API catches up.
 TEST_PASSWORD = f"test-pass-{uuid.uuid4().hex}-Aa1!"
 TEST_REDIRECT_URI = "http://localhost/callback"
 TEST_SCOPE = "journal openid offline_access"
@@ -81,7 +81,7 @@ def _skip_if_no_admin_url() -> None:
 @pytest.mark.hosted_live
 @pytest.mark.skipif(
     os.environ.get("JOURNAL_LIVE_STACK") != "1",
-    reason="requires live dev stack (auth-dev.meepolabs.com + identity-dev.meepolabs.com + journal.meepolabs.com); enable with JOURNAL_LIVE_STACK=1",
+    reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
 )
 class TestHydraOauthFlow:
     """Hosted OAuth flow -- live dev stack on bunsamosa.
@@ -127,7 +127,7 @@ class TestHydraOauthFlow:
 
             # ---- Step 2: Kratos identity creation (two-step flow: init + submit) ----
             test_id = uuid.uuid4().hex[:8]
-            email = f"{EMAIL_PREFIX}{test_id}@meepolabs.com"
+            email = f"{EMAIL_PREFIX}{test_id}@gubbi.ai"
 
             flow_resp = await client.get(
                 f"{JOURNAL_DEV_IDENTITY_URL}/self-service/registration/api",

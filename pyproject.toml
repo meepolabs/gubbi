@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "journalctl"
+name = "gubbi"
 version = "0.2.0"
 description = "Personal journal MCP server - append-only historical record with semantic memory"
 authors = ["madhukar01 <mholla8@gmail.com>"]
@@ -11,11 +11,11 @@ package-mode = false
 python = "^3.11"
 fastapi = "^0.115.6"
 uvicorn = "^0.34.0"
-pydantic = "^2.13.2"  # Harmonised floor with journalctl-cloud.
+pydantic = "^2.13.2"  # Harmonised floor with gubbi-cloud.
 pydantic-settings = "^2.7.0"
 structlog = "^24.4.0"
 gunicorn = "^23.0.0"
-# TIGHT: journalctl/tools/registry.py and 4 test files reach into
+# TIGHT: gubbi/tools/registry.py and 4 test files reach into
 # mcp._mcp_server / mcp._tool_manager._tools (private FastMCP internals).
 # Hold to the 1.26 minor until we either upstream a public API or add
 # an upgrade-time guard test.
@@ -29,7 +29,7 @@ onnxruntime = ">=1.14,<2"
 tokenizers = ">=0.22,<0.23"  # TIGHT: 0.x; BPE semantics have shipped breaking minor changes.
 numpy = ">=1.24,<3"  # Already crossed 1->2 silently; cap to gate the next major.
 requests = ">=2.33,<3"
-httpx = ">=0.28,<0.29"  # Harmonised with journalctl-cloud (which overrides the private _merge_cookies).
+httpx = ">=0.28,<0.29"  # Harmonised with gubbi-cloud (which overrides the private _merge_cookies).
 PyJWT = {version = ">=2.12,<3", extras = ["crypto"]}  # TIGHT: token verification; major bumps changed default algorithms.
 cryptography = ">=46,<47"  # TIGHT: crypto primitives; major bumps deprecate algorithms.
 # Database migrations
@@ -47,7 +47,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "ssh://git@github.com/meepolabs/gubbi-common.git", tag = "v0.4.2", extras = ["db"] }
+gubbi-common = { git = "ssh://git@github.com/meepolabs/gubbi-common.git", tag = "v0.4.4", extras = ["db"] }
 
 # LLM extraction — Arq worker + Anthropic API
 arq = "^0.26.0"
@@ -81,14 +81,11 @@ ignore = ["ANN401", "N818"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**/*.py" = ["S101", "PT011", "S105", "S106", "S107", "ANN", "E501"]
-"journalctl/storage/database.py" = ["S101", "E501"]
-"journalctl/storage/conversations.py" = ["E501"]
-"journalctl/storage/embedding_service.py" = ["ANN"]
-"journalctl/alembic/versions/20260419_0004_add_user_id_to_tenants.py" = ["E501"]
-"journalctl-cloud/journalctl_cloud/webhooks/kratos.py" = ["E501"]
+"gubbi/storage/embedding_service.py" = ["ANN"]
+"gubbi/alembic/versions/20260419_0004_add_user_id_to_tenants.py" = ["E501"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["journalctl"]
+known-first-party = ["gubbi"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -114,7 +111,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 markers = [
     "slow: slower tests (e.g. large-input performance checks)",
-    "hosted_live: requires live dev stack (auth-dev.meepolabs.com + identity-dev.meepolabs.com + journal.meepolabs.com); enable with JOURNAL_LIVE_STACK=1",
+    "hosted_live: requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
     "unit: fast, isolated unit tests with no external dependencies",
     "integration: tests that exercise multiple components or require a running service",
 ]

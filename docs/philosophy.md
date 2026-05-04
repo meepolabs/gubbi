@@ -6,7 +6,7 @@ If you use LLMs as a daily companion for life decisions, project planning, hobbi
 
 Some LLMs offer built-in memory, but it's a black box: you don't control what's remembered, can't browse it, can't port it, and can't use it across different providers. Your context is locked inside one vendor's product.
 
-journalctl is the escape hatch. It gives any MCP-compatible LLM persistent, structured memory that you own -- stored in a PostgreSQL database on your own server, with conversation transcripts archived as JSON files, and portable to any future client that supports MCP.
+gubbi is the escape hatch. It gives any MCP-compatible LLM persistent, structured memory that you own -- stored in a PostgreSQL database on your own server, with conversation transcripts archived as JSON files, and portable to any future client that supports MCP.
 
 ## Journal is a ledger, not a brain
 
@@ -42,7 +42,7 @@ Distilled facts are just entries. Conversations are just entries with a linked J
 
 RAG (Retrieval-Augmented Generation) is the standard approach to giving LLMs access to external knowledge. It works by chunking documents into vectors, embedding them, and retrieving the nearest chunks at query time.
 
-journalctl is **not** a RAG system, and doesn't need to be:
+gubbi is **not** a RAG system, and doesn't need to be:
 
 **RAG solves the wrong problem.** RAG is designed for large, passive document corpora where the LLM needs to "search and find" relevant context. Your journal isn't a corpus to be searched -- it's a structured, curated record that the LLM actively writes to. The LLM knows where things are because it put them there.
 
@@ -50,15 +50,15 @@ journalctl is **not** a RAG system, and doesn't need to be:
 
 **No embedding drift alone.** Semantic similarity can be misleading. Two unrelated topics might score as semantically similar because they share abstract concepts. Pairing semantic search with keyword `tsvector` matching and explicit topic/date filters prevents the LLM from drowning in fuzzy false-positives.
 
-**Agentic retrieval beats statistical retrieval.** RAG retrieves the top-K nearest chunks and hopes the answer is in there. An LLM connected to journalctl makes *deliberate, targeted tool calls* -- search for a keyword, then read a specific topic, then check a timeline -- iteratively narrowing down exactly what it needs. The retrieval is driven by reasoning, not cosine similarity.
+**Agentic retrieval beats statistical retrieval.** RAG retrieves the top-K nearest chunks and hopes the answer is in there. An LLM connected to gubbi makes *deliberate, targeted tool calls* -- search for a keyword, then read a specific topic, then check a timeline -- iteratively narrowing down exactly what it needs. The retrieval is driven by reasoning, not cosine similarity.
 
-**No infrastructure overhead.** journalctl embeds a local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) and stores vectors in `pgvector` alongside the rest of the data. No separate vector database, no chunking pipeline, no external embedding API. Just one PostgreSQL database.
+**No infrastructure overhead.** gubbi embeds a local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) and stores vectors in `pgvector` alongside the rest of the data. No separate vector database, no chunking pipeline, no external embedding API. Just one PostgreSQL database.
 
 The useful parts of RAG -- semantic similarity for fuzzy matches when you don't know the exact keywords -- are built into `journal_search`, which merges `tsvector` keyword search with `pgvector` semantic results in a single tool call.
 
 ## Why PostgreSQL over SQLite
 
-The earliest versions of journalctl were SQLite + FTS5 + `sqlite-vec`. It worked for a single user but hit two walls: `sqlite-vec` required manual hacks to clean up orphan embeddings when entries were soft-deleted, and the multi-tenant path had no clean story for row-level security. PostgreSQL 17 + `pgvector` + `tsvector` solved both at once:
+The earliest versions of gubbi were SQLite + FTS5 + `sqlite-vec`. It worked for a single user but hit two walls: `sqlite-vec` required manual hacks to clean up orphan embeddings when entries were soft-deleted, and the multi-tenant path had no clean story for row-level security. PostgreSQL 17 + `pgvector` + `tsvector` solved both at once:
 
 1. **One database, zero drift.** `search_vector` is a regular `tsvector` column populated inline by the repo at INSERT/UPDATE time via `to_tsvector('english', $plaintext)` -- the plaintext only ever appears as an ephemeral parameter bind, never as a stored column. `pgvector` embeddings live in their own table linked to `entries` via `ON DELETE CASCADE` -- soft-deletes and hard-deletes both clean up correctly.
 2. **Native concurrency.** No WAL-mode quirks, no `busy_timeout` retries. Each gunicorn worker gets its own asyncpg pool, MVCC handles the rest.
@@ -88,7 +88,7 @@ This matters because:
 
 ## Why LLM-agnostic
 
-journalctl uses the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), an open standard for connecting LLMs to external tools. This means:
+gubbi uses the [Model Context Protocol](https://modelcontextprotocol.io/) (MCP), an open standard for connecting LLMs to external tools. This means:
 
 - Any MCP-compatible client can connect -- CLI tools, desktop apps, browser-based chat, mobile apps.
 - You're not locked into any specific LLM provider. Switch providers, keep your journal.

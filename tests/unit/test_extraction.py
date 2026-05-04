@@ -18,11 +18,11 @@ import pytest
 from anthropic import RateLimitError
 from starlette.testclient import TestClient
 
-from journalctl.config import LLMConfig
-from journalctl.extraction.health import app as health_app
-from journalctl.extraction.llm import AnthropicProvider
-from journalctl.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
-from journalctl.extraction.service import (
+from gubbi.config import LLMConfig
+from gubbi.extraction.health import app as health_app
+from gubbi.extraction.llm import AnthropicProvider
+from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
+from gubbi.extraction.service import (
     CategorizationResult,
     ExtractedEntry,
     ExtractionService,
@@ -153,7 +153,7 @@ async def test_extraction_service_extract_entries() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_provider_calls_api_with_expected_kwargs() -> None:
     """Verify the provider constructs correct API kwargs for the anthropic SDK."""
-    with patch("journalctl.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
+    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
 
@@ -194,7 +194,7 @@ async def test_anthropic_provider_calls_api_with_expected_kwargs() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_provider_uses_tool_use_for_structured_output() -> None:
     """When output_schema is provided, the API call should include tools + tool_choice."""
-    with patch("journalctl.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
+    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
 
@@ -234,7 +234,7 @@ async def test_anthropic_provider_uses_tool_use_for_structured_output() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_provider_retries_on_429() -> None:
     """Verify exponential backoff retry on 429 status."""
-    with patch("journalctl.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
+    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
 
@@ -266,7 +266,7 @@ async def test_anthropic_provider_retries_on_429() -> None:
 
 @pytest.mark.asyncio
 async def test_anthropic_provider_estimate_cost() -> None:
-    with patch("journalctl.extraction.llm.anthropic_provider.AsyncAnthropic"):
+    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic"):
         provider = _make_anthropic_provider()
         cost = provider.estimate_cost_cents(1_000_000, 500_000)
         # Haiku: $1.00/M input, $5.00/M output

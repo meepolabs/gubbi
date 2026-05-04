@@ -2,7 +2,7 @@
 
 import pytest
 
-from journalctl.core.validation import reject_tool_call_syntax
+from gubbi.core.validation import reject_tool_call_syntax
 
 pytestmark = pytest.mark.unit
 

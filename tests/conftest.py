@@ -3,7 +3,7 @@
 PostgreSQL tests require a running PostgreSQL instance.
 Set TEST_DATABASE_URL to point at it, or run:
 
-    docker run -d --name journalctl-test-pg \\
+    docker run -d --name gubbi-test-pg \\
         -e POSTGRES_DB=journal_test \\
         -e POSTGRES_USER=journal \\
         -e POSTGRES_PASSWORD=testpass \\
@@ -25,10 +25,10 @@ import bcrypt
 import pytest
 import pytest_asyncio
 
-from journalctl.config import get_settings
-from journalctl.core.crypto import ContentCipher
-from journalctl.oauth.storage import OAuthStorage
-from journalctl.storage.pg_setup import _init_connection
+from gubbi.config import get_settings
+from gubbi.core.crypto import ContentCipher
+from gubbi.oauth.storage import OAuthStorage
+from gubbi.storage.pg_setup import _init_connection
 
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
@@ -82,7 +82,7 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
     Skips the test session if PostgreSQL is not reachable.
 
     Start a test database with:
-        docker run -d --name journalctl-test-pg \\
+        docker run -d --name gubbi-test-pg \\
             -e POSTGRES_DB=journal_test -e POSTGRES_USER=journal \\
             -e POSTGRES_PASSWORD=testpass -p 5433:5432 \\
             pgvector/pgvector:pg17

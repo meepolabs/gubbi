@@ -1,6 +1,6 @@
 # Tools Reference
 
-journalctl exposes 12 MCP tools. The connected LLM calls these automatically during conversation based on context -- you don't need to invoke them manually.
+gubbi exposes 12 MCP tools. The connected LLM calls these automatically during conversation based on context -- you don't need to invoke them manually.
 
 All tools that read or write prose run under PostgreSQL row-level security with per-user isolation, and content is encrypted (AES-256-GCM) at rest. Decrypted content is only ever in memory while a tool is processing a request.
 

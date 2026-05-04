@@ -25,11 +25,11 @@ import asyncpg
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from journalctl.core.crypto import ContentCipher
-from journalctl.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
-from journalctl.storage.repositories import conversations as conv_repo
-from journalctl.storage.repositories import entries as entry_repo
-from journalctl.storage.repositories import topics as topic_repo
+from gubbi.core.crypto import ContentCipher
+from gubbi.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
+from gubbi.storage.repositories import conversations as conv_repo
+from gubbi.storage.repositories import entries as entry_repo
+from gubbi.storage.repositories import topics as topic_repo
 
 # NB: tenant fixtures (tenant_a, tenant_b, seeded_a, seeded_b, seed_for,
 # TenantSeed) come from tests/integration/conftest.py — pytest auto-discovers

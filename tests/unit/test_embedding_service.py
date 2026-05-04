@@ -18,7 +18,7 @@ def mock_embedding_service() -> Any:
     Bypasses __init__ (which would try to download the ONNX model) and
     directly sets the internal attributes the methods use.
     """
-    from journalctl.storage.embedding_service import EmbeddingService
+    from gubbi.storage.embedding_service import EmbeddingService
 
     # Mock ONNX session that returns [batch=1, seq=8, dim=384] output
     mock_session = MagicMock()

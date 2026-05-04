@@ -13,8 +13,8 @@ from anthropic.types import Message, Usage
 @pytest.mark.asyncio
 async def test_anthropic_retry_only_on_rate_limit_error() -> None:
     """Only RateLimitError triggers retries; other exceptions propagate immediately."""
-    from journalctl.config import LLMConfig
-    from journalctl.extraction.llm.anthropic_provider import AnthropicProvider
+    from gubbi.config import LLMConfig
+    from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 
     config = LLMConfig(api_key="test-key", model="claude-haiku-4-5-20251001")
     provider = AnthropicProvider(config)
@@ -52,8 +52,8 @@ async def test_anthropic_retry_only_on_rate_limit_error() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_non_rate_limit_raises_immediately() -> None:
     """Non-rate-limit exceptions should NOT be retried -- they propagate at once."""
-    from journalctl.config import LLMConfig
-    from journalctl.extraction.llm.anthropic_provider import AnthropicProvider
+    from gubbi.config import LLMConfig
+    from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 
     config = LLMConfig(api_key="test-key", model="claude-haiku-4-5-20251001")
     provider = AnthropicProvider(config)
@@ -74,8 +74,8 @@ async def test_anthropic_non_rate_limit_raises_immediately() -> None:
 @pytest.mark.asyncio
 async def test_anthropic_retry_jitter_is_added() -> None:
     """Retry backoff includes jitter to prevent thundering herd."""
-    from journalctl.config import LLMConfig
-    from journalctl.extraction.llm.anthropic_provider import AnthropicProvider
+    from gubbi.config import LLMConfig
+    from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 
     config = LLMConfig(api_key="test-key", model="claude-haiku-4-5-20251001")
     provider = AnthropicProvider(config)

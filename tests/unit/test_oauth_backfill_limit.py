@@ -10,7 +10,7 @@ from pathlib import Path
 
 def test_oauth_backfill_caps_at_10000(tmp_path: Path) -> None:
     """Only 10 000 NULL expires_at rows are backfilled per startup."""
-    from journalctl.oauth.storage import OAuthStorage
+    from gubbi.oauth.storage import OAuthStorage
 
     db_path = tmp_path / "backfill_test.db"
     conn = sqlite3.connect(str(db_path))

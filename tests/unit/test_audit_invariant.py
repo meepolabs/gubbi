@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from journalctl.tools.registry import WRITE_TOOLS
+from gubbi.tools.registry import WRITE_TOOLS
 
 pytestmark = pytest.mark.unit
 
@@ -55,7 +55,7 @@ def _function_has_audited(decorators: list[ast.expr]) -> bool:
 class TestAuditInvariant:
     """Every write tool must have @audited(...) alongside @require_scope("journal:write")."""
 
-    tools_dir = Path(__file__).resolve().parents[2] / "journalctl" / "tools"
+    tools_dir = Path(__file__).resolve().parents[2] / "gubbi" / "tools"
 
     def test_all_write_tools_have_audited(self) -> None:
         missing: list[str] = []

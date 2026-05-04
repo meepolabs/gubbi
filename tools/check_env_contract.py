@@ -408,7 +408,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--settings",
-        default="journalctl/config.py",
+        default="gubbi/config.py",
         help="Path to the pydantic Settings source file.",
     )
     parser.add_argument(
@@ -421,7 +421,7 @@ def main() -> None:
     settings_data = parse_settings(args.settings, cls_name=args.cls)
     compose_data = parse_compose(args.compose)
 
-    target_service = "journalctl"
+    target_service = "gubbi"
     drifts, stale = check_env_contract(
         settings_data,
         compose_data,

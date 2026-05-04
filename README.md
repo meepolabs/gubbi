@@ -1,4 +1,4 @@
-# journalctl
+# gubbi
 
 A self-hosted [MCP](https://modelcontextprotocol.io/) server that gives any LLM a persistent, searchable journal — a personal memory infrastructure layer for AI, backed by PostgreSQL on your own infrastructure.
 
@@ -20,7 +20,7 @@ LLM: *searches journal* → "On March 23rd you finished the initial setup..."
 
 If you use LLMs across multiple clients — CLI tools, desktop apps, browser, mobile — your conversations vanish between sessions. You lose the thread on ongoing projects, life decisions, and accumulated context.
 
-journalctl solves this by providing a **persistent memory layer** accessible from any MCP-compatible client. Every client connects to the same journal, so you pick up exactly where you left off — whether that's a coding project, a hobby log, a fitness plan, or a reading list.
+gubbi solves this by providing a **persistent memory layer** accessible from any MCP-compatible client. Every client connects to the same journal, so you pick up exactly where you left off — whether that's a coding project, a hobby log, a fitness plan, or a reading list.
 
 The journal is an **append-only ledger**, not a brain. It faithfully stores everything — decisions, conversations, milestones, research — and never compresses, forgets, or consolidates. Full-text search (`tsvector` + GIN) and semantic search (`pgvector` HNSW) are both built into the same PostgreSQL database. No data leaves your infrastructure.
 
@@ -29,9 +29,9 @@ The journal is an **append-only ledger**, not a brain. It faithfully stores ever
 **Prerequisites:** Docker + Docker Compose, any small VPS, a domain with DNS configured.
 
 ```bash
-git clone https://github.com/user/journalctl.git && cd journalctl
+git clone https://github.com/user/gubbi.git && cd gubbi
 cp .env.example .env   # fill in your secrets
-docker compose up -d   # brings up postgres + journalctl
+docker compose up -d   # brings up postgres + gubbi
 ```
 
 Then connect your MCP client:
@@ -68,7 +68,7 @@ Plus 7 more tools for topic management, conversation browsing, entry editing, de
 ```
 data/
 ├── postgres/                        # PostgreSQL cluster (WAL + tablespaces)
-├── onnx/                            # Cached ONNX embedding model (~/.cache/journalctl)
+├── onnx/                            # Cached ONNX embedding model (~/.cache/gubbi)
 └── journal/
     ├── oauth.db                     # OAuth tokens/clients (SQLite, separate from PG)
     ├── conversations_json/          # Archived conversation transcripts (JSON)
@@ -102,8 +102,8 @@ See [docs/architecture.md](docs/architecture.md) for the full system design.
 ## Project structure
 
 ```
-journalctl/
-├── journalctl/                # Python package
+gubbi/
+├── gubbi/                # Python package
 │   ├── main.py                #   FastAPI app, MCP mount, OAuth wiring
 │   ├── config.py              #   Pydantic settings (JOURNAL_* env vars)
 │   ├── core/                  #   AppContext, structlog, validation

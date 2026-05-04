@@ -9,7 +9,7 @@ set -euo pipefail
 # deployment/scripts/grants.sql. Exit 0 on pass, 1 on fail, 2 if no DSN.
 
 # ---------------------------------------------------------------------------
-# Resolve DSN (same fallback chain as journalctl/alembic/env.py)
+# Resolve DSN (same fallback chain as gubbi/alembic/env.py)
 # ---------------------------------------------------------------------------
 DB_URL="${JOURNAL_DB_MIGRATION_URL:-${JOURNAL_DB_ADMIN_URL:-}}"
 
