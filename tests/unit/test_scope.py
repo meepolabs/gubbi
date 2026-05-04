@@ -26,9 +26,9 @@ import pytest
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ListToolsRequest, ListToolsResult, ServerResult
 
-from journalctl.auth.hydra import HydraIntrospector, TokenClaims
-from journalctl.core.auth_context import current_token_scopes
-from journalctl.core.scope import (
+from gubbi.auth.hydra import HydraIntrospector, TokenClaims
+from gubbi.core.auth_context import current_token_scopes
+from gubbi.core.scope import (
     _GRANT_INVERSE,
     _GRANTS_UNION,
     SCOPE_DESCRIPTIONS,
@@ -37,9 +37,9 @@ from journalctl.core.scope import (
     insufficient_scope_response,
     require_scope,
 )
-from journalctl.middleware.auth import BearerAuthMiddleware
-from journalctl.middleware.origin import OriginValidationMiddleware
-from journalctl.tools.registry import (
+from gubbi.middleware.auth import BearerAuthMiddleware
+from gubbi.middleware.origin import OriginValidationMiddleware
+from gubbi.tools.registry import (
     ALL_TOOLS,
     READ_TOOLS,
     WRITE_TOOLS,
@@ -410,13 +410,13 @@ class TestOriginValidation:
             resp = await client.get("/", headers={"Origin": "http://127.0.0.1:8100"})
         assert resp.status_code == 200
 
-    async def test_journal_meepolabs_allowed(self) -> None:
-        allowed = frozenset({"https://journal.meepolabs.com"})
+    async def test_mcp_gubbi_allowed(self) -> None:
+        allowed = frozenset({"https://mcp.gubbi.ai"})
         mw = OriginValidationMiddleware(_asgi_app(), allowed)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
-            resp = await client.get("/", headers={"Origin": "https://journal.meepolabs.com"})
+            resp = await client.get("/", headers={"Origin": "https://mcp.gubbi.ai"})
         assert resp.status_code == 200
 
     async def test_non_http_scope_bypass(self) -> None:
@@ -547,7 +547,7 @@ class TestFilterToolsByScope:
 def _extract_tool_annotations() -> dict[str, dict[str, bool]]:
     """Parse tool source files via AST and extract per-tool annotation kwargs.
 
-    Walks each ``journalctl/tools/*.py`` (excluding registry / constants /
+    Walks each ``gubbi/tools/*.py`` (excluding registry / constants /
     __init__) and pulls every ``async def journal_*`` function decorated
     with ``@mcp.tool(annotations=ToolAnnotations(...))``.  Returns a map
     from tool name (function name) to its annotation kwargs (constants
@@ -557,7 +557,7 @@ def _extract_tool_annotations() -> dict[str, dict[str, bool]]:
     setup, no AppContext stub, no closure traversal.
     """
     out: dict[str, dict[str, bool]] = {}
-    tools_dir = Path(__file__).resolve().parents[2] / "journalctl" / "tools"
+    tools_dir = Path(__file__).resolve().parents[2] / "gubbi" / "tools"
     skip = {"__init__.py", "registry.py", "constants.py"}
     for path in sorted(tools_dir.glob("*.py")):
         if path.name in skip:
@@ -729,17 +729,17 @@ class TestRenderScopesHtml:
     """Verify the consent UI scope rendering helper escapes input and loops over scopes."""
 
     def test_empty_string_returns_empty(self) -> None:
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         assert _render_scopes_html("") == ""
 
     def test_whitespace_only_returns_empty(self) -> None:
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         assert _render_scopes_html("   ") == ""
 
     def test_single_known_scope_renders_description(self) -> None:
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         out = _render_scopes_html("journal")
         assert 'class="scopes"' in out
@@ -747,7 +747,7 @@ class TestRenderScopesHtml:
         assert "read, write, search" in out
 
     def test_multiple_scopes_each_rendered(self) -> None:
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         out = _render_scopes_html("journal openid email")
         assert out.count('class="scope-item"') == 3
@@ -756,7 +756,7 @@ class TestRenderScopesHtml:
         assert "email" in out
 
     def test_unknown_scope_falls_back_to_placeholder(self) -> None:
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         out = _render_scopes_html("unknown_scope_xyz")
         assert "unknown_scope_xyz" in out
@@ -764,14 +764,14 @@ class TestRenderScopesHtml:
 
     def test_scope_name_html_escaped(self) -> None:
         """A malicious scope name in the request must be HTML-escaped, not rendered as markup."""
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         out = _render_scopes_html("<script>alert(1)</script>")
         assert "<script>" not in out
         assert "&lt;script&gt;" in out
 
     def test_loops_over_all_scopes_in_input_order(self) -> None:
-        from journalctl.oauth.templates import _render_scopes_html
+        from gubbi.oauth.templates import _render_scopes_html
 
         out = _render_scopes_html("journal email")
         # journal item should appear before email item

@@ -1,4 +1,4 @@
-"""Tests for journalctl.core.crypto (TASK-02.11).
+"""Tests for gubbi.core.crypto (TASK-02.11).
 
 Covers ContentCipher round-trips, nonce uniqueness, version rotation,
 construction guards, error handling, load_master_keys_from_env behaviour,
@@ -16,7 +16,7 @@ from cryptography.exceptions import InvalidTag
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from journalctl.core.crypto import (
+from gubbi.core.crypto import (
     ContentCipher,
     DecryptionError,
     decrypt_or_raise,

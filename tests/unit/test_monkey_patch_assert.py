@@ -9,7 +9,7 @@ from mcp.server.fastmcp.tools import ToolManager
 
 def test_monkey_patch_assert_at_startup() -> None:
     """Patching ToolManager.call_tool sets __wrapped__ and passes check."""
-    from journalctl.tools.registry import _patch_tool_manager
+    from gubbi.tools.registry import _patch_tool_manager
 
     tm = ToolManager()
     # Patch should install without side-effects.
@@ -26,7 +26,7 @@ def test_monkey_patch_assert_at_startup() -> None:
 
 def test_patch_removed_wasted_attrs() -> None:
     """The patched call_tool no longer emits empty user_id / scope_required."""
-    from journalctl.tools.registry import _patch_tool_manager
+    from gubbi.tools.registry import _patch_tool_manager
 
     tm = ToolManager()
     _patch_tool_manager(tm)

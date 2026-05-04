@@ -10,7 +10,7 @@ import httpx
 import pytest
 import structlog
 
-from journalctl.auth.hydra import (
+from gubbi.auth.hydra import (
     HydraError,
     HydraIntrospector,
     HydraInvalidToken,

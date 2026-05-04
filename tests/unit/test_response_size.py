@@ -2,7 +2,7 @@
 
 import pytest
 
-from journalctl.tools._response_size import _assert_response_ok
+from gubbi.tools._response_size import _assert_response_ok
 
 pytestmark = pytest.mark.unit
 

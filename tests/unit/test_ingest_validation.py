@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from journalctl.api.v1.ingest import (
+from gubbi.api.v1.ingest import (
     MAX_CONVERSATIONS_PER_REQUEST,
     ConversationPayload,
     IngestConversationRequest,

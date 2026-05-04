@@ -32,7 +32,7 @@ ADMIN_ONLY_ALLOWLIST = frozenset(
     {
         "audit_log",  # INSERT-only for journal_app (migration 0010); immutability trigger blocks UPDATE/DELETE; no per-user filtering needed
         "alembic_version",  # Alembic internal tracking table; never touched by app code at runtime
-        # OAuth SQLite tables (oauth.db, not PostgreSQL) -- see journalctl/oauth/storage.py
+        # OAuth SQLite tables (oauth.db, not PostgreSQL) -- see gubbi/oauth/storage.py
         "access_tokens",
         "auth_codes",
         "clients",
@@ -146,7 +146,7 @@ def _collect_sql_tables(root: Path) -> set[str]:
 
 def test_all_app_sql_tables_are_accounted_for() -> None:
     """Assert all tables referenced in app SQL are in _TENANT_TABLES or ADMIN_ONLY_ALLOWLIST."""
-    src_root = Path(__file__).resolve().parents[2] / "journalctl"
+    src_root = Path(__file__).resolve().parents[2] / "gubbi"
     found_tables = _collect_sql_tables(src_root)
     unknown = found_tables - _TENANT_TABLES - ADMIN_ONLY_ALLOWLIST
     assert not unknown, (

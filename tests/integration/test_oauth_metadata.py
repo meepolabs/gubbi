@@ -5,9 +5,9 @@ from pathlib import Path
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
-from journalctl.oauth.router import register_oauth_routes
-from journalctl.oauth.storage import OAuthStorage
+from gubbi.config import AuthConfig, DbConfig, ServerConfig, Settings
+from gubbi.oauth.router import register_oauth_routes
+from gubbi.oauth.storage import OAuthStorage
 
 
 def _make_mode3_settings() -> Settings:
@@ -17,7 +17,7 @@ def _make_mode3_settings() -> Settings:
         auth=AuthConfig.model_construct(
             password_hash="",
             hydra_admin_url="http://hydra:4445",
-            hydra_public_issuer_url="https://auth-dev.meepolabs.com",
+            hydra_public_issuer_url="https://auth-dev.gubbi.ai",
             hydra_public_url=None,
             api_key="",
             operator_email="",
@@ -88,7 +88,7 @@ class TestMode3ProtectedResourceMetadata:
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         data = response.json()
         # AnyHttpUrl adds a trailing slash in its string representation.
-        assert data["authorization_servers"] == ["https://auth-dev.meepolabs.com/"]
+        assert data["authorization_servers"] == ["https://auth-dev.gubbi.ai/"]
 
     def test_rfc9728_compliant_fields(self, tmp_path: Path) -> None:
         """RFC 9728 requires 'resource' and 'authorization_servers' keys."""

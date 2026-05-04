@@ -10,14 +10,14 @@ from uuid import UUID
 import httpx
 import pytest
 
-from journalctl.auth.hydra import (
+from gubbi.auth.hydra import (
     HydraIntrospector,
     HydraInvalidToken,
     HydraUnreachable,
     TokenClaims,
 )
-from journalctl.core.auth_context import current_user_id
-from journalctl.middleware.auth import BearerAuthMiddleware
+from gubbi.core.auth_context import current_user_id
+from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_API_KEY = "a" * 64  # 64-char key
 TEST_TOKEN = "ory_at_" + "x" * 80
@@ -445,7 +445,7 @@ class TestWWWAuthenticateHeader:
     server without baked-in knowledge of the deployment.
     """
 
-    PRM_URL = "https://api.journalctl.app/.well-known/oauth-protected-resource"
+    PRM_URL = "https://api.gubbi.ai/.well-known/oauth-protected-resource"
 
     async def test_missing_auth_includes_resource_metadata_when_configured(self) -> None:
         mw = BearerAuthMiddleware(

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from journalctl.main import _check_trust_gateway_bind_address
+from gubbi.main import _check_trust_gateway_bind_address
 
 
 @pytest.fixture

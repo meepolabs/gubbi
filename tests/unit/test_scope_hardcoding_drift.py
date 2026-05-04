@@ -1,5 +1,5 @@
 """AST scan / text-scan: ensure no bare ``frozenset({"journal"})`` literal
-survives in ``journalctl/middleware/auth.py``.
+survives in ``gubbi/middleware/auth.py``.
 
 The post-fix code uses ``frozenset({"journal:read","journal:write"})``
 (the audit-equivalent default) only as a fallback constant; the regression
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-_AUTH_PATH = Path(__file__).resolve().parents[2] / "journalctl" / "middleware" / "auth.py"
+_AUTH_PATH = Path(__file__).resolve().parents[2] / "gubbi" / "middleware" / "auth.py"
 
 
 @pytest.mark.unit

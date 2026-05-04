@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from journalctl.config import Settings
+from gubbi.config import Settings
 
 
 def _base_env(**extra: str) -> dict[str, str]:

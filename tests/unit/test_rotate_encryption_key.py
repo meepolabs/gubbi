@@ -1,4 +1,4 @@
-"""Unit tests for ``journalctl.scripts.rotate_encryption_key``.
+"""Unit tests for ``gubbi.scripts.rotate_encryption_key``.
 
 Pure-function coverage:
 - ``_verify_sample_size`` bounds for the verify path
@@ -13,8 +13,8 @@ real database to be meaningful.
 
 from __future__ import annotations
 
-from journalctl.core.crypto import ContentCipher
-from journalctl.scripts.rotate_encryption_key import (
+from gubbi.core.crypto import ContentCipher
+from gubbi.scripts.rotate_encryption_key import (
     _AUDIT_ACTION,
     _ROTATION_SCREENS,
     _VERIFY_SAMPLE_MAX,

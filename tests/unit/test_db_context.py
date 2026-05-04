@@ -18,7 +18,7 @@ import asyncpg
 import pytest
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 
-from journalctl.core.auth_context import current_user_id
+from gubbi.core.auth_context import current_user_id
 
 # The ``pool`` fixture is session-scoped. pytest-asyncio 0.25+ requires every
 # test using session-scoped async fixtures to explicitly pin the loop scope,

@@ -54,7 +54,7 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
 # No --preload: asyncpg pools must not be shared across os.fork().
 # Each worker creates its own pool independently (2 workers × min_size=2 = 4 connections).
 # ONNX model is pre-downloaded by entrypoint.sh; each worker loads from disk cache.
-CMD ["gunicorn", "journalctl.main:server", \
+CMD ["gunicorn", "gubbi.main:server", \
     "--workers", "2", \
     "--worker-class", "uvicorn.workers.UvicornWorker", \
     "--bind", "0.0.0.0:8100", \

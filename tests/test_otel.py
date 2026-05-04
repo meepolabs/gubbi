@@ -18,7 +18,7 @@ from opentelemetry import trace
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
-from journalctl.telemetry.attrs import (
+from gubbi.telemetry.attrs import (
     BANNED_KEYS,
     MCP_TOOL_CALL_ATTRS,
     SpanNames,
@@ -161,7 +161,7 @@ def test_correlation_id_in_span_attributes(in_memory_tracer: tuple[Any, InMemory
     """Correlation ID must appear as a span attribute when routed through safe_set_attributes."""
     tracer, exporter = in_memory_tracer
 
-    from journalctl.telemetry.logging import set_correlation_id
+    from gubbi.telemetry.logging import set_correlation_id
 
     cid = str(uuid.uuid4())
     set_correlation_id(cid)
@@ -180,7 +180,7 @@ def test_correlation_id_in_span_attributes(in_memory_tracer: tuple[Any, InMemory
 
 def test_correlation_id_generated_when_missing() -> None:
     """CorrelationIDMiddleware must generate a UUID when no header is present."""
-    from journalctl.middleware.correlation import CorrelationIDMiddleware
+    from gubbi.middleware.correlation import CorrelationIDMiddleware
 
     # Test the extract method directly
     scope: dict[str, Any] = {"headers": []}
@@ -194,7 +194,7 @@ def test_correlation_id_generated_when_missing() -> None:
 
 def test_correlation_id_extracted_from_header() -> None:
     """CorrelationIDMiddleware must extract correlation_id from request header."""
-    from journalctl.middleware.correlation import CorrelationIDMiddleware
+    from gubbi.middleware.correlation import CorrelationIDMiddleware
 
     cid_in = str(uuid.uuid4())
     scope: dict[str, Any] = {
@@ -216,7 +216,7 @@ def test_safe_set_attributes_unknown_span_name(
 ) -> None:
     """Unknown span names: no attributes pass through (strict drop-all).
 
-    After the gubbi_common.telemetry.allowlist migration the journalctl
+    After the gubbi_common.telemetry.allowlist migration the gubbi
     wrapper defers to the shared strict behaviour: unknown span names
     drop all attributes.
     """
@@ -241,7 +241,7 @@ def test_safe_set_attributes_unknown_span_name(
 
 def test_structured_log_formatter_has_required_fields() -> None:
     """StructuredLogFormatter must emit JSON with required schema fields."""
-    from journalctl.telemetry.logging import StructuredLogFormatter
+    from gubbi.telemetry.logging import StructuredLogFormatter
 
     formatter = StructuredLogFormatter()
     record = logging.LogRecord(
@@ -261,7 +261,7 @@ def test_structured_log_formatter_has_required_fields() -> None:
     assert "level" in parsed
     assert parsed["level"] == "INFO"
     assert "service" in parsed
-    assert parsed["service"] == "journalctl"
+    assert parsed["service"] == "gubbi"
     assert "event" in parsed
     assert parsed["event"] == "test.event"
     # correlation_id, trace_id, span_id are optional (may be None)

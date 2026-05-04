@@ -2,7 +2,7 @@
 
 import pytest
 
-from journalctl.core.validation import (
+from gubbi.core.validation import (
     harden_llm_topic_path,
     sanitize_freetext,
     sanitize_label,
