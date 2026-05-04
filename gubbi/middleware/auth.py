@@ -177,113 +177,7 @@ class BearerAuthMiddleware:
         # gubbi must not be directly internet-reachable when
         # trust_gateway=True.
         if self.trust_gateway:
-            request = Request(scope)
-            user_id_header = request.headers.get("x-auth-user-id", "")
-            if not user_id_header:
-                response = JSONResponse(
-                    {"error": "Missing X-Auth-User-Id header"},
-                    status_code=401,
-                )
-                await response(scope, receive, send)
-                return
-            try:
-                user_uuid = UUID(user_id_header)
-            except (ValueError, AttributeError):
-                response = JSONResponse(
-                    {"error": "Invalid X-Auth-User-Id header"},
-                    status_code=401,
-                )
-                await response(scope, receive, send)
-                return
-
-            # Read all X-Auth-* headers
-            contract_version = request.headers.get("x-auth-contract-version", "")
-            scopes_header = request.headers.get("x-auth-scopes", "")
-            timestamp_header = request.headers.get("x-auth-timestamp", "")
-            signature_header = request.headers.get("x-auth-signature", "")
-            # X-Auth-Token-Fp is optional, used only for log correlation
-            token_fp = request.headers.get("x-auth-token-fp", "")
-
-            sig_present = bool(signature_header)
-            sig_required = self.gateway_require_signature
-
-            # Legacy path: no signature header and not enforced
-            if not sig_present and not sig_required:
-                resolved_scopes = _resolve_scopes(scopes_header)
-                scope_reset = current_token_scopes.set(resolved_scopes)
-                token_reset = current_user_id.set(user_uuid)
-                try:
-                    await self.app(scope, receive, send)
-                finally:
-                    current_user_id.reset(token_reset)
-                    current_token_scopes.reset(scope_reset)
-                return
-
-            # Verification path: signature present or REQUIRE_SIGNATURE=true
-            if contract_version != str(GATEWAY_CONTRACT_VERSION):
-                response = JSONResponse(
-                    {"error": "Unsupported X-Auth-Contract-Version"},
-                    status_code=401,
-                )
-                await response(scope, receive, send)
-                return
-
-            if self.gateway_secret is None:
-                # Deployment misconfiguration when REQUIRE_SIGNATURE=true
-                _logger.warning(
-                    "gateway_require_signature=true but secret not configured on app.state",
-                    extra={"user_id": user_id_header},
-                )
-                response = JSONResponse(
-                    {"error": "gateway secret not configured"},
-                    status_code=503,
-                )
-                await response(scope, receive, send)
-                return
-
-            try:
-                verify_signature(
-                    self.gateway_secret,
-                    signature_header,
-                    str(user_uuid),
-                    scopes_header,
-                    timestamp_header,
-                    request.method.upper(),
-                    request.url.path,
-                )
-            except SignatureError as exc:
-                _logger.warning(
-                    "Gateway signature verification failed",
-                    extra={
-                        "error_type": type(exc).__name__,
-                        "user_id": user_id_header,
-                        "token_fp": token_fp,
-                    },
-                )
-                response = JSONResponse(
-                    {"error": "Invalid gateway signature"},
-                    status_code=401,
-                )
-                await response(scope, receive, send)
-                return
-
-            # Signature verified -- parse scopes
-            parsed_scopes = frozenset(s for s in scopes_header.split() if s)
-            if not parsed_scopes:
-                _logger.debug(
-                    "Empty X-Auth-Scopes in signed gateway request -- "
-                    "falling back to legacy default scopes",
-                    extra={"user_id": user_id_header, "token_fp": token_fp},
-                )
-                parsed_scopes = _LEGACY_DEFAULT_SCOPES
-
-            scope_reset = current_token_scopes.set(parsed_scopes)
-            token_reset = current_user_id.set(user_uuid)
-            try:
-                await self.app(scope, receive, send)
-            finally:
-                current_user_id.reset(token_reset)
-                current_token_scopes.reset(scope_reset)
+            await self._handle_trust_gateway(scope, receive, send)
             return
 
         request = Request(scope)
@@ -369,6 +263,126 @@ class BearerAuthMiddleware:
         await _unauthorized("Invalid or expired token", self.protected_resource_metadata_url)(
             scope, receive, send
         )
+
+    async def _handle_trust_gateway(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+    ) -> None:
+        """Handle trust-gateway HMAC envelope verification.
+
+        Called only when ``trust_gateway`` is True.  Verifies X-Auth-*
+        headers (signature check) and sets current_user_id /
+        current_token_scopes before delegating to the wrapped ASGI app.
+        """
+        request = Request(scope)
+        user_id_header = request.headers.get("x-auth-user-id", "")
+        if not user_id_header:
+            response = JSONResponse(
+                {"error": "Missing X-Auth-User-Id header"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+        try:
+            user_uuid = UUID(user_id_header)
+        except (ValueError, AttributeError):
+            response = JSONResponse(
+                {"error": "Invalid X-Auth-User-Id header"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+
+        # Read all X-Auth-* headers
+        contract_version = request.headers.get("x-auth-contract-version", "")
+        scopes_header = request.headers.get("x-auth-scopes", "")
+        timestamp_header = request.headers.get("x-auth-timestamp", "")
+        signature_header = request.headers.get("x-auth-signature", "")
+        # X-Auth-Token-Fp is optional, used only for log correlation
+        token_fp = request.headers.get("x-auth-token-fp", "")
+
+        sig_present = bool(signature_header)
+        sig_required = self.gateway_require_signature
+
+        # Legacy path: no signature header and not enforced
+        if not sig_present and not sig_required:
+            resolved_scopes = _resolve_scopes(scopes_header)
+            scope_reset = current_token_scopes.set(resolved_scopes)
+            token_reset = current_user_id.set(user_uuid)
+            try:
+                await self.app(scope, receive, send)
+            finally:
+                current_user_id.reset(token_reset)
+                current_token_scopes.reset(scope_reset)
+            return
+
+        # Verification path: signature present or REQUIRE_SIGNATURE=true
+        if contract_version != str(GATEWAY_CONTRACT_VERSION):
+            response = JSONResponse(
+                {"error": "Unsupported X-Auth-Contract-Version"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+
+        if self.gateway_secret is None:
+            # Deployment misconfiguration when REQUIRE_SIGNATURE=true
+            _logger.warning(
+                "gateway_require_signature=true but secret not configured on app.state",
+                extra={"user_id": user_id_header},
+            )
+            response = JSONResponse(
+                {"error": "gateway secret not configured"},
+                status_code=503,
+            )
+            await response(scope, receive, send)
+            return
+
+        try:
+            verify_signature(
+                self.gateway_secret,
+                signature_header,
+                str(user_uuid),
+                scopes_header,
+                timestamp_header,
+                request.method.upper(),
+                request.url.path,
+            )
+        except SignatureError as exc:
+            _logger.warning(
+                "Gateway signature verification failed",
+                extra={
+                    "error_type": type(exc).__name__,
+                    "user_id": user_id_header,
+                    "token_fp": token_fp,
+                },
+            )
+            response = JSONResponse(
+                {"error": "Invalid gateway signature"},
+                status_code=401,
+            )
+            await response(scope, receive, send)
+            return
+
+        # Signature verified -- parse scopes
+        parsed_scopes = frozenset(s for s in scopes_header.split() if s)
+        if not parsed_scopes:
+            _logger.debug(
+                "Empty X-Auth-Scopes in signed gateway request -- "
+                "falling back to legacy default scopes",
+                extra={"user_id": user_id_header, "token_fp": token_fp},
+            )
+            parsed_scopes = _LEGACY_DEFAULT_SCOPES
+
+        scope_reset = current_token_scopes.set(parsed_scopes)
+        token_reset = current_user_id.set(user_uuid)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            current_user_id.reset(token_reset)
+            current_token_scopes.reset(scope_reset)
 
     async def _call_with_operator(
         self,
