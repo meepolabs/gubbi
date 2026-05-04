@@ -25,7 +25,7 @@ _TENANT_TABLES = ("topics", "entries", "conversations", "messages", "entry_embed
 
 _MIGRATION_FILE = (
     pathlib.Path(__file__).resolve().parents[2]
-    / "journalctl"
+    / "gubbi"
     / "alembic"
     / "versions"
     / "20260419_0004_add_user_id_to_tenants.py"

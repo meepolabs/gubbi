@@ -11,7 +11,7 @@
 # pytest-asyncio session fixtures), so no separate setup step is needed.
 #
 # Coverage gate: the security-critical crypto + RLS primitives
-# (journalctl/core/crypto.py, cipher_guard.py, db_context.py) must keep
+# (gubbi/core/crypto.py, cipher_guard.py, db_context.py) must keep
 # combined coverage >= 80%. The repository-layer modules
 # (storage/repositories/entries.py, conversations.py, search.py) are
 # intentionally NOT on this gate: pre-02.06.1 legacy tests in
@@ -139,9 +139,9 @@ jobs:
             tests/integration/test_encryption_contract.py \
             tests/integration/test_encryption_correctness.py \
             tests/integration/test_repo_inserts_under_rls.py \
-            --cov=journalctl.core.crypto \
-            --cov=journalctl.core.cipher_guard \
-            --cov=journalctl.core.db_context \
+            --cov=gubbi.core.crypto \
+            --cov=gubbi.core.cipher_guard \
+            --cov=gubbi.core.db_context \
             --cov-report=term-missing \
             --cov-fail-under=80
 

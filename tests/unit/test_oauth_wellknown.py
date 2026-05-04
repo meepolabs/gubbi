@@ -3,8 +3,8 @@
 from fastapi import FastAPI
 from pydantic import AnyHttpUrl
 
-from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
-from journalctl.oauth.wellknown import register
+from gubbi.config import AuthConfig, DbConfig, ServerConfig, Settings
+from gubbi.oauth.wellknown import register
 
 
 def _make_settings(

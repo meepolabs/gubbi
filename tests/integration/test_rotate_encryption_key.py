@@ -1,4 +1,4 @@
-"""Integration tests for ``journalctl.scripts.rotate_encryption_key`` against the test DB.
+"""Integration tests for ``gubbi.scripts.rotate_encryption_key`` against the test DB.
 
 Seeds rows encrypted at V1 into all five column-pairs, invokes the rotation
 logic at the function level (not as subprocess), then asserts post-state:
@@ -17,8 +17,8 @@ from uuid import UUID
 import asyncpg
 import pytest
 
-from journalctl.core.crypto import ContentCipher
-from journalctl.scripts.rotate_encryption_key import (
+from gubbi.core.crypto import ContentCipher
+from gubbi.scripts.rotate_encryption_key import (
     _ROTATION_SCREENS,
     _run,
 )

@@ -13,16 +13,16 @@ import structlog
 from gubbi_common.db.user_scoped import user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.config import get_settings
-from journalctl.core.auth_context import current_user_id
-from journalctl.core.context import AppContext
-from journalctl.core.crypto import ContentCipher
-from journalctl.models.conversation import Message
-from journalctl.storage.embedding_service import EmbeddingService
-from journalctl.storage.repositories import conversations as conv_repo
-from journalctl.storage.repositories import entries as entry_repo
-from journalctl.storage.repositories import topics as topic_repo
-from journalctl.tools.registry import register_tools
+from gubbi.config import get_settings
+from gubbi.core.auth_context import current_user_id
+from gubbi.core.context import AppContext
+from gubbi.core.crypto import ContentCipher
+from gubbi.models.conversation import Message
+from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.repositories import conversations as conv_repo
+from gubbi.storage.repositories import entries as entry_repo
+from gubbi.storage.repositories import topics as topic_repo
+from gubbi.tools.registry import register_tools
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 

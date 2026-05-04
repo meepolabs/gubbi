@@ -28,7 +28,7 @@ def _load_get_database_url() -> Any:
     live alembic context. We sidestep that by reading the file and exec'ing
     only the helper definitions we need.
     """
-    env_path = Path(__file__).resolve().parents[2] / "journalctl" / "alembic" / "env.py"
+    env_path = Path(__file__).resolve().parents[2] / "gubbi" / "alembic" / "env.py"
     source = env_path.read_text(encoding="utf-8")
     cutoff = source.index("def run_migrations_offline")
     head = source[:cutoff]

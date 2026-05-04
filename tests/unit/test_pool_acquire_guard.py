@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-TOOLS_DIR = Path(__file__).resolve().parents[2] / "journalctl" / "tools"
+TOOLS_DIR = Path(__file__).resolve().parents[2] / "gubbi" / "tools"
 ADMIN_ALLOWLIST = {"admin.py"}
 PATTERN = re.compile(r"\bpool\.acquire\s*\(")
 

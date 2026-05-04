@@ -12,12 +12,12 @@ import asyncpg
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from journalctl.core.crypto import ContentCipher
-from journalctl.models.conversation import Message
-from journalctl.storage.embedding_service import EmbeddingService
-from journalctl.storage.repositories import conversations as conv_repo
-from journalctl.storage.repositories import entries as entry_repo
-from journalctl.storage.repositories import topics as topic_repo
+from gubbi.core.crypto import ContentCipher
+from gubbi.models.conversation import Message
+from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.repositories import conversations as conv_repo
+from gubbi.storage.repositories import entries as entry_repo
+from gubbi.storage.repositories import topics as topic_repo
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 

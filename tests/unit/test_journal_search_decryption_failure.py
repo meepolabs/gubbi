@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from journalctl.models.search import SearchResult
+from gubbi.models.search import SearchResult
 
 
 class TestJournalSearchDecryptionFailure:
