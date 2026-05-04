@@ -367,14 +367,7 @@ class BearerAuthMiddleware:
             return
 
         # Signature verified -- parse scopes
-        parsed_scopes = frozenset(s for s in scopes_header.split() if s)
-        if not parsed_scopes:
-            _logger.debug(
-                "Empty X-Auth-Scopes in signed gateway request -- "
-                "falling back to legacy default scopes",
-                extra={"user_id": user_id_header, "token_fp": token_fp},
-            )
-            parsed_scopes = _LEGACY_DEFAULT_SCOPES
+        parsed_scopes = _resolve_scopes(scopes_header)
 
         scope_reset = current_token_scopes.set(parsed_scopes)
         token_reset = current_user_id.set(user_uuid)
