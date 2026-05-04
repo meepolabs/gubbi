@@ -109,9 +109,8 @@ async def ingest_conversations(
             await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
 
         for conv in body.conversations:
-            existing = await conn.fetchval(
-                "SELECT 1 FROM conversations"
-                " WHERE user_id = $1 AND platform = $2 AND platform_id = $3",
+            existing = await conv_repo.exists_by_platform_id(
+                conn,
                 user_id,
                 conv.platform,
                 conv.platform_id,
@@ -152,11 +151,11 @@ async def ingest_conversations(
                         source=conv.platform,
                         date=conv.created_at.date().isoformat(),
                     )
-                    await conn.execute(
-                        "UPDATE conversations SET platform = $1, platform_id = $2 WHERE id = $3",
+                    await conv_repo.set_platform_metadata(
+                        conn,
+                        save_result.conversation_id,
                         conv.platform,
                         conv.platform_id,
-                        save_result.conversation_id,
                     )
             except asyncpg.UniqueViolationError:
                 logger.warning(

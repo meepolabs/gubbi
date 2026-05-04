@@ -81,8 +81,8 @@ async def extract_conversation(
 
     # --- Idempotency check ---
     async with user_scoped_connection(pool, user_id=user_uuid) as conn:
-        already_processed = await conn.fetchval(
-            "SELECT processed_at FROM conversations WHERE id = $1",
+        already_processed = await conv_repo.get_processed_at(
+            conn,
             conversation_id,
         )
         if already_processed is not None:
@@ -152,8 +152,8 @@ async def extract_conversation(
                 "extraction: no usable topic_path from LLM, returning early (%d chars)",
                 len(raw_topic_path) if raw_topic_path else 0,
             )
-            await conn.execute(
-                "UPDATE conversations SET processed_at = now() WHERE id = $1",
+            await conv_repo.mark_processed(
+                conn,
                 conversation_id,
             )
             return {
@@ -220,8 +220,8 @@ async def extract_conversation(
             entries_created += 1
 
         # --- Mark conversation as processed ---
-        await conn.execute(
-            "UPDATE conversations SET processed_at = now() WHERE id = $1",
+        await conv_repo.mark_processed(
+            conn,
             conversation_id,
         )
 
