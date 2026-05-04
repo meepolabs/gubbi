@@ -211,7 +211,14 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     and result.entry_id in decrypted_entries
                 ):
                     content, _reasoning = decrypted_entries[result.entry_id]
-                    hydrated.append(result.model_copy(update={"content": _truncate_text(content)}))
+                    decryption_failed = content == "[decryption-failed]"  # sentinel (M-9.8)
+                    update: dict[str, Any] = {
+                        "content": (
+                            "[decryption failed]" if decryption_failed else _truncate_text(content)
+                        ),
+                        "decryption_failed": decryption_failed,
+                    }
+                    hydrated.append(result.model_copy(update=update))
                 elif (
                     result.doc_type == "conversation"
                     and result.conversation_id is not None
@@ -242,6 +249,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         "entry_id": result.entry_id,
                         "conversation_id": None,
                         "content": result.content or "",
+                        "decryption_failed": result.decryption_failed,
                     }
                 )
             elif result.doc_type == "conversation":

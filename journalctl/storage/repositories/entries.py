@@ -690,11 +690,11 @@ async def get_texts(
             result[eid] = (content, reasoning)
         except DecryptionError as exc:
             logger.warning(
-                "Skipping entry %d: decryption failed (%s)",
+                "Entry %d could not be decrypted (%s); included with failure marker",
                 eid,
                 type(exc).__name__,
-                exc_info=True,
             )
+            result[eid] = ("[decryption-failed]", None)  # sentinel for search.py to surface (M-9.8)
     return result
 
 

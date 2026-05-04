@@ -13,7 +13,9 @@ from collections.abc import Mapping
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+from anthropic import RateLimitError
 from starlette.testclient import TestClient
 
 from journalctl.config import LLMConfig
@@ -236,9 +238,9 @@ async def test_anthropic_provider_retries_on_429() -> None:
         mock_client = MagicMock()
         mock_cls.return_value = mock_client
 
-        # Must be actual Exception instances so AsyncMock raises them.
-        class _RateLimit(Exception):
-            status_code = 429
+        _req = httpx.Request("GET", "https://api.anthropic.com")
+        _resp = httpx.Response(429, request=_req)
+        _rate_limit_err = RateLimitError("too fast", response=_resp, body=None)
 
         fake_text_block = MagicMock()
         fake_text_block.text = "ok"
@@ -249,7 +251,7 @@ async def test_anthropic_provider_retries_on_429() -> None:
         fake_response.model = "test-model"
 
         mock_client.messages.create = AsyncMock(
-            side_effect=[_RateLimit("too fast"), _RateLimit("too fast"), fake_response]
+            side_effect=[_rate_limit_err, _rate_limit_err, fake_response]
         )
 
         provider = _make_anthropic_provider()
