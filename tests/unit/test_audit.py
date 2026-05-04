@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 from unittest.mock import AsyncMock, MagicMock
 
+import asyncpg
 import pytest
 
 from journalctl.audit import Action, record_audit
@@ -273,3 +274,53 @@ def test_tenant_provisioned_value() -> None:
 
 def test_login_failed_value() -> None:
     assert Action.LOGIN_FAILED == "login_failed"
+
+
+# ---------------------------------------------------------------------------
+# M-2.6: action parameter accepts enum or string
+# ---------------------------------------------------------------------------
+
+
+async def test_record_audit_accepts_action_enum_or_string() -> None:
+    """record_audit accepts Action enum values and raw strings for action."""
+    conn = _make_conn()
+    # Act + Assert -- enum value (no exception)
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id="uuid-123",
+        action=Action.IDENTITY_CREATED,
+    )
+    conn.execute.assert_called_once()
+    args = _executed_args(conn)
+    assert args[3] == Action.IDENTITY_CREATED
+    # Reset and test raw string
+    conn.execute.reset_mock()
+    # Act + Assert -- raw string (no exception)
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id="uuid-123",
+        action="entry.created",
+    )
+    conn.execute.assert_called_once()
+    args = _executed_args(conn)
+    assert args[3] == "entry.created"
+
+
+# ---------------------------------------------------------------------------
+# M-9.6: record_audit propagates on DB error
+# ---------------------------------------------------------------------------
+
+
+async def test_record_audit_propagates_on_db_error() -> None:
+    """record_audit re-raises DB exceptions (best-effort is the decorator's job)."""
+    conn = _make_conn()
+    conn.execute.side_effect = asyncpg.PostgresError("insert failed")
+    with pytest.raises(asyncpg.PostgresError):
+        await record_audit(
+            conn,
+            actor_type="user",
+            actor_id="uuid-123",
+            action="entry.created",
+        )
