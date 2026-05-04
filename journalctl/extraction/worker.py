@@ -95,7 +95,9 @@ async def shutdown(ctx: ExtractionContext) -> None:
 def _run_health_server() -> None:
     import uvicorn  # noqa: PLC0415
 
-    uvicorn.run(health_app, host="0.0.0.0", port=8201, log_level="info")  # noqa: S104
+    public = os.environ.get("JOURNAL_HEALTH_BIND_PUBLIC", "").lower() == "true"
+    host = "0.0.0.0" if public else "127.0.0.1"  # noqa: S104
+    uvicorn.run(health_app, host=host, port=8201, log_level="info")
 
 
 class WorkerSettings:
