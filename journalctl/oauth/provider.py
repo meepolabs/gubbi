@@ -7,6 +7,7 @@ Dual-mode: accepts both a shared static API key and OAuth access tokens.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import secrets
 import time
@@ -149,6 +150,25 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         if token is None:
             return None
         if not secrets.compare_digest(token.client_id, client.client_id or ""):
+            now = int(time.time())
+            stored_hash = (
+                token.client_id and hashlib.sha256(token.client_id.encode()).hexdigest()[:8]
+            ) or ""
+            req_hash = (
+                client.client_id and hashlib.sha256(client.client_id.encode()).hexdigest()[:8]
+            ) or ""
+            token_age = (
+                (now - (token.expires_at - OAUTH_REFRESH_TOKEN_TTL_SECS)) if token.expires_at else 0
+            )
+            logger.warning(
+                "oauth.refresh.client_id_mismatch",
+                extra={
+                    "event": "oauth.refresh.client_id_mismatch",
+                    "stored_client_id_hash": stored_hash,
+                    "requesting_client_id_hash": req_hash,
+                    "token_age_seconds": token_age,
+                },
+            )
             return None
         # Check expiry
         if token.expires_at is not None and token.expires_at < int(time.time()):

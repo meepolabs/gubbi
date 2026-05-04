@@ -29,6 +29,8 @@ from mcp.types import ListToolsRequest, ListToolsResult, ServerResult
 from journalctl.auth.hydra import HydraIntrospector, TokenClaims
 from journalctl.core.auth_context import current_token_scopes
 from journalctl.core.scope import (
+    _GRANT_INVERSE,
+    _GRANTS_UNION,
     SCOPE_DESCRIPTIONS,
     SCOPE_GRANTS,
     check_scope,
@@ -109,6 +111,49 @@ class TestScopeGrantsMapping:
 
     def test_journal_write_self_grant(self) -> None:
         assert SCOPE_GRANTS["journal:write"] == frozenset({"journal:write"})
+
+
+# ---------------------------------------------------------------------------
+# Item 8: Precomputed dicts correctness
+# ---------------------------------------------------------------------------
+
+
+class TestScopePrecomputeCorrectness:
+    """Verify the precomputed _GRANTS_UNION and _GRANT_INVERSE mirror
+    SCOPE_GRANTS faithfully for non-trivial scope hierarchies."""
+
+    def test_grants_union_contains_all_expected_perms(self) -> None:
+        expected = frozenset({"journal:read", "journal:write"})
+        assert expected == _GRANTS_UNION
+
+    def test_grant_inverse_journal_read_maps_correctly(self) -> None:
+        # Only "journal" and "journal:read" grant journal:read.
+        inv = _GRANT_INVERSE.get("journal:read", frozenset())
+        assert "journal" in inv
+        assert "journal:read" in inv
+        assert "journal:write" not in inv
+
+    def test_grant_inverse_journal_write_maps_correctly(self) -> None:
+        # Only "journal" and "journal:write" grant journal:write.
+        inv = _GRANT_INVERSE.get("journal:write", frozenset())
+        assert "journal" in inv
+        assert "journal:write" in inv
+        assert "journal:read" not in inv
+
+    def test_check_scope_correct_for_non_trivial_combinations(self) -> None:
+        # openid+email should NOT grant journal:read via precomputed path.
+        assert check_scope({"openid", "email"}, "journal:read") is False
+        assert check_scope({"openid", "email"}, "openid") is True  # direct match
+
+    def test_check_scope_journal_plus_many_scopes(self) -> None:
+        # journal mixed with openid, email, offline_access, plus unknown.
+        scopes = {"journal", "openid", "email", "offline_access", "nonexistent"}
+        assert check_scope(scopes, "journal:read") is True
+        assert check_scope(scopes, "journal:write") is True
+
+    def test_check_scope_empty_sets_return_false(self) -> None:
+        assert check_scope([], "journal:read") is False
+        assert check_scope(set(), "openid") is False
 
 
 # ---------------------------------------------------------------------------

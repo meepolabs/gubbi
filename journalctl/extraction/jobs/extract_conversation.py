@@ -15,8 +15,10 @@ from gubbi_common.db.user_scoped import user_scoped_connection
 
 from journalctl.audit import record_audit
 from journalctl.core.crypto import ContentCipher
+from journalctl.core.validation import validate_topic
 from journalctl.extraction.context import ExtractionContext
 from journalctl.extraction.llm.provider import LLMMessage
+from journalctl.extraction.service import ExtractedEntry
 from journalctl.storage.exceptions import TopicNotFoundError
 from journalctl.storage.repositories import conversations as conv_repo
 from journalctl.storage.repositories import entries as entry_repo
@@ -137,10 +139,57 @@ async def extract_conversation(
 
         topic_path = categorization.topic_path
 
-        # --- Upsert topic ---
+        # LLM-sourced topic_path requires hardening: the model may return
+        # adversarial paths (path traversal, injection, etc.).  Validate
+        # before any repository call -- treat a failing validation as a skip
+        # signal rather than crashing the extraction job.
+        topic_max_len = 256
+        if not topic_path or len(topic_path) > topic_max_len:
+            log.warning(
+                "extraction: rejecting invalid topic_path from LLM (empty or too long, %d chars)",
+                len(topic_path) if topic_path else 0,
+            )
+            topic_path = ""  # type: ignore[assignment]
+
+        elif topic_path:
+            # Strip control characters then delegate to the canonical validator
+            # which enforces the same pattern used by journal_create_topic.
+            valid_path = None  # safe default before try (guards ImportError / control stripping)
+            try:
+                _clean = "".join(
+                    ch for ch in topic_path if not ord(ch) < 32 and ch not in ("\t", "\n", "\r")
+                ).strip()
+                valid_path = validate_topic(_clean)
+
+            except ValueError:
+                log.warning("extraction: LLM topic_path %r rejected validation", topic_path)
+                valid_path = None
+
+            if valid_path is None:
+                # Validation destroyed the path -- abort this extraction cleanly.
+                log.warning(
+                    "extraction: no usable topic_path from LLM, returning early",
+                )
+                await conn.execute(
+                    "UPDATE conversations SET processed_at = now() WHERE id = $1",
+                    conversation_id,
+                )
+                return {
+                    "topic_path": None,
+                    "entries_created": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "skipped": True,
+                }
+
+            topic_path = valid_path
+
+        # --- Upsert topic / extract entries (guarded by validated path) ---
         try:
-            await topic_repo.get_id(conn, topic_path)
+            if topic_path:
+                await topic_repo.get_id(conn, topic_path)
         except TopicNotFoundError:
+            assert topic_path  # noqa: S101 -- narrowed by truthiness guard above
             try:
                 await topic_repo.create(
                     conn,
@@ -156,8 +205,10 @@ async def extract_conversation(
                     raise
 
         # --- Extract entries ---
+        extracted: list[ExtractedEntry] = []
         try:
-            extracted = await extraction_service.extract_entries(message_dicts, topic_path)
+            if topic_path:
+                extracted = await extraction_service.extract_entries(message_dicts, topic_path)
         except Exception:
             log.error(
                 "Entry extraction failed",
@@ -175,6 +226,7 @@ async def extract_conversation(
         total_input_tokens = 0
         total_output_tokens = 0
 
+        assert topic_path  # noqa: S101 -- truthy topic required for entry persistence
         for entry in extracted:
             await entry_repo.append(
                 conn,
