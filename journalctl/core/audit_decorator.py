@@ -1,8 +1,11 @@
 """@audited decorator for MCP tool handlers (M3 requirement).
 
 Records an audit event after a write tool handler completes successfully.
-Best-effort: audit write failures are logged and counted but never
-propagated to the caller, so the user always gets their result.
+Best-effort at the decorator layer: ``record_audit`` propagates exceptions
+on infra failure; this decorator catches them, logs, and increments a
+metric -- the caller never sees an audit exception.  Direct (non-decorator)
+callers of ``record_audit`` receive the exception and must handle it
+themselves.
 
 Stacking order (outermost to innermost)::
 
