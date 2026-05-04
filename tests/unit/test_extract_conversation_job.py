@@ -59,6 +59,12 @@ class TestExtractConversationJob:
                 "gubbi.storage.repositories.conversations.read_conversation_by_id",
             ) as mock_read_conv,
             patch(
+                "gubbi.storage.repositories.conversations.get_processed_at",
+            ) as mock_get_processed_at,
+            patch(
+                "gubbi.storage.repositories.conversations.mark_processed",
+            ) as mock_mark_processed,
+            patch(
                 "gubbi.storage.repositories.topics.list_all",
             ) as mock_list_topics,
             patch(
@@ -71,6 +77,8 @@ class TestExtractConversationJob:
                 "gubbi.storage.repositories.entries.append",
             ) as mock_entry_append,
         ):
+            # get_processed_at returns None -- conversation is not yet processed.
+            mock_get_processed_at.return_value = None
             mock_usc.return_value.__aenter__.return_value = mock_conn
 
             # --- Fake conversation data ---
@@ -129,11 +137,8 @@ class TestExtractConversationJob:
             assert result["skipped"] is False
 
             # --- Assert calls in order ---
-            # 1. Idempotency check
-            mock_conn.fetchval.assert_any_call(
-                "SELECT processed_at FROM conversations WHERE id = $1",
-                conversation_id,
-            )
+            # 1. Idempotency check (via repo)
+            mock_get_processed_at.assert_awaited_once_with(mock_conn, conversation_id)
 
             # 2. Load conversation
             mock_read_conv.assert_awaited_once_with(mock_conn, mock_ctx["cipher"], conversation_id)
@@ -190,11 +195,8 @@ class TestExtractConversationJob:
                 ]
             )
 
-            # 8. Mark conversation processed
-            mock_conn.execute.assert_any_call(
-                "UPDATE conversations SET processed_at = now() WHERE id = $1",
-                conversation_id,
-            )
+            # 8. Mark conversation processed (via repo, uses SQL now())
+            mock_mark_processed.assert_awaited_once_with(mock_conn, conversation_id)
 
             # 9. Redis publish (new channel format with job_id)
             expected_event = {
@@ -225,15 +227,20 @@ class TestExtractConversationJob:
         conversation_id = 99
         user_id = "00000000-0000-0000-0000-000000000002"
 
-        # Simulate already-processed conversation.
-        from datetime import UTC, datetime
-
-        mock_conn.fetchval.return_value = datetime.now(UTC)
-
-        with patch(
-            "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
-        ) as mock_usc:
+        with (
+            patch(
+                "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
+            ) as mock_usc,
+            patch(
+                "gubbi.storage.repositories.conversations.get_processed_at",
+            ) as mock_get_processed_at,
+        ):
             mock_usc.return_value.__aenter__.return_value = mock_conn
+
+            # Simulate already-processed conversation.
+            from datetime import datetime
+
+            mock_get_processed_at.return_value = datetime(2020, 1, 1)
 
             result = await extract_conversation(mock_ctx, conversation_id, user_id)
 
@@ -249,11 +256,8 @@ class TestExtractConversationJob:
             # Redis publish should never be called.
             mock_ctx["redis"].publish.assert_not_called()
 
-            # Only the idempotency check fetchval should have been called.
-            mock_conn.fetchval.assert_awaited_once_with(
-                "SELECT processed_at FROM conversations WHERE id = $1",
-                conversation_id,
-            )
+            # Only the idempotency check via repo should have been called.
+            mock_get_processed_at.assert_awaited_once_with(mock_conn, conversation_id)
 
     # ------------------------------------------------------------------
     # Redis publish
