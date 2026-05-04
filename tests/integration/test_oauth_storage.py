@@ -7,7 +7,7 @@ from pathlib import Path
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
 
-from journalctl.oauth.storage import OAuthStorage
+from gubbi.oauth.storage import OAuthStorage
 
 
 def _make_client(client_id: str = "test-client") -> OAuthClientInformationFull:

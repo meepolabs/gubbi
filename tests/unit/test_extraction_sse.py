@@ -19,7 +19,7 @@ from uuid import UUID
 
 import pytest
 
-from journalctl.api.v1.extraction import SSE_PER_USER_CAP, _event_stream
+from gubbi.api.v1.extraction import SSE_PER_USER_CAP, _event_stream
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -71,7 +71,7 @@ class TestExtractionSSE:
         """
         from fastapi import FastAPI
 
-        from journalctl.api.v1.extraction import router as extraction_router
+        from gubbi.api.v1.extraction import router as extraction_router
 
         app = FastAPI()
         app.include_router(extraction_router, prefix="/api/v1")
@@ -198,7 +198,7 @@ class TestSSEConnectionCap:
         mock_redis.expire = AsyncMock()
         mock_redis.decr = AsyncMock()
 
-        from journalctl.api.v1.extraction import SSE_PER_USER_CAP
+        from gubbi.api.v1.extraction import SSE_PER_USER_CAP
 
         # Simulate the cap check: count=5, cap=5 -> passes
         cap_key = f"sse:extraction:user:{TEST_USER_ID}:count"

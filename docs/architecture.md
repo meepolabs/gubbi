@@ -2,7 +2,7 @@
 
 ## System overview
 
-journalctl is a FastAPI application that exposes 12 MCP tools over streamable HTTP. Any MCP-compatible client connects via the MCP protocol, authenticates using one of three configurable modes (static API key, self-host OAuth 2.1, or external OAuth via Hydra introspection), and reads/writes to a canonical PostgreSQL 17 database (`pgvector/pgvector:pg17`). Conversation transcripts are additionally archived as JSON files on disk for long-term backup.
+gubbi is a FastAPI application that exposes 12 MCP tools over streamable HTTP. Any MCP-compatible client connects via the MCP protocol, authenticates using one of three configurable modes (static API key, self-host OAuth 2.1, or external OAuth via Hydra introspection), and reads/writes to a canonical PostgreSQL 17 database (`pgvector/pgvector:pg17`). Conversation transcripts are additionally archived as JSON files on disk for long-term backup.
 
 ![System architecture](diagrams/system-architecture.svg)
 
@@ -22,7 +22,7 @@ The journal stores data in three tiers, each serving a different purpose:
 
 ### Canonical storage: PostgreSQL 17
 
-All data lives in one PostgreSQL database. The schema is owned by alembic migrations under `journalctl/alembic/versions/`. Six tenant-relevant tables plus an audit log:
+All data lives in one PostgreSQL database. The schema is owned by alembic migrations under `gubbi/alembic/versions/`. Six tenant-relevant tables plus an audit log:
 
 ```sql
 users            -- id UUID PK, email, timezone, created_at, deleted_at,
@@ -96,7 +96,7 @@ Inside each request, the tool layer opens a connection via `core.db_context.user
 
 ### Audit log
 
-`audit_log` is an append-only table written via `journalctl.audit.record_audit(conn, actor_type, actor_id, action, ...)`. A DB-level trigger blocks UPDATE and DELETE on the table -- compensating entries are the only correction path. Used today for user provisioning + email-collision events; broader call-site coverage lands per feature.
+`audit_log` is an append-only table written via `gubbi.audit.record_audit(conn, actor_type, actor_id, action, ...)`. A DB-level trigger blocks UPDATE and DELETE on the table -- compensating entries are the only correction path. Used today for user provisioning + email-collision events; broader call-site coverage lands per feature.
 
 ### Archival storage: JSON files
 
@@ -180,7 +180,7 @@ The server runs multiple gunicorn workers against a shared PostgreSQL database:
 
 ## Authentication
 
-journalctl supports three mutually-exclusive deploy modes, selected at startup by which env vars are set. A pydantic model validator enforces mutual exclusion: `JOURNAL_HYDRA_ADMIN_URL` and `JOURNAL_PASSWORD_HASH` cannot coexist; `JOURNAL_API_KEY` + `JOURNAL_OPERATOR_EMAIL` are required unless Hydra is on.
+gubbi supports three mutually-exclusive deploy modes, selected at startup by which env vars are set. A pydantic model validator enforces mutual exclusion: `JOURNAL_HYDRA_ADMIN_URL` and `JOURNAL_PASSWORD_HASH` cannot coexist; `JOURNAL_API_KEY` + `JOURNAL_OPERATOR_EMAIL` are required unless Hydra is on.
 
 | Mode | API key | Self-host OAuth | Hydra introspection | Operator email |
 |------|---------|-----------------|---------------------|----------------|
@@ -206,9 +206,9 @@ Modes 1 and 2 share the operator UUID. At startup, `scaffold_operator(admin_pool
 
 Mode 3 instead resolves the user lazily: the first time a Hydra-introspected access token presents a `sub` not in `users`, the middleware looks up the email via Hydra's `/userinfo`, INSERTs a `users` row, and writes a `USER_CREATED` audit row -- all on the admin pool, before the request contextvar is bound. A small LRU cache keyed by `sub` short-circuits the lookup once provisioned. An email collision (different `sub` already owns the email) emits an `auth.email_collision` audit and returns 401.
 
-The self-host OAuth implementation lives in `journalctl/oauth/` and uses the MCP SDK's `OAuthAuthorizationServerProvider` plumbing: PKCE, RFC 7591 Dynamic Client Registration, bcrypt password verification, CSRF-protected login form, token refresh. OAuth state (registered clients, auth codes, access + refresh tokens) lives in `oauth.db` (SQLite), deliberately separate from the PostgreSQL journal database so auth changes never touch user data.
+The self-host OAuth implementation lives in `gubbi/oauth/` and uses the MCP SDK's `OAuthAuthorizationServerProvider` plumbing: PKCE, RFC 7591 Dynamic Client Registration, bcrypt password verification, CSRF-protected login form, token refresh. OAuth state (registered clients, auth codes, access + refresh tokens) lives in `oauth.db` (SQLite), deliberately separate from the PostgreSQL journal database so auth changes never touch user data.
 
-Hydra and the Kratos identity stack are open-source projects that self-hosters can also adopt if they want a Mode 3-style deployment; the journalctl side is just an OAuth 2.1 introspection client.
+Hydra and the Kratos identity stack are open-source projects that self-hosters can also adopt if they want a Mode 3-style deployment; the gubbi side is just an OAuth 2.1 introspection client.
 
 ## Semantic memory is internal
 

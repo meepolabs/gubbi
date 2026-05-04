@@ -1,8 +1,8 @@
-"""AST scan: every ``Action.NAME`` referenced in journalctl source must exist
+"""AST scan: every ``Action.NAME`` referenced in gubbi source must exist
 in the pinned ``gubbi_common.audit.actions.Action``.
 
 This is the consumer-side drift guard for the Action contract. It catches
-the failure mode where journalctl HEAD references an Action constant that
+the failure mode where gubbi HEAD references an Action constant that
 isn't in the gubbi-common version pinned in pyproject.toml -- a clean
 install at HEAD would raise AttributeError on first use.
 
@@ -20,11 +20,11 @@ from pathlib import Path
 import pytest
 from gubbi_common.audit.actions import Action
 
-_SOURCE_ROOT = Path(__file__).resolve().parent.parent.parent / "journalctl"
+_SOURCE_ROOT = Path(__file__).resolve().parent.parent.parent / "gubbi"
 
 
 def _action_names_referenced() -> dict[str, list[tuple[Path, int]]]:
-    """Walk every .py under journalctl/ and collect ``Action.X`` attribute references."""
+    """Walk every .py under gubbi/ and collect ``Action.X`` attribute references."""
     refs: dict[str, list[tuple[Path, int]]] = {}
     for py in _SOURCE_ROOT.rglob("*.py"):
         try:
@@ -54,7 +54,7 @@ def test_every_action_reference_resolves() -> None:
                 missing.append(f"  {rel}:{lineno} -- Action.{name}")
 
     assert not missing, (
-        "journalctl references Action constants missing from the pinned "
+        "gubbi references Action constants missing from the pinned "
         "gubbi-common.audit.actions.Action.\n"
         "Either bump the gubbi-common pin in pyproject.toml or add the "
         "constant to gubbi-common and release.\n\n"

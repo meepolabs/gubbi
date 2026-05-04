@@ -27,11 +27,11 @@ import httpx
 import pytest
 
 # -- URL overrides from existing env vars (hosted dev stack convention) --
-JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.meepolabs.com")
+JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.gubbi.ai")
 JOURNAL_DEV_IDENTITY_URL: str = os.environ.get(
-    "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.meepolabs.com"
+    "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.gubbi.ai"
 )
-JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://journal.meepolabs.com")
+JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://mcp-dev.gubbi.ai")
 
 # Hydra admin port (optional; when set drives login/consent for full flow).
 JOURNAL_DEV_AUTH_ADMIN_URL: str | None = os.environ.get("JOURNAL_DEV_AUTH_ADMIN_URL", None)
@@ -170,7 +170,7 @@ async def _drive_to_callback(client: httpx.AsyncClient, admin_url: str, start_lo
 def _kratos_email() -> tuple[str, str]:
     """Generate unique email + password for a Kratos test identity."""
     eid = uuid.uuid4().hex[:8]
-    return f"{_EMAIL_PREFIX}{eid}@meepolabs.com", f"TestPass-{eid}-Aa1!"
+    return f"{_EMAIL_PREFIX}{eid}@gubbi.ai", f"TestPass-{eid}-Aa1!"
 
 
 async def _create_identity(client: httpx.AsyncClient, url: str) -> dict[str, Any]:
@@ -356,7 +356,7 @@ async def call_mcp_tool(
 @pytest.mark.hosted_live
 @pytest.mark.skipif(
     os.environ.get("JOURNAL_LIVE_STACK") != "1",
-    reason="requires live dev stack (auth-dev.meepolabs.com + identity-dev.meepolabs.com + journal.meepolabs.com); enable with JOURNAL_LIVE_STACK=1",
+    reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
 )
 async def test_anthropic_style_mcp_oauth_flow() -> None:
     """Anthropic-style profile.
@@ -710,7 +710,7 @@ def _has_resource_wwwauth(resp: httpx.Response) -> bool:
 @pytest.mark.hosted_live
 @pytest.mark.skipif(
     os.environ.get("JOURNAL_LIVE_STACK") != "1",
-    reason="requires live dev stack (auth-dev.meepolabs.com + identity-dev.meepolabs.com + journal.meepolabs.com); enable with JOURNAL_LIVE_STACK=1",
+    reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
 )
 async def test_openai_style_mcp_oauth_flow() -> None:
     """OpenAI-style profile.

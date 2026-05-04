@@ -8,10 +8,10 @@ import pytest
 import structlog
 from mcp.server.fastmcp import FastMCP
 
-from journalctl.config import get_settings
-from journalctl.core.context import AppContext
-from journalctl.tools.constants import LIST_SUMMARY_PREVIEW_CHARS
-from journalctl.tools.registry import register_tools
+from gubbi.config import get_settings
+from gubbi.core.context import AppContext
+from gubbi.tools.constants import LIST_SUMMARY_PREVIEW_CHARS
+from gubbi.tools.registry import register_tools
 
 
 class _StubEmbeddingService:
@@ -58,7 +58,7 @@ def mcp_server(clean_pool: asyncpg.Pool, tmp_journal: Path) -> FastMCP:
         settings=settings,
         logger=structlog.get_logger("test"),
     )
-    mcp = FastMCP("test-journalctl")
+    mcp = FastMCP("test-gubbi")
     register_tools(mcp, app_ctx)
     return mcp
 

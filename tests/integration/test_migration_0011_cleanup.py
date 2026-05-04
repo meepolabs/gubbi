@@ -12,7 +12,7 @@ import pytest
 @pytest.mark.integration
 def test_migration_0011_noop_runs_cleanly() -> None:
     """Upgrade is a logger-only no-op; should not raise."""
-    from journalctl.alembic.versions.v20260424_0011_cleanup_xml_spill import (
+    from gubbi.alembic.versions.v20260424_0011_cleanup_xml_spill import (
         upgrade,
     )
 

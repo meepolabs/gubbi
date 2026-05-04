@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncpg
 import pytest
 
-from journalctl.audit import Action, record_audit
+from gubbi.audit import Action, record_audit
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),

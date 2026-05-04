@@ -7,9 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from journalctl.extraction.jobs.extract_conversation import extract_conversation
-from journalctl.extraction.service import CategorizationResult, ExtractedEntry
-from journalctl.storage.exceptions import TopicNotFoundError
+from gubbi.extraction.jobs.extract_conversation import extract_conversation
+from gubbi.extraction.service import CategorizationResult, ExtractedEntry
+from gubbi.storage.exceptions import TopicNotFoundError
 
 
 @pytest.fixture
@@ -53,22 +53,22 @@ class TestExtractConversationJob:
         # Mock user_scoped_connection context manager.
         with (
             patch(
-                "journalctl.extraction.jobs.extract_conversation.user_scoped_connection",
+                "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
             ) as mock_usc,
             patch(
-                "journalctl.storage.repositories.conversations.read_conversation_by_id",
+                "gubbi.storage.repositories.conversations.read_conversation_by_id",
             ) as mock_read_conv,
             patch(
-                "journalctl.storage.repositories.topics.list_all",
+                "gubbi.storage.repositories.topics.list_all",
             ) as mock_list_topics,
             patch(
-                "journalctl.storage.repositories.topics.get_id",
+                "gubbi.storage.repositories.topics.get_id",
             ) as mock_get_topic_id,
             patch(
-                "journalctl.storage.repositories.topics.create",
+                "gubbi.storage.repositories.topics.create",
             ) as mock_create_topic,
             patch(
-                "journalctl.storage.repositories.entries.append",
+                "gubbi.storage.repositories.entries.append",
             ) as mock_entry_append,
         ):
             mock_usc.return_value.__aenter__.return_value = mock_conn
@@ -231,7 +231,7 @@ class TestExtractConversationJob:
         mock_conn.fetchval.return_value = datetime.now(UTC)
 
         with patch(
-            "journalctl.extraction.jobs.extract_conversation.user_scoped_connection",
+            "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
         ) as mock_usc:
             mock_usc.return_value.__aenter__.return_value = mock_conn
 
@@ -272,19 +272,19 @@ class TestExtractConversationJob:
 
         with (
             patch(
-                "journalctl.extraction.jobs.extract_conversation.user_scoped_connection",
+                "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
             ) as mock_usc,
             patch(
-                "journalctl.storage.repositories.conversations.read_conversation_by_id",
+                "gubbi.storage.repositories.conversations.read_conversation_by_id",
             ) as mock_read_conv,
             patch(
-                "journalctl.storage.repositories.topics.list_all",
+                "gubbi.storage.repositories.topics.list_all",
             ) as mock_list_topics,
             patch(
-                "journalctl.storage.repositories.topics.get_id",
+                "gubbi.storage.repositories.topics.get_id",
             ) as mock_get_topic_id,
             patch(
-                "journalctl.storage.repositories.entries.append",
+                "gubbi.storage.repositories.entries.append",
             ),
         ):
             mock_usc.return_value.__aenter__.return_value = mock_conn

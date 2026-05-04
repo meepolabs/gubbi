@@ -6,9 +6,9 @@ import pytest
 from fastapi import FastAPI
 from starlette.routing import Route
 
-from journalctl.config import AuthConfig, DbConfig, ServerConfig, Settings
-from journalctl.oauth.router import register_oauth_routes
-from journalctl.oauth.storage import OAuthStorage
+from gubbi.config import AuthConfig, DbConfig, ServerConfig, Settings
+from gubbi.oauth.router import register_oauth_routes
+from gubbi.oauth.storage import OAuthStorage
 
 
 def _make_settings(
@@ -144,7 +144,7 @@ class TestMode3HydraBacked:
     def test_returns_none(self, tmp_path: Path) -> None:
         settings = _make_settings(
             hydra_admin_url="http://hydra:4445",
-            hydra_public_issuer_url="https://auth-dev.meepolabs.com",
+            hydra_public_issuer_url="https://auth-dev.gubbi.ai",
         )
         app = FastAPI()
         storage = _make_storage(tmp_path)
@@ -155,7 +155,7 @@ class TestMode3HydraBacked:
     def test_only_protected_resource_route(self, tmp_path: Path) -> None:
         settings = _make_settings(
             hydra_admin_url="http://hydra:4445",
-            hydra_public_issuer_url="https://auth-dev.meepolabs.com",
+            hydra_public_issuer_url="https://auth-dev.gubbi.ai",
         )
         app = FastAPI()
         storage = _make_storage(tmp_path)
@@ -179,16 +179,16 @@ class TestDeployShapeValidator:
         for key in ("JOURNAL_PASSWORD_HASH", "JOURNAL_OPERATOR_EMAIL"):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("JOURNAL_HYDRA_ADMIN_URL", "http://hydra:4445")
-        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.example.com")
         monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_URL", "https://hydra.example.com")
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
-        from journalctl.config import get_settings
+        from gubbi.config import get_settings
 
         get_settings.cache_clear()
 
     def _get_settings(self) -> Settings:
         """Rebuild Settings from current env (cache cleared)."""
-        from journalctl.config import get_settings
+        from gubbi.config import get_settings
 
         return get_settings()
 
@@ -205,7 +205,7 @@ class TestDeployShapeValidator:
         monkeypatch.setenv("JOURNAL_HYDRA_ADMIN_URL", "http://hydra:4445")
         monkeypatch.delenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", raising=False)
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
-        from journalctl.config import get_settings
+        from gubbi.config import get_settings
 
         get_settings.cache_clear()
         with pytest.raises(ValueError, match="(?i)hydra_public_issuer_url.*required"):
@@ -214,9 +214,9 @@ class TestDeployShapeValidator:
     def test_hydra_issuer_without_admin(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("JOURNAL_PASSWORD_HASH", raising=False)
         monkeypatch.delenv("JOURNAL_HYDRA_ADMIN_URL", raising=False)
-        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.example.com")
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
-        from journalctl.config import get_settings
+        from gubbi.config import get_settings
 
         get_settings.cache_clear()
         with pytest.raises(ValueError, match="(?i)hydra_admin_url.*required"):
@@ -227,9 +227,9 @@ class TestDeployShapeValidator:
         for key in ("JOURNAL_PASSWORD_HASH", "JOURNAL_HYDRA_PUBLIC_URL"):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.setenv("JOURNAL_HYDRA_ADMIN_URL", "http://hydra:4445")
-        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.example.com")
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
-        from journalctl.config import get_settings
+        from gubbi.config import get_settings
 
         get_settings.cache_clear()
         with pytest.raises(ValueError, match="(?i)hydra_public_url.*required"):
@@ -240,10 +240,10 @@ class TestDeployShapeValidator:
         for key in ("JOURNAL_PASSWORD_HASH",):
             monkeypatch.delenv(key, raising=False)
         monkeypatch.delenv("JOURNAL_HYDRA_ADMIN_URL", raising=False)
-        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.meepo.com")
+        monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_ISSUER_URL", "https://auth.example.com")
         monkeypatch.setenv("JOURNAL_HYDRA_PUBLIC_URL", "https://hydra.example.com")
         monkeypatch.setenv("JOURNAL_DB_APP_URL", "sqlite:///memory:")
-        from journalctl.config import get_settings
+        from gubbi.config import get_settings
 
         get_settings.cache_clear()
         with pytest.raises(ValueError, match="(?i)hydra_admin_url.*required"):

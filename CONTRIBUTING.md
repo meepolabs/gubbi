@@ -1,4 +1,4 @@
-# Contributing to journalctl
+# Contributing to gubbi
 
 Thanks for your interest. Before submitting a PR:
 

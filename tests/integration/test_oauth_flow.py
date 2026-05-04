@@ -15,12 +15,12 @@ from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.testclient import TestClient
 
-from journalctl.config import get_settings
-from journalctl.oauth.forms import create_login_handler
-from journalctl.oauth.provider import JournalOAuthProvider
-from journalctl.oauth.router import register_oauth_routes
-from journalctl.oauth.storage import OAuthStorage
-from journalctl.oauth.templates import CSRF_COOKIE_NAME
+from gubbi.config import get_settings
+from gubbi.oauth.forms import create_login_handler
+from gubbi.oauth.provider import JournalOAuthProvider
+from gubbi.oauth.router import register_oauth_routes
+from gubbi.oauth.storage import OAuthStorage
+from gubbi.oauth.templates import CSRF_COOKIE_NAME
 
 SERVER_URL = "http://localhost:8100"
 TEST_PASSWORD = "test-password"
@@ -298,7 +298,7 @@ class TestTokenLengthValidation:
         from starlette.responses import JSONResponse
         from starlette.routing import Route
 
-        from journalctl.middleware import BearerAuthMiddleware
+        from gubbi.middleware import BearerAuthMiddleware
 
         async def echo(request: object) -> JSONResponse:  # noqa: ARG001
             return JSONResponse({"ok": True})
@@ -412,7 +412,7 @@ class TestFullOAuthFlow:
 class TestRegisterRateLimit:
     def test_register_rate_limited_per_ip(self, oauth_storage: OAuthStorage) -> None:
         """HIGH-4: /register returns 429 after REGISTER_MAX_ATTEMPTS in window."""
-        from journalctl.oauth.constants import REGISTER_MAX_ATTEMPTS
+        from gubbi.oauth.constants import REGISTER_MAX_ATTEMPTS
 
         # Use the real register_oauth_routes so the wrap is applied
         settings = get_settings()
@@ -443,7 +443,7 @@ class TestRegisterRateLimit:
 class TestLoginRateLimitSharedAcrossInstances:
     def test_lockout_persists_when_storage_reopened(self, tmp_path: Path) -> None:
         """CRITICAL-2: simulate two workers by opening storage twice on same DB."""
-        from journalctl.oauth.constants import LOGIN_MAX_FAILURES
+        from gubbi.oauth.constants import LOGIN_MAX_FAILURES
 
         db_path = tmp_path / "oauth.db"
 

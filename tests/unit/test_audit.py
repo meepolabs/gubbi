@@ -1,4 +1,4 @@
-"""Unit tests for journalctl.audit -- record_audit() helper.
+"""Unit tests for gubbi.audit -- record_audit() helper.
 
 Tests use a mock asyncpg connection so no database is required.
 All 13 documented action strings are exercised.
@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 import asyncpg
 import pytest
 
-from journalctl.audit import Action, record_audit
+from gubbi.audit import Action, record_audit
 
 pytestmark = pytest.mark.unit
 

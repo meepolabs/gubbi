@@ -19,8 +19,8 @@ from uuid import UUID
 import asyncpg
 import pytest
 
-from journalctl.extraction.jobs.extract_conversation import extract_conversation
-from journalctl.extraction.service import CategorizationResult, ExtractedEntry
+from gubbi.extraction.jobs.extract_conversation import extract_conversation
+from gubbi.extraction.service import CategorizationResult, ExtractedEntry
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),

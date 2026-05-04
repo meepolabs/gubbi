@@ -1,4 +1,4 @@
-"""Unit tests for journalctl.users.bootstrap -- function-level only."""
+"""Unit tests for gubbi.users.bootstrap -- function-level only."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ def _make_pool(
 async def test_scaffold_insert_when_absent() -> None:
     """When no user row exists, INSERT creates one and returns."""
     pool = _make_pool(execute_ret="INSERT 0 1", fetchval_ret=_FAKE_UUID)
-    from journalctl.users.bootstrap import scaffold_operator
+    from gubbi.users.bootstrap import scaffold_operator
 
     await scaffold_operator(pool, _EMAIL, _TIMEZONE)
     pool.acquire.assert_called_once()
@@ -42,7 +42,7 @@ async def test_scaffold_insert_when_absent() -> None:
 async def test_scaffold_noop_when_present() -> None:
     """When INSERT is a no-op (conflict), verify row still exists."""
     pool = _make_pool(execute_ret="INSERT 0 0", fetchval_ret=_FAKE_UUID)
-    from journalctl.users.bootstrap import scaffold_operator
+    from gubbi.users.bootstrap import scaffold_operator
 
     await scaffold_operator(pool, _EMAIL, _TIMEZONE)
     pool.acquire.assert_called_once()
@@ -51,7 +51,7 @@ async def test_scaffold_noop_when_present() -> None:
 async def test_scaffold_error_on_no_row_after_insert() -> None:
     """When SELECT finds no row after INSERT, RuntimeError is raised."""
     pool = _make_pool(execute_ret="INSERT 0 1", fetchval_ret=None)
-    from journalctl.users.bootstrap import scaffold_operator
+    from gubbi.users.bootstrap import scaffold_operator
 
     with pytest.raises(RuntimeError, match="No active user row found after provisioning"):
         await scaffold_operator(pool, _EMAIL, _TIMEZONE)
@@ -70,7 +70,7 @@ async def test_scaffold_postgres_error_wrapped() -> None:
     context_mgr.__aexit__ = AsyncMock(return_value=False)
     pool.acquire = MagicMock(return_value=context_mgr)
 
-    from journalctl.users.bootstrap import scaffold_operator
+    from gubbi.users.bootstrap import scaffold_operator
 
     with pytest.raises(RuntimeError, match="PostgreSQL error during scaffold: connection refused"):
         await scaffold_operator(pool, _EMAIL, _TIMEZONE)

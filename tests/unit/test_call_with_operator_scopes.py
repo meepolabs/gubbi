@@ -15,8 +15,8 @@ from uuid import UUID
 
 import httpx
 
-from journalctl.core.auth_context import current_token_scopes, current_user_id
-from journalctl.middleware.auth import BearerAuthMiddleware
+from gubbi.core.auth_context import current_token_scopes, current_user_id
+from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_API_KEY = "a" * 64
 TEST_OP_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
