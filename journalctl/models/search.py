@@ -23,3 +23,4 @@ class SearchResult(BaseModel):
     content: str | None = None
     title: str | None = None
     summary: str | None = None
+    decryption_failed: bool = False  # True when content was unreadable (M-9.8)
