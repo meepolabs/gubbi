@@ -15,7 +15,7 @@ from gubbi_common.db.user_scoped import user_scoped_connection
 
 from journalctl.audit import record_audit
 from journalctl.core.crypto import ContentCipher
-from journalctl.core.validation import validate_topic
+from journalctl.core.validation import harden_llm_topic_path
 from journalctl.extraction.context import ExtractionContext
 from journalctl.extraction.llm.provider import LLMMessage
 from journalctl.extraction.service import ExtractedEntry
@@ -137,52 +137,31 @@ async def extract_conversation(
             )
             raise
 
-        topic_path = categorization.topic_path
+        raw_topic_path: str | None = categorization.topic_path
+        topic_path: str | None = raw_topic_path
 
         # LLM-sourced topic_path requires hardening: the model may return
-        # adversarial paths (path traversal, injection, etc.).  Validate
+        # adversarial paths (path traversal, injection, etc.).  Harden
         # before any repository call -- treat a failing validation as a skip
         # signal rather than crashing the extraction job.
-        topic_max_len = 256
-        if not topic_path or len(topic_path) > topic_max_len:
+        topic_path = harden_llm_topic_path(topic_path)
+
+        if topic_path is None:
             log.warning(
-                "extraction: rejecting invalid topic_path from LLM (empty or too long, %d chars)",
-                len(topic_path) if topic_path else 0,
+                "extraction: no usable topic_path from LLM, returning early (%d chars)",
+                len(raw_topic_path) if raw_topic_path else 0,
             )
-            topic_path = ""  # type: ignore[assignment]
-
-        elif topic_path:
-            # Strip control characters then delegate to the canonical validator
-            # which enforces the same pattern used by journal_create_topic.
-            valid_path = None  # safe default before try (guards ImportError / control stripping)
-            try:
-                _clean = "".join(
-                    ch for ch in topic_path if not ord(ch) < 32 and ch not in ("\t", "\n", "\r")
-                ).strip()
-                valid_path = validate_topic(_clean)
-
-            except ValueError:
-                log.warning("extraction: LLM topic_path %r rejected validation", topic_path)
-                valid_path = None
-
-            if valid_path is None:
-                # Validation destroyed the path -- abort this extraction cleanly.
-                log.warning(
-                    "extraction: no usable topic_path from LLM, returning early",
-                )
-                await conn.execute(
-                    "UPDATE conversations SET processed_at = now() WHERE id = $1",
-                    conversation_id,
-                )
-                return {
-                    "topic_path": None,
-                    "entries_created": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "skipped": True,
-                }
-
-            topic_path = valid_path
+            await conn.execute(
+                "UPDATE conversations SET processed_at = now() WHERE id = $1",
+                conversation_id,
+            )
+            return {
+                "topic_path": None,
+                "entries_created": 0,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "skipped": True,
+            }
 
         # --- Upsert topic / extract entries (guarded by validated path) ---
         try:
