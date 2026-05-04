@@ -21,9 +21,10 @@ from __future__ import annotations
 import hmac
 import logging
 from collections.abc import Awaitable, Callable
+from typing import NoReturn
 from uuid import UUID
 
-from fastapi import HTTPException, Request
+from fastapi import HTTPException, Request, status
 from gubbi_common.auth.gateway_signature import (
     GATEWAY_CONTRACT_VERSION,
     SignatureError,
@@ -35,6 +36,15 @@ from gubbi.oauth.constants import MAX_BEARER_TOKEN_LEN
 logger = logging.getLogger(__name__)
 
 _LEGACY_DEFAULT_SCOPES: frozenset[str] = frozenset({"journal:read", "journal:write"})
+
+INVALID_TOKEN_MESSAGE: str = "Invalid or expired token"  # noqa: S105
+
+
+def _raise_invalid_token() -> NoReturn:
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=INVALID_TOKEN_MESSAGE,
+    )
 
 
 async def resolve_user_id(
@@ -55,11 +65,17 @@ async def resolve_user_id(
     if settings.auth.trust_gateway:
         user_id_str = request.headers.get("x-auth-user-id", "")
         if not user_id_str:
-            raise HTTPException(status_code=401, detail="Missing X-Auth-User-Id header")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing X-Auth-User-Id header",
+            )
         try:
             user_uuid = UUID(user_id_str)
         except (ValueError, AttributeError):
-            raise HTTPException(status_code=401, detail="Invalid X-Auth-User-Id header") from None
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid X-Auth-User-Id header",
+            ) from None
 
         contract_version = request.headers.get("x-auth-contract-version", "")
         scopes_header = request.headers.get("x-auth-scopes", "")
@@ -72,7 +88,10 @@ async def resolve_user_id(
         if sig_present or sig_required:
             # Verification path: signature header present, OR enforced.
             if contract_version != str(GATEWAY_CONTRACT_VERSION):
-                raise HTTPException(status_code=401, detail="Unsupported X-Auth-Contract-Version")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Unsupported X-Auth-Contract-Version",
+                )
             gateway_secret = getattr(request.app.state, "gubbi_gateway_secret", None)
             if gateway_secret is None:
                 # Deployment misconfiguration when gateway_require_signature=true.
@@ -80,7 +99,10 @@ async def resolve_user_id(
                     "gateway_require_signature=true but secret not configured on app.state",
                     extra={"user_id": user_id_str},
                 )
-                raise HTTPException(status_code=503, detail="gateway secret not configured")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="gateway secret not configured",
+                )
             try:
                 verify_signature(
                     gateway_secret,
@@ -96,7 +118,10 @@ async def resolve_user_id(
                     "Gateway signature verification failed on REST route",
                     extra={"error_type": type(exc).__name__, "user_id": user_id_str},
                 )
-                raise HTTPException(status_code=401, detail="Invalid gateway signature") from None
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Invalid gateway signature",
+                ) from None
         # else: legacy path -- no signature header AND not enforced.
         # Same semantics as BearerAuthMiddleware: accept bare X-Auth-User-Id.
 
@@ -109,18 +134,27 @@ async def resolve_user_id(
     else:
         auth_header = request.headers.get("authorization", "")
         if not auth_header.lower().startswith("bearer "):
-            raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Missing or invalid Authorization header",
+            )
 
         token = auth_header[7:]
 
         if len(token) > MAX_BEARER_TOKEN_LEN:
-            raise HTTPException(status_code=401, detail="Invalid token")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token",
+            )
 
         # (b) Static API key
         if settings.auth.api_key and hmac.compare_digest(token, settings.auth.api_key):
             operator_user_id = request.app.state.operator_user_id
             if operator_user_id is None:
-                raise HTTPException(status_code=503, detail="Operator not provisioned")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Operator not provisioned",
+                )
             user_id = operator_user_id
             granted_scopes = frozenset(settings.auth.api_key_scopes)
 
@@ -128,17 +162,23 @@ async def resolve_user_id(
         elif token.startswith("ory_at_"):
             introspector = request.app.state.hydra_introspector
             if introspector is None:
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
+                _raise_invalid_token()
             from gubbi.auth.hydra import HydraInvalidToken, HydraUnreachable
 
             try:
                 claims = await introspector.introspect(token)
             except HydraUnreachable:
-                raise HTTPException(status_code=503, detail="Auth service unavailable") from None
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Auth service unavailable",
+                ) from None
             except HydraInvalidToken:
-                raise HTTPException(status_code=401, detail="Invalid or expired token") from None
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail=INVALID_TOKEN_MESSAGE,
+                ) from None
             if not isinstance(claims.sub, UUID):
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
+                _raise_invalid_token()
             user_id = claims.sub
             granted_scopes = frozenset(claims.scope.split())
 
@@ -146,19 +186,25 @@ async def resolve_user_id(
         else:
             validator = request.app.state.selfhost_token_validator
             if validator is None:
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
+                _raise_invalid_token()
             granted = validator(token)
             if granted is None:
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
+                _raise_invalid_token()
             operator_user_id = request.app.state.operator_user_id
             if operator_user_id is None:
-                raise HTTPException(status_code=503, detail="Operator not provisioned")
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="Operator not provisioned",
+                )
             user_id = operator_user_id
             granted_scopes = granted
 
     # Optional scope check
     if scope is not None and scope not in granted_scopes:
-        raise HTTPException(status_code=403, detail="insufficient_scope")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="insufficient_scope",
+        )
 
     return (user_id, granted_scopes)
 
