@@ -27,6 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ListToolsRequest, ListToolsResult, ServerResult
 
 from gubbi.auth.hydra import HydraIntrospector, TokenClaims
+from gubbi.auth.strategies import ApiKeyStrategy, HydraStrategy
 from gubbi.core.auth_context import current_token_scopes
 from gubbi.core.scope import (
     _GRANT_INVERSE,
@@ -305,8 +306,7 @@ class TestMiddlewareScopeStorage:
 
         mw = BearerAuthMiddleware(
             capture_app,
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=[HydraStrategy(introspector=mock_iv)],
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -326,8 +326,7 @@ class TestMiddlewareScopeStorage:
 
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=[HydraStrategy(introspector=mock_iv)],
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -348,8 +347,13 @@ class TestMiddlewareScopeStorage:
 
         mw = BearerAuthMiddleware(
             capture_app,
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"

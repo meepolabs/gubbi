@@ -15,6 +15,7 @@ from uuid import UUID
 
 import httpx
 
+from gubbi.auth.strategies import ApiKeyStrategy, SelfHostStrategy
 from gubbi.core.auth_context import current_token_scopes, current_user_id
 from gubbi.middleware.auth import BearerAuthMiddleware
 
@@ -37,6 +38,36 @@ def _asgi_app(
     return _app
 
 
+def _build_test_strategies(
+    *,
+    api_key: str = "",
+    operator_user_id: UUID | None = TEST_OP_ID,
+    introspector: Any = None,
+    selfhost_token_validator: Callable[[str], frozenset[str] | None] | None = None,
+    api_key_scopes: tuple[str, ...] | None = None,
+) -> list:
+    effective_api_key = "" if introspector is not None else api_key
+    scopes_tuple = tuple(api_key_scopes) if api_key_scopes else ("journal:read", "journal:write")
+    strategies = []
+    if effective_api_key:
+        strategies.append(
+            ApiKeyStrategy(
+                api_key=effective_api_key,
+                api_key_scopes=scopes_tuple,
+                operator_user_id=operator_user_id,
+            )
+        )
+    # No introspector used in this test module's current scope tests.
+    if selfhost_token_validator is not None:
+        strategies.append(
+            SelfHostStrategy(
+                token_validator=selfhost_token_validator,
+                operator_user_id=operator_user_id,
+            )
+        )
+    return strategies
+
+
 class TestMode1ApiKeyScopes:
     """Mode 1 (static API key) uses configured api_key_scopes."""
 
@@ -45,8 +76,9 @@ class TestMode1ApiKeyScopes:
         captured: list[frozenset[str] | None] = []
         mw = BearerAuthMiddleware(
             _asgi_app(captured),
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
+            strategies=_build_test_strategies(
+                api_key=TEST_API_KEY, operator_user_id=TEST_OP_ID, introspector=None
+            ),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -61,9 +93,12 @@ class TestMode1ApiKeyScopes:
         custom_scopes = frozenset({"journal:read"})
         mw = BearerAuthMiddleware(
             _asgi_app(captured),
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
-            api_key_scopes=custom_scopes,
+            strategies=_build_test_strategies(
+                api_key=TEST_API_KEY,
+                operator_user_id=TEST_OP_ID,
+                introspector=None,
+                api_key_scopes=("journal:read",),
+            ),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -76,8 +111,9 @@ class TestMode1ApiKeyScopes:
         """ContextVar is reset to None after the request completes."""
         mw = BearerAuthMiddleware(
             _asgi_app([]),
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
+            strategies=_build_test_strategies(
+                api_key=TEST_API_KEY, operator_user_id=TEST_OP_ID, introspector=None
+            ),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -99,9 +135,12 @@ class TestMode2ValidatorScopes:
 
         mw = BearerAuthMiddleware(
             _asgi_app(captured),
-            api_key=TEST_API_KEY,
-            selfhost_token_validator=validator,
-            operator_user_id=TEST_OP_ID,
+            strategies=_build_test_strategies(
+                api_key=TEST_API_KEY,
+                selfhost_token_validator=validator,
+                operator_user_id=TEST_OP_ID,
+                introspector=None,  # no introspector means api key is effective
+            ),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -118,9 +157,12 @@ class TestMode2ValidatorScopes:
 
         mw = BearerAuthMiddleware(
             _asgi_app([]),
-            api_key=TEST_API_KEY,
-            selfhost_token_validator=validator,
-            operator_user_id=TEST_OP_ID,
+            strategies=_build_test_strategies(
+                api_key=TEST_API_KEY,
+                selfhost_token_validator=validator,
+                operator_user_id=TEST_OP_ID,
+                introspector=None,
+            ),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -129,14 +171,18 @@ class TestMode2ValidatorScopes:
         assert resp.status_code == 401
 
     async def test_validator_not_configured_falls_through(self) -> None:
-        """selfhost_token_validator=None -> falls through to 401."""
+        """selfhost_token_validator=None -> falls back to api key which won't match."""
         mw = BearerAuthMiddleware(
             _asgi_app([]),
-            api_key=TEST_API_KEY,
-            selfhost_token_validator=None,
+            strategies=_build_test_strategies(
+                api_key=TEST_API_KEY,
+                selfhost_token_validator=None,
+                introspector=None,
+            ),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
             resp = await client.get("/", headers={"Authorization": "Bearer some_token"})
+        # Only ApiKeyStrategy is in the list. Bearer token doesn't match api_key -> 401
         assert resp.status_code == 401
