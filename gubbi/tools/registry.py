@@ -127,7 +127,7 @@ logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer(_TRACER_NAME)
 
 
-def _patch_tool_manager(tm: ToolManager) -> None:
+def patch_tool_manager(tm: ToolManager) -> None:
     """Monkey-patch ToolManager.call_tool to emit mcp.tool_call spans.
 
     Every tool dispatch is wrapped with a span containing:
@@ -194,7 +194,7 @@ def _patch_tool_manager(tm: ToolManager) -> None:
     # silently broken; we want it loud at startup.
     wrapped = getattr(tm.call_tool, "__wrapped__", None)
     if wrapped is None:
-        raise RuntimeError("ToolManager.call_tool was not wrapped by _patch_tool_manager")
+        raise RuntimeError("ToolManager.call_tool was not wrapped by patch_tool_manager")
     if not hasattr(wrapped, "__func__"):
         raise RuntimeError(
             "Wrapped call_tool lacks __func__ -- SDK refactor may have broken wrapping"
@@ -206,7 +206,7 @@ def _patch_tool_manager(tm: ToolManager) -> None:
         )
 
 
-def _wire_scope_filter(mcp: FastMCP) -> None:
+def wire_scope_filter(mcp: FastMCP) -> None:
     """Wire scope filter into tools/list handler (defense in depth).
 
     Replaces the lowlevel handler set by FastMCP._setup_handlers() so
@@ -253,7 +253,7 @@ def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
             type(tool_manager).__name__,
         )
     else:
-        _patch_tool_manager(tool_manager)
+        patch_tool_manager(tool_manager)
         logger.debug("OTel tool-call span wrapper installed on ToolManager")
 
-    _wire_scope_filter(mcp)
+    wire_scope_filter(mcp)

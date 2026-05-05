@@ -44,8 +44,8 @@ from gubbi.tools.registry import (
     ALL_TOOLS,
     READ_TOOLS,
     WRITE_TOOLS,
-    _wire_scope_filter,
     filter_tools_by_scope,
+    wire_scope_filter,
 )
 
 TEST_API_KEY = "a" * 64
@@ -783,12 +783,11 @@ class TestRenderScopesHtml:
 
 
 # ---------------------------------------------------------------------------
-# _wire_scope_filter integration with FastMCP
-# ---------------------------------------------------------------------------
+# wire_scope_filter integration with FastMCP
 
 
 class TestScopeFilterWired:
-    """_wire_scope_filter restricts tools/list output by token scopes.
+    """wire_scope_filter restricts tools/list output by token scopes.
 
     Constructs a FastMCP instance, registers dummy tools, wires the scope
     filter, then exercises the lowlevel handler with various
@@ -803,7 +802,7 @@ class TestScopeFilterWired:
     def wired_mcp(self, mcp: FastMCP) -> FastMCP:
         """FastMCP with dummy tools + scope filter wired."""
         _register_dummy_tools(mcp)
-        _wire_scope_filter(mcp)
+        wire_scope_filter(mcp)
         return mcp
 
     async def _list_tool_names(self, mcp: FastMCP) -> set[str]:
@@ -858,7 +857,7 @@ class TestScopeFilterWired:
 
 def _register_dummy_tools(mcp: FastMCP) -> None:
     """Register one dummy async function per tool name so the tool_manager
-    has entries for _wire_scope_filter to filter against."""
+    has entries for wire_scope_filter to filter against."""
 
     async def _dummy(**kwargs: Any) -> dict[str, Any]:
         return {}
