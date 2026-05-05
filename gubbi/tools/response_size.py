@@ -17,7 +17,7 @@ _ERROR_THRESHOLD_CHARS: int = 80_000
 _SUGGESTED_LIMIT_HEADROOM_FACTOR: float = 0.5
 
 
-def _assert_response_ok(
+def assert_response_ok(
     payload: Any,  # noqa: ANN401
     *,
     tool_name: str | None = None,
@@ -27,7 +27,7 @@ def _assert_response_ok(
 
     Caller pattern::
 
-        err = _assert_response_ok(payload, tool_name="journal_timeline")
+        err = assert_response_ok(payload, tool_name="journal_timeline")
         if err is not None:
             await _report_oversized(tool_name, err)
             return err
@@ -64,7 +64,7 @@ async def _report_oversized(tool_name: str, err: dict[str, Any]) -> None:
     """Emit the OTel size-check span for an oversized tool response.
 
     Centralises the fire-and-forget OTel call that all read tools make
-    when _assert_response_ok fires. Best-effort -- failures are swallowed
+    when assert_response_ok fires. Best-effort -- failures are swallowed
     so they never block the error response.
     """
     try:

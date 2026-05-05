@@ -31,7 +31,6 @@ from gubbi.storage.repositories.conversations import (
     read_conversation_by_id,
     read_conversation_by_id_paginated,
 )
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
 from gubbi.tools.constants import (
     DEFAULT_CONVERSATION_MESSAGES_LIMIT,
     DEFAULT_CONVERSATIONS_LIMIT,
@@ -43,6 +42,7 @@ from gubbi.tools.constants import (
     MAX_MSG_CHARS,
 )
 from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
+from gubbi.tools.response_size import _report_oversized, assert_response_ok
 
 logger = logging.getLogger(__name__)
 
@@ -241,7 +241,7 @@ async def _journal_list_conversations(
         "limit": limit,
         "offset": offset,
     }
-    err = _assert_response_ok(result, tool_name="journal_list_conversations")
+    err = assert_response_ok(result, tool_name="journal_list_conversations")
     if err:
         await _report_oversized("journal_list_conversations", err)
         return err
@@ -285,7 +285,7 @@ async def _journal_read_conversation(
         "messages_shown": len(messages),
         "messages_total": total_messages,
     }
-    err = _assert_response_ok(result, tool_name="journal_read_conversation")
+    err = assert_response_ok(result, tool_name="journal_read_conversation")
     if err:
         await _report_oversized("journal_read_conversation", err)
         return err
