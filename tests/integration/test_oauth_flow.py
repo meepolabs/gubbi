@@ -294,17 +294,27 @@ class TestXSSPrevention:
 class TestTokenLengthValidation:
     def test_oversized_token_rejected(self, oauth_storage: OAuthStorage) -> None:
         """Fix #9: tokens longer than 256 chars should be rejected."""
+        from uuid import UUID
+
         from starlette.applications import Starlette
         from starlette.responses import JSONResponse
         from starlette.routing import Route
 
+        from gubbi.auth.strategies import ApiKeyStrategy
         from gubbi.middleware import BearerAuthMiddleware
 
         async def echo(request: object) -> JSONResponse:  # noqa: ARG001
             return JSONResponse({"ok": True})
 
         inner = Starlette(routes=[Route("/", echo)])
-        app = BearerAuthMiddleware(inner, api_key="unused-for-oversized-check")
+        app = BearerAuthMiddleware(
+            inner,
+            strategies=[
+                ApiKeyStrategy(
+                    "unused-for-oversized-check", (), UUID("00000000-0000-0000-0000-000000000000")
+                )
+            ],
+        )
         client = TestClient(app)
 
         oversized = "x" * 300

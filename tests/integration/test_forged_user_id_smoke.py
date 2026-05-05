@@ -18,6 +18,7 @@ from uuid import UUID
 import httpx
 import pytest
 
+from gubbi.auth.strategies import TrustGatewayStrategy
 from gubbi.middleware.auth import BearerAuthMiddleware
 
 VICTIM_UUID = UUID("99999999-8888-7777-6666-555555555555")
@@ -45,10 +46,12 @@ async def test_forged_user_id_no_signature_returns_401() -> None:
     """
     mw = BearerAuthMiddleware(
         _asgi_app(),
-        api_key="",
-        trust_gateway=True,
-        gateway_secret=TEST_GATEWAY_SECRET,
-        gateway_require_signature=True,
+        strategies=[
+            TrustGatewayStrategy(
+                gateway_secret=TEST_GATEWAY_SECRET,
+                gateway_require_signature=True,
+            ),
+        ],
     )
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=mw), base_url="http://test"
