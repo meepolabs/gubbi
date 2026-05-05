@@ -129,6 +129,7 @@ async def read(
     Returns (TopicMeta, entries, total_matching).
     Raises TopicNotFoundError if topic missing.
     """
+    assert conn.is_in_transaction(), "entries.read: caller must wrap in conn.transaction()"  # noqa: S101
     # Defense-in-depth: validate date formats here even though the tool layer
     # validates first -- protects migration scripts and direct test calls.
     if date_from:
@@ -231,86 +232,84 @@ async def update(
         date: New date string YYYY-MM-DD (None = leave unchanged).
         tags: New tags list (None = leave unchanged).
     """
-    async with conn.transaction():
-        row = await conn.fetchrow(
-            "SELECT id, content_encrypted, content_nonce,"
-            " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
-            " FROM entries WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-            entry_id,
+    assert conn.is_in_transaction(), "entries.update: caller must wrap in conn.transaction()"  # noqa: S101
+    row = await conn.fetchrow(
+        "SELECT id, content_encrypted, content_nonce,"
+        " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
+        " FROM entries WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        entry_id,
+    )
+    if not row:
+        msg = f"Entry id {entry_id} not found"
+        raise EntryNotFoundError(msg)
+
+    old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
+    old_reasoning = _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce")
+    if old_content is None:
+        raise RuntimeError(
+            f"Entry {entry_id}: content decrypted to None; schema invariant violated"
         )
-        if not row:
-            msg = f"Entry id {entry_id} not found"
-            raise EntryNotFoundError(msg)
 
-        old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
-        old_reasoning = _decrypt_content_field(
-            cipher, row, "reasoning_encrypted", "reasoning_nonce"
+    new_content: str
+    new_reasoning: str | None
+    if content is not None:
+        if mode == "replace":
+            new_content = content
+        elif mode == "append":
+            new_content = f"{old_content}\n\n{content}".strip()
+        else:
+            msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
+            raise ValueError(msg)
+    else:
+        new_content = old_content
+
+    if reasoning is not None:
+        if mode == "append" and old_reasoning:
+            new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
+        else:
+            new_reasoning = reasoning
+    else:
+        new_reasoning = old_reasoning
+
+    new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
+    new_tags: Sequence[str] = tags if tags is not None else list(row["tags"] or [])
+    now = datetime_cls.now(UTC)
+
+    # Encrypt new content and reasoning (if not None); else None pair for reasoning.
+    new_content_ct, new_content_nonce = cipher.encrypt(new_content)
+    if new_reasoning is not None:
+        new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
+    else:
+        new_reasoning_ct = None
+        new_reasoning_nonce = None
+
+    # CTE: update entry + update topic timestamp in one round-trip.
+    # indexed_at = NULL signals the embedding needs regenerating.
+    await conn.execute(
+        """
+        WITH updated AS (
+            UPDATE entries
+            SET date=$1, tags=$2,
+                updated_at=$3, indexed_at=NULL,
+                content_encrypted=$4, content_nonce=$5,
+                reasoning_encrypted=$6, reasoning_nonce=$7,
+                search_vector=to_tsvector('english', $8)
+            WHERE id=$9
+            RETURNING topic_id
         )
-        if old_content is None:
-            raise RuntimeError(
-                f"Entry {entry_id}: content decrypted to None; schema invariant violated"
-            )
-
-        new_content: str
-        new_reasoning: str | None
-        if content is not None:
-            if mode == "replace":
-                new_content = content
-            elif mode == "append":
-                new_content = f"{old_content}\n\n{content}".strip()
-            else:
-                msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
-                raise ValueError(msg)
-        else:
-            new_content = old_content
-
-        if reasoning is not None:
-            if mode == "append" and old_reasoning:
-                new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
-            else:
-                new_reasoning = reasoning
-        else:
-            new_reasoning = old_reasoning
-
-        new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
-        new_tags: Sequence[str] = tags if tags is not None else list(row["tags"] or [])
-        now = datetime_cls.now(UTC)
-
-        # Encrypt new content and reasoning (if not None); else None pair for reasoning.
-        new_content_ct, new_content_nonce = cipher.encrypt(new_content)
-        if new_reasoning is not None:
-            new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
-        else:
-            new_reasoning_ct = None
-            new_reasoning_nonce = None
-
-        # CTE: update entry + update topic timestamp in one round-trip.
-        # indexed_at = NULL signals the embedding needs regenerating.
-        await conn.execute(
-            """
-            WITH updated AS (
-                UPDATE entries
-                SET date=$1, tags=$2,
-                    updated_at=$3, indexed_at=NULL,
-                    content_encrypted=$4, content_nonce=$5,
-                    reasoning_encrypted=$6, reasoning_nonce=$7,
-                    search_vector=to_tsvector('english', $8)
-                WHERE id=$9
-                RETURNING topic_id
-            )
-            UPDATE topics SET updated_at=$3
-            FROM updated WHERE topics.id = updated.topic_id
-            """,
-            new_date,
-            new_tags,
-            now,
-            new_content_ct,
-            new_content_nonce,
-            new_reasoning_ct,
-            new_reasoning_nonce,
-            new_content,
-            entry_id,
-        )
+        UPDATE topics SET updated_at=$3
+        FROM updated WHERE topics.id = updated.topic_id
+        """,
+        new_date,
+        new_tags,
+        now,
+        new_content_ct,
+        new_content_nonce,
+        new_reasoning_ct,
+        new_reasoning_nonce,
+        new_content,
+        entry_id,
+    )
 
 
 async def delete(conn: asyncpg.Connection, entry_id: int) -> int:
