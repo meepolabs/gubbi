@@ -2,12 +2,18 @@
 
 import asyncpg
 
+from gubbi.constants import (
+    APP_POOL_SIZE_MAX,
+    APP_POOL_SIZE_MIN,
+    DB_COMMAND_TIMEOUT_SECS,
+)
+
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
     """Register the pgvector codec on every new pool connection.
 
     Called by asyncpg for each connection it creates. Must be registered
-    here (via `init=`) rather than on a single acquired connection —
+    here (via `init=`) rather than on a single acquired connection --
     `register_vector(conn)` only applies to that one connection object,
     not to others in the pool.
     """
@@ -18,8 +24,8 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 
 async def init_pool(
     database_url: str,
-    min_size: int = 2,
-    max_size: int = 5,
+    min_size: int = APP_POOL_SIZE_MIN,
+    max_size: int = APP_POOL_SIZE_MAX,
 ) -> asyncpg.Pool:
     """Create an asyncpg connection pool and register the pgvector codec.
 
@@ -31,7 +37,7 @@ async def init_pool(
         database_url,
         min_size=min_size,
         max_size=max_size,
-        command_timeout=30,
+        command_timeout=DB_COMMAND_TIMEOUT_SECS,
         statement_cache_size=0,
         init=_init_connection,
         server_settings={"application_name": "gubbi"},
