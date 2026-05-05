@@ -6,6 +6,7 @@ from typing import Any
 from anthropic import AsyncAnthropic, RateLimitError
 
 from gubbi.config import LLMConfig
+from gubbi.constants import ANTHROPIC_MAX_RETRIES
 from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
 
 # Model pricing in $USD per million tokens (input, output).
@@ -85,7 +86,7 @@ class AnthropicProvider(LLMProvider):
         )
 
     async def _call_with_retry(self, kwargs: dict[str, Any]) -> Any:
-        max_retries = 5
+        max_retries = ANTHROPIC_MAX_RETRIES
         base_delay = 1.0
         for attempt in range(max_retries):
             try:

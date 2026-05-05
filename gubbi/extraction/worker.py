@@ -14,6 +14,7 @@ import redis.asyncio as aioredis
 from arq.connections import RedisSettings
 
 from gubbi.config import get_settings
+from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 from gubbi.core.crypto import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.health import app as health_app
@@ -106,6 +107,6 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10
-    job_timeout = 600
+    job_timeout = ARQ_JOB_TIMEOUT_SECS
     keep_result = 86400
     poll_delay = 0.5
