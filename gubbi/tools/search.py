@@ -27,7 +27,7 @@ from gubbi.tools.constants import (
     MAX_SEARCH_RESULTS,
 )
 from gubbi.tools.errors import invalid_date, invalid_topic, validation_error
-from gubbi.tools.response_size import _report_oversized, assert_response_ok
+from gubbi.tools.response_size import _report_oversized, check_response_size
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +314,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         search_result = _build_payload(hydrated, query, limit)
 
-        err = assert_response_ok(search_result, tool_name="journal_search")
+        err = check_response_size(search_result, tool_name="journal_search")
         if err:
             await _report_oversized("journal_search", err)
             return err
