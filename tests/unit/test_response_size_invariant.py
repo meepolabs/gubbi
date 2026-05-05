@@ -35,19 +35,34 @@ _TOOL_SOURCE: dict[str, str] = {
 
 
 def _function_contains_call_assert_response_ok(tree: ast.AST, func_name: str) -> bool:
-    """Return True if ``func_name`` (async def or def) contains a call to _assert_response_ok."""
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == func_name:
-            for child in ast.walk(node):
-                if isinstance(child, ast.Call):
-                    fn = child.func
-                    # Direct call: _assert_response_ok(...)
-                    if isinstance(fn, ast.Name) and fn.id == "_assert_response_ok":
-                        return True
-                    # Attribute call: mod._assert_response_ok(...)
-                    if isinstance(fn, ast.Attribute) and fn.attr == "_assert_response_ok":
-                        return True
-            return False
+    """Return True if ``func_name`` (async def or def) contains a call to _assert_response_ok.
+
+    First checks the named function directly; if not found, also checks all module-level
+    functions whose names match the pattern prefixed with underscores (the structurally-
+    lifted handler bodies). This handles the refactor that moved tool bodies to private
+    module-level functions like ``_journal_read_topic``.
+    """
+    candidates = [func_name]
+    # When tools were refactored, their delegates are thin closures and the real logic is in
+    # a module-level function prefixed with underscores (e.g., _journal_read_topic).
+    underscored = func_name.lstrip("_")
+    if underscored != func_name:
+        candidates.append(underscored)
+    elif func_name.startswith("journal_"):
+        candidates.append(f"_{func_name}")
+
+    for candidate in candidates:
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name == candidate:
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        fn = child.func
+                        # Direct call: _assert_response_ok(...)
+                        if isinstance(fn, ast.Name) and fn.id == "_assert_response_ok":
+                            return True
+                        # Attribute call: mod._assert_response_ok(...)
+                        if isinstance(fn, ast.Attribute) and fn.attr == "_assert_response_ok":
+                            return True
     return False
 
 
