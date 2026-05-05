@@ -20,7 +20,6 @@ from gubbi.models.search import SearchResult
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import search as search_repo
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
 from gubbi.tools.constants import (
     DEFAULT_SEARCH_LIMIT,
     MAX_QUERY_LEN,
@@ -28,6 +27,7 @@ from gubbi.tools.constants import (
     MAX_SEARCH_RESULTS,
 )
 from gubbi.tools.errors import invalid_date, invalid_topic, validation_error
+from gubbi.tools.response_size import _report_oversized, assert_response_ok
 
 logger = logging.getLogger(__name__)
 
@@ -314,7 +314,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         search_result = _build_payload(hydrated, query, limit)
 
-        err = _assert_response_ok(search_result, tool_name="journal_search")
+        err = assert_response_ok(search_result, tool_name="journal_search")
         if err:
             await _report_oversized("journal_search", err)
             return err

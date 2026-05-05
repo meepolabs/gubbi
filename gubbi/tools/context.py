@@ -22,7 +22,6 @@ from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import search as search_repo
 from gubbi.storage.repositories import topics as topic_repo
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
 from gubbi.tools.constants import (
     BRIEFING_KEY_FACTS_COUNT,
     BRIEFING_KEY_FACTS_QUERY,
@@ -33,6 +32,7 @@ from gubbi.tools.constants import (
     MAX_TIMELINE_ENTRIES,
 )
 from gubbi.tools.errors import validation_error
+from gubbi.tools.response_size import _report_oversized, assert_response_ok
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "topic_count": topic_count,
             "stats": stats,
         }
-        err = _assert_response_ok(briefing_payload, tool_name="journal_briefing")
+        err = assert_response_ok(briefing_payload, tool_name="journal_briefing")
         if err:
             await _report_oversized("journal_briefing", err)
             return err
@@ -355,7 +355,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "entries": entries,
             "count": len(entries),
         }
-        err = _assert_response_ok(payload, tool_name="journal_timeline")
+        err = assert_response_ok(payload, tool_name="journal_timeline")
         if err:
             await _report_oversized("journal_timeline", err)
             return err

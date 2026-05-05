@@ -16,9 +16,9 @@ from gubbi.core.validation import (
     validate_topic,
 )
 from gubbi.storage.repositories import topics as topic_repo
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
 from gubbi.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
 from gubbi.tools.errors import already_exists, invalid_topic, validation_error
+from gubbi.tools.response_size import _report_oversized, assert_response_ok
 
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
@@ -72,7 +72,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "offset": offset,
             "limit": limit,
         }
-        err = _assert_response_ok(result, tool_name="journal_list_topics")
+        err = assert_response_ok(result, tool_name="journal_list_topics")
         if err:
             await _report_oversized("journal_list_topics", err)
             return err
