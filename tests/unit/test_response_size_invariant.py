@@ -1,7 +1,7 @@
-"""Invariant: every read/list tool must call assert_response_ok.
+"""Invariant: every read/list tool must call check_response_size.
 
 AST-walks each tool source file and asserts the function body contains
-a call to ``assert_response_ok``.  This catches the next read/list tool
+a call to ``check_response_size``.  This catches the next read/list tool
 added without the response-size guard at PR review time.
 """
 
@@ -34,8 +34,8 @@ _TOOL_SOURCE: dict[str, str] = {
 }
 
 
-def _function_contains_call_assert_response_ok(tree: ast.AST, func_name: str) -> bool:
-    """Return True if ``func_name`` (async def or def) contains a call to assert_response_ok.
+def _function_contains_call_check_response_size(tree: ast.AST, func_name: str) -> bool:
+    """Return True if ``func_name`` (async def or def) contains a call to check_response_size.
 
     First checks the named function directly; if not found, also checks all module-level
     functions whose names match the pattern prefixed with underscores (the structurally-
@@ -57,17 +57,17 @@ def _function_contains_call_assert_response_ok(tree: ast.AST, func_name: str) ->
                 for child in ast.walk(node):
                     if isinstance(child, ast.Call):
                         fn = child.func
-                        # Direct call: assert_response_ok(...)
-                        if isinstance(fn, ast.Name) and fn.id == "assert_response_ok":
+                        # Direct call: check_response_size(...)
+                        if isinstance(fn, ast.Name) and fn.id == "check_response_size":
                             return True
-                        # Attribute call: mod.assert_response_ok(...)
-                        if isinstance(fn, ast.Attribute) and fn.attr == "assert_response_ok":
+                        # Attribute call: mod.check_response_size(...)
+                        if isinstance(fn, ast.Attribute) and fn.attr == "check_response_size":
                             return True
     return False
 
 
 class TestResponseSizeGuardInvariant:
-    """Every read/list tool must call assert_response_ok before returning."""
+    """Every read/list tool must call check_response_size before returning."""
 
     tools_dir = Path(__file__).resolve().parents[2] / "gubbi" / "tools"
 
@@ -79,8 +79,8 @@ class TestResponseSizeGuardInvariant:
             source_path = self.tools_dir / filename
             assert source_path.exists(), f"Source file not found: {source_path}"
             tree = ast.parse(source_path.read_text(encoding="utf-8"))
-            if not _function_contains_call_assert_response_ok(tree, tool_name):
+            if not _function_contains_call_check_response_size(tree, tool_name):
                 missing.append(tool_name)
         assert (
             not missing
-        ), f"The following tools are missing a call to assert_response_ok: {missing}"
+        ), f"The following tools are missing a call to check_response_size: {missing}"
