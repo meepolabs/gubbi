@@ -23,6 +23,13 @@ from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
+from gubbi.auth.strategies import (
+    ApiKeyStrategy,
+    AuthStrategy,
+    HydraStrategy,
+    SelfHostStrategy,
+    TrustGatewayStrategy,
+)
 from gubbi.config import (
     ALLOWED_ORIGINS,
     HYDRA_INTROSPECT_TIMEOUT_SECS,
@@ -413,18 +420,43 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         ):
             protected_resource_metadata_url = None
 
+    # Build auth strategy list. Trust-gateway deployments use ONLY
+    # TrustGatewayStrategy; non-trust builds compose ApiKey + Hydra + SelfHost.
+    if settings.auth.trust_gateway:
+        auth_strategies: list[AuthStrategy] = [
+            TrustGatewayStrategy(
+                gateway_secret=gateway_secret,
+                gateway_require_signature=settings.auth.gateway_require_signature,
+            ),
+        ]
+    else:
+        _raw_strategies: list[AuthStrategy | None] = [
+            (
+                ApiKeyStrategy(
+                    api_key=effective_api_key,
+                    api_key_scopes=tuple(settings.auth.api_key_scopes),
+                    operator_user_id=operator_user_id,
+                )
+            )
+            if effective_api_key
+            else None,
+            HydraStrategy(introspector=introspector) if introspector is not None else None,
+            SelfHostStrategy(
+                token_validator=token_validator,
+                operator_user_id=operator_user_id,
+            )
+            if token_validator is not None
+            else None,
+        ]
+        auth_strategies = [s for s in _raw_strategies if s is not None]
+
+    app.state.auth_strategies = auth_strategies
+
     authed_mcp = BearerAuthMiddleware(
         mcp_http,
-        api_key=effective_api_key,
-        introspector=introspector,
+        strategies=auth_strategies,
         required_scope=REQUIRED_OAUTH_SCOPE,
-        selfhost_token_validator=token_validator,
-        operator_user_id=operator_user_id,
         protected_resource_metadata_url=protected_resource_metadata_url,
-        trust_gateway=settings.auth.trust_gateway,
-        gateway_secret=gateway_secret,
-        gateway_require_signature=settings.auth.gateway_require_signature,
-        api_key_scopes=frozenset(settings.auth.api_key_scopes),
     )
     # Origin validation: prevents DNS-rebinding attacks on the MCP endpoint.
     origin_validated_mcp = OriginValidationMiddleware(authed_mcp, ALLOWED_ORIGINS)

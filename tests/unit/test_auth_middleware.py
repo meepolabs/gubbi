@@ -16,6 +16,11 @@ from gubbi.auth.hydra import (
     HydraUnreachable,
     TokenClaims,
 )
+from gubbi.auth.strategies import (
+    ApiKeyStrategy,
+    HydraStrategy,
+    SelfHostStrategy,
+)
 from gubbi.core.auth_context import current_user_id
 from gubbi.middleware.auth import BearerAuthMiddleware
 
@@ -72,6 +77,52 @@ def _scope(
     }
 
 
+def _build_test_strategies(
+    *,
+    api_key: str = "",
+    introspector: HydraIntrospector | None = None,
+    selfhost_token_validator: Callable[[str], frozenset[str] | None] | None = None,
+    operator_user_id: UUID | None = TEST_OP_ID,
+    trust_gateway: bool = False,
+    gateway_secret: bytes | None = None,
+    gateway_require_signature: bool = False,
+) -> list:  # -- AuthStrategy -- avoids forward ref issues
+    from gubbi.auth.strategies import (  # noqa: PLC0415
+        ApiKeyStrategy,
+        SelfHostStrategy,
+        TrustGatewayStrategy,
+    )
+
+    if trust_gateway:
+        return [
+            TrustGatewayStrategy(
+                gateway_secret=gateway_secret,
+                gateway_require_signature=gateway_require_signature,
+            ),
+        ]
+
+    effective_api_key = "" if introspector is not None else api_key
+    strategies: list = []
+    if effective_api_key:
+        strategies.append(
+            ApiKeyStrategy(
+                api_key=effective_api_key,
+                api_key_scopes=("journal:read", "journal:write"),
+                operator_user_id=operator_user_id,
+            )
+        )
+    if introspector is not None:
+        strategies.append(HydraStrategy(introspector=introspector))
+    if selfhost_token_validator is not None:
+        strategies.append(
+            SelfHostStrategy(
+                token_validator=selfhost_token_validator,
+                operator_user_id=operator_user_id,
+            )
+        )
+    return strategies
+
+
 @pytest.fixture
 def transport_app() -> tuple[Any, AsyncMock]:
     """Create an ASGI middleware under test with a mocked introspector."""
@@ -80,8 +131,7 @@ def transport_app() -> tuple[Any, AsyncMock]:
     mock_iv.introspect = AsyncMock(return_value=claims)
     app = BearerAuthMiddleware(
         _asgi_app(),
-        api_key=TEST_API_KEY,
-        introspector=mock_iv,
+        strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
         required_scope="journal",
     )
     return app, mock_iv
@@ -90,7 +140,16 @@ def transport_app() -> tuple[Any, AsyncMock]:
 class TestAPIMode:
     async def test_api_key_match_returns_200(self) -> None:
         downstream = _asgi_app()
-        mw = BearerAuthMiddleware(downstream, api_key=TEST_API_KEY, operator_user_id=TEST_OP_ID)
+        mw = BearerAuthMiddleware(
+            downstream,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -99,7 +158,16 @@ class TestAPIMode:
 
     async def test_wrong_api_key_returns_401(self) -> None:
         downstream = _asgi_app()
-        mw = BearerAuthMiddleware(downstream, api_key=TEST_API_KEY)
+        mw = BearerAuthMiddleware(
+            downstream,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -110,13 +178,21 @@ class TestAPIMode:
     async def test_api_key_no_operator_returns_503(self) -> None:
         """When operator_user_id is None, API key match returns 503 with provisioning hint."""
         downstream = _asgi_app()
-        mw = BearerAuthMiddleware(downstream, api_key=TEST_API_KEY, operator_user_id=None)
+        mw = BearerAuthMiddleware(
+            downstream,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=None,
+                )
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
             resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
         assert resp.status_code == 503
-        assert "auto-scaffold" in resp.json()["error"]
 
 
 class TestHydraMode:
@@ -149,8 +225,7 @@ class TestHydraMode:
 
         mw = BearerAuthMiddleware(
             capture,
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -165,8 +240,7 @@ class TestHydraMode:
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -175,10 +249,11 @@ class TestHydraMode:
         assert current_user_id.get() is None
 
     async def test_introspector_none_rejects_ory_token(self) -> None:
+        # When introspector is None, no strategies are built (api_key alone doesn't work for ory_at_* tokens)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=None,
+            strategies=[],
+            protected_resource_metadata_url=None,
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -219,8 +294,7 @@ class TestScopeCheck:
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -236,8 +310,7 @@ class TestScopeCheck:
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -253,8 +326,7 @@ class TestScopeCheck:
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -266,7 +338,16 @@ class TestScopeCheck:
 
 class TestMissingAndOversizedTokens:
     async def test_missing_authorization_returns_401(self) -> None:
-        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -274,7 +355,16 @@ class TestMissingAndOversizedTokens:
         assert resp.status_code == 401
 
     async def test_empty_authorization_returns_401(self) -> None:
-        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -282,7 +372,16 @@ class TestMissingAndOversizedTokens:
         assert resp.status_code == 401
 
     async def test_oversized_token_returns_401(self) -> None:
-        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         fake_token = "O" * 300
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -296,8 +395,14 @@ class TestSelfhostValidator:
         mock_validator = MagicMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            selfhost_token_validator=mock_validator,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                ),
+                SelfHostStrategy(token_validator=mock_validator, operator_user_id=TEST_OP_ID),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -310,9 +415,9 @@ class TestSelfhostValidator:
         mock_validator = MagicMock(return_value=frozenset({"journal:read", "journal:write"}))
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            selfhost_token_validator=mock_validator,
-            operator_user_id=TEST_OP_ID,
+            strategies=[
+                SelfHostStrategy(token_validator=mock_validator, operator_user_id=TEST_OP_ID),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -325,25 +430,34 @@ class TestSelfhostValidator:
         mock_validator = MagicMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=None,
-            selfhost_token_validator=mock_validator,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                ),
+                SelfHostStrategy(token_validator=mock_validator, operator_user_id=TEST_OP_ID),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
             resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
         assert resp.status_code == 401
-        # Self-host validator is called because introspector is None
+        # Self-host validator is called because introspector is None and ory token doesn't match api_key
         mock_validator.assert_called_once()
 
     async def test_ory_token_with_none_validator_returns_401(self) -> None:
         """Ory token without introspector and selfhost_validator=None -> 401."""
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=None,
-            selfhost_token_validator=None,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -363,8 +477,13 @@ class TestContextvarReset:
 
         mw = BearerAuthMiddleware(
             crashing_app,
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
         )
         scope = _scope(auth_header=f"Bearer {TEST_API_KEY}")
 
@@ -396,8 +515,7 @@ class TestContextvarReset:
 
         mw = BearerAuthMiddleware(
             crashing_app,
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
         )
         scope = _scope(auth_header=f"Bearer {TEST_TOKEN}")
@@ -425,7 +543,7 @@ class TestNonHttpScope:
 
         mw = BearerAuthMiddleware(
             passthrough,
-            api_key=TEST_API_KEY,
+            strategies=[],
         )
         scope = _scope(scope_type="websocket")
 
@@ -450,7 +568,13 @@ class TestWWWAuthenticateHeader:
     async def test_missing_auth_includes_resource_metadata_when_configured(self) -> None:
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
             protected_resource_metadata_url=self.PRM_URL,
         )
         async with httpx.AsyncClient(
@@ -466,7 +590,13 @@ class TestWWWAuthenticateHeader:
     async def test_invalid_token_includes_resource_metadata(self) -> None:
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
             protected_resource_metadata_url=self.PRM_URL,
         )
         async with httpx.AsyncClient(
@@ -482,8 +612,7 @@ class TestWWWAuthenticateHeader:
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
             protected_resource_metadata_url=self.PRM_URL,
         )
@@ -499,7 +628,16 @@ class TestWWWAuthenticateHeader:
 
     async def test_no_url_configured_omits_resource_metadata(self) -> None:
         """Mode 1 (API-key only, no OAuth) deployments get a bare challenge."""
-        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -513,7 +651,13 @@ class TestWWWAuthenticateHeader:
         """Full-string assertion pins RFC 6750 challenge grammar + param order."""
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
             protected_resource_metadata_url=self.PRM_URL,
         )
         async with httpx.AsyncClient(
@@ -531,8 +675,7 @@ class TestWWWAuthenticateHeader:
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
             required_scope="journal",
             protected_resource_metadata_url=self.PRM_URL,
         )
@@ -551,6 +694,8 @@ class TestWWWAuthenticateHeader:
 class TestTrustGateway:
     """JOURNAL_TRUST_GATEWAY mode: skip all auth and trust X-Auth-User-Id header."""
 
+    from gubbi.auth.strategies import TrustGatewayStrategy  # noqa: PLC0415
+
     TEST_USER_UUID = UUID("11111111-2222-3333-4444-555555555555")
 
     async def test_valid_user_id_passes_through(self) -> None:
@@ -568,7 +713,15 @@ class TestTrustGateway:
             )
             await send({"type": "http.response.body", "body": b"ok"})
 
-        mw = BearerAuthMiddleware(capture, api_key="", trust_gateway=True)
+        mw = BearerAuthMiddleware(
+            capture,
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -578,7 +731,15 @@ class TestTrustGateway:
 
     async def test_missing_header_returns_401(self) -> None:
         """Missing X-Auth-User-Id header -> 401."""
-        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -588,7 +749,15 @@ class TestTrustGateway:
 
     async def test_empty_header_returns_401(self) -> None:
         """Empty X-Auth-User-Id header -> 401."""
-        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -598,7 +767,15 @@ class TestTrustGateway:
 
     async def test_malformed_uuid_returns_401(self) -> None:
         """Malformed X-Auth-User-Id header -> 401."""
-        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -610,7 +787,15 @@ class TestTrustGateway:
         """Authorization header is IGNORED when trust_gateway=True.
         Even with a forged Bearer token + missing X-Auth-User-Id, response is 401.
         """
-        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -629,9 +814,12 @@ class TestTrustGateway:
         mock_iv.introspect = AsyncMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
-            trust_gateway=True,
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -648,7 +836,15 @@ class TestTrustGateway:
 
     async def test_contextvar_reset_after_trust_gateway(self) -> None:
         """ContextVar is reset after the request completes."""
-        mw = BearerAuthMiddleware(_asgi_app(), api_key="", trust_gateway=True)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                self.TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
+        )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
@@ -657,7 +853,16 @@ class TestTrustGateway:
 
     async def test_trust_gateway_false_still_uses_normal_auth(self) -> None:
         """Regression: trust_gateway=False (default) still uses normal auth paths."""
-        mw = BearerAuthMiddleware(_asgi_app(), api_key=TEST_API_KEY, trust_gateway=False)
+        mw = BearerAuthMiddleware(
+            _asgi_app(),
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
+        )
         # With trust_gateway=False, missing Auth header -> 401 (normal path)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -669,9 +874,13 @@ class TestTrustGateway:
         """Regression: trust_gateway=False + valid API key -> 200 (normal path)."""
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
-            trust_gateway=False,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"

@@ -2,6 +2,7 @@
 
 Tests all four auth modes (trust-gateway, static API key, Hydra bearer,
 self-host OAuth), token-length cap, scope mismatch, and route integration.
+Uses strategy-based auth via ``request.app.state.auth_strategies``.
 """
 
 from __future__ import annotations
@@ -11,9 +12,16 @@ from uuid import UUID
 
 import pytest
 from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from gubbi.api.v1.auth import require_scope
+from gubbi.auth.strategies import (
+    ApiKeyStrategy,
+    HydraStrategy,
+    SelfHostStrategy,
+    TrustGatewayStrategy,
+)
 
 TEST_USER_ID = UUID("11111111-1111-1111-1111-111111111111")
 TEST_OP_ID = UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
@@ -23,7 +31,54 @@ TEST_ORY_TOKEN = "ory_at_" + "x" * 80
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 
+def _build_strategies(
+    *,
+    trust_gateway: bool,
+    api_key: str,
+    api_key_scopes: list[str] | None,
+    operator_user_id: UUID | None,
+    hydra_introspector: AsyncMock | None,
+    selfhost_token_validator: MagicMock | None,
+    gateway_require_signature: bool,
+    gateway_secret: bytes | None,
+) -> list:  # AuthStrategy -- avoid forward ref issues in test module
+    """Build a strategy list from the mock parameters (mirrors main.py logic)."""
+    if trust_gateway:
+        return [
+            TrustGatewayStrategy(
+                gateway_secret=gateway_secret,
+                gateway_require_signature=gateway_require_signature,
+            ),
+        ]
+
+    strategies: list = []  # AuthStrategy
+
+    effective_api_key = "" if hydra_introspector is not None else api_key
+    if effective_api_key:
+        strategies.append(
+            ApiKeyStrategy(
+                api_key=effective_api_key,
+                api_key_scopes=tuple(api_key_scopes or ["journal:read", "journal:write"]),
+                operator_user_id=operator_user_id,
+            )
+        )
+
+    if hydra_introspector is not None:
+        strategies.append(HydraStrategy(introspector=hydra_introspector))
+
+    if selfhost_token_validator is not None:
+        strategies.append(
+            SelfHostStrategy(
+                token_validator=selfhost_token_validator,
+                operator_user_id=operator_user_id,
+            )
+        )
+
+    return strategies
+
+
 def _make_app(
+    *,
     trust_gateway: bool = False,
     api_key: str = "",
     api_key_scopes: list[str] | None = None,
@@ -34,41 +89,28 @@ def _make_app(
     gateway_require_signature: bool = False,
     gateway_secret: bytes | None = None,
 ) -> FastAPI:
-    """Build a minimal FastAPI app with a test route using the shared auth dep.
-
-    The test route returns the resolved (user_id, scopes) as JSON so
-    assertions can verify both values.
-    """
+    """Build a minimal FastAPI app with a test route using the shared auth dep."""
     app = FastAPI()
 
-    # Mock settings
-    mock_auth_settings = MagicMock()
-    mock_auth_settings.trust_gateway = trust_gateway
-    mock_auth_settings.api_key = api_key
-    mock_auth_settings.api_key_scopes = api_key_scopes or ["journal:read", "journal:write"]
-    mock_auth_settings.gateway_require_signature = gateway_require_signature
-
-    mock_settings = MagicMock()
-    mock_settings.auth = mock_auth_settings
-
-    mock_app_ctx = MagicMock()
-    mock_app_ctx.settings = mock_settings
-    mock_app_ctx.operator_user_id = operator_user_id
-
-    # Set up app state
-    app.state.app_ctx = mock_app_ctx
-    app.state.operator_user_id = operator_user_id
-    app.state.hydra_introspector = hydra_introspector
-    app.state.selfhost_token_validator = selfhost_token_validator
-    app.state.gubbi_gateway_secret = gateway_secret
+    # Build and set strategy list (replaces per-mode state mocks).
+    auth_strategies = _build_strategies(
+        trust_gateway=trust_gateway,
+        api_key=api_key,
+        api_key_scopes=api_key_scopes,
+        operator_user_id=operator_user_id,
+        hydra_introspector=hydra_introspector,
+        selfhost_token_validator=selfhost_token_validator,
+        gateway_require_signature=gateway_require_signature,
+        gateway_secret=gateway_secret,
+    )
+    app.state.auth_strategies = auth_strategies  # type: ignore[attr-defined]
 
     @app.get("/test-auth")
     async def test_route(
         request: Request,
         auth: tuple[UUID, frozenset[str]] = Depends(require_scope(require_scope_arg)),
-    ):
+    ) -> JSONResponse:
         user_id, scopes = auth
-        from fastapi.responses import JSONResponse
 
         return JSONResponse(
             {
@@ -125,13 +167,7 @@ class TestTrustGatewayMode:
 
 
 class TestTrustGatewayEnvelopeVerification:
-    """Auth mode (a) -- H-1 HMAC envelope verification on REST.
-
-    Mirrors the contract that BearerAuthMiddleware enforces on /mcp.
-    Without these checks, anything on the gubbi private network
-    could forge X-Auth-User-Id and bypass auth (the brief explicitly
-    required reusing the middleware's verification path).
-    """
+    """Auth mode (a) -- H-1 HMAC envelope verification on REST."""
 
     _SECRET = b"\x42" * 32
 
@@ -175,14 +211,12 @@ class TestTrustGatewayEnvelopeVerification:
         assert resp.json()["user_id"] == str(TEST_USER_ID)
 
     async def test_tampered_signature_returns_401(self) -> None:
-        """Forged user_id with a valid signature for a DIFFERENT user is rejected."""
         app = _make_app(
             trust_gateway=True,
             gateway_require_signature=True,
             gateway_secret=self._SECRET,
         )
         client = TestClient(app)
-        # Sign for user A but send user B in the header
         other_user = UUID("99999999-9999-9999-9999-999999999999")
         headers = self._signed_headers(other_user)
         headers["X-Auth-User-Id"] = str(TEST_USER_ID)
@@ -203,8 +237,6 @@ class TestTrustGatewayEnvelopeVerification:
         assert "Invalid gateway signature" in resp.json()["detail"]
 
     async def test_required_signature_missing_returns_401(self) -> None:
-        """gateway_require_signature=true + bare X-Auth-User-Id (no envelope)
-        must fail closed."""
         app = _make_app(
             trust_gateway=True,
             gateway_require_signature=True,
@@ -215,8 +247,6 @@ class TestTrustGatewayEnvelopeVerification:
         assert resp.status_code == 401
 
     async def test_required_signature_secret_not_configured_returns_503(self) -> None:
-        """gateway_require_signature=true + secret not provisioned is a deployment
-        misconfiguration -- 503, not 401."""
         app = _make_app(
             trust_gateway=True,
             gateway_require_signature=True,
@@ -240,8 +270,6 @@ class TestTrustGatewayEnvelopeVerification:
         assert "Unsupported X-Auth-Contract-Version" in resp.json()["detail"]
 
     async def test_legacy_path_accepts_unsigned_when_not_required(self) -> None:
-        """gateway_require_signature=false + no signature header -> legacy path
-        accepts bare X-Auth-User-Id. Same semantics as the MCP middleware."""
         app = _make_app(
             trust_gateway=True,
             gateway_require_signature=False,
@@ -329,6 +357,27 @@ class TestHydraBearerMode:
         data = resp.json()
         assert data["user_id"] == str(TEST_USER_ID)
         assert sorted(data["scopes"]) == ["journal:read", "journal:write"]
+
+    async def test_journal_scope_grants_journal_read(self) -> None:
+        """Hydra "journal" scope should satisfy require_scope("journal:read")."""
+        from gubbi.auth.hydra import TokenClaims
+
+        mock_iv = AsyncMock()
+        mock_iv.introspect = AsyncMock(
+            return_value=TokenClaims(
+                sub=TEST_USER_ID,
+                scope="journal",
+                exp=9999999999,
+            )
+        )
+        app = _make_app(
+            api_key=TEST_API_KEY,
+            hydra_introspector=mock_iv,
+            require_scope_arg="journal:read",
+        )
+        client = TestClient(app)
+        resp = client.get("/test-auth", headers={"Authorization": f"Bearer {TEST_ORY_TOKEN}"})
+        assert resp.status_code == 200
 
     async def test_hydra_unreachable_returns_503(self, mock_introspector: AsyncMock) -> None:
         from gubbi.auth.hydra import HydraUnreachable
@@ -438,7 +487,6 @@ class TestScopeMismatch:
                 exp=9999999999,
             )
         )
-        # require_scope("journal:write")
         app = _make_app(
             api_key=TEST_API_KEY,
             hydra_introspector=mock_iv,
@@ -454,7 +502,6 @@ class TestRouteIntegration:
     """Both /v1/ingest and /v1/extraction/progress routes accept the shared dep."""
 
     async def test_ingest_route_accepts_shared_dep(self) -> None:
-        """Verify the /api/v1/ingest/conversations route uses require_scope."""
         from gubbi.api.v1.ingest import router as ingest_router
 
         app = FastAPI()
@@ -470,7 +517,6 @@ class TestRouteIntegration:
         assert len(routes) == 1
 
     async def test_extraction_progress_route_accepts_shared_dep(self) -> None:
-        """Verify the /api/v1/extraction/progress route uses require_scope."""
         from gubbi.api.v1.extraction import router as extraction_router
 
         app = FastAPI()
@@ -484,3 +530,53 @@ class TestRouteIntegration:
             if isinstance(r, Route) and r.path == "/api/v1/extraction/progress"
         ]
         assert len(routes) == 1
+
+
+class TestTrustGatewayBoundarySecurity:
+    """D3 security boundary: trust-gateway deploy MUST NOT accept other auth modes."""
+
+    async def test_hydra_token_rejected_when_trust_gateway(self) -> None:
+        """When trust_gateway=True, a Hydra bearer token should not be accepted."""
+        from gubbi.auth.hydra import TokenClaims
+
+        mock_iv = AsyncMock()
+        mock_iv.introspect = AsyncMock(
+            return_value=TokenClaims(
+                sub=TEST_USER_ID,
+                scope="journal:read journal:write",
+                exp=9999999999,
+            )
+        )
+        app = _make_app(
+            trust_gateway=True,
+            api_key=TEST_API_KEY,
+            hydra_introspector=mock_iv,
+            operator_user_id=TEST_OP_ID,
+        )
+        client = TestClient(app)
+        resp = client.get("/test-auth", headers={"Authorization": f"Bearer {TEST_ORY_TOKEN}"})
+        assert resp.status_code == 401
+
+    async def test_api_key_rejected_when_trust_gateway(self) -> None:
+        """When trust_gateway=True, a valid API key bearer should not be accepted."""
+        app = _make_app(
+            trust_gateway=True,
+            api_key=TEST_API_KEY,
+            operator_user_id=TEST_OP_ID,
+        )
+        client = TestClient(app)
+        resp = client.get("/test-auth", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
+        assert resp.status_code == 401
+
+    async def test_selfhost_rejected_when_trust_gateway(self) -> None:
+        """When trust_gateway=True, a self-host token should not be accepted."""
+        mock_validator = MagicMock(return_value=frozenset({"journal:read"}))
+        app = _make_app(
+            trust_gateway=True,
+            api_key="",
+            operator_user_id=TEST_OP_ID,
+            selfhost_token_validator=mock_validator,
+        )
+        client = TestClient(app)
+        resp = client.get("/test-auth", headers={"Authorization": "Bearer some_token"})
+        assert resp.status_code == 401
