@@ -13,6 +13,7 @@ from mcp.types import ToolAnnotations
 from gubbi.core.auth_context import current_user_id
 from gubbi.core.cipher_guard import require_cipher
 from gubbi.core.context import AppContext
+from gubbi.core.crypto import ContentCipher
 from gubbi.core.scope import require_scope
 from gubbi.core.validation import validate_date, validate_topic
 from gubbi.models.search import SearchResult
@@ -43,6 +44,180 @@ def _truncate_title_summary(title: str, summary: str) -> tuple[str, str]:
         return title[:budget], ""
     remaining = budget - len(title)
     return title, summary[:remaining]
+
+
+async def _run_dual_search(
+    conn: asyncpg.Connection,
+    app_ctx: AppContext,
+    query: str,
+    query_embedding: list[float] | None,
+    topic_prefix: str | None,
+    date_from: str | None,
+    date_to: str | None,
+    df: date_cls | None,
+    dt: date_cls | None,
+    limit: int,
+) -> list[SearchResult]:
+    """Run FTS + semantic search backends and merge with dedup."""
+    fts_results: list[SearchResult] = await search_repo.fts_search(
+        conn, query, topic_prefix, date_from, date_to, limit
+    )
+
+    semantic_results: list[SearchResult] = []
+    if query_embedding is not None:
+        try:
+            raw = await app_ctx.embedding_service.search_by_vector(
+                conn,
+                query_embedding,
+                limit=limit,
+                topic_prefix=topic_prefix,
+                date_from=df,
+                date_to=dt,
+            )
+            semantic_results = [
+                SearchResult(
+                    source_key=f"entry:{r.get('entry_id')}",
+                    doc_type="entry",
+                    topic=str(r.get("topic", "")),
+                    rank=-float(r.get("similarity", 0.0)),
+                    date=str(r.get("date", "")),
+                    entry_id=r.get("entry_id"),
+                    conversation_id=None,
+                )
+                for r in raw
+                if r.get("entry_id") is not None
+            ]
+        except asyncpg.PostgresError:
+            logger.warning("Semantic search failed, using FTS only", exc_info=True)
+        except Exception:
+            logger.exception("Semantic search failed unexpectedly")
+            raise
+
+    # Merge with seen_keys dedup -- FTS first, semantic second preserves order.
+    seen_keys: set[str] = set()
+    merged: list[SearchResult] = []
+    for result in fts_results:
+        if result.source_key not in seen_keys:
+            seen_keys.add(result.source_key)
+            merged.append(result)
+    for result in semantic_results:
+        if result.source_key not in seen_keys:
+            seen_keys.add(result.source_key)
+            merged.append(result)
+
+    return merged
+
+
+async def _hydrate_results(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    merged: list[SearchResult],
+) -> list[SearchResult]:
+    """Decrypt+truncation hydration for merged search results."""
+    # Batch-collect unique IDs for a single round-trip per entity type.
+    entry_ids: set[int] = set()
+    conv_ids: set[int] = set()
+    for result in merged:
+        if result.doc_type == "entry" and result.entry_id is not None:
+            entry_ids.add(result.entry_id)
+        elif result.doc_type == "conversation" and result.conversation_id is not None:
+            conv_ids.add(result.conversation_id)
+
+    # Batched fetches -- one query per entity type instead of N.
+    entry_id_list = list(entry_ids)
+    conv_id_list = list(conv_ids)
+
+    decrypted_entries: dict[int, tuple[str, str | None]] = {}
+    try:
+        decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
+    except asyncpg.PostgresError:
+        logger.exception(
+            "Entry batch query failed, skipping %d entries: %s",
+            len(entry_id_list),
+            repr(entry_id_list),
+        )
+
+    decrypted_convs: dict[int, tuple[str, str]] = {}
+    try:
+        decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
+    except asyncpg.PostgresError:
+        logger.exception(
+            "Conversation batch query failed, skipping %d conversations: %s",
+            len(conv_id_list),
+            repr(conv_id_list),
+        )
+
+    hydrated: list[SearchResult] = []
+    for result in merged:
+        if (
+            result.doc_type == "entry"
+            and result.entry_id is not None
+            and result.entry_id in decrypted_entries
+        ):
+            content, _reasoning = decrypted_entries[result.entry_id]
+            decryption_failed = content == "[decryption-failed]"  # sentinel (M-9.8)
+            update: dict[str, Any] = {
+                "content": (
+                    "[decryption failed]" if decryption_failed else _truncate_text(content)
+                ),
+                "decryption_failed": decryption_failed,
+            }
+            hydrated.append(result.model_copy(update=update))
+        elif (
+            result.doc_type == "conversation"
+            and result.conversation_id is not None
+            and result.conversation_id in decrypted_convs
+        ):
+            title, summary = decrypted_convs[result.conversation_id]
+            truncated_title, truncated_summary = _truncate_title_summary(title, summary)
+            hydrated.append(
+                result.model_copy(
+                    update={
+                        "title": truncated_title,
+                        "summary": truncated_summary,
+                    }
+                )
+            )
+
+    return hydrated
+
+
+def _build_payload(hydrated: list[SearchResult], query: str, limit: int) -> dict[str, Any]:
+    """Sort, slice, and shape hydrated results into the MCP response dict."""
+    sorted_results = sorted(hydrated, key=lambda x: x.rank)[:limit]
+
+    payload: list[dict[str, Any]] = []
+    for result in sorted_results:
+        if result.doc_type == "entry":
+            payload.append(
+                {
+                    "doc_type": "entry",
+                    "topic": result.topic,
+                    "date": result.date,
+                    "entry_id": result.entry_id,
+                    "conversation_id": None,
+                    "content": result.content or "",
+                    "decryption_failed": result.decryption_failed,
+                }
+            )
+        elif result.doc_type == "conversation":
+            payload.append(
+                {
+                    "doc_type": "conversation",
+                    "topic": result.topic,
+                    "date": result.date,
+                    "entry_id": None,
+                    "conversation_id": result.conversation_id,
+                    "title": result.title or "",
+                    "summary": result.summary or "",
+                }
+            )
+
+    return {
+        "results": payload,
+        "total": len(payload),
+        "query": query,
+    }
 
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
@@ -109,14 +284,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             except ValueError:
                 return invalid_date(date_to)
 
-        fts_results: list[SearchResult] = []
-        semantic_results: list[SearchResult] = []
-
+        query_embedding: list[float] | None = None
         try:
             query_embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, query)
         except Exception:
             logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
-            query_embedding = None
 
         df = date_cls.fromisoformat(date_from) if date_from else None
         dt = date_cls.fromisoformat(date_to) if date_to else None
@@ -126,150 +298,22 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         cipher = require_cipher(app_ctx)
 
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-            fts_results = await search_repo.fts_search(
-                conn, query, topic_prefix, date_from, date_to, limit
+            merged = await _run_dual_search(
+                conn,
+                app_ctx,
+                query,
+                query_embedding,
+                topic_prefix,
+                date_from,
+                date_to,
+                df,
+                dt,
+                limit,
             )
+            hydrated = await _hydrate_results(conn, cipher, merged)
 
-            if query_embedding is not None:
-                try:
-                    raw = await app_ctx.embedding_service.search_by_vector(
-                        conn,
-                        query_embedding,
-                        limit=limit,
-                        topic_prefix=topic_prefix,
-                        date_from=df,
-                        date_to=dt,
-                    )
-                    semantic_results = [
-                        SearchResult(
-                            source_key=f"entry:{r.get('entry_id')}",
-                            doc_type="entry",
-                            topic=str(r.get("topic", "")),
-                            rank=-float(r.get("similarity", 0.0)),
-                            date=str(r.get("date", "")),
-                            entry_id=r.get("entry_id"),
-                            conversation_id=None,
-                        )
-                        for r in raw
-                        if r.get("entry_id") is not None
-                    ]
-                except asyncpg.PostgresError:
-                    logger.warning("Semantic search failed, using FTS only", exc_info=True)
-                except Exception:
-                    logger.exception("Semantic search failed unexpectedly")
-                    raise
+        search_result = _build_payload(hydrated, query, limit)
 
-            seen_keys: set[str] = set()
-            merged: list[SearchResult] = []
-            for result in fts_results:
-                if result.source_key not in seen_keys:
-                    seen_keys.add(result.source_key)
-                    merged.append(result)
-            for result in semantic_results:
-                if result.source_key not in seen_keys:
-                    seen_keys.add(result.source_key)
-                    merged.append(result)
-
-            # Batch-collect unique IDs for a single round-trip per entity type.
-            entry_ids: set[int] = set()
-            conv_ids: set[int] = set()
-            for result in merged:
-                if result.doc_type == "entry" and result.entry_id is not None:
-                    entry_ids.add(result.entry_id)
-                elif result.doc_type == "conversation" and result.conversation_id is not None:
-                    conv_ids.add(result.conversation_id)
-
-            # Batched fetches — one query per entity type instead of N.
-            entry_id_list = list(entry_ids)
-            conv_id_list = list(conv_ids)
-
-            decrypted_entries: dict[int, tuple[str, str | None]] = {}
-            try:
-                decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
-            except asyncpg.PostgresError:
-                logger.exception(
-                    "Entry batch query failed, skipping %d entries: %s",
-                    len(entry_id_list),
-                    repr(entry_id_list),
-                )
-
-            decrypted_convs: dict[int, tuple[str, str]] = {}
-            try:
-                decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
-            except asyncpg.PostgresError:
-                logger.exception(
-                    "Conversation batch query failed, skipping %d conversations: %s",
-                    len(conv_id_list),
-                    repr(conv_id_list),
-                )
-
-            hydrated: list[SearchResult] = []
-            for result in merged:
-                if (
-                    result.doc_type == "entry"
-                    and result.entry_id is not None
-                    and result.entry_id in decrypted_entries
-                ):
-                    content, _reasoning = decrypted_entries[result.entry_id]
-                    decryption_failed = content == "[decryption-failed]"  # sentinel (M-9.8)
-                    update: dict[str, Any] = {
-                        "content": (
-                            "[decryption failed]" if decryption_failed else _truncate_text(content)
-                        ),
-                        "decryption_failed": decryption_failed,
-                    }
-                    hydrated.append(result.model_copy(update=update))
-                elif (
-                    result.doc_type == "conversation"
-                    and result.conversation_id is not None
-                    and result.conversation_id in decrypted_convs
-                ):
-                    title, summary = decrypted_convs[result.conversation_id]
-                    truncated_title, truncated_summary = _truncate_title_summary(title, summary)
-                    hydrated.append(
-                        result.model_copy(
-                            update={
-                                "title": truncated_title,
-                                "summary": truncated_summary,
-                            }
-                        )
-                    )
-
-        hydrated.sort(key=lambda x: x.rank)
-        hydrated = hydrated[:limit]
-
-        payload: list[dict[str, Any]] = []
-        for result in hydrated:
-            if result.doc_type == "entry":
-                payload.append(
-                    {
-                        "doc_type": "entry",
-                        "topic": result.topic,
-                        "date": result.date,
-                        "entry_id": result.entry_id,
-                        "conversation_id": None,
-                        "content": result.content or "",
-                        "decryption_failed": result.decryption_failed,
-                    }
-                )
-            elif result.doc_type == "conversation":
-                payload.append(
-                    {
-                        "doc_type": "conversation",
-                        "topic": result.topic,
-                        "date": result.date,
-                        "entry_id": None,
-                        "conversation_id": result.conversation_id,
-                        "title": result.title or "",
-                        "summary": result.summary or "",
-                    }
-                )
-
-        search_result = {
-            "results": payload,
-            "total": len(payload),
-            "query": query,
-        }
         err = _assert_response_ok(search_result, tool_name="journal_search")
         if err:
             await _report_oversized("journal_search", err)
