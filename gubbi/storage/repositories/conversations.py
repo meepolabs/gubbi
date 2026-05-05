@@ -150,11 +150,11 @@ async def save_conversation(
 ) -> SaveConversationResult:
     """Save a conversation. Idempotent -- same topic+title overwrites.
 
-    The caller MUST supply ``conn`` already inside a transaction -- e.g. from
-    ``gubbi_common.db.user_scoped.user_scoped_connection`` -- because this function issues
-    multiple writes (upsert conversation, delete/insert messages, upsert
-    linked entry, update topic) that only stay consistent when grouped into
-    one atomic commit.
+    Transaction contract: the caller MUST wrap any multi-statement
+    write method in ``conn.transaction()``. Multi-statement methods
+    assert ``conn.is_in_transaction()`` at entry and raise
+    AssertionError in non-prod if called outside a transaction.
+    Single-statement read methods do not require a transaction.
 
     Returns a ``SaveConversationResult`` named tuple. The
     ``superseded_json_path`` field is the **previous** ``json_path`` of
@@ -181,6 +181,8 @@ async def save_conversation(
       it; the row reverts to that path and remains internally
       consistent.
     """
+    transaction_required = "conversations.save_conversation: caller must wrap in conn.transaction()"
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     topic = validate_topic(topic)
     title = validate_title(title)
     slug = slugify(title)
@@ -526,6 +528,8 @@ async def read_conversation(
 
     Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
     """
+    transaction_required = "conversations.read_conversation: caller must wrap in conn.transaction()"
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     topic = validate_topic(topic)
     slug = slugify(title)
 
@@ -577,6 +581,10 @@ async def read_conversation_by_id(
     Returns (ConversationMeta, messages, total_messages).
     Raises ConversationNotFoundError if not found.
     """
+    transaction_required = (
+        "conversations.read_conversation_by_id: caller must wrap in conn.transaction()"
+    )
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     row = await conn.fetchrow(
         """
         SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
@@ -634,6 +642,10 @@ async def read_conversation_by_id_paginated(
     Returns (ConversationMeta, paged_messages, total_messages).
     Raises ConversationNotFoundError if not found.
     """
+    transaction_required = (
+        "conversations.read_conversation_by_id_paginated: caller must wrap in conn.transaction()"
+    )
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     row = await conn.fetchrow(
         """
         SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
