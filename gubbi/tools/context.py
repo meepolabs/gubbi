@@ -32,7 +32,7 @@ from gubbi.tools.constants import (
     MAX_TIMELINE_ENTRIES,
 )
 from gubbi.tools.errors import validation_error
-from gubbi.tools.response_size import _report_oversized, assert_response_ok
+from gubbi.tools.response_size import _report_oversized, check_response_size
 
 logger = logging.getLogger(__name__)
 
@@ -288,7 +288,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "topic_count": topic_count,
             "stats": stats,
         }
-        err = assert_response_ok(briefing_payload, tool_name="journal_briefing")
+        err = check_response_size(briefing_payload, tool_name="journal_briefing")
         if err:
             await _report_oversized("journal_briefing", err)
             return err
@@ -355,7 +355,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "entries": entries,
             "count": len(entries),
         }
-        err = assert_response_ok(payload, tool_name="journal_timeline")
+        err = check_response_size(payload, tool_name="journal_timeline")
         if err:
             await _report_oversized("journal_timeline", err)
             return err

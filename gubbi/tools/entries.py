@@ -33,7 +33,7 @@ from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
 from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
-from gubbi.tools.response_size import _report_oversized, assert_response_ok
+from gubbi.tools.response_size import _report_oversized, check_response_size
 
 logger = logging.getLogger(__name__)
 
@@ -184,7 +184,7 @@ async def _journal_read_topic(
         "limit": limit,
         "offset": offset,
     }
-    err = assert_response_ok(result, tool_name="journal_read_topic")
+    err = check_response_size(result, tool_name="journal_read_topic")
     if err:
         await _report_oversized("journal_read_topic", err)
         return err
