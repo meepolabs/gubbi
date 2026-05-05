@@ -467,80 +467,10 @@ async def get_by_date_range(
     results: list[dict] = []
     for r in rows:
         if title_only:
-            # Minimal metadata -- no decryption at all (or best-effort conv title decode).
-            if r["doc_type"] == "entry":
-                results.append(
-                    {
-                        "entry_id": r["doc_id"],
-                        "conversation_id": None,
-                        "doc_type": "entry",
-                        "topic": r["topic"],
-                        "topic_title": r["topic_title"],
-                        "title": _build_entry_title(r),
-                        "updated": r["date"],
-                        "tags": list(r["tags"] or []),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "entry_id": None,
-                        "conversation_id": r["conv_id"],
-                        "doc_type": "conversation",
-                        "topic": r["topic"],
-                        "topic_title": r["topic_title"],
-                        "title": _decrypt_conv_title_or_none(cipher, r),
-                        "updated": r["date"],
-                        "tags": list(r["tags"] or []),
-                    }
-                )
+            results.append(_to_title_only_row(r, cipher))
         else:
-            if cipher is None:
-                raise RuntimeError("get_by_date_range: cipher required when title_only=False")
-            # Full content path (used by journal_briefing).
-            if r["doc_type"] == "entry":
-                decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
-                if decrypted is None:
-                    raise RuntimeError(
-                        f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
-                    )
-                content = decrypted
-                title = content.split("\n", 1)[0][:80]
-            else:
-                conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
-                summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
-                if conv_title is None or summary is None:
-                    raise RuntimeError(
-                        "Conversation title/summary decrypted to None; schema invariant violated"
-                    )
-                title = conv_title
-                content = summary
-            if r["doc_type"] == "entry":
-                results.append(
-                    {
-                        "entry_id": r["doc_id"],
-                        "conversation_id": None,
-                        "doc_type": "entry",
-                        "topic": r["topic"],
-                        "title": title if title else r["topic_title"],
-                        "description": content[:SNIPPET_PREVIEW_LEN],
-                        "tags": list(r["tags"] or []),
-                        "updated": r["date"],
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "entry_id": None,
-                        "conversation_id": r["conv_id"],
-                        "doc_type": "conversation",
-                        "topic": r["topic"],
-                        "title": title,
-                        "description": content[:SNIPPET_PREVIEW_LEN],
-                        "tags": list(r["tags"] or []),
-                        "updated": r["date"],
-                    }
-                )
+            assert cipher is not None  # noqa: S101 - narrowed by guard above
+            results.append(_to_full_row(r, cipher))
     return results
 
 
@@ -567,6 +497,78 @@ def _decrypt_conv_title_or_none(cipher: ContentCipher | None, row: asyncpg.Recor
         return title or ""
     except DecryptionError:
         return str(row.get("topic_title") or "")
+
+
+def _to_title_only_row(r: asyncpg.Record, cipher: ContentCipher | None) -> dict:
+    """Shape a UNION ALL row into a title-only result dict.
+
+    No decryption performed -- best-effort conversation title decode only.
+    """
+    if r["doc_type"] == "entry":
+        return {
+            "entry_id": r["doc_id"],
+            "conversation_id": None,
+            "doc_type": "entry",
+            "topic": r["topic"],
+            "topic_title": r["topic_title"],
+            "title": _build_entry_title(r),
+            "updated": r["date"],
+            "tags": list(r["tags"] or []),
+        }
+    # conversation path
+    return {
+        "entry_id": None,
+        "conversation_id": r["conv_id"],
+        "doc_type": "conversation",
+        "topic": r["topic"],
+        "topic_title": r["topic_title"],
+        "title": _decrypt_conv_title_or_none(cipher, r),
+        "updated": r["date"],
+        "tags": list(r["tags"] or []),
+    }
+
+
+def _to_full_row(r: asyncpg.Record, cipher: ContentCipher) -> dict:
+    """Shape a UNION ALL row into a full-content result dict.
+
+    Decrypts content/title/summary as needed. Raises ``RuntimeError`` on
+    schema-invariant violations (None decryption results).
+    """
+    if r["doc_type"] == "entry":
+        decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+        if decrypted is None:
+            raise RuntimeError(
+                f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
+            )
+        content = decrypted
+        title_text = content.split("\n", 1)[0][:80]
+        return {
+            "entry_id": r["doc_id"],
+            "conversation_id": None,
+            "doc_type": "entry",
+            "topic": r["topic"],
+            "title": title_text if title_text else r["topic_title"],
+            "description": content[:SNIPPET_PREVIEW_LEN],
+            "tags": list(r["tags"] or []),
+            "updated": r["date"],
+        }
+    # conversation path
+    conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
+    summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
+    if conv_title is None or summary is None:
+        raise RuntimeError(
+            "Conversation title/summary decrypted to None; schema invariant violated"
+        )
+    return {
+        "entry_id": None,
+        "conversation_id": r["conv_id"],
+        "doc_type": "conversation",
+        "topic": r["topic"],
+        "title": conv_title,
+        "description": summary[:SNIPPET_PREVIEW_LEN],
+        "tags": list(r["tags"] or []),
+        "updated": r["date"],
+    }
 
 
 async def get_stats(conn: asyncpg.Connection) -> dict[str, int]:
