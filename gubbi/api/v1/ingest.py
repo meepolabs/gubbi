@@ -14,7 +14,6 @@ from uuid import UUID
 
 import asyncpg
 from fastapi import APIRouter, Depends, Request
-from gubbi_common.db.user_scoped import user_scoped_connection
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
@@ -22,6 +21,7 @@ from gubbi.core.cipher_guard import require_cipher
 from gubbi.core.context import AppContext
 from gubbi.core.validation import validate_title
 from gubbi.models.conversation import Message
+from gubbi.storage.connection import safe_user_scoped_connection
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories.topics import create as create_topic
@@ -101,7 +101,7 @@ async def ingest_conversations(
     conversations_skipped_dedupe = 0
     superseded_json_paths: list[str] = []
 
-    async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+    async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
         # Ensure the inbox topic exists before saving conversations
         try:
             await get_topic_id(conn, DEFAULT_INBOX_TOPIC)
