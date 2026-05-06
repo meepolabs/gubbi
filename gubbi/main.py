@@ -49,6 +49,7 @@ from gubbi.middleware import (
 from gubbi.oauth.router import register_oauth_routes
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.exceptions import DatabaseUnavailable
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import configure_otel
 from gubbi.tools.registry import register_tools
@@ -495,6 +496,19 @@ from gubbi.api.v1.ingest import router as ingest_router  # noqa: E402
 
 server.include_router(ingest_router, prefix="/api/v1")
 server.include_router(extraction_router, prefix="/api/v1")
+
+
+@server.exception_handler(DatabaseUnavailable)
+async def database_unavailable_handler(
+    request: Request,
+    exc: DatabaseUnavailable,  # noqa: ARG001
+) -> JSONResponse:
+    """Map transient DB errors to HTTP 503 with Retry-After header."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "database temporarily unavailable"},
+        headers={"Retry-After": "5"},
+    )
 
 
 @server.exception_handler(Exception)
