@@ -10,6 +10,7 @@ import asyncpg
 
 from gubbi.core.context import AppContext
 from gubbi.core.crypto import ContentCipher
+from gubbi.storage.connection import safe_acquire
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.tools.constants import REINDEX_BATCH_SIZE
 
@@ -32,7 +33,7 @@ async def _db_reindex_cooldown(pool: asyncpg.Pool) -> int | None:
     Uses MAX(indexed_at) from entries as a shared proxy for last reindex time —
     accurate across all workers since the value lives in PostgreSQL.
     """
-    async with pool.acquire() as conn:
+    async with safe_acquire(pool) as conn:
         max_indexed = await entry_repo.get_max_indexed_at(conn)
     if max_indexed is None:
         return None
@@ -57,7 +58,7 @@ async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentC
 
     # tsvector columns are GENERATED ALWAYS — always up-to-date.
     # Only needs to rebuild semantic embeddings (tsvector stays current).
-    async with pool.acquire() as conn:
+    async with safe_acquire(pool) as conn:
         await entry_repo.reset_indexed_at(conn)
 
     embeddings_generated = 0
@@ -66,7 +67,7 @@ async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentC
     semantic_status = "ok"
 
     while True:
-        async with pool.acquire() as conn:
+        async with safe_acquire(pool) as conn:
             batch = await entry_repo.get_unindexed(conn, cipher, last_id, REINDEX_BATCH_SIZE)
 
         if not batch:
@@ -79,7 +80,7 @@ async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentC
                 # Encode outside the connection acquire — ONNX inference is CPU-bound
                 # (10-200ms) and should not hold a pool connection during that time.
                 embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
-                async with pool.acquire() as conn:
+                async with safe_acquire(pool) as conn:
                     await app_ctx.embedding_service.store_by_vector(conn, r["id"], embedding)
                 succeeded_ids.append(r["id"])
                 embeddings_generated += 1
@@ -94,7 +95,7 @@ async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentC
 
         # Batch-mark all succeeded entries as indexed in one query
         if succeeded_ids:
-            async with pool.acquire() as conn:
+            async with safe_acquire(pool) as conn:
                 await entry_repo.mark_indexed_batch(conn, succeeded_ids)
 
         last_id = batch[-1]["id"]
