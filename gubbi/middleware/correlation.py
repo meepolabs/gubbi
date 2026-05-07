@@ -13,7 +13,10 @@ import logging
 import uuid
 from typing import Any
 
-from gubbi_common.telemetry.logging import _correlation_id_var
+from gubbi_common.telemetry.logging import (
+    reset_correlation_id,
+    set_correlation_id,
+)
 from opentelemetry import trace
 from starlette.types import ASGIApp, Receive, Scope, Send
 
@@ -44,7 +47,7 @@ class CorrelationIDMiddleware:
             return
 
         correlation_id = self._extract_or_generate(scope)
-        token = _correlation_id_var.set(correlation_id)
+        token = set_correlation_id(correlation_id)
 
         # Set the correlation_id on the current OTel span via safe_set_attributes
         try:
@@ -79,7 +82,7 @@ class CorrelationIDMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)  # type: ignore[arg-type]
         finally:
-            _correlation_id_var.reset(token)
+            reset_correlation_id(token)
 
     @staticmethod
     def _extract_or_generate(scope: Scope) -> str:
