@@ -161,7 +161,7 @@ def test_correlation_id_in_span_attributes(in_memory_tracer: tuple[Any, InMemory
     """Correlation ID must appear as a span attribute when routed through safe_set_attributes."""
     tracer, exporter = in_memory_tracer
 
-    from gubbi.telemetry.logging import set_correlation_id
+    from gubbi_common.telemetry.logging import set_correlation_id
 
     cid = str(uuid.uuid4())
     set_correlation_id(cid)
@@ -241,7 +241,7 @@ def test_safe_set_attributes_unknown_span_name(
 
 def test_structured_log_formatter_has_required_fields() -> None:
     """StructuredLogFormatter must emit JSON with required schema fields."""
-    from gubbi.telemetry.logging import StructuredLogFormatter
+    from gubbi_common.telemetry.logging import StructuredLogFormatter
 
     formatter = StructuredLogFormatter()
     record = logging.LogRecord(
