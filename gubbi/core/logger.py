@@ -10,10 +10,9 @@ import os
 from logging import handlers
 
 import structlog
+from gubbi_common.telemetry.logging import get_correlation_id
 from opentelemetry import trace
 from structlog.types import EventDict, WrappedLogger
-
-from gubbi.telemetry.logging import get_correlation_id
 
 LOG_ROTATE_WHEN = os.getenv(key="LOG_ROTATE_WHEN", default="W6")
 LOG_ROTATE_BACKUP = int(os.getenv(key="LOG_ROTATE_BACKUP", default="4"))
