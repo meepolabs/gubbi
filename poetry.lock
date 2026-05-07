@@ -1059,7 +1059,7 @@ protobuf = ["grpcio-tools (>=1.80.0)"]
 
 [[package]]
 name = "gubbi-common"
-version = "0.6.0"
+version = "0.7.0"
 description = "Shared contracts (audit, auth, telemetry) for Gubbi packages"
 optional = false
 python-versions = "^3.11"
@@ -1069,6 +1069,11 @@ develop = false
 
 [package.dependencies]
 asyncpg = {version = ">=0.29,<0.31", optional = true}
+opentelemetry-api = ">=1.29.0,<2.0"
+opentelemetry-exporter-otlp-proto-grpc = ">=1.29.0,<2.0"
+opentelemetry-sdk = ">=1.29.0,<2.0"
+starlette = ">=0.41,<1.0"
+structlog = "^24.4.0"
 
 [package.extras]
 db = ["asyncpg (>=0.29,<0.31)"]
@@ -1076,8 +1081,8 @@ db = ["asyncpg (>=0.29,<0.31)"]
 [package.source]
 type = "git"
 url = "ssh://git@github.com/meepolabs/gubbi-common.git"
-reference = "v0.6.0"
-resolved_reference = "3e8220d005ae823b31655f3e2dd93f206c475f84"
+reference = "v0.7.0"
+resolved_reference = "0c9bf321c391eedadf02fc28cc0d23b3cb77f41d"
 
 [[package]]
 name = "gunicorn"
@@ -3826,4 +3831,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "f5520c6071adcb4673d5cc01f6db56e92cb861df7f76723bf00c1f03e5bbe620"
+content-hash = "3cf79a5069181a54d2a095c4fb1ca4f6587c336028fb80551da20eb89d09af5f"
