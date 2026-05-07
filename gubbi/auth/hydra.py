@@ -4,32 +4,28 @@ from __future__ import annotations
 
 import hashlib
 import time
-from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import UUID
 
 import httpx
 import structlog
 from cachetools import TTLCache  # type: ignore[import-untyped]
+from gubbi_common.auth.hydra import (
+    HydraError,
+    HydraInvalidToken,
+    HydraUnreachable,
+    TokenClaims,
+)
 
-
-@dataclass(frozen=True)
-class TokenClaims:
-    sub: UUID
-    scope: str  # raw space-delimited scope string from Hydra
-    exp: int  # unix timestamp
-
-
-class HydraError(Exception):
-    pass
-
-
-class HydraUnreachable(HydraError):
-    pass
-
-
-class HydraInvalidToken(HydraError):
-    pass
+__all__ = [
+    "TokenClaims",
+    "HydraError",
+    "HydraUnreachable",
+    "HydraInvalidToken",
+    "HydraCache",
+    "HydraIntrospector",
+    "InMemoryHydraCache",
+]
 
 
 class HydraCache(Protocol):
