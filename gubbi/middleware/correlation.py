@@ -13,11 +13,11 @@ import logging
 import uuid
 from typing import Any
 
+from gubbi_common.telemetry.logging import _correlation_id_var
 from opentelemetry import trace
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from gubbi.telemetry.attrs import SpanNames, safe_set_attributes
-from gubbi.telemetry.logging import _correlation_id_var
 
 logger = logging.getLogger(__name__)
 
