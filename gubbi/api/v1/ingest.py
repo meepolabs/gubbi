@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
 from gubbi.app_context import AppContext
+from gubbi.app_state import require_app_ctx
 from gubbi.crypto.guard import require_cipher
 from gubbi.models.conversation import Message
 from gubbi.storage.connection import safe_user_scoped_connection
@@ -73,12 +74,11 @@ class IngestConversationResponse(BaseModel):
 def _get_app_ctx(request: Request) -> AppContext:
     """Extract AppContext from the application state.
 
-    Populated during lifespan by main.py.
+    Thin wrapper around :func:`gubbi.app_state.require_app_ctx` so the
+    rest of this module reads as before. Populated during lifespan by
+    ``main.py``.
     """
-    ctx: object = request.app.state.app_ctx
-    if not isinstance(ctx, AppContext):
-        raise RuntimeError("app_ctx not set on application state or wrong type")
-    return ctx
+    return require_app_ctx(request)
 
 
 @router.post("/conversations", response_model=IngestConversationResponse)

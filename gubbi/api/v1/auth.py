@@ -7,8 +7,9 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request
 
+from gubbi.app_state import require_auth_strategies
 from gubbi.auth.scope import SCOPE_GRANTS, check_scope
-from gubbi.auth.strategies import AuthRejected, AuthResult, AuthStrategy
+from gubbi.auth.strategies import AuthRejected, AuthResult
 
 INVALID_TOKEN_MESSAGE: str = "Invalid or expired token"  # noqa: S105
 
@@ -26,7 +27,7 @@ async def resolve_user_id(
     scope: str | None = None,
 ) -> tuple[UUID, frozenset[str]]:
     """Authenticate request and return (user_id, granted_scopes)."""
-    strategies: list[AuthStrategy] = request.app.state.auth_strategies  # type: ignore[attr-defined]
+    strategies = require_auth_strategies(request)
     result: AuthResult | None = None
     for strategy in strategies:
         try:
