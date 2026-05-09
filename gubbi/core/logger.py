@@ -1,10 +1,19 @@
-"""Re-export of initialize_logger from gubbi-common.
+"""Compatibility shim -- logger moved to gubbi.telemetry.logger."""
 
-This module re-exports the canonical ``initialize_logger`` function
-provided by gubbi_common.telemetry.logging so that callers (e.g. main.py)
-continue to import from the traditional ``gubbi.core.logger`` path.
-"""
+from __future__ import annotations
 
-from gubbi_common.telemetry.logging import initialize_logger
+import warnings
+from typing import Any
 
-__all__ = ["initialize_logger"]
+
+def __getattr__(name: str) -> Any:
+    if name == "initialize_logger":
+        warnings.warn(
+            "gubbi.core.logger is deprecated; " "import from gubbi.telemetry.logger instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        from gubbi.telemetry.logger import initialize_logger  # noqa: PLC0415
+
+        return initialize_logger
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

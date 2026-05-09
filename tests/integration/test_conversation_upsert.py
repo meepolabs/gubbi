@@ -13,7 +13,7 @@ from uuid import UUID
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.models.conversation import Message
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import topics as topic_repo

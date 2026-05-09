@@ -6,8 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
+from gubbi.crypto.guard import require_cipher
 
 
 def _make_cipher() -> ContentCipher:

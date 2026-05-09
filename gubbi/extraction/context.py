@@ -6,7 +6,7 @@ from typing import NotRequired, TypedDict
 import asyncpg
 from redis.asyncio import Redis as RedisClient
 
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.service import ExtractionService
 
 

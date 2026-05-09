@@ -7,8 +7,8 @@ from uuid import UUID
 
 from fastapi import HTTPException, Request
 
+from gubbi.auth.scope import SCOPE_GRANTS, check_scope
 from gubbi.auth.strategies import AuthRejected, AuthResult, AuthStrategy
-from gubbi.core.scope import SCOPE_GRANTS, check_scope
 
 INVALID_TOKEN_MESSAGE: str = "Invalid or expired token"  # noqa: S105
 

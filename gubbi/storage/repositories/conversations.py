@@ -18,12 +18,12 @@ from uuid import UUID, uuid4
 
 import asyncpg
 
-from gubbi.core.crypto import ContentCipher, DecryptionError, decrypt_or_raise
-from gubbi.core.validation import slugify, validate_title, validate_topic
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
 from gubbi.models.conversation import ConversationMeta, Message
 from gubbi.storage.exceptions import ConversationNotFoundError
 from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.storage.repositories.topics import get_id as get_topic_id
+from gubbi.validation import slugify, validate_title, validate_topic
 
 logger = logging.getLogger(__name__)
 

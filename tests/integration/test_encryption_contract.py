@@ -32,7 +32,7 @@ import pytest
 from cryptography.exceptions import InvalidTag
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from gubbi.core.crypto import ContentCipher, DecryptionError
+from gubbi.crypto.cipher import ContentCipher, DecryptionError
 from gubbi.storage.repositories import entries as entry_repo
 
 # Session-scoped asyncpg pools (admin_pool, app_pool) require tests to

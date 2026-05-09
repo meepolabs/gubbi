@@ -37,7 +37,7 @@ from typing import Final
 import asyncpg
 
 from gubbi.audit import Action, record_audit
-from gubbi.core.crypto import ContentCipher, DecryptionError, load_master_keys_from_env
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, load_master_keys_from_env
 from gubbi.storage.pg_setup import init_pool
 
 logger = logging.getLogger("rotate.encryption.key")

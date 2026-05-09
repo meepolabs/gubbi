@@ -56,7 +56,7 @@ from opentelemetry import trace
 
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 
-__all__ = ["Action", "record_audit"]
+__all__: list[str] = ["Action", "record_audit"]
 
 # 10-column insert including target_kind (migration 0020).  Defined here
 # rather than in gubbi_common so the column is always present.

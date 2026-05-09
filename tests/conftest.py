@@ -26,7 +26,7 @@ import pytest
 import pytest_asyncio
 
 from gubbi.config import get_settings
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.storage.pg_setup import _init_connection
 
