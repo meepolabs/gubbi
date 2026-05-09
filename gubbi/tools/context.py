@@ -11,12 +11,11 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import DecryptionError
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import local_today
+from gubbi.app_context import AppContext
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
+from gubbi.crypto.cipher import DecryptionError
+from gubbi.crypto.guard import require_cipher
 from gubbi.storage import knowledge
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.repositories import entries as entry_repo
@@ -33,6 +32,7 @@ from gubbi.tools.constants import (
 )
 from gubbi.tools.errors import validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import local_today
 
 logger = logging.getLogger(__name__)
 

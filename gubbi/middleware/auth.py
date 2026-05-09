@@ -13,9 +13,9 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from gubbi.auth.scope import SCOPE_GRANTS, check_scope
 from gubbi.auth.strategies import AuthRejected, AuthResult, AuthStrategy
-from gubbi.core.auth_context import current_token_scopes, current_user_id
-from gubbi.core.scope import SCOPE_GRANTS, check_scope
+from gubbi.auth_context import current_token_scopes, current_user_id
 
 
 def _unauthorized(detail: str, resource_metadata_url: str | None = None) -> JSONResponse:

@@ -20,7 +20,7 @@ import httpx
 from gubbi_common.auth.gateway_signature import build_signature
 
 from gubbi.auth.strategies import TrustGatewayStrategy
-from gubbi.core.auth_context import current_token_scopes, current_user_id
+from gubbi.auth_context import current_token_scopes, current_user_id
 from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_GATEWAY_SECRET = bytes.fromhex("a" * 64)  # 32 bytes / 64 hex chars

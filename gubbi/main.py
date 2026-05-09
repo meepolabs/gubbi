@@ -22,6 +22,7 @@ from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
+from gubbi.app_context import AppContext
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
 from gubbi.auth.strategies import (
     ApiKeyStrategy,
@@ -37,9 +38,7 @@ from gubbi.config import (
     Settings,
     get_settings,
 )
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import ContentCipher, load_master_keys_from_env
-from gubbi.core.logger import initialize_logger
+from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.middleware import (
     BearerAuthMiddleware,
     CorrelationIDMiddleware,
@@ -52,6 +51,7 @@ from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.exceptions import DatabaseUnavailable
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import configure_otel
+from gubbi.telemetry.logger import initialize_logger
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
 

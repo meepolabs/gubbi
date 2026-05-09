@@ -2,7 +2,7 @@
 
 import pytest
 
-from gubbi.core.validation import reject_tool_call_syntax
+from gubbi.validation import reject_tool_call_syntax
 
 pytestmark = pytest.mark.unit
 

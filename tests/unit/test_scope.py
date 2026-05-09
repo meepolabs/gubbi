@@ -27,9 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ListToolsRequest, ListToolsResult, ServerResult
 
 from gubbi.auth.hydra import HydraIntrospector, TokenClaims
-from gubbi.auth.strategies import ApiKeyStrategy, HydraStrategy
-from gubbi.core.auth_context import current_token_scopes
-from gubbi.core.scope import (
+from gubbi.auth.scope import (
     _GRANT_INVERSE,
     _GRANTS_UNION,
     SCOPE_DESCRIPTIONS,
@@ -38,6 +36,8 @@ from gubbi.core.scope import (
     insufficient_scope_response,
     require_scope,
 )
+from gubbi.auth.strategies import ApiKeyStrategy, HydraStrategy
+from gubbi.auth_context import current_token_scopes
 from gubbi.middleware.auth import BearerAuthMiddleware
 from gubbi.middleware.origin import OriginValidationMiddleware
 from gubbi.tools.registry import (

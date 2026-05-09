@@ -35,9 +35,9 @@ from mcp.types import Tool as MCPTool
 # Imported for type info when available; but we monkey-patch via ToolManager
 from opentelemetry import trace
 
-from gubbi.core.auth_context import current_token_scopes
-from gubbi.core.context import AppContext
-from gubbi.core.scope import SCOPE_GRANTS
+from gubbi.app_context import AppContext
+from gubbi.auth.scope import SCOPE_GRANTS
+from gubbi.auth_context import current_token_scopes
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 from gubbi.tools import (
     context,

@@ -6,19 +6,19 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.audit_decorator import ACTION_TOPIC_CREATED, audited
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.context import AppContext
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import (
-    sanitize_freetext,
-    sanitize_label,
-    validate_topic,
-)
+from gubbi.app_context import AppContext
+from gubbi.audit import ACTION_TOPIC_CREATED, audited
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
 from gubbi.tools.errors import already_exists, invalid_topic, validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import (
+    sanitize_freetext,
+    sanitize_label,
+    validate_topic,
+)
 
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:

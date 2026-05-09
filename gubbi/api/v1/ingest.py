@@ -17,15 +17,15 @@ from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.context import AppContext
-from gubbi.core.validation import validate_title
+from gubbi.app_context import AppContext
+from gubbi.crypto.guard import require_cipher
 from gubbi.models.conversation import Message
 from gubbi.storage.connection import safe_user_scoped_connection
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories.topics import create as create_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
+from gubbi.validation import validate_title
 
 logger = logging.getLogger(__name__)
 

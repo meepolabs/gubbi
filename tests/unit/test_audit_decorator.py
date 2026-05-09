@@ -20,8 +20,8 @@ from uuid import UUID
 
 import pytest
 
-from gubbi.core.audit_decorator import _extract_target_id, _result_is_success, audited
-from gubbi.core.context import AppContext
+from gubbi.app_context import AppContext
+from gubbi.audit import _extract_target_id, _result_is_success, audited
 
 pytestmark = pytest.mark.unit
 
@@ -65,9 +65,9 @@ async def _raising_handler(**kwargs: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-@patch("gubbi.core.audit_decorator.current_user_id")
-@patch("gubbi.core.audit_decorator.user_scoped_connection")
-@patch("gubbi.core.audit_decorator.record_audit_persistence_failure")
+@patch("gubbi.audit.decorator.current_user_id")
+@patch("gubbi.audit.decorator.user_scoped_connection")
+@patch("gubbi.audit.decorator.record_audit_persistence_failure")
 async def test_successful_handler_triggers_audit(
     mock_persistence_failure: MagicMock,
     mock_user_scoped_conn: MagicMock,
@@ -86,7 +86,7 @@ async def test_successful_handler_triggers_audit(
     )
 
     # Act
-    with patch("gubbi.core.audit_decorator.record_audit", new=AsyncMock()) as mock_record_audit:
+    with patch("gubbi.audit.decorator.record_audit", new=AsyncMock()) as mock_record_audit:
         result = await decorated(topic="test", content="hello")
 
     # Assert
@@ -107,8 +107,8 @@ async def test_successful_handler_triggers_audit(
 # ---------------------------------------------------------------------------
 
 
-@patch("gubbi.core.audit_decorator.current_user_id")
-@patch("gubbi.core.audit_decorator.user_scoped_connection")
+@patch("gubbi.audit.decorator.current_user_id")
+@patch("gubbi.audit.decorator.user_scoped_connection")
 async def test_failed_handler_does_not_audit(
     mock_user_scoped_conn: MagicMock,
     mock_current_user_id: MagicMock,
@@ -126,7 +126,7 @@ async def test_failed_handler_does_not_audit(
     )
 
     # Act
-    with patch("gubbi.core.audit_decorator.record_audit", new=AsyncMock()) as mock_record_audit:
+    with patch("gubbi.audit.decorator.record_audit", new=AsyncMock()) as mock_record_audit:
         result = await decorated()
 
     # Assert
@@ -140,10 +140,10 @@ async def test_failed_handler_does_not_audit(
 # ---------------------------------------------------------------------------
 
 
-@patch("gubbi.core.audit_decorator.current_user_id")
-@patch("gubbi.core.audit_decorator.user_scoped_connection")
-@patch("gubbi.core.audit_decorator.logger")
-@patch("gubbi.core.audit_decorator.record_audit_persistence_failure")
+@patch("gubbi.audit.decorator.current_user_id")
+@patch("gubbi.audit.decorator.user_scoped_connection")
+@patch("gubbi.audit.decorator.logger")
+@patch("gubbi.audit.decorator.record_audit_persistence_failure")
 async def test_audit_failure_swallowed(
     mock_persistence_failure: MagicMock,
     mock_logger: MagicMock,
@@ -163,7 +163,7 @@ async def test_audit_failure_swallowed(
     )
 
     # Act
-    with patch("gubbi.core.audit_decorator.record_audit") as mock_record_audit:
+    with patch("gubbi.audit.decorator.record_audit") as mock_record_audit:
         mock_record_audit.side_effect = RuntimeError("DB connection lost")
         result = await decorated(topic="test", content="hello")
 
@@ -179,9 +179,9 @@ async def test_audit_failure_swallowed(
 # ---------------------------------------------------------------------------
 
 
-@patch("gubbi.core.audit_decorator.current_user_id")
-@patch("gubbi.core.audit_decorator.logger")
-@patch("gubbi.core.audit_decorator.record_audit_persistence_failure")
+@patch("gubbi.audit.decorator.current_user_id")
+@patch("gubbi.audit.decorator.logger")
+@patch("gubbi.audit.decorator.record_audit_persistence_failure")
 async def test_no_user_id_skips_audit(
     mock_persistence_failure: MagicMock,
     mock_logger: MagicMock,
@@ -194,7 +194,7 @@ async def test_no_user_id_skips_audit(
         _ok_handler
     )
 
-    with patch("gubbi.core.audit_decorator.record_audit", new=AsyncMock()) as mock_record_audit:
+    with patch("gubbi.audit.decorator.record_audit", new=AsyncMock()) as mock_record_audit:
         result = await decorated(topic="test", content="hello")
 
     assert result == {"status": "ok", "entry_id": 42}
@@ -208,7 +208,7 @@ async def test_no_user_id_skips_audit(
 # ---------------------------------------------------------------------------
 
 
-@patch("gubbi.core.audit_decorator.current_user_id")
+@patch("gubbi.audit.decorator.current_user_id")
 async def test_handler_exception_propagates(
     mock_current_user_id: MagicMock,
 ) -> None:
@@ -220,7 +220,7 @@ async def test_handler_exception_propagates(
     )
 
     with (
-        patch("gubbi.core.audit_decorator.record_audit", new=AsyncMock()) as mock_record_audit,
+        patch("gubbi.audit.decorator.record_audit", new=AsyncMock()) as mock_record_audit,
         pytest.raises(RuntimeError, match="handler failed"),
     ):
         await decorated(topic="test", content="hello")
@@ -316,7 +316,7 @@ class TestAuditedTargetTypeWarning:
     def test_unmapped_target_type_logs_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         """Decorating with target_type not in _TARGET_KEYS logs a warning."""
         ctx = _make_app_ctx()
-        with caplog.at_level("WARNING", logger="gubbi.core.audit_decorator"):
+        with caplog.at_level("WARNING", logger="gubbi.audit.decorator"):
 
             @audited("user.flagged", target_type="user", app_ctx=ctx)
             async def _handler() -> dict[str, Any]:
@@ -330,7 +330,7 @@ class TestAuditedTargetTypeWarning:
     def test_mapped_target_type_no_warning(self, caplog: pytest.LogCaptureFixture) -> None:
         """Decorating with a mapped target_type does NOT warn."""
         ctx = _make_app_ctx()
-        with caplog.at_level("WARNING", logger="gubbi.core.audit_decorator"):
+        with caplog.at_level("WARNING", logger="gubbi.audit.decorator"):
 
             @audited("entry.created", target_type="entry", app_ctx=ctx)
             async def _handler() -> dict[str, Any]:

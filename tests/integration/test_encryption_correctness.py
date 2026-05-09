@@ -13,10 +13,10 @@ import structlog
 from gubbi_common.db.user_scoped import user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 
+from gubbi.app_context import AppContext
+from gubbi.auth_context import current_user_id
 from gubbi.config import get_settings
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.models.conversation import Message
 from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.repositories import conversations as conv_repo

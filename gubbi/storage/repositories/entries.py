@@ -11,14 +11,14 @@ from typing import Any, cast
 
 import asyncpg
 
-from gubbi.core.crypto import ContentCipher, DecryptionError, decrypt_or_raise
-from gubbi.core.validation import validate_date as _validate_date
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
 from gubbi.models.journal import Entry, TopicMeta
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
 from gubbi.storage.repositories.base import _add_param
 from gubbi.storage.repositories.topics import get as get_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
+from gubbi.validation import validate_date as _validate_date
 
 logger = logging.getLogger(__name__)
 

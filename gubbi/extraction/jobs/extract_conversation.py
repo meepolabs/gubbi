@@ -16,8 +16,7 @@ from gubbi_common.audit.actions import Action
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.audit import record_audit
-from gubbi.core.crypto import ContentCipher
-from gubbi.core.validation import harden_llm_topic_path
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.llm.provider import LLMMessage
 from gubbi.extraction.service import CategorizationResult, ExtractedEntry, ExtractionService
@@ -25,6 +24,7 @@ from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import topics as topic_repo
+from gubbi.validation import harden_llm_topic_path
 
 logger = logging.getLogger(__name__)
 

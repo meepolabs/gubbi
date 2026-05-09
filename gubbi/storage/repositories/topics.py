@@ -8,10 +8,10 @@ from typing import Any
 
 import asyncpg
 
-from gubbi.core.validation import validate_topic
 from gubbi.models.journal import TopicMeta
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories.base import _add_param, _escape_like
+from gubbi.validation import validate_topic
 
 
 def _row_to_topic_meta(row: asyncpg.Record) -> TopicMeta:
