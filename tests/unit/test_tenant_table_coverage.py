@@ -97,6 +97,10 @@ def _extract_table_names(source: str) -> set[str]:
             continue
         if name.startswith("pg_") or name == "information_schema":
             continue
+        # SQLite system catalogue (analog of pg_* / information_schema):
+        # used by gubbi/oauth/_rate_limit.py for schema-existence probes.
+        if name == "sqlite_master":
+            continue
         tables.add(name)
     return tables
 

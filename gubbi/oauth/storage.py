@@ -20,6 +20,7 @@ from pathlib import Path
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
 from mcp.shared.auth import OAuthClientInformationFull
 
+from gubbi.oauth._rate_limit import RateLimitStorage
 from gubbi.oauth.constants import RATE_LIMIT_EVENT_RETENTION_SECS
 from gubbi.storage.constants import DB_BUSY_TIMEOUT_MS
 
@@ -100,6 +101,7 @@ class OAuthStorage:
         self.db_path = db_path
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._rl = RateLimitStorage(db_path)
 
     @property
     def conn(self) -> sqlite3.Connection:
@@ -178,6 +180,7 @@ class OAuthStorage:
         if self._conn:
             self._conn.close()
             self._conn = None
+        self._rl.close()
 
     # ------------------------------------------------------------------
     # Clients
@@ -463,37 +466,20 @@ class OAuthStorage:
     # ------------------------------------------------------------------
     # Rate limit events (login failures, register attempts, etc.)
     # ------------------------------------------------------------------
+    # Delegated to RateLimitStorage. Schema for the rate_limit_events table
+    # is still owned by _init_schema above so all DDL stays centralized.
 
     def record_rate_limit_event(self, event_key: str) -> None:
         """Record a single rate-limit event (e.g. 'login_failure:1.2.3.4')."""
-        with self._lock:
-            self.conn.execute(
-                "INSERT INTO rate_limit_events (event_key, occurred_at) VALUES (?, ?)",
-                (event_key, int(time.time())),
-            )
-            self.conn.commit()
+        self._rl.record_event(event_key)
 
     def count_rate_limit_events(self, event_key: str, window_secs: int) -> int:
         """Count events for a key that occurred within the last window_secs seconds."""
-        with self._lock:
-            cutoff = int(time.time()) - window_secs
-            row = self.conn.execute(
-                "SELECT COUNT(*) AS c FROM rate_limit_events "
-                "WHERE event_key = ? AND occurred_at >= ?",
-                (event_key, cutoff),
-            ).fetchone()
-            return int(row["c"]) if row else 0
+        return self._rl.count_events(event_key, window_secs)
 
     def prune_rate_limit_events(self, retention_secs: int) -> int:
         """Delete events older than retention_secs. Returns rows deleted."""
-        with self._lock:
-            cutoff = int(time.time()) - retention_secs
-            cur = self.conn.execute(
-                "DELETE FROM rate_limit_events WHERE occurred_at < ?",
-                (cutoff,),
-            )
-            self.conn.commit()
-            return cur.rowcount
+        return self._rl.prune(retention_secs)
 
     # ------------------------------------------------------------------
     # Cleanup
