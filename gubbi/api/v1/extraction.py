@@ -16,6 +16,7 @@ from fastapi.responses import StreamingResponse
 from redis.asyncio import Redis as RedisClient
 
 from gubbi.api.v1.auth import require_scope
+from gubbi.app_state import require_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +42,7 @@ async def _event_stream(
     extraction jobs publishing to per-job channels are received.
 
     Args:
-        redis_client: Shared Redis client from ``request.app.state.redis_client``.
+        redis_client: Shared Redis client from ``require_redis_client(request)``.
         user_id: The authenticated user UUID whose extraction channel to
             subscribe to.
         request: The HTTP request, used for disconnect polling.
@@ -92,7 +93,7 @@ async def extraction_progress(
     concurrent connection from the same user receives HTTP 429.
     """
     user_id, _scopes = auth
-    redis_client: RedisClient = request.app.state.redis_client
+    redis_client = require_redis_client(request)
 
     cap_key = f"sse:extraction:user:{user_id}:count"
     count = await redis_client.incr(cap_key)
