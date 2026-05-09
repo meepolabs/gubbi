@@ -1,8 +1,10 @@
-"""Journal MCP Server — FastAPI application entry point.
+"""Journal MCP Server -- FastAPI application entry point.
 
 Serves the MCP protocol over streamable HTTP (production) or
-stdio (local development). Based on fastapi_template patterns:
-CustomFastAPI subclass, lifespan, AppContext, structlog.
+stdio (local development). Application-scoped resources (pools,
+cipher, MCP server, auth strategies) are written to ``app.state`` by
+the lifespan and read back through typed accessors in
+``gubbi.app_state``.
 """
 
 import asyncio
@@ -51,18 +53,6 @@ from gubbi.telemetry import configure_otel
 from gubbi.telemetry.logger import initialize_logger
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
-
-
-class CustomFastAPI(FastAPI):
-    """Extended FastAPI with journal-specific attributes."""
-
-    logger: structlog.stdlib.AsyncBoundLogger
-    pool: asyncpg.Pool
-    admin_pool: asyncpg.Pool | None
-    embedding_service: EmbeddingService
-    settings: Settings
-    cipher: ContentCipher | None
-    mcp: FastMCP
 
 
 async def _build_content_cipher(
@@ -297,31 +287,24 @@ async def _build_app_ctx(
 
 
 @asynccontextmanager
-async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
     settings = get_settings()
 
     initialize_logger("gubbi", log_dir=str(settings.log_dir))
-    app.logger = structlog.get_logger("gubbi")
+    logger = structlog.get_logger("gubbi")
 
     configure_otel(app)
 
-    await app.logger.info("Server starting up")
-
-    app.settings = settings
+    await logger.info("Server starting up")
 
     # Security: fail fast when trust_gateway is paired with a public-routable bind address.
     await _check_trust_gateway_bind_address(
-        settings.server.host, settings.auth.trust_gateway, app.logger
+        settings.server.host, settings.auth.trust_gateway, logger
     )
 
     # Core startup: pools, operator scaffold, caching, cipher.
-    app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, app.logger)
-    app.pool = pool
-    app.admin_pool = admin_pool
-    app.embedding_service = app_ctx.embedding_service
-    app.cipher = app_ctx.cipher
-    app.mcp = mcp
+    app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, logger)
     app.state.app_ctx = app_ctx
 
     operator_user_id = app_ctx.operator_user_id
@@ -329,14 +312,14 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # OAuth -- storage, routes, expired-token cleanup.
     oauth_storage, token_validator = setup_oauth(app, settings)
     if token_validator:
-        await app.logger.info("OAuth endpoints registered")
+        await logger.info("OAuth endpoints registered")
 
     # Gateway HMAC secret (three warning branches preserved verbatim).
     app.state.gubbi_gateway_secret = await decode_gateway_secret(
         settings.auth.gateway_secret,
         require_signature=settings.auth.gateway_require_signature,
         trust_gateway=settings.auth.trust_gateway,
-        logger=app.logger,
+        logger=logger,
     )
 
     # Expose auth dependencies on app.state for REST API routes.
@@ -352,11 +335,11 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         introspector = HydraIntrospector(
             admin_url=settings.auth.hydra_admin_url,
             http_client=hydra_http_client,
-            logger=app.logger,
+            logger=logger,
             cache=InMemoryHydraCache(),
             timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
         )
-        await app.logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
+        await logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
         app.state.hydra_introspector = introspector
 
     # Shared Redis client for SSE pub/sub (extraction progress).
@@ -428,7 +411,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         async with mcp.session_manager.run():
             yield
     finally:
-        await app.logger.info("Server shutting down")
+        await logger.info("Server shutting down")
         if hydra_http_client is not None:
             await hydra_http_client.aclose()
         if admin_pool is not None:
@@ -439,7 +422,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
 
 # Create FastAPI app
-server = CustomFastAPI(
+server = FastAPI(
     title="gubbi",
     description="Personal journal MCP server",
     version="0.2.0",

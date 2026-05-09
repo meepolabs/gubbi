@@ -267,16 +267,19 @@ class TestLifespanRedisClient:
     """SSE handler uses the shared Redis client from app.state."""
 
     async def test_handler_gets_redis_from_app_state(self) -> None:
-        """The SSE endpoint gets redis_client from request.app.state.redis_client."""
+        """The SSE endpoint gets redis_client via require_redis_client(request)."""
         from fastapi import FastAPI
+
+        from gubbi.app_state import require_redis_client
 
         mock_redis = MagicMock()
         app = FastAPI()
         app.state.redis_client = mock_redis
 
-        async def _check_redis(request) -> None:
-            rc = request.app.state.redis_client
-            assert rc is mock_redis
+        # Simulate a Request whose ``request.app.state`` is the FastAPI app
+        # state. The accessor only touches request.app.state.redis_client.
+        request = MagicMock()
+        request.app = app
 
-        # Basic smoke test: app.state.redis_client is accessible
-        assert app.state.redis_client is mock_redis
+        rc = require_redis_client(request)
+        assert rc is mock_redis
