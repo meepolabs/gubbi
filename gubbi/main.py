@@ -31,6 +31,7 @@ from gubbi.auth.strategies import (
     SelfHostStrategy,
     TrustGatewayStrategy,
 )
+from gubbi.bootstrap import build_mcp_middleware, decode_gateway_secret, setup_oauth
 from gubbi.config import (
     ALLOWED_ORIGINS,
     HYDRA_INTROSPECT_TIMEOUT_SECS,
@@ -40,13 +41,9 @@ from gubbi.config import (
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.middleware import (
-    BearerAuthMiddleware,
     CorrelationIDMiddleware,
     MCPPathNormalizer,
-    OriginValidationMiddleware,
 )
-from gubbi.oauth.router import register_oauth_routes
-from gubbi.oauth.storage import OAuthStorage
 from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.exceptions import DatabaseUnavailable
 from gubbi.storage.pg_setup import init_pool
@@ -313,10 +310,12 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     app.settings = settings
 
+    # Security: fail fast when trust_gateway is paired with a public-routable bind address.
     await _check_trust_gateway_bind_address(
         settings.server.host, settings.auth.trust_gateway, app.logger
     )
 
+    # Core startup: pools, operator scaffold, caching, cipher.
     app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, app.logger)
     app.pool = pool
     app.admin_pool = admin_pool
@@ -327,57 +326,25 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     operator_user_id = app_ctx.operator_user_id
 
-    # OAuth (stays SQLite -- own connection, out of scope for PG migration)
-    oauth_storage = OAuthStorage(settings.oauth_db_path)
-    _ = oauth_storage.conn
-    expired = oauth_storage.cleanup_expired()
-    if expired:
-        await app.logger.info("OAuth cleanup", expired_tokens=expired)
-
-    token_validator = register_oauth_routes(app, oauth_storage, settings)
+    # OAuth -- storage, routes, expired-token cleanup.
+    oauth_storage, token_validator = setup_oauth(app, settings)
     if token_validator:
         await app.logger.info("OAuth endpoints registered")
 
-    # Gateway HMAC secret: decode the hex-encoded shared secret from config.
-    # If empty or invalid, stash None (verification will fall through to
-    # legacy path or 503 depending on gateway_require_signature).
-    gateway_secret: bytes | None = None
-    if settings.auth.gateway_secret:
-        try:
-            decoded = bytes.fromhex(settings.auth.gateway_secret)
-            if len(decoded) >= 32:
-                gateway_secret = decoded
-            else:
-                await app.logger.warning(
-                    "JOURNAL_GUBBI_GATEWAY_SECRET decodes to less than 32 bytes "
-                    "-- gateway signature verification disabled"
-                )
-        except ValueError:
-            await app.logger.warning(
-                "JOURNAL_GUBBI_GATEWAY_SECRET is not valid hex "
-                "-- gateway signature verification disabled"
-            )
-    if settings.auth.gateway_require_signature and gateway_secret is None:
-        await app.logger.warning(
-            "JOURNAL_GATEWAY_REQUIRE_SIGNATURE=true but JOURNAL_GUBBI_GATEWAY_SECRET "
-            "is missing or invalid -- signed requests will fail with 503"
-        )
-    if settings.auth.trust_gateway and not settings.auth.gateway_require_signature:
-        await app.logger.warning(
-            "trust_gateway=true but gateway_require_signature=false -- "
-            "requests are accepted without HMAC verification"
-        )
-    app.state.gubbi_gateway_secret = gateway_secret
+    # Gateway HMAC secret (three warning branches preserved verbatim).
+    app.state.gubbi_gateway_secret = await decode_gateway_secret(
+        settings.auth.gateway_secret,
+        require_signature=settings.auth.gateway_require_signature,
+        trust_gateway=settings.auth.trust_gateway,
+        logger=app.logger,
+    )
 
-    # Expose auth dependencies on app.state for REST API routes
+    # Expose auth dependencies on app.state for REST API routes.
     app.state.hydra_introspector = None  # may be replaced below
     app.state.selfhost_token_validator = token_validator  # may be None
     app.state.operator_user_id = operator_user_id  # may be None
 
-    mcp_http = app.mcp.streamable_http_app()
-
     # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
-    # When on, the static API key path is disabled (hosted mode is OAuth-only).
     introspector: HydraIntrospector | None = None
     hydra_http_client: httpx.AsyncClient | None = None
     if settings.auth.hydra_admin_url:
@@ -405,17 +372,10 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # discover the authorization server (MCP spec 2025-11-25). Only surface
     # the URL when OAuth is actually wired -- pure Mode 1 API-key deployments
     # have no metadata endpoint to advertise.
-    #
-    # RFC 9728 mounts the metadata at <.well-known>/oauth-protected-resource
-    # + the resource path, so for resource <server_url>/mcp the SDK serves
-    # the doc at /.well-known/oauth-protected-resource/mcp. Must match the
-    # resource_url passed to create_protected_resource_routes in router.py
-    # (which uses the same /mcp suffix); a mismatch breaks discovery.
     protected_resource_metadata_url: str | None = None
     if introspector is not None or token_validator is not None:
         server_base = settings.server.url.rstrip("/")
         protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource/mcp"
-        # Guard: resource_metadata must be an absolute URI (RFC 8414 s3).
         if protected_resource_metadata_url and not any(
             protected_resource_metadata_url.startswith(pre) for pre in ("http://", "https://")
         ):
@@ -426,7 +386,7 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     if settings.auth.trust_gateway:
         auth_strategies: list[AuthStrategy] = [
             TrustGatewayStrategy(
-                gateway_secret=gateway_secret,
+                gateway_secret=app.state.gubbi_gateway_secret,
                 gateway_require_signature=settings.auth.gateway_require_signature,
             ),
         ]
@@ -453,26 +413,27 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
 
     app.state.auth_strategies = auth_strategies
 
-    authed_mcp = BearerAuthMiddleware(
+    # Assemble MCP middleware chain and mount at /mcp.
+    mcp_http = mcp.streamable_http_app()
+    origin_validated_mcp = build_mcp_middleware(
         mcp_http,
         strategies=auth_strategies,
         required_scope=REQUIRED_OAUTH_SCOPE,
         protected_resource_metadata_url=protected_resource_metadata_url,
+        allowed_origins=ALLOWED_ORIGINS,
     )
-    # Origin validation: prevents DNS-rebinding attacks on the MCP endpoint.
-    origin_validated_mcp = OriginValidationMiddleware(authed_mcp, ALLOWED_ORIGINS)
     app.mount("/mcp", origin_validated_mcp)
 
     try:
-        async with app.mcp.session_manager.run():
+        async with mcp.session_manager.run():
             yield
     finally:
         await app.logger.info("Server shutting down")
         if hydra_http_client is not None:
             await hydra_http_client.aclose()
-        if app.admin_pool is not None:
-            await app.admin_pool.close()
-        await app.pool.close()
+        if admin_pool is not None:
+            await admin_pool.close()
+        await pool.close()
         oauth_storage.close()
         await redis_client.aclose()
 
