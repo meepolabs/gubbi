@@ -8,8 +8,8 @@ from datetime import datetime as datetime_cls
 
 import asyncpg
 
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import ContentCipher
+from gubbi.app_context import AppContext
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.connection import safe_acquire
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.tools.constants import REINDEX_BATCH_SIZE

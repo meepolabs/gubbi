@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, StringConstraints, field_validator
 
-from gubbi.core.validation import validate_topic
+from gubbi.validation import validate_topic
 
 Tag128 = Annotated[str, StringConstraints(max_length=128)]
 

@@ -10,17 +10,22 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.audit_decorator import (
+from gubbi.app_context import AppContext
+from gubbi.audit import (
     ACTION_ENTRY_CREATED,
     ACTION_ENTRY_DELETED,
     ACTION_ENTRY_UPDATED,
     audited,
 )
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.context import AppContext
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import (
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
+from gubbi.crypto.guard import require_cipher
+from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
+from gubbi.storage.repositories import entries as entry_repo
+from gubbi.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
+from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
+from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import (
     is_future_date,
     local_today,
     reject_tool_call_syntax,
@@ -29,11 +34,6 @@ from gubbi.core.validation import (
     validate_date,
     validate_topic,
 )
-from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
-from gubbi.storage.repositories import entries as entry_repo
-from gubbi.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
-from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
-from gubbi.tools.response_size import _report_oversized, check_response_size
 
 logger = logging.getLogger(__name__)
 

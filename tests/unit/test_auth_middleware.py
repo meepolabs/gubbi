@@ -21,7 +21,7 @@ from gubbi.auth.strategies import (
     HydraStrategy,
     SelfHostStrategy,
 )
-from gubbi.core.auth_context import current_user_id
+from gubbi.auth_context import current_user_id
 from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_API_KEY = "a" * 64  # 64-char key

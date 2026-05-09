@@ -16,7 +16,7 @@ from uuid import UUID
 import httpx
 
 from gubbi.auth.strategies import ApiKeyStrategy, SelfHostStrategy
-from gubbi.core.auth_context import current_token_scopes, current_user_id
+from gubbi.auth_context import current_token_scopes, current_user_id
 from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_API_KEY = "a" * 64

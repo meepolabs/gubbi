@@ -22,7 +22,7 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest_asyncio
 
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 
 # Fixed test cipher -- keep in sync with the ``cipher`` fixture in conftest
 # so fixture-seeded rows can be decrypted by test code that imports that

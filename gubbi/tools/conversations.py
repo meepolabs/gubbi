@@ -9,20 +9,11 @@ from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connecti
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.audit_decorator import ACTION_CONVERSATION_SAVED, audited
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.context import AppContext
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import (
-    local_today,
-    reject_tool_call_syntax,
-    sanitize_freetext,
-    sanitize_label,
-    validate_date,
-    validate_title,
-    validate_topic,
-)
+from gubbi.app_context import AppContext
+from gubbi.audit import ACTION_CONVERSATION_SAVED, audited
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
+from gubbi.crypto.guard import require_cipher
 from gubbi.models.conversation import Message
 from gubbi.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
@@ -43,6 +34,15 @@ from gubbi.tools.constants import (
 )
 from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import (
+    local_today,
+    reject_tool_call_syntax,
+    sanitize_freetext,
+    sanitize_label,
+    validate_date,
+    validate_title,
+    validate_topic,
+)
 
 logger = logging.getLogger(__name__)
 
