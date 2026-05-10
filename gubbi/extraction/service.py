@@ -29,7 +29,7 @@ class ExtractedEntry:
 class ExtractionEntriesResult:
     """Wrapper around a list of ExtractedEntry that also carries token usage."""
 
-    entries: list[ExtractedEntry]
+    entries: tuple[ExtractedEntry, ...]
     input_tokens: int
     output_tokens: int
 
@@ -133,7 +133,7 @@ class ExtractionService:
             for e in raw_entries
         ]
         return ExtractionEntriesResult(
-            entries=entries,
+            entries=tuple(entries),
             input_tokens=response.input_tokens,
             output_tokens=response.output_tokens,
         )

@@ -188,6 +188,30 @@ async def test_mark_running_noop_when_already_running(
     assert row["status"] == "running"
 
 
+async def test_mark_running_retries_failed_job_and_clears_error_code(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    """mark_running revives failed rows for Arq retries."""
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+        await mark_failed(conn, job_id, error_code="llm_provider_error")
+        await mark_running(conn, job_id)
+
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, error_code, started_at FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert row["status"] == "running"
+    assert row["error_code"] is None
+    assert row["started_at"] is not None
+
+
 # ---------------------------------------------------------------------------
 # Tests: mark_completed
 # ---------------------------------------------------------------------------
@@ -203,9 +227,13 @@ async def test_mark_completed_noop_when_already_completed(
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
         job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
-        await mark_completed(conn, job_id, topics_created=1, entries_created=3, cents_spent=5)
+        updated = await mark_completed(
+            conn, job_id, topics_created=1, entries_created=3, cents_spent=5
+        )
         # Second call must not raise.
-        await mark_completed(conn, job_id, topics_created=99, entries_created=99, cents_spent=99)
+        second_updated = await mark_completed(
+            conn, job_id, topics_created=99, entries_created=99, cents_spent=99
+        )
 
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -214,9 +242,36 @@ async def test_mark_completed_noop_when_already_completed(
         )
     assert row is not None
     assert row["status"] == "completed"
+    assert updated is True
+    assert second_updated is False
     # The second call was a no-op -- original values preserved.
     assert row["topics_created"] == 1
     assert row["entries_created"] == 3
+
+
+@pytest.mark.asyncio
+async def test_mark_failed_noop_when_already_completed(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    """mark_failed is a no-op when the job is already in 'completed' status."""
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+        await mark_completed(conn, job_id, topics_created=1, entries_created=3, cents_spent=5)
+        updated = await mark_failed(conn, job_id, error_code="late_failure")
+
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, error_code FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["error_code"] is None
+    assert updated is False
 
 
 # ---------------------------------------------------------------------------

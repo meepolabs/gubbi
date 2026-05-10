@@ -6,7 +6,7 @@ A row gets stuck if ingest INSERTs it but the subsequent Arq enqueue fails
 holds the slot and prevents user retries.
 
 Cadence: every {sleep_seconds} seconds. Threshold: {threshold_minutes} minutes
-(config-tunable via journal_orphan_cleanup_threshold_minutes).
+(config-tunable via llm.orphan_cleanup_threshold_minutes).
 """
 
 from __future__ import annotations
@@ -52,12 +52,12 @@ async def run_orphan_cleanup(
                         error_code = 'enqueue_lost',
                         completed_at = now()
                     WHERE status = 'pending'
-                      AND created_at < now() - ($1 || ' minutes')::interval
+                      AND created_at < now() - ($1 * interval '1 minute')
                     RETURNING id
                 )
                 SELECT count(*) FROM updated
                 """,
-                str(threshold_minutes),
+                threshold_minutes,
             )
             swept = int(result or 0)
             if swept > 0:

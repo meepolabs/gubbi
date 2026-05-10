@@ -320,7 +320,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         cron_task = asyncio.create_task(
             run_orphan_cleanup(
                 admin_pool,
-                threshold_minutes=settings.journal_orphan_cleanup_threshold_minutes,
+                threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
             ),
         )
         app.state.background_tasks.add(cron_task)

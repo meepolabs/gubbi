@@ -35,10 +35,15 @@ _FAKE_EXTRACTION = ExtractionEntriesResult(
 
 def _make_minimal_ctx(redis: Any = None) -> dict[str, Any]:
     """Build a minimal ExtractionContext-like dict."""
+    # Set _llm=None so the cost-estimation getattr chain in
+    # extract_conversation returns 0 cents cleanly without spawning
+    # un-awaited coroutines from AsyncMock auto-magic on _llm.estimate_cost_cents.
+    extraction_service = AsyncMock()
+    extraction_service._llm = None
     return {
         "pool": AsyncMock(),
         "cipher": MagicMock(),
-        "extraction_service": AsyncMock(),
+        "extraction_service": extraction_service,
         "redis": redis,
     }
 

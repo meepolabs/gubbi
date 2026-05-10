@@ -13,6 +13,7 @@ persistence transaction on Redis failure here.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable
 from datetime import date
 from typing import Protocol
 from uuid import UUID
@@ -21,7 +22,7 @@ from uuid import UUID
 class _BudgetRedisClient(Protocol):
     async def hincrby(self, key: str, field: str, amount: int) -> int: ...
     async def sadd(self, key: str, *values: str) -> int: ...
-    async def expire(self, key: str, time: int) -> bool: ...
+    def expire(self, key: str, time: int) -> Awaitable[bool]: ...
 
 
 async def record_extraction_cost(
