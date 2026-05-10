@@ -19,15 +19,14 @@ on no-op).
 
 from __future__ import annotations
 
-import logging
-
 import asyncpg
+import structlog
 
 from gubbi.audit import Action, record_audit
 
 __all__: list[str] = ["scaffold_operator"]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 async def scaffold_operator(
@@ -83,7 +82,7 @@ async def scaffold_operator(
                         metadata={"provision_path": "scaffold"},
                     )
                 except Exception:
-                    logger.exception("scaffold_operator: audit write failed")
+                    await logger.exception("scaffold_operator: audit write failed")
 
             # Verify a row exists (covers both newly-created and pre-existing).
             user_id = await conn.fetchval(

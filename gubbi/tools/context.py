@@ -1,12 +1,12 @@
 """MCP tools: journal_briefing, journal_timeline."""
 
 import asyncio
-import logging
 import re
 from datetime import date, timedelta
 from typing import Any
 
 import asyncpg
+import structlog
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -36,7 +36,7 @@ from gubbi.validation import local_today
 
 __all__: list[str] = ["register"]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _month_end(year: int, month: int) -> date:
@@ -180,7 +180,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 app_ctx.embedding_service.encode, BRIEFING_KEY_FACTS_QUERY
             )
         except Exception:
-            logger.warning("Key facts encoding failed, continuing without", exc_info=True)
+            await logger.warning("Key facts encoding failed, continuing without", exc_info=True)
 
         user_id = current_user_id.get()
         if user_id is None:
@@ -208,15 +208,15 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         limit=BRIEFING_KEY_FACTS_COUNT,
                     )
                 except DecryptionError as exc:
-                    logger.warning(
-                        "Key facts batch decryption failed (%s)",
-                        type(exc).__name__,
+                    await logger.warning(
+                        "Key facts batch decryption failed",
+                        error_type=type(exc).__name__,
                         exc_info=True,
                     )
                 except asyncpg.PostgresError:
-                    logger.exception("Key facts batch query failed")
+                    await logger.exception("Key facts batch query failed")
                 except Exception:
-                    logger.exception("Key facts retrieval failed unexpectedly")
+                    await logger.exception("Key facts retrieval failed unexpectedly")
                     raise
 
             if raw_facts:
@@ -230,9 +230,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 try:
                     decrypted_entries = await entry_repo.get_texts(conn, cipher, fact_entry_ids)
                 except asyncpg.PostgresError:
-                    logger.exception(
-                        "Key facts entry batch query failed for %d entries",
-                        len(fact_entry_ids),
+                    await logger.exception(
+                        "Key facts entry batch query failed",
+                        entry_count=len(fact_entry_ids),
                     )
 
                 for row in raw_facts:

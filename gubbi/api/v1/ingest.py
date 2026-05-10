@@ -7,13 +7,14 @@ No LLM calls. Pure data ingest.
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
 
 import asyncpg
+import structlog
 from fastapi import APIRouter, Depends, Request
+from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
@@ -39,7 +40,7 @@ __all__: list[str] = [
     "router",
 ]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])
 
@@ -107,6 +108,7 @@ async def ingest_conversations(
     user_id, _scopes = auth
     app_ctx = _get_app_ctx(request)
     cipher = require_cipher(app_ctx)
+    log = bound_logger(request)
 
     conversations_saved = 0
     conversations_skipped_dedupe = 0
@@ -169,9 +171,10 @@ async def ingest_conversations(
                         conv.platform_id,
                     )
             except asyncpg.UniqueViolationError:
-                logger.warning(
+                await log.warning(
                     "Dedupe race: platform_id already exists, treating as skip",
-                    extra={"platform": conv.platform, "platform_id": conv.platform_id},
+                    platform=conv.platform,
+                    platform_id=conv.platform_id,
                 )
                 conversations_skipped_dedupe += 1
                 continue

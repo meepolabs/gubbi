@@ -142,7 +142,7 @@ async def test_failed_handler_does_not_audit(
 
 @patch("gubbi.audit.decorator.current_user_id")
 @patch("gubbi.audit.decorator.user_scoped_connection")
-@patch("gubbi.audit.decorator.logger")
+@patch("gubbi.audit.decorator.logger", new_callable=lambda: MagicMock(warning=AsyncMock()))
 @patch("gubbi.audit.decorator.record_audit_persistence_failure")
 async def test_audit_failure_swallowed(
     mock_persistence_failure: MagicMock,
@@ -180,7 +180,7 @@ async def test_audit_failure_swallowed(
 
 
 @patch("gubbi.audit.decorator.current_user_id")
-@patch("gubbi.audit.decorator.logger")
+@patch("gubbi.audit.decorator.logger", new_callable=lambda: MagicMock(warning=AsyncMock()))
 @patch("gubbi.audit.decorator.record_audit_persistence_failure")
 async def test_no_user_id_skips_audit(
     mock_persistence_failure: MagicMock,

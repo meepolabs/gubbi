@@ -7,11 +7,11 @@ See ``extract_conversation`` function docstring for the CALLER CONTRACT
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any, cast
 from uuid import UUID
 
 import asyncpg
+import structlog
 from gubbi_common.audit.actions import Action
 from gubbi_common.db.user_scoped import user_scoped_connection
 
@@ -28,7 +28,7 @@ from gubbi.validation import harden_llm_topic_path
 
 __all__: list[str] = ["extract_conversation"]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -40,7 +40,7 @@ async def _check_idempotent(
     conn: asyncpg.Connection,
     conversation_id: int,
     user_id: str,
-    log: logging.Logger,
+    log: structlog.stdlib.AsyncBoundLogger,
 ) -> bool:
     """Check whether this conversation was already processed.
 
@@ -49,9 +49,10 @@ async def _check_idempotent(
     """
     already_processed = await conv_repo.get_processed_at(conn, conversation_id)
     if already_processed is not None:
-        log.info(
+        await log.info(
             "Conversation already processed, skipping",
-            extra={"user_id": user_id, "conversation_id": conversation_id},
+            user_id=user_id,
+            conversation_id=conversation_id,
         )
         return True
     return False
@@ -62,7 +63,7 @@ async def _load_conversation_for_extraction(
     cipher: ContentCipher,
     conversation_id: int,
     user_id: str,
-    log: logging.Logger,
+    log: structlog.stdlib.AsyncBoundLogger,
 ) -> tuple[Any, list[LLMMessage], list[str]]:
     """Load a conversation + its messages and existing topics.
 
@@ -77,9 +78,10 @@ async def _load_conversation_for_extraction(
             conn, cipher, conversation_id
         )
     except Exception:
-        log.error(
+        await log.error(
             "Failed to load conversation",
-            extra={"user_id": user_id, "conversation_id": conversation_id},
+            user_id=user_id,
+            conversation_id=conversation_id,
             exc_info=True,
         )
         raise
@@ -98,7 +100,7 @@ async def _categorize_and_resolve_topic(
     existing_topics: list[str],
     user_id: str,
     conversation_id: int,
-    log: logging.Logger,
+    log: structlog.stdlib.AsyncBoundLogger,
 ) -> tuple[CategorizationResult, str | None]:
     """Categorise the conversation and produce a hardened topic path.
 
@@ -112,9 +114,10 @@ async def _categorize_and_resolve_topic(
             message_dicts, existing_topics
         )
     except Exception:
-        log.error(
+        await log.error(
             "Categorization failed",
-            extra={"user_id": user_id, "conversation_id": conversation_id},
+            user_id=user_id,
+            conversation_id=conversation_id,
             exc_info=True,
         )
         raise
@@ -123,9 +126,9 @@ async def _categorize_and_resolve_topic(
     topic_path: str | None = harden_llm_topic_path(raw_topic_path)
 
     if topic_path is None:
-        log.warning(
-            "extraction: no usable topic_path from LLM, returning early (%d chars)",
-            len(raw_topic_path) if raw_topic_path else 0,
+        await log.warning(
+            "extraction: no usable topic_path from LLM, returning early",
+            raw_topic_path_chars=len(raw_topic_path) if raw_topic_path else 0,
         )
 
     return categorization, topic_path
@@ -140,7 +143,7 @@ async def _persist_entries(
     categorization: CategorizationResult,
     user_id: str,
     conversation_id: int,
-    log: logging.Logger,
+    log: structlog.stdlib.AsyncBoundLogger,
 ) -> int:
     """Upsert the topic (if needed), extract entries, and persist them.
 
@@ -161,7 +164,7 @@ async def _persist_entries(
                 await topic_repo.create(conn, topic_path, title=categorization.topic_title)
             except ValueError as exc:
                 if "already exists" in str(exc):
-                    log.debug("Topic race on create, proceeding: %s", exc)
+                    await log.debug("Topic race on create, proceeding", error=str(exc))
                 else:
                     raise
 
@@ -171,9 +174,10 @@ async def _persist_entries(
         if topic_path:
             extracted = await extraction_service.extract_entries(message_dicts, topic_path)
     except Exception:
-        log.error(
+        await log.error(
             "Entry extraction failed",
-            extra={"user_id": user_id, "conversation_id": conversation_id},
+            user_id=user_id,
+            conversation_id=conversation_id,
             exc_info=True,
         )
         raise
@@ -203,7 +207,7 @@ async def _publish_progress(
     job_id: str,
     topic_path: str | None,
     entries_created: int,
-    log: logging.Logger,
+    log: structlog.stdlib.AsyncBoundLogger,
 ) -> None:
     """Publish extraction completion event on the user's Redis channel.
 
@@ -219,9 +223,10 @@ async def _publish_progress(
         channel = f"extraction:user:{user_id}:job:{job_id}"
         await redis.publish(channel, json.dumps(event))
     except Exception:
-        log.warning(
+        await log.warning(
             "Failed to publish extraction event to Redis",
-            extra={"user_id": user_id, "conversation_id": conversation_id},
+            user_id=user_id,
+            conversation_id=conversation_id,
             exc_info=True,
         )
 
@@ -276,7 +281,10 @@ async def extract_conversation(
     extraction_service = ctx["extraction_service"]
     redis = ctx["redis"]
 
-    log = logger.getChild("extract_conversation")
+    log = cast(
+        "structlog.stdlib.AsyncBoundLogger",
+        logger.bind(component="extract_conversation"),
+    )
     user_uuid = user_id if isinstance(user_id, UUID) else UUID(user_id)
 
     # --- Idempotency / full pipeline ---
@@ -349,14 +357,12 @@ async def extract_conversation(
         redis, user_id, conversation_id, str(job_id), topic_path, entries_created, log
     )
 
-    log.info(
+    await log.info(
         "Extraction complete",
-        extra={
-            "user_id": user_id,
-            "conversation_id": conversation_id,
-            "topic_path": topic_path,
-            "entries_created": entries_created,
-        },
+        user_id=user_id,
+        conversation_id=conversation_id,
+        topic_path=topic_path,
+        entries_created=entries_created,
     )
 
     return {

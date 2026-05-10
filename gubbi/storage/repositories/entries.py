@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC
 from datetime import date as date_cls
@@ -10,6 +9,7 @@ from datetime import datetime as datetime_cls
 from typing import Any, cast
 
 import asyncpg
+import structlog
 
 from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
 from gubbi.models.journal import Entry, TopicMeta
@@ -36,7 +36,7 @@ __all__: list[str] = [
     "update",
 ]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 # ── module-private helpers ────────────────────────────────────────────────────
@@ -706,10 +706,10 @@ async def get_texts(
             reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
             result[eid] = (content, reasoning)
         except DecryptionError as exc:
-            logger.warning(
-                "Entry %d could not be decrypted (%s); included with failure marker",
-                eid,
-                type(exc).__name__,
+            await logger.warning(
+                "Entry could not be decrypted; included with failure marker",
+                entry_id=eid,
+                error_type=type(exc).__name__,
             )
             result[eid] = ("[decryption-failed]", None)  # sentinel for search.py to surface (M-9.8)
     return result
