@@ -1,4 +1,4 @@
-"""Unit tests for _check_trust_gateway_bind_address startup assertion."""
+"""Unit tests for check_trust_gateway_bind_address startup assertion."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from gubbi.main import _check_trust_gateway_bind_address
+from gubbi.bootstrap import check_trust_gateway_bind_address
 
 
 @pytest.fixture
@@ -17,7 +17,7 @@ def mock_logger() -> AsyncMock:
 
 
 class TestTrustGatewayBind:
-    """Every branch of _check_trust_gateway_bind_address."""
+    """Every branch of check_trust_gateway_bind_address."""
 
     # -- trust_gateway=False: no constraint, no log ---------------------------
 
@@ -38,7 +38,7 @@ class TestTrustGatewayBind:
         self, mock_logger: AsyncMock, host: str
     ) -> None:
         """When trust_gateway=False the check is a no-op for every address."""
-        await _check_trust_gateway_bind_address(host, False, mock_logger)
+        await check_trust_gateway_bind_address(host, False, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     # -- Loopback -------------------------------------------------------------
@@ -53,7 +53,7 @@ class TestTrustGatewayBind:
         ],
     )
     async def test_loopback_passes(self, mock_logger: AsyncMock, host: str) -> None:
-        await _check_trust_gateway_bind_address(host, True, mock_logger)
+        await check_trust_gateway_bind_address(host, True, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     async def test_localhost_hostname_passes(self, mock_logger: AsyncMock) -> None:
@@ -65,7 +65,7 @@ class TestTrustGatewayBind:
                 (socket.AF_INET, socket.SOCK_STREAM, 0, "", ("127.0.0.1", 0)),
             ],
         ):
-            await _check_trust_gateway_bind_address("localhost", True, mock_logger)
+            await check_trust_gateway_bind_address("localhost", True, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     # -- RFC 1918 private -----------------------------------------------------
@@ -82,7 +82,7 @@ class TestTrustGatewayBind:
         ],
     )
     async def test_private_rfc1918_passes(self, mock_logger: AsyncMock, host: str) -> None:
-        await _check_trust_gateway_bind_address(host, True, mock_logger)
+        await check_trust_gateway_bind_address(host, True, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     # -- IPv6 unique-local (fc00::/7) -----------------------------------------
@@ -96,7 +96,7 @@ class TestTrustGatewayBind:
         ],
     )
     async def test_unique_local_v6_passes(self, mock_logger: AsyncMock, host: str) -> None:
-        await _check_trust_gateway_bind_address(host, True, mock_logger)
+        await check_trust_gateway_bind_address(host, True, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     # -- Link-local -----------------------------------------------------------
@@ -111,7 +111,7 @@ class TestTrustGatewayBind:
         ],
     )
     async def test_link_local_passes(self, mock_logger: AsyncMock, host: str) -> None:
-        await _check_trust_gateway_bind_address(host, True, mock_logger)
+        await check_trust_gateway_bind_address(host, True, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     # -- Unspecified (warning, not error) -------------------------------------
@@ -125,7 +125,7 @@ class TestTrustGatewayBind:
     )
     async def test_unspecified_warns(self, mock_logger: AsyncMock, host: str) -> None:
         """Unspecified bind addresses emit a warning but do not block startup."""
-        await _check_trust_gateway_bind_address(host, True, mock_logger)
+        await check_trust_gateway_bind_address(host, True, mock_logger)
         mock_logger.warning.assert_awaited_once()
 
     # -- Public-routable ------------------------------------------------------
@@ -140,7 +140,7 @@ class TestTrustGatewayBind:
     )
     async def test_public_ip_raises(self, mock_logger: AsyncMock, host: str) -> None:
         with pytest.raises(RuntimeError) as exc:
-            await _check_trust_gateway_bind_address(host, True, mock_logger)
+            await check_trust_gateway_bind_address(host, True, mock_logger)
         msg = str(exc.value)
         assert "JOURNAL_TRUST_GATEWAY=true" in msg
         assert host in msg
@@ -156,7 +156,7 @@ class TestTrustGatewayBind:
             ),
             pytest.raises(RuntimeError) as exc,
         ):
-            await _check_trust_gateway_bind_address("public.example.com", True, mock_logger)
+            await check_trust_gateway_bind_address("public.example.com", True, mock_logger)
         msg = str(exc.value)
         assert "JOURNAL_TRUST_GATEWAY=true" in msg
         assert "public.example.com" in msg
@@ -175,7 +175,7 @@ class TestTrustGatewayBind:
             ),
             pytest.raises(RuntimeError),
         ):
-            await _check_trust_gateway_bind_address("mixed.example.com", True, mock_logger)
+            await check_trust_gateway_bind_address("mixed.example.com", True, mock_logger)
         mock_logger.warning.assert_not_awaited()
 
     async def test_hostname_all_unspecified_warns(self, mock_logger: AsyncMock) -> None:
@@ -187,7 +187,7 @@ class TestTrustGatewayBind:
                 (socket.AF_INET6, socket.SOCK_STREAM, 0, "", ("::", 0, 0, 0)),
             ],
         ):
-            await _check_trust_gateway_bind_address("wildcard.example.com", True, mock_logger)
+            await check_trust_gateway_bind_address("wildcard.example.com", True, mock_logger)
         mock_logger.warning.assert_awaited_once()
 
     # -- Hostname resolution failure ------------------------------------------
@@ -197,7 +197,7 @@ class TestTrustGatewayBind:
             patch.object(socket, "getaddrinfo", side_effect=socket.gaierror),
             pytest.raises(RuntimeError) as exc,
         ):
-            await _check_trust_gateway_bind_address("nonexistent.invalid", True, mock_logger)
+            await check_trust_gateway_bind_address("nonexistent.invalid", True, mock_logger)
         msg = str(exc.value)
         assert "JOURNAL_TRUST_GATEWAY=true" in msg
         assert "nonexistent.invalid" in msg
@@ -222,5 +222,5 @@ class TestTrustGatewayBind:
                 (socket.AF_INET, socket.SOCK_STREAM, 0, "", (resolved, 0)),
             ],
         ):
-            await _check_trust_gateway_bind_address(hostname, True, mock_logger)
+            await check_trust_gateway_bind_address(hostname, True, mock_logger)
         mock_logger.warning.assert_not_awaited()

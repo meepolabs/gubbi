@@ -8,8 +8,6 @@ the lifespan and read back through typed accessors in
 """
 
 import asyncio
-import ipaddress
-import socket
 import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -33,7 +31,12 @@ from gubbi.auth.strategies import (
     SelfHostStrategy,
     TrustGatewayStrategy,
 )
-from gubbi.bootstrap import build_mcp_middleware, decode_gateway_secret, setup_oauth
+from gubbi.bootstrap import (
+    build_mcp_middleware,
+    check_trust_gateway_bind_address,
+    decode_gateway_secret,
+    setup_oauth,
+)
 from gubbi.config import (
     ALLOWED_ORIGINS,
     HYDRA_INTROSPECT_TIMEOUT_SECS,
@@ -175,64 +178,6 @@ def create_mcp_server(app_ctx: AppContext) -> FastMCP:
     return mcp
 
 
-async def _check_trust_gateway_bind_address(
-    host: str,
-    trust_gateway: bool,
-    logger: structlog.stdlib.AsyncBoundLogger,
-) -> None:
-    """Fail fast when trust_gateway is paired with a public-routable bind address."""
-    if not trust_gateway:
-        return
-
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-
-    # Try parsing the bind address as a literal IP first.
-    try:
-        addresses.append(ipaddress.ip_address(host))
-    except ValueError:
-        # Hostname -- resolve before classifying.
-        loop = asyncio.get_running_loop()
-        try:
-            resolved = await loop.run_in_executor(
-                None,
-                socket.getaddrinfo,
-                host,
-                None,
-                socket.AF_UNSPEC,
-                socket.SOCK_STREAM,
-            )
-        except socket.gaierror:
-            raise RuntimeError(
-                f"JOURNAL_TRUST_GATEWAY=true -- bind address '{host}' failed to resolve. "
-                "Set JOURNAL_HOST to a resolvable address."
-            ) from None
-
-        for _family, _type, _proto, _canonname, sockaddr in resolved:
-            addresses.append(ipaddress.ip_address(sockaddr[0]))
-
-    has_unspecified = False
-    for addr in addresses:
-        if addr.is_unspecified:
-            has_unspecified = True
-            continue
-
-        if addr.is_loopback or addr.is_private or addr.is_link_local:
-            continue
-
-        # Public-routable -- fail fast.
-        raise RuntimeError(
-            f"JOURNAL_TRUST_GATEWAY=true is incompatible with bind address "
-            f"'{host}' -- set JOURNAL_HOST to a loopback or private-network address."
-        )
-
-    if has_unspecified:
-        await logger.warning(
-            "JOURNAL_TRUST_GATEWAY=true with bind address '%s' -- "
-            "exposure depends on network/proxy layer",
-            host,
-        )
-
-
 async def _build_app_ctx(
     settings: Settings,
     logger: structlog.stdlib.AsyncBoundLogger,
@@ -299,7 +244,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await logger.info("Server starting up")
 
     # Security: fail fast when trust_gateway is paired with a public-routable bind address.
-    await _check_trust_gateway_bind_address(
+    await check_trust_gateway_bind_address(
         settings.server.host, settings.auth.trust_gateway, logger
     )
 
