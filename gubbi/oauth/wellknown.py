@@ -11,7 +11,10 @@ from pydantic import AnyHttpUrl
 
 from gubbi.config import Settings
 
-_logger = logging.getLogger("gubbi.oauth.wellknown")
+# Stays on stdlib ``logging`` because ``register`` runs sync at lifespan
+# setup. ``structlog.AsyncBoundLogger`` emits return coroutines that must
+# be awaited; sync callers cannot use it.
+logger = logging.getLogger(__name__)
 
 
 def register(
@@ -28,4 +31,4 @@ def register(
     )
     for route in pr_routes:
         app.routes.insert(0, route)
-    _logger.info("Registered protected-resource routes")
+    logger.info("Registered protected-resource routes")

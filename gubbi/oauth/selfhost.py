@@ -25,7 +25,10 @@ from gubbi.oauth.wellknown import register as register_wellknown
 
 __all__: list[str] = ["register"]
 
-_logger = logging.getLogger("gubbi.oauth.selfhost")
+# Stays on stdlib ``logging`` because the validator closure runs in a
+# sync token-validation pipeline. ``structlog.AsyncBoundLogger`` emits
+# return coroutines that must be awaited; sync callers cannot use it.
+logger = logging.getLogger(__name__)
 
 
 def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], frozenset[str] | None]:
@@ -47,10 +50,10 @@ def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], frozen
                 return frozenset({"journal:read", "journal:write"})
             return None
         except (sqlite3.Error, ValueError, KeyError):
-            _logger.warning("Token validation failed", exc_info=True)
+            logger.warning("Token validation failed", exc_info=True)
             return None
         except Exception:
-            _logger.exception("Unexpected error during token validation")
+            logger.exception("Unexpected error during token validation")
             return None
 
     return validate

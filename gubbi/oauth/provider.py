@@ -8,10 +8,10 @@ Dual-mode: accepts both a shared static API key and OAuth access tokens.
 from __future__ import annotations
 
 import hashlib
-import logging
 import secrets
 import time
 
+import structlog
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
@@ -28,7 +28,7 @@ from gubbi.oauth.storage import OAuthStorage
 
 __all__: list[str] = ["JournalOAuthProvider"]
 
-logger = logging.getLogger("gubbi.oauth.provider")
+logger = structlog.get_logger(__name__)
 
 
 class JournalOAuthProvider(
@@ -86,7 +86,10 @@ class JournalOAuthProvider(
         # Verify it belongs to this client (timing-safe)
         if not secrets.compare_digest(code.client_id, client.client_id or ""):
             self.storage.delete_auth_code(authorization_code)
-            logger.warning("Auth code client_id mismatch for client %s", client.client_id)
+            await logger.warning(
+                "Auth code client_id mismatch",
+                client_id=client.client_id,
+            )
             return None
         # Check expiry
         if code.expires_at < time.time():
@@ -162,14 +165,12 @@ class JournalOAuthProvider(
             token_age = (
                 (now - (token.expires_at - OAUTH_REFRESH_TOKEN_TTL_SECS)) if token.expires_at else 0
             )
-            logger.warning(
+            await logger.warning(
                 "oauth.refresh.client_id_mismatch",
-                extra={
-                    "event": "oauth.refresh.client_id_mismatch",
-                    "stored_client_id_hash": stored_hash,
-                    "requesting_client_id_hash": req_hash,
-                    "token_age_seconds": token_age,
-                },
+                event="oauth.refresh.client_id_mismatch",
+                stored_client_id_hash=stored_hash,
+                requesting_client_id_hash=req_hash,
+                token_age_seconds=token_age,
             )
             return None
         # Check expiry
@@ -211,7 +212,7 @@ class JournalOAuthProvider(
             new_refresh_token=new_refresh,
         )
 
-        logger.info("Refresh token rotated for client_id=%s", client.client_id)
+        await logger.info("Refresh token rotated", client_id=client.client_id)
         return OAuthToken(
             access_token=new_access_str,
             token_type="Bearer",  # noqa: S106 — protocol constant
@@ -242,11 +243,11 @@ class JournalOAuthProvider(
             self.storage.delete_token_pair_by_access(token.token)
             if paired_refresh:
                 self.storage.delete_refresh_token(paired_refresh)
-            logger.info("Access token revoked for client_id=%s", token.client_id)
+            await logger.info("Access token revoked", client_id=token.client_id)
         elif isinstance(token, RefreshToken):
             paired_access = self.storage.get_paired_access_tokens(token.token)
             self.storage.delete_refresh_token(token.token)
             self.storage.delete_token_pair_by_refresh(token.token)
             for at in paired_access:
                 self.storage.delete_access_token(at)
-            logger.info("Refresh token revoked for client_id=%s", token.client_id)
+            await logger.info("Refresh token revoked", client_id=token.client_id)

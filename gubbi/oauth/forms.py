@@ -12,13 +12,14 @@ POST compares the cookie value to the form value (timing-safe).
 from __future__ import annotations
 
 import ipaddress
-import logging
 import secrets
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 import bcrypt
+import structlog
+from gubbi_common.telemetry import bound_logger
 from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -40,7 +41,7 @@ __all__: list[str] = [
 
 LoginHandler = Callable[[Request], Coroutine[Any, Any, Response]]
 
-logger = logging.getLogger("gubbi.oauth.forms")
+logger = structlog.get_logger(__name__)
 
 
 def client_ip(request: Request) -> str:
@@ -80,6 +81,7 @@ def create_login_handler(
     """Create a Starlette endpoint handler for /login."""
 
     async def login_handler(request: Request) -> Response:
+        log = bound_logger(request)
         if request.method == "GET":
             params = request.query_params
             csrf_token = secrets.token_urlsafe(32)
@@ -103,7 +105,10 @@ def create_login_handler(
             storage.count_rate_limit_events(event_key, LOGIN_LOCKOUT_WINDOW_SECS)
             >= LOGIN_MAX_FAILURES
         ):
-            logger.warning("Login rate limit reached, rejecting request from %s", client_host)
+            await log.warning(
+                "Login rate limit reached, rejecting request",
+                client_host=client_host,
+            )
             return HTMLResponse("Too many failed attempts. Try again later.", status_code=429)
 
         # POST: verify CSRF token first
@@ -112,7 +117,7 @@ def create_login_handler(
         cookie_csrf = request.cookies.get(CSRF_COOKIE_NAME, "")
 
         if not form_csrf or not cookie_csrf or not secrets.compare_digest(form_csrf, cookie_csrf):
-            logger.warning("CSRF validation failed")
+            await log.warning("CSRF validation failed")
             return HTMLResponse("CSRF validation failed", status_code=403)
 
         client_id = str(form.get("client_id", ""))
@@ -125,12 +130,14 @@ def create_login_handler(
         # Validate client exists and redirect_uri is registered before touching credentials
         client = storage.get_client(client_id)
         if client is None:
-            logger.warning("Unknown client_id in login form: %s", client_id)
+            await log.warning("Unknown client_id in login form", client_id=client_id)
             return HTMLResponse("Invalid client", status_code=400)
         registered_uris = [str(u) for u in (client.redirect_uris or [])]
         if redirect_uri not in registered_uris:
-            logger.warning(
-                "Unregistered redirect_uri '%s' for client '%s'", redirect_uri, client_id
+            await log.warning(
+                "Unregistered redirect_uri",
+                redirect_uri=redirect_uri,
+                client_id=client_id,
             )
             return HTMLResponse("Invalid redirect_uri", status_code=400)
 
@@ -141,7 +148,7 @@ def create_login_handler(
         ):
             # Record the failure for per-IP rate limiting (CRITICAL-2)
             storage.record_rate_limit_event(event_key)
-            logger.warning("Failed login attempt from %s", client_host)
+            await log.warning("Failed login attempt", client_host=client_host)
             csrf_token = secrets.token_urlsafe(32)
             return render_login_page(
                 client_id=client_id,
@@ -169,7 +176,7 @@ def create_login_handler(
         )
         storage.save_auth_code(code, auth_code)
 
-        logger.info("Authorization code issued from %s", client_host)
+        await log.info("Authorization code issued", client_host=client_host)
 
         # Redirect back to client, clear CSRF cookie
         callback = construct_redirect_uri(

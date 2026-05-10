@@ -1,11 +1,11 @@
 """MCP tool: journal_search (tsvector FTS + pgvector semantic)."""
 
 import asyncio
-import logging
 from datetime import date as date_cls
 from typing import Any
 
 import asyncpg
+import structlog
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -31,7 +31,7 @@ from gubbi.validation import validate_date, validate_topic
 
 __all__: list[str] = ["register"]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 def _truncate_text(value: str) -> str:
@@ -90,9 +90,9 @@ async def _run_dual_search(
                 if r.get("entry_id") is not None
             ]
         except asyncpg.PostgresError:
-            logger.warning("Semantic search failed, using FTS only", exc_info=True)
+            await logger.warning("Semantic search failed, using FTS only", exc_info=True)
         except Exception:
-            logger.exception("Semantic search failed unexpectedly")
+            await logger.exception("Semantic search failed unexpectedly")
             raise
 
     # Merge with seen_keys dedup -- FTS first, semantic second preserves order.
@@ -133,20 +133,20 @@ async def _hydrate_results(
     try:
         decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
     except asyncpg.PostgresError:
-        logger.exception(
-            "Entry batch query failed, skipping %d entries: %s",
-            len(entry_id_list),
-            repr(entry_id_list),
+        await logger.exception(
+            "Entry batch query failed, skipping entries",
+            entry_count=len(entry_id_list),
+            entry_ids=repr(entry_id_list),
         )
 
     decrypted_convs: dict[int, tuple[str, str]] = {}
     try:
         decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
     except asyncpg.PostgresError:
-        logger.exception(
-            "Conversation batch query failed, skipping %d conversations: %s",
-            len(conv_id_list),
-            repr(conv_id_list),
+        await logger.exception(
+            "Conversation batch query failed, skipping conversations",
+            conv_count=len(conv_id_list),
+            conv_ids=repr(conv_id_list),
         )
 
     hydrated: list[SearchResult] = []
@@ -290,7 +290,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         try:
             query_embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, query)
         except Exception:
-            logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
+            await logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
 
         df = date_cls.fromisoformat(date_from) if date_from else None
         dt = date_cls.fromisoformat(date_to) if date_to else None
