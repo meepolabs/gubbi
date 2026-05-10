@@ -2,13 +2,22 @@
 
 See ``extract_conversation`` function docstring for the CALLER CONTRACT
 (security-critical).
+
+Connection-split design (m-h5-h6):
+  Phase 1 -- conn1: read-only load + early idempotency check.
+  Phase 2 -- LLM phase: NO database connection held.
+  Phase 3 -- conn2: persistence under an explicit nested SAVEPOINT transaction.
+
+This ensures the database connection is released during the LLM calls
+(which can take several seconds), so the pool is not exhausted when
+max_jobs concurrent workers are all mid-LLM.
 """
 
 from __future__ import annotations
 
 import json
 from typing import Any, cast
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import asyncpg
 import structlog
@@ -134,58 +143,65 @@ async def _categorize_and_resolve_topic(
     return categorization, topic_path
 
 
-async def _persist_entries(
+async def _mark_skipped_no_topic(
+    pool: asyncpg.Pool,
+    user_uuid: UUID,
+    conversation_id: int,
+) -> None:
+    """Open a short-lived connection to mark a conversation as processed (no-topic path).
+
+    Called when the LLM categorization returns a topic_path that hardening rejects.
+    Uses a dedicated connection so the no-topic skip has exactly the same persistence
+    contract as the full success path.
+    """
+    async with user_scoped_connection(pool, user_id=user_uuid) as conn:
+        await conv_repo.mark_processed(conn, conversation_id)
+
+
+async def _persist_extraction(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
-    extraction_service: ExtractionService,
-    message_dicts: list[LLMMessage],
-    topic_path: str | None,
-    categorization: CategorizationResult,
-    user_id: str,
+    user_uuid: UUID,
     conversation_id: int,
+    topic_path: str,
+    categorization: CategorizationResult,
+    extracted_entries: list[ExtractedEntry],
+    extraction_attempt_id: str,
     log: structlog.stdlib.AsyncBoundLogger,
 ) -> int:
-    """Upsert the topic (if needed), extract entries, and persist them.
+    """Upsert the topic (if needed) and persist pre-extracted entries.
 
-    Handles topic create with race-tolerance, entry extraction via the LLM
-    service, then appends each extracted entry into the journal.
+    All writes happen inside the SAVEPOINT that the caller wraps around this
+    function. No LLM calls here -- entries are pre-extracted before conn2 is
+    acquired.
 
-    Returns the count of persisted entries.  On extraction failure logs an
-    error with extras and re-raises so that ``mark_processed`` is *not*
-    written (fail-closed).
+    Returns the count of persisted entries.
+
+    NOTE-m-h5-h6: entry_repo.append uses a plain INSERT with no ON CONFLICT
+    clause.  The entries table has no uniqueness constraint on
+    (conversation_id, topic_id, content) that would make ON CONFLICT DO NOTHING
+    meaningful without a schema migration.  The conn2 second-idempotency-check
+    (caller) prevents double-insert under normal retry storms.  A partial conn2
+    failure mid-batch (e.g. after some entries are written but before
+    mark_processed) will roll back via the SAVEPOINT, so partial state is
+    never committed.  Retries after that are safe: the SAVEPOINT re-runs from
+    the start of Phase 3.
     """
-    # Topic upsert (get_id / create with race-tolerance)
-    if topic_path:
-        try:
-            await topic_repo.get_id(conn, topic_path)
-        except TopicNotFoundError:
-            assert topic_path  # noqa: S101 -- narrowed by truthiness guard above
-            try:
-                await topic_repo.create(conn, topic_path, title=categorization.topic_title)
-            except ValueError as exc:
-                if "already exists" in str(exc):
-                    await log.debug("Topic race on create, proceeding", error=str(exc))
-                else:
-                    raise
-
-    # Extract entries
-    extracted: list[ExtractedEntry] = []
+    # Topic upsert (get_id / create with race-tolerance).
     try:
-        if topic_path:
-            extracted = await extraction_service.extract_entries(message_dicts, topic_path)
-    except Exception:
-        await log.error(
-            "Entry extraction failed",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            exc_info=True,
-        )
-        raise
+        await topic_repo.get_id(conn, topic_path)
+    except TopicNotFoundError:
+        try:
+            await topic_repo.create(conn, topic_path, title=categorization.topic_title)
+        except ValueError as exc:
+            if "already exists" in str(exc):
+                await log.debug("Topic race on create, proceeding", error=str(exc))
+            else:
+                raise
 
-    # Persist entries (append loop)
+    # Persist entries (append loop -- no LLM calls here).
     entries_created = 0
-    assert topic_path  # noqa: S101 -- truthy topic required for entry persistence
-    for entry in extracted:
+    for entry in extracted_entries:
         await entry_repo.append(
             conn,
             cipher,
@@ -196,6 +212,26 @@ async def _persist_entries(
             date=entry.entry_date,
         )
         entries_created += 1
+
+    # Mark processed (WHERE processed_at IS NULL -- race-safe no-op if already set).
+    await conv_repo.mark_processed(conn, conversation_id)
+
+    # Audit row -- inside SAVEPOINT; rolled back on any failure above.
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id=str(user_uuid),
+        action=Action.CONVERSATION_EXTRACTED,
+        target_type="conversation",
+        target_kind="conversation",
+        target_id=str(conversation_id),
+        metadata={
+            "via": "extraction-worker",
+            "entries_created": entries_created,
+            "topics_touched": 1,
+            "extraction_attempt_id": extraction_attempt_id,
+        },
+    )
 
     return entries_created
 
@@ -264,6 +300,11 @@ async def extract_conversation(
     See llm_context/audit_contract.md for actor_type semantics on the
     summary audit row this job produces.
 
+    Connection-split design (m-h5-h6):
+      Phase 1 -- conn1: read-only load + early idempotency check.
+      Phase 2 -- LLM phase: no database connection held.
+      Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
+
     Args:
         ctx: Arq worker context (pool, cipher, extraction_service, redis
             injected by on_startup).
@@ -281,16 +322,24 @@ async def extract_conversation(
     extraction_service = ctx["extraction_service"]
     redis = ctx["redis"]
 
+    # Bind an attempt-level correlation ID for trace correlation across the two DB spans.
+    extraction_attempt_id = str(uuid4())
+
     log = cast(
         "structlog.stdlib.AsyncBoundLogger",
-        logger.bind(component="extract_conversation"),
+        logger.bind(
+            component="extract_conversation",
+            extraction_attempt_id=extraction_attempt_id,
+        ),
     )
     user_uuid = user_id if isinstance(user_id, UUID) else UUID(user_id)
 
-    # --- Idempotency / full pipeline ---
-    async with user_scoped_connection(pool, user_id=user_uuid) as conn:
-        # Skip if already processed.
-        if await _check_idempotent(conn, conversation_id, user_id, log):
+    # ------------------------------------------------------------------
+    # Phase 1 -- conn1: read-only load + early idempotency check.
+    # conn1 is released before any LLM call.
+    # ------------------------------------------------------------------
+    async with user_scoped_connection(pool, user_id=user_uuid) as conn1:
+        if await _check_idempotent(conn1, conversation_id, user_id, log):
             return {
                 "topic_path": None,
                 "entries_created": 0,
@@ -299,59 +348,75 @@ async def extract_conversation(
                 "skipped": True,
             }
 
-        # Load conversation + messages + existing topics.
         _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
-            conn, cipher, conversation_id, user_id, log
+            conn1, cipher, conversation_id, user_id, log
         )
+    # conn1 released here -- pool slot returned before LLM calls.
 
-        # Categorize & harden topic path.
-        categorization, topic_path = await _categorize_and_resolve_topic(
-            extraction_service, message_dicts, existing_topics, user_id, conversation_id, log
+    # ------------------------------------------------------------------
+    # Phase 2 -- LLM phase: no database connection held.
+    # ------------------------------------------------------------------
+    categorization, topic_path = await _categorize_and_resolve_topic(
+        extraction_service, message_dicts, existing_topics, user_id, conversation_id, log
+    )
+
+    if topic_path is None:
+        # No usable topic -- mark processed via a short dedicated connection.
+        await _mark_skipped_no_topic(pool, user_uuid, conversation_id)
+        return {
+            "topic_path": None,
+            "entries_created": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "skipped": True,
+        }
+
+    # Extract entries while no DB connection is held.
+    extracted_entries: list[ExtractedEntry] = []
+    try:
+        extracted_entries = await extraction_service.extract_entries(message_dicts, topic_path)
+    except Exception:
+        await log.error(
+            "Entry extraction failed",
+            user_id=user_id,
+            conversation_id=conversation_id,
+            exc_info=True,
         )
+        raise
 
-        # If hardening rejected the topic, mark and skip (no entries).
-        if topic_path is None:
-            await conv_repo.mark_processed(conn, conversation_id)
-            return {
-                "topic_path": None,
-                "entries_created": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "skipped": True,
-            }
+    # ------------------------------------------------------------------
+    # Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
+    # Second idempotency check here guards against a concurrent worker
+    # that raced through Phase 2 while we were doing LLM calls.
+    # ------------------------------------------------------------------
+    async with user_scoped_connection(pool, user_id=user_uuid) as conn2:  # noqa: SIM117
+        async with conn2.transaction():  # nested SAVEPOINT inside user_scoped_connection
+            # Last-write-wins guard: if another worker committed first, bail.
+            if await _check_idempotent(conn2, conversation_id, user_id, log):
+                return {
+                    "topic_path": None,
+                    "entries_created": 0,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "skipped": True,
+                }
 
-        # Persist: topic upsert + entry extraction + write.
-        entries_created = await _persist_entries(
-            conn,
-            cipher,
-            extraction_service,
-            message_dicts,
-            topic_path,
-            categorization,
-            user_id,
-            conversation_id,
-            log,
-        )
+            entries_created = await _persist_extraction(
+                conn2,
+                cipher,
+                user_uuid,
+                conversation_id,
+                topic_path,
+                categorization,
+                extracted_entries,
+                extraction_attempt_id,
+                log,
+            )
+    # conn2 released here -- SAVEPOINT committed atomically.
 
-        # Mark processed (committed with everything above).
-        await conv_repo.mark_processed(conn, conversation_id)
-
-        # Audit row -- last DB write; committed only when everything succeeds.
-        await record_audit(
-            conn,
-            actor_type="user",
-            actor_id=str(user_uuid),
-            action=Action.CONVERSATION_EXTRACTED,
-            target_kind="conversation",
-            target_id=str(conversation_id),
-            metadata={
-                "via": "extraction-worker",
-                "entries_created": entries_created,
-                "topics_touched": 1,
-            },
-        )
-
-    # --- Publish progress event (outside DB connection) ---
+    # ------------------------------------------------------------------
+    # Publish progress event (outside DB connection -- non-fatal).
+    # ------------------------------------------------------------------
     job_id = ctx.get("job_id", "unknown")
     await _publish_progress(
         redis, user_id, conversation_id, str(job_id), topic_path, entries_created, log
