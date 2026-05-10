@@ -169,6 +169,9 @@ class LLMConfig(BaseModel):
 
     api_key: str = ""
     model: str = ""
+    # JOURNAL_LLM__BUDGET_ENABLED; gates budget delta writes from worker
+    # (hosted: True; self-host: False)
+    journal_llm_budget_enabled: bool = False
 
 
 class Settings(BaseSettings):
@@ -226,6 +229,11 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "info"
     log_dir: Path = Path("./logs")
+
+    # Orphan cleanup cron -- threshold for stale extraction_jobs.pending sweep.
+    # Read from JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES env var.
+    # Cron threshold for stale extraction_jobs.pending sweep.
+    journal_orphan_cleanup_threshold_minutes: int = 30
 
     @model_validator(mode="after")
     def _validate_deploy_shape(self) -> Self:

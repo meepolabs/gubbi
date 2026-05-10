@@ -10,7 +10,7 @@ the lifespan and read back through typed accessors in
 import asyncio
 import textwrap
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from typing import Any
 from uuid import UUID
 
@@ -48,6 +48,7 @@ from gubbi.config import (
     get_settings,
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
+from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
 from gubbi.middleware import (
     CorrelationIDMiddleware,
     MCPPathNormalizer,
@@ -310,6 +311,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     app.state.arq_pool = arq_pool
     app_ctx.arq_pool = arq_pool
 
+    # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
+    # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
+    # admin pool is configured (single-tenant dev fallback).
+    app.state.background_tasks = set()
+    cron_task: asyncio.Task[None] | None = None
+    if admin_pool is not None:
+        cron_task = asyncio.create_task(
+            run_orphan_cleanup(
+                admin_pool,
+                threshold_minutes=settings.journal_orphan_cleanup_threshold_minutes,
+            ),
+        )
+        app.state.background_tasks.add(cron_task)
+
     # Mode 3 (hosted) disables the shared static API key path -- operators
     # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
     # compare in the middleware can never match (every token is >= one char).
@@ -376,6 +391,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await logger.info("Server shutting down")
+        if cron_task is not None:
+            cron_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cron_task
         if hydra_http_client is not None:
             await hydra_http_client.aclose()
         if admin_pool is not None:
