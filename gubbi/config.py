@@ -12,6 +12,21 @@ from pydantic_settings import (
     SettingsConfigDict,
 )
 
+__all__: list[str] = [
+    "ALLOWED_ORIGINS",
+    "AuthConfig",
+    "DbConfig",
+    "HYDRA_INTROSPECT_TIMEOUT_SECS",
+    "LLMConfig",
+    "OAUTH_ACCESS_TOKEN_TTL_SECS",
+    "OAUTH_AUTH_CODE_TTL_SECS",
+    "OAUTH_REFRESH_TOKEN_TTL_SECS",
+    "REQUIRED_OAUTH_SCOPE",
+    "ServerConfig",
+    "Settings",
+    "get_settings",
+]
+
 # Hydra admin-introspect HTTP timeout, seconds. 3s is comfortable on a local
 # docker network; it is not an operator-tunable.
 HYDRA_INTROSPECT_TIMEOUT_SECS: Final[float] = 3.0

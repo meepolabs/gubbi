@@ -26,6 +26,8 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from gubbi.config import OAUTH_ACCESS_TOKEN_TTL_SECS, OAUTH_REFRESH_TOKEN_TTL_SECS
 from gubbi.oauth.storage import OAuthStorage
 
+__all__: list[str] = ["JournalOAuthProvider"]
+
 logger = logging.getLogger("gubbi.oauth.provider")
 
 

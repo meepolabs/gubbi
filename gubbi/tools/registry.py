@@ -47,6 +47,16 @@ from gubbi.tools import (
     topics,
 )
 
+__all__: list[str] = [
+    "ALL_TOOLS",
+    "READ_TOOLS",
+    "WRITE_TOOLS",
+    "filter_tools_by_scope",
+    "patch_tool_manager",
+    "register_tools",
+    "wire_scope_filter",
+]
+
 # ---------------------------------------------------------------------------
 # Tool categorization lists (used by future read/write scope split)
 # ---------------------------------------------------------------------------

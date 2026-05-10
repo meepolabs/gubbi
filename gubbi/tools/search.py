@@ -29,6 +29,8 @@ from gubbi.tools.errors import invalid_date, invalid_topic, validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
 from gubbi.validation import validate_date, validate_topic
 
+__all__: list[str] = ["register"]
+
 logger = logging.getLogger(__name__)
 
 

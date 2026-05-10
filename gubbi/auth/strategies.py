@@ -47,6 +47,16 @@ from starlette.requests import Request
 from gubbi.auth.hydra import HydraIntrospector, HydraInvalidToken, HydraUnreachable
 from gubbi.oauth.constants import MAX_BEARER_TOKEN_LEN
 
+__all__: list[str] = [
+    "ApiKeyStrategy",
+    "AuthRejected",
+    "AuthResult",
+    "AuthStrategy",
+    "HydraStrategy",
+    "SelfHostStrategy",
+    "TrustGatewayStrategy",
+]
+
 _logger = logging.getLogger("gubbi.auth.strategies")
 
 # ---------------------------------------------------------------------------

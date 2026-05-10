@@ -26,6 +26,8 @@ from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.validation import harden_llm_topic_path
 
+__all__: list[str] = ["extract_conversation"]
+
 logger = logging.getLogger(__name__)
 
 

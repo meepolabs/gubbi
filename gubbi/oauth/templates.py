@@ -13,6 +13,12 @@ from starlette.responses import HTMLResponse
 from gubbi.auth.scope import SCOPE_DESCRIPTIONS
 from gubbi.oauth.constants import CSRF_COOKIE_NAME
 
+__all__: list[str] = [
+    "CSRF_COOKIE_NAME",
+    "LOGIN_HTML",
+    "render_login_page",
+]
+
 LOGIN_HTML = """<!DOCTYPE html>
 <html lang="en">
 <head>
