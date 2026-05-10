@@ -34,6 +34,8 @@ from gubbi.tools.errors import validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
 from gubbi.validation import local_today
 
+__all__: list[str] = ["register"]
+
 logger = logging.getLogger(__name__)
 
 

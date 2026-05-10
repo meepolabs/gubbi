@@ -7,6 +7,13 @@ dict access failure has the same type as a bare KeyError but a very different
 meaning.
 """
 
+__all__: list[str] = [
+    "ConversationNotFoundError",
+    "DatabaseUnavailable",
+    "EntryNotFoundError",
+    "TopicNotFoundError",
+]
+
 
 class TopicNotFoundError(LookupError):
     """Raised when a topic path does not exist in the database."""

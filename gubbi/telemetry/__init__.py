@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
+__all__: list[str] = ["configure_otel"]
+
 logger = logging.getLogger(__name__)
 
 _OTEL_ENABLED_ENV = "OTEL_ENABLED"

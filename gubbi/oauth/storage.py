@@ -24,6 +24,8 @@ from gubbi.oauth._rate_limit import RateLimitStorage
 from gubbi.oauth.constants import RATE_LIMIT_EVENT_RETENTION_SECS
 from gubbi.storage.constants import DB_BUSY_TIMEOUT_MS
 
+__all__: list[str] = ["OAuthStorage", "SCHEMA"]
+
 logger = logging.getLogger(__name__)
 
 SCHEMA = """

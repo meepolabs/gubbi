@@ -27,6 +27,8 @@ from pathlib import Path
 
 from gubbi.storage.constants import DB_BUSY_TIMEOUT_MS
 
+__all__: list[str] = ["RateLimitStorage"]
+
 
 class RateLimitStorage:
     """SQLite-backed counter for rate-limit events.

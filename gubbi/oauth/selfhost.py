@@ -23,6 +23,8 @@ from gubbi.oauth.provider import JournalOAuthProvider
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.wellknown import register as register_wellknown
 
+__all__: list[str] = ["register"]
+
 _logger = logging.getLogger("gubbi.oauth.selfhost")
 
 

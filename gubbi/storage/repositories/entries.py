@@ -20,6 +20,22 @@ from gubbi.storage.repositories.topics import get as get_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_date as _validate_date
 
+__all__: list[str] = [
+    "append",
+    "delete",
+    "get_by_date_range",
+    "get_max_indexed_at",
+    "get_stats",
+    "get_text",
+    "get_texts",
+    "get_unindexed",
+    "mark_indexed",
+    "mark_indexed_batch",
+    "read",
+    "reset_indexed_at",
+    "update",
+]
+
 logger = logging.getLogger(__name__)
 
 

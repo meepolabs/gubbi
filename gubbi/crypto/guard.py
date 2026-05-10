@@ -18,6 +18,8 @@ if TYPE_CHECKING:
     from gubbi.app_context import AppContext
     from gubbi.crypto.cipher import ContentCipher
 
+__all__: list[str] = ["require_cipher"]
+
 
 def require_cipher(app_ctx: AppContext) -> ContentCipher:
     """Return ``app_ctx.cipher`` or raise if it is ``None``.

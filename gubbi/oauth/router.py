@@ -14,6 +14,8 @@ from gubbi.oauth.selfhost import register as register_selfhost
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.wellknown import register as register_wellknown
 
+__all__: list[str] = ["register_oauth_routes"]
+
 _logger = logging.getLogger("gubbi.oauth.router")
 
 

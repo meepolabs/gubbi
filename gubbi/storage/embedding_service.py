@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 
+__all__: list[str] = ["EmbeddingService"]
+
 logger = logging.getLogger(__name__)
 
 # ── Model constants ───────────────────────────────────────────────────────────

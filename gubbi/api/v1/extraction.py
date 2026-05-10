@@ -18,6 +18,12 @@ from redis.asyncio import Redis as RedisClient
 from gubbi.api.v1.auth import require_scope
 from gubbi.app_state import require_redis_client
 
+__all__: list[str] = [
+    "SSE_PER_USER_CAP",
+    "extraction_progress",
+    "router",
+]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/extraction", tags=["extraction"])

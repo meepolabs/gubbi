@@ -21,6 +21,8 @@ from __future__ import annotations
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+__all__: list[str] = ["OriginValidationMiddleware"]
+
 
 class OriginValidationMiddleware:
     """ASGI middleware that validates the Origin header against an allowlist.

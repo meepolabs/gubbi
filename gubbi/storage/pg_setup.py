@@ -8,6 +8,12 @@ from gubbi.constants import (
     DB_COMMAND_TIMEOUT_SECS,
 )
 
+__all__: list[str] = [
+    "advisory_unlock",
+    "init_pool",
+    "try_advisory_lock",
+]
+
 
 async def _init_connection(conn: asyncpg.Connection) -> None:
     """Register the pgvector codec on every new pool connection.
