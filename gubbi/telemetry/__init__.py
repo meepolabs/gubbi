@@ -81,7 +81,7 @@ def _wire_instrumentors(app: FastAPI) -> None:
     try:
         from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor  # noqa: PLC0415
 
-        AsyncPGInstrumentor().instrument()
+        AsyncPGInstrumentor().instrument()  # type: ignore[no-untyped-call]  # opentelemetry-instrumentation-asyncpg ships no py.typed marker
         logger.debug("asyncpg auto-instrumentation wired")
     except Exception as exc:
         logger.warning("AsyncPGInstrumentor failed: %s", exc)

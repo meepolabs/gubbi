@@ -11,6 +11,7 @@ import asyncio
 import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Any
 from uuid import UUID
 
 import asyncpg
@@ -298,7 +299,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.hydra_introspector = introspector
 
     # Shared Redis client for SSE pub/sub (extraction progress).
-    redis_client = aioredis.from_url(str(settings.redis_url))
+    redis_pool = aioredis.ConnectionPool.from_url(str(settings.redis_url))
+    redis_client = aioredis.Redis(connection_pool=redis_pool)
     app.state.redis_client = redis_client
 
     # Mode 3 (hosted) disables the shared static API key path -- operators
@@ -373,7 +375,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             await admin_pool.close()
         await pool.close()
         oauth_storage.close()
+        # Explicit two-step Redis teardown: redis_client.aclose() does NOT drain
+        # an externally-supplied ConnectionPool (redis-py: "If a pool is passed
+        # in, do not close it"). Disconnect the pool ourselves to avoid
+        # leaking pooled connections across lifespan restarts.
         await redis_client.aclose()
+        await redis_pool.aclose()
 
 
 # Create FastAPI app
@@ -430,7 +437,7 @@ async def general_exception_handler(
 
 
 @server.get("/health")
-async def mcp_health() -> dict:
+async def mcp_health() -> dict[str, Any]:
     """Liveness probe for Docker health checks.
 
     NOTE: do NOT add @server.get("/mcp/") here -- it shadows the

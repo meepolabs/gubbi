@@ -88,14 +88,27 @@ ignore = ["ANN401", "N818"]
 known-first-party = ["gubbi"]
 
 [tool.mypy]
+# Strict-mode flags landed in CO.45 (Phase 4 item 45). Set explicitly rather
+# than via `strict = true` so the pre-commit mypy hook (which runs in an
+# isolated venv with limited deps) does not emit false positives on
+# `disallow_untyped_decorators` for `@mcp.tool` / `@server.exception_handler`.
+# Project venv enforces full --strict via `mypy gubbi/ --strict` in CI.
+# `disable_error_code = "import-untyped"` covers vendor libs without py.typed
+# markers (asyncpg, mcp, opentelemetry-instrumentation-*, onnxruntime, etc.)
+# without needing a per-module `[[tool.mypy.overrides]]` block per dep.
 python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
 disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
 check_untyped_defs = true
 no_implicit_optional = true
 strict_optional = true
+strict_equality = true
+extra_checks = true
+no_implicit_reexport = true
 disable_error_code = "import-untyped"
 plugins = ["pydantic.mypy"]
 

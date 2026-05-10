@@ -32,7 +32,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Final
+from typing import Any, Final
 
 import asyncpg
 
@@ -77,9 +77,9 @@ def _resolve_admin_dsn() -> str:
     )
 
 
-async def _collect_dry_run_counts(pool: asyncpg.Pool, source_version: int) -> list[dict]:
+async def _collect_dry_run_counts(pool: asyncpg.Pool, source_version: int) -> list[dict[str, Any]]:
     """Collect per-table row counts that are at ``source_version``."""
-    reports: list[dict] = []
+    reports: list[dict[str, Any]] = []
     hex_pfx = f"{source_version:02x}"
 
     for table, col_enc, col_nonce in _ROTATION_SCREENS:  # noqa: S608

@@ -258,7 +258,7 @@ class EmbeddingService:
         topic_prefix: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Return top-k entries by a pre-computed embedding vector.
 
         Callers should encode text via asyncio.to_thread(self.encode, text) before
@@ -268,7 +268,7 @@ class EmbeddingService:
         topic_prefix: filter to topics whose path starts with this prefix.
         date_from / date_to: filter by entry date (datetime.date objects).
         """
-        params: list = [embedding, limit]  # $1=embedding, $2=limit
+        params: list[Any] = [embedding, limit]  # $1=embedding, $2=limit
         where_clauses = ["e.deleted_at IS NULL"]
 
         if topic_prefix:
@@ -307,7 +307,7 @@ class EmbeddingService:
         text: str,
         limit: int = 10,
         topic_prefix: str | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Encode text then search. Convenience wrapper — holds conn during inference.
 
         Prefer encode() + search_by_vector() when conn comes from a pool to avoid

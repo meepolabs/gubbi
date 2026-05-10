@@ -31,7 +31,7 @@ __all__: list[str] = ["JournalOAuthProvider"]
 logger = logging.getLogger("gubbi.oauth.provider")
 
 
-class JournalOAuthProvider(  # type: ignore[type-arg]
+class JournalOAuthProvider(
     OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken],
 ):
     """Single-user OAuth provider for the journal MCP server."""
