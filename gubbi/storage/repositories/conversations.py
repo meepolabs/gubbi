@@ -518,7 +518,7 @@ async def list_conversations(
     return [_row_to_meta(cipher, r) for r in rows], total
 
 
-async def read_conversation(
+async def get_conversation(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
     topic: str,
@@ -528,7 +528,7 @@ async def read_conversation(
 
     Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
     """
-    transaction_required = "conversations.read_conversation: caller must wrap in conn.transaction()"
+    transaction_required = "conversations.get_conversation: caller must wrap in conn.transaction()"
     assert conn.is_in_transaction(), transaction_required  # noqa: S101
     topic = validate_topic(topic)
     slug = slugify(title)
@@ -564,6 +564,12 @@ async def read_conversation(
         )
         for r in msg_rows
     ]
+
+
+# Deprecated alias for one release per Part 9.8 of the code-org review (CO.43).
+# `get_conversation` is the canonical name; `read_conversation` was inconsistent
+# with the `get_*` verb used elsewhere in this module.
+read_conversation = get_conversation
 
 
 async def read_conversation_by_id(

@@ -221,8 +221,8 @@ async def test_journal_search_returns_full_content_for_fts_and_semantic(
             summary="Full summary for search tool output",
         )
         conv_id = search_result.conversation_id
-        await embedding_service.store_by_vector(conn, strong_entry_id, [1.0] + [0.0] * 383)
-        await embedding_service.store_by_vector(conn, weak_entry_id, [0.0, 1.0] + [0.0] * 382)
+        await embedding_service.save_by_vector(conn, strong_entry_id, [1.0] + [0.0] * 383)
+        await embedding_service.save_by_vector(conn, weak_entry_id, [0.0, 1.0] + [0.0] * 382)
 
     fts_result = await _with_user(user_id, tools["journal_search"](query="orchid", limit=10))
     assert fts_result["total"] >= 2

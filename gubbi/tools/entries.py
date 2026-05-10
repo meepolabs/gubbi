@@ -51,7 +51,7 @@ async def _embed_entry(
     try:
         embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-            await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
+            await app_ctx.embedding_service.save_by_vector(conn, entry_id, embedding)
         return embedding
     except Exception as e:
         logger.warning("Failed to embed entry %s: %s", entry_id, e, exc_info=True)
@@ -258,7 +258,7 @@ async def _journal_update_entry(
                 app_ctx.embedding_service.encode, embed_text.strip()
             )
             async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
+                await app_ctx.embedding_service.save_by_vector(conn, entry_id, embedding)
                 await entry_repo.mark_indexed(conn, entry_id)
         except Exception as e:
             logger.warning("Failed to embed updated entry %s: %s", entry_id, e, exc_info=True)

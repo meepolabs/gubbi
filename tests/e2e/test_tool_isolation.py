@@ -49,7 +49,7 @@ class _StubEmbeddingService:
     def encode(self, text: str) -> list[float]:
         return [0.0] * 384
 
-    async def store_by_vector(self, conn: Any, entry_id: int, embedding: list[float]) -> None:
+    async def save_by_vector(self, conn: Any, entry_id: int, embedding: list[float]) -> None:
         pass
 
     async def search_by_vector(
