@@ -26,6 +26,8 @@ from gubbi_common.audit.actions import Action
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.audit import record_audit
+from gubbi.budget import PRE_CHARGE_CENTS, current_period_start, record_extraction_cost
+from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.llm.provider import LLMMessage
@@ -533,6 +535,21 @@ async def extract_conversation(
                     cents_spent,
                     log,
                 )
+
+                # Best-effort budget delta write. Must NOT affect the SAVEPOINT:
+                # extraction succeeded and the row is committed; the pre-charge
+                # already protected the cap. Log + continue on any Redis failure.
+                if get_settings().llm.journal_llm_budget_enabled and redis is not None:
+                    try:
+                        await record_extraction_cost(
+                            user_uuid,
+                            current_period_start(),
+                            actual_cents=cents_spent,
+                            estimated_cents=PRE_CHARGE_CENTS,
+                            redis=redis,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+                        )
+                    except Exception:  # broad: redis errors come in many shapes
+                        await log.warning("budget_delta_failed", exc_info=True)
         # conn2 released here -- SAVEPOINT committed atomically.
 
     except Exception as exc:
