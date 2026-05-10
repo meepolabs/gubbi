@@ -14,6 +14,9 @@ from gubbi.storage.connection import safe_acquire
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.tools.constants import REINDEX_BATCH_SIZE
 
+# All functions are private; registered via MCP tool registry, not direct import.
+__all__: list[str] = []
+
 logger = logging.getLogger(__name__)
 
 # PostgreSQL advisory lock key for reindex coordination.

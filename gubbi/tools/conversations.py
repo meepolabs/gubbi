@@ -44,6 +44,11 @@ from gubbi.validation import (
     validate_topic,
 )
 
+__all__: list[str] = [
+    "MessageInput",
+    "register",
+]
+
 logger = logging.getLogger(__name__)
 
 

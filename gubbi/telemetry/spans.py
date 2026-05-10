@@ -23,6 +23,8 @@ from gubbi.telemetry.attrs import _TRACER_NAME, SpanNames, safe_set_attributes
 if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
+__all__: list[str] = ["record_mcp_tool_response_size_check"]
+
 logger = logging.getLogger(__name__)
 
 _tracer = trace.get_tracer(_TRACER_NAME)

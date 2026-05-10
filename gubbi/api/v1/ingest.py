@@ -28,6 +28,17 @@ from gubbi.storage.repositories.topics import create as create_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_title
 
+__all__: list[str] = [
+    "ConversationPayload",
+    "DEFAULT_INBOX_TOPIC",
+    "IngestConversationRequest",
+    "IngestConversationResponse",
+    "MAX_CONVERSATIONS_PER_REQUEST",
+    "MessagePayload",
+    "ingest_conversations",
+    "router",
+]
+
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ingest", tags=["ingest"])

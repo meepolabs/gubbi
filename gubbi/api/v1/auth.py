@@ -11,6 +11,12 @@ from gubbi.app_state import require_auth_strategies
 from gubbi.auth.scope import SCOPE_GRANTS, check_scope
 from gubbi.auth.strategies import AuthRejected, AuthResult
 
+__all__: list[str] = [
+    "INVALID_TOKEN_MESSAGE",
+    "require_scope",
+    "resolve_user_id",
+]
+
 INVALID_TOKEN_MESSAGE: str = "Invalid or expired token"  # noqa: S105
 
 

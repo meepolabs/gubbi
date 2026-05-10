@@ -25,6 +25,24 @@ from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import slugify, validate_title, validate_topic
 
+__all__: list[str] = [
+    "SaveConversationResult",
+    "count_conversations",
+    "delete_superseded_json_archive",
+    "exists_by_platform_id",
+    "get_conversation",
+    "get_processed_at",
+    "get_title_summary",
+    "get_titles_summaries",
+    "list_conversations",
+    "mark_processed",
+    "read_conversation",
+    "read_conversation_by_id",
+    "read_conversation_by_id_paginated",
+    "save_conversation",
+    "set_platform_metadata",
+]
+
 logger = logging.getLogger(__name__)
 
 

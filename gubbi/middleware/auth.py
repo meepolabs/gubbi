@@ -17,6 +17,8 @@ from gubbi.auth.scope import SCOPE_GRANTS, check_scope
 from gubbi.auth.strategies import AuthRejected, AuthResult, AuthStrategy
 from gubbi.auth_context import current_token_scopes, current_user_id
 
+__all__: list[str] = ["BearerAuthMiddleware"]
+
 
 def _unauthorized(detail: str, resource_metadata_url: str | None = None) -> JSONResponse:
     """Return a 401 JSONResponse with RFC 6750 Bearer challenge."""

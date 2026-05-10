@@ -25,6 +25,8 @@ import asyncpg
 
 from gubbi.audit import Action, record_audit
 
+__all__: list[str] = ["scaffold_operator"]
+
 logger = logging.getLogger(__name__)
 
 

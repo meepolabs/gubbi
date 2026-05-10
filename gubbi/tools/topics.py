@@ -20,6 +20,8 @@ from gubbi.validation import (
     validate_topic,
 )
 
+__all__: list[str] = ["register"]
+
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register topic tools on the MCP server."""

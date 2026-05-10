@@ -26,6 +26,16 @@ from opentelemetry import metrics
 
 from gubbi.telemetry.attrs import BANNED_KEYS, MetricNames
 
+__all__: list[str] = [
+    "AUDIT_PERSISTENCE_FAILURE",
+    "TOOL_CALL_COUNT",
+    "TOOL_CALL_DURATION",
+    "TOOL_RESPONSE_SIZE_CHARS",
+    "record_audit_persistence_failure",
+    "record_tool_call",
+    "record_tool_response_size",
+]
+
 logger = logging.getLogger(__name__)
 
 _METER_NAME = "gubbi"

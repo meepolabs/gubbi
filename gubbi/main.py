@@ -57,6 +57,16 @@ from gubbi.telemetry.logger import initialize_logger
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
 
+__all__: list[str] = [
+    "create_mcp_server",
+    "database_unavailable_handler",
+    "general_exception_handler",
+    "lifespan",
+    "main",
+    "mcp_health",
+    "server",
+]
+
 
 async def _build_content_cipher(
     logger: structlog.stdlib.AsyncBoundLogger,
