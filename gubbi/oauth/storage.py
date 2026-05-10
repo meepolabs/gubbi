@@ -110,6 +110,7 @@ class OAuthStorage:
 
     @property
     def conn(self) -> sqlite3.Connection:
+        """Return the lazily-initialized SQLite connection (schema applied on first access)."""
         if self._conn is None:
             self._conn = sqlite3.connect(
                 str(self.db_path),
@@ -182,6 +183,7 @@ class OAuthStorage:
             self._conn.commit()  # type: ignore[union-attr]
 
     def close(self) -> None:
+        """Release the SQLite connection and the rate-limit storage handle."""
         if self._conn:
             self._conn.close()
             self._conn = None
@@ -192,6 +194,7 @@ class OAuthStorage:
     # ------------------------------------------------------------------
 
     def save_client(self, client_info: OAuthClientInformationFull) -> None:
+        """Insert or replace an OAuth client row keyed by client_id."""
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO clients (client_id, client_info, created_at) "
@@ -201,6 +204,7 @@ class OAuthStorage:
             self.conn.commit()
 
     def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        """Load a client row by client_id, or return None if not registered."""
         with self._lock:
             row = self.conn.execute(
                 "SELECT client_info FROM clients WHERE client_id = ?",
@@ -215,6 +219,7 @@ class OAuthStorage:
     # ------------------------------------------------------------------
 
     def save_auth_code(self, code: str, auth_code: AuthorizationCode) -> None:
+        """Persist an authorization code with its expires_at for indexed cleanup."""
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO auth_codes (code, data, created_at, expires_at) "
@@ -228,6 +233,7 @@ class OAuthStorage:
             self.conn.commit()
 
     def get_auth_code(self, code: str) -> AuthorizationCode | None:
+        """Load an authorization code by code string, or return None if absent/expired."""
         with self._lock:
             row = self.conn.execute(
                 "SELECT data FROM auth_codes WHERE code = ?",
@@ -238,6 +244,7 @@ class OAuthStorage:
         return AuthorizationCode.model_validate_json(row["data"])
 
     def delete_auth_code(self, code: str) -> None:
+        """Single-use code: remove from storage after redemption (or on revocation)."""
         with self._lock:
             self.conn.execute("DELETE FROM auth_codes WHERE code = ?", (code,))
             self.conn.commit()
@@ -247,6 +254,7 @@ class OAuthStorage:
     # ------------------------------------------------------------------
 
     def save_access_token(self, token: str, access_token: AccessToken) -> None:
+        """Persist an access token with its expires_at for indexed cleanup."""
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO access_tokens (token, data, created_at, expires_at) "
@@ -260,6 +268,7 @@ class OAuthStorage:
             self.conn.commit()
 
     def get_access_token(self, token: str) -> AccessToken | None:
+        """Load an access token by token string, or return None if absent."""
         with self._lock:
             row = self.conn.execute(
                 "SELECT data FROM access_tokens WHERE token = ?",
@@ -270,6 +279,7 @@ class OAuthStorage:
         return AccessToken.model_validate_json(row["data"])
 
     def delete_access_token(self, token: str) -> None:
+        """Revoke an access token by deleting its row."""
         with self._lock:
             self.conn.execute("DELETE FROM access_tokens WHERE token = ?", (token,))
             self.conn.commit()
@@ -279,6 +289,7 @@ class OAuthStorage:
     # ------------------------------------------------------------------
 
     def save_refresh_token(self, token: str, refresh_token: RefreshToken) -> None:
+        """Persist a refresh token with its expires_at for indexed cleanup."""
         with self._lock:
             self.conn.execute(
                 "INSERT OR REPLACE INTO refresh_tokens (token, data, created_at, expires_at) "
@@ -292,6 +303,7 @@ class OAuthStorage:
             self.conn.commit()
 
     def get_refresh_token(self, token: str) -> RefreshToken | None:
+        """Load a refresh token by token string, or return None if absent."""
         with self._lock:
             row = self.conn.execute(
                 "SELECT data FROM refresh_tokens WHERE token = ?",
@@ -302,6 +314,7 @@ class OAuthStorage:
         return RefreshToken.model_validate_json(row["data"])
 
     def delete_refresh_token(self, token: str) -> None:
+        """Revoke a refresh token by deleting its row (paired access tokens cleared separately)."""
         with self._lock:
             self.conn.execute("DELETE FROM refresh_tokens WHERE token = ?", (token,))
             self.conn.commit()
@@ -376,6 +389,7 @@ class OAuthStorage:
         return [row["access_token"] for row in rows]
 
     def delete_token_pair_by_access(self, access_token: str) -> None:
+        """Drop the (access, refresh) pairing rows referencing this access token."""
         with self._lock:
             self.conn.execute(
                 "DELETE FROM token_pairs WHERE access_token = ?",
@@ -384,6 +398,7 @@ class OAuthStorage:
             self.conn.commit()
 
     def delete_token_pair_by_refresh(self, refresh_token: str) -> None:
+        """Drop the (access, refresh) pairing rows referencing this refresh token."""
         with self._lock:
             self.conn.execute(
                 "DELETE FROM token_pairs WHERE refresh_token = ?",
@@ -491,8 +506,7 @@ class OAuthStorage:
     # ------------------------------------------------------------------
 
     def cleanup_expired(self) -> int:
-        """Delete expired auth codes, access tokens, refresh tokens, and prune
-        stale rate-limit events.
+        """Delete expired tokens/codes and prune stale rate-limit events.
 
         Uses indexed expires_at for O(log n) per-table deletion.
         Also cascades: access tokens paired with an expired refresh token are

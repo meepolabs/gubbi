@@ -10,6 +10,7 @@ import bcrypt
 
 
 def main() -> None:
+    """Prompt for an operator password and emit a bcrypt hash to paste into a secret manager."""
     password = getpass.getpass("Enter operator password: ")
     confirm = getpass.getpass("Confirm password: ")
     if password != confirm:

@@ -26,6 +26,7 @@ class ConversationMeta(BaseModel):
     @field_validator("topic")
     @classmethod
     def check_topic(cls, v: str) -> str:
+        """Validate conversation topic path against the shared topic-rules grammar."""
         return validate_topic(v)
 
 

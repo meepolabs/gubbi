@@ -45,12 +45,14 @@ class JournalOAuthProvider(
         self.server_url = server_url.rstrip("/")
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        """Look up a registered OAuth client by client_id, or return None."""
         return self.storage.get_client(client_id)
 
     async def register_client(
         self,
         client_info: OAuthClientInformationFull,
     ) -> None:
+        """Persist a newly-registered OAuth client (RFC 7591 dynamic registration)."""
         self.storage.save_client(client_info)
 
     async def authorize(
@@ -80,6 +82,7 @@ class JournalOAuthProvider(
         client: OAuthClientInformationFull,
         authorization_code: str,
     ) -> AuthorizationCode | None:
+        """Load an auth code bound to this client; reject mismatched client_id (timing-safe)."""
         code = self.storage.get_auth_code(authorization_code)
         if code is None:
             return None
@@ -151,6 +154,7 @@ class JournalOAuthProvider(
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
+        """Load a refresh token bound to this client; reject mismatched client_id."""
         token = self.storage.get_refresh_token(refresh_token)
         if token is None:
             return None

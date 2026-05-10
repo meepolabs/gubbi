@@ -65,6 +65,7 @@ class ExtractionService:
         messages: list[LLMMessage],
         existing_topics: list[str],
     ) -> CategorizationResult:
+        """Pick or coin a topic path for the conversation; return path + summary + confidence."""
         system_prompt = self._read_prompt("categorize.md")
         user_content = json.dumps(
             {
@@ -88,6 +89,7 @@ class ExtractionService:
         messages: list[LLMMessage],
         topic: str,
     ) -> list[ExtractedEntry]:
+        """Mine the conversation for journal-worthy entries (decisions, milestones, facts)."""
         system_prompt = self._read_prompt("extract_entries.md")
         user_content = json.dumps(
             {

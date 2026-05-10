@@ -89,10 +89,12 @@ class ContentCipher:
 
     @property
     def active_version(self) -> int:
+        """Key version used for new encryptions."""
         return self._active_version
 
     @property
     def known_versions(self) -> frozenset[int]:
+        """Set of key versions this cipher can decrypt with."""
         return frozenset(self._keys)
 
     def encrypt(self, plaintext: str, field_kind: str = "unknown") -> tuple[bytes, bytes]:

@@ -30,22 +30,31 @@ __all__ = [
 
 
 class HydraCache(Protocol):
-    def get(self, token_fp: str) -> TokenClaims | None: ...
+    def get(self, token_fp: str) -> TokenClaims | None:
+        """Return cached claims for a token fingerprint, or None on miss."""
+        ...
 
-    def set(self, token_fp: str, claims: TokenClaims) -> None: ...
+    def set(self, token_fp: str, claims: TokenClaims) -> None:
+        """Store introspection claims under a token fingerprint."""
+        ...
 
 
 class InMemoryHydraCache:
+    """TTL-bounded in-process cache for Hydra introspection results."""
+
     def __init__(self, ttl_seconds: int = 30, maxsize: int = 10_000) -> None:
+        """Build an LRU+TTL cache; defaults: 30s TTL, 10k entries."""
         self._cache = TTLCache(maxsize=maxsize, ttl=ttl_seconds)
 
     def get(self, token_fp: str) -> TokenClaims | None:
+        """Return cached claims by fingerprint, or None on miss/expiry."""
         val = self._cache.get(token_fp)
         if val is None:
             return None
         return cast("TokenClaims", val)
 
     def set(self, token_fp: str, claims: TokenClaims) -> None:
+        """Insert claims keyed by token fingerprint."""
         self._cache[token_fp] = claims
 
 
@@ -174,6 +183,7 @@ class HydraIntrospector:
         return claims
 
     async def introspect(self, token: str) -> TokenClaims:
+        """Resolve a bearer token to claims via Hydra, with cache + single-flight de-dup."""
         cache_key, fp = _token_digest(token)
 
         # cache hit
