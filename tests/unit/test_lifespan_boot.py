@@ -205,9 +205,12 @@ def _patch_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
     # minimal-env override below disables.
 
     # OAuth: stub setup_oauth to skip SQLite + route registration.
+    # setup_oauth is async def, so AsyncMock is required; MagicMock would
+    # return a plain tuple and `await setup_oauth(...)` would raise
+    # TypeError: 'tuple' object can't be awaited.
     oauth_storage_stub = MagicMock()
-    oauth_storage_stub.close = MagicMock()
-    setup_oauth_mock = MagicMock(return_value=(oauth_storage_stub, None))
+    oauth_storage_stub.close = AsyncMock()
+    setup_oauth_mock = AsyncMock(return_value=(oauth_storage_stub, None))
     monkeypatch.setattr("gubbi.main.setup_oauth", setup_oauth_mock)
 
     # OTel + structlog initializers must be inert -- production wires the

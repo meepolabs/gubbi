@@ -102,7 +102,7 @@ def create_login_handler(
 
         # POST: rate-limit check before any work
         if (
-            storage.count_rate_limit_events(event_key, LOGIN_LOCKOUT_WINDOW_SECS)
+            await storage.count_rate_limit_events(event_key, LOGIN_LOCKOUT_WINDOW_SECS)
             >= LOGIN_MAX_FAILURES
         ):
             await log.warning(
@@ -128,7 +128,7 @@ def create_login_handler(
         password = str(form.get("password", ""))
 
         # Validate client exists and redirect_uri is registered before touching credentials
-        client = storage.get_client(client_id)
+        client = await storage.get_client(client_id)
         if client is None:
             await log.warning("Unknown client_id in login form", client_id=client_id)
             return HTMLResponse("Invalid client", status_code=400)
@@ -147,7 +147,7 @@ def create_login_handler(
             password_hash.encode("utf-8"),
         ):
             # Record the failure for per-IP rate limiting (CRITICAL-2)
-            storage.record_rate_limit_event(event_key)
+            await storage.record_rate_limit_event(event_key)
             await log.warning("Failed login attempt", client_host=client_host)
             csrf_token = secrets.token_urlsafe(32)
             return render_login_page(
@@ -174,7 +174,7 @@ def create_login_handler(
             redirect_uri=redirect_uri,
             redirect_uri_provided_explicitly=True,
         )
-        storage.save_auth_code(code, auth_code)
+        await storage.save_auth_code(code, auth_code)
 
         await log.info("Authorization code issued", client_host=client_host)
 

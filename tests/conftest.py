@@ -190,13 +190,13 @@ async def clean_pool(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Pool]:
         )
 
 
-@pytest.fixture
-def oauth_storage(tmp_path: Path) -> Iterator[OAuthStorage]:
+@pytest_asyncio.fixture
+async def oauth_storage(tmp_path: Path) -> AsyncIterator[OAuthStorage]:
     """OAuthStorage with a temp database."""
     db = OAuthStorage(tmp_path / "oauth.db")
-    _ = db.conn  # Force schema init
+    await db.initialize()  # Force schema init
     yield db
-    db.close()
+    await db.close()
 
 
 @pytest.fixture

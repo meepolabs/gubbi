@@ -39,26 +39,26 @@ def _make_settings(
     )  # type: ignore[call-arg]
 
 
-def _make_storage(tmp_path: Path) -> OAuthStorage:
+async def _make_storage_async(tmp_path: Path) -> OAuthStorage:
     storage = OAuthStorage(tmp_path / "oauth.db")
-    _ = storage.conn  # Force schema init
+    await storage.initialize()
     return storage
 
 
 class TestSelfhostRegister:
-    def test_returns_token_validator(self, tmp_path: Path) -> None:
+    async def test_returns_token_validator(self, tmp_path: Path) -> None:
         settings = _make_settings()
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        result = register(app, storage, settings)
-        storage.close()
+        storage = await _make_storage_async(tmp_path)
+        result = await register(app, storage, settings)
+        await storage.close()
         assert callable(result)
 
-    def test_all_oauth_routes_present(self, tmp_path: Path) -> None:
+    async def test_all_oauth_routes_present(self, tmp_path: Path) -> None:
         settings = _make_settings()
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        register(app, storage, settings)
+        storage = await _make_storage_async(tmp_path)
+        await register(app, storage, settings)
         expected_paths = [
             "/authorize",
             "/token",
@@ -71,12 +71,13 @@ class TestSelfhostRegister:
             for r in app.routes
             if isinstance(r, Route)
         }
-        storage.close()
+        await storage.close()
         for p in expected_paths:
             assert p in registered, f"Missing route {p}; got: {registered}"
 
-    def test_token_validator_rejects_unknown(self, tmp_path: Path) -> None:
-        storage = _make_storage(tmp_path)
+    async def test_token_validator_rejects_unknown(self, tmp_path: Path) -> None:
+        storage = await _make_storage_async(tmp_path)
         validator = _make_token_validator(storage)
-        storage.close()
-        assert validator("nonexistent") is None
+        result = await validator("nonexistent")
+        await storage.close()
+        assert result is None

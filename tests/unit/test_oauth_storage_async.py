@@ -1,0 +1,206 @@
+"""Async-concurrency unit tests for OAuthStorage.
+
+Covers three scenarios that only manifest under asyncio concurrency:
+
+1. Concurrent saves + reads across 50 coroutines -- no row is lost.
+2. Lazy-init race -- two parallel first-callers converge to a single open
+   connection (initialize() is idempotent).
+3. Atomic rotation interleave -- rotate_refresh_token leaves no half-state
+   even when two coroutines race.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+
+import pytest
+import pytest_asyncio
+from mcp.server.auth.provider import AccessToken, RefreshToken
+from mcp.shared.auth import OAuthClientInformationFull
+
+from gubbi.oauth.storage import OAuthStorage
+
+
+def _access_token(token: str, client_id: str = "c") -> AccessToken:
+    return AccessToken(
+        token=token,
+        client_id=client_id,
+        scopes=["journal:read"],
+        expires_at=int(time.time()) + 3600,
+    )
+
+
+def _refresh_token(token: str, client_id: str = "c") -> RefreshToken:
+    return RefreshToken(
+        token=token,
+        client_id=client_id,
+        scopes=["journal:read"],
+        expires_at=int(time.time()) + 86400,
+    )
+
+
+def _client(client_id: str = "client-1") -> OAuthClientInformationFull:
+    return OAuthClientInformationFull(
+        client_id=client_id,
+        client_secret="test-secret",
+        redirect_uris=["http://localhost/callback"],
+    )
+
+
+async def _cancel_inside_atomic(storage: OAuthStorage) -> None:
+    task = asyncio.current_task()
+    assert task is not None
+    async with storage._atomic():
+        task.cancel()
+        await asyncio.sleep(0)
+
+
+@pytest_asyncio.fixture
+async def storage(tmp_path: Path) -> OAuthStorage:
+    """Initialized OAuthStorage; closed after each test."""
+    s = OAuthStorage(tmp_path / "oauth.db")
+    await s.initialize()
+    yield s
+    await s.close()
+
+
+class TestConcurrentSaveAndGet:
+    async def test_fifty_parallel_saves_all_land(self, storage: OAuthStorage) -> None:
+        """50 concurrent save_access_token coroutines must all persist successfully."""
+        tokens = [f"tok-{i:03d}" for i in range(50)]
+
+        async def save(t: str) -> None:
+            await storage.save_access_token(t, _access_token(t))
+
+        await asyncio.gather(*[save(t) for t in tokens])
+
+        for t in tokens:
+            row = await storage.get_access_token(t)
+            assert row is not None, f"token {t!r} not found after concurrent saves"
+
+    async def test_parallel_reads_after_write_all_see_row(self, storage: OAuthStorage) -> None:
+        """A single write followed by 50 concurrent reads must all return the row."""
+        await storage.save_access_token("shared-tok", _access_token("shared-tok"))
+
+        results = await asyncio.gather(*[storage.get_access_token("shared-tok") for _ in range(50)])
+        assert all(r is not None for r in results)
+        assert all(r.token == "shared-tok" for r in results)  # type: ignore[union-attr]
+
+
+class TestLazyInitRace:
+    async def test_two_parallel_first_callers_produce_single_connection(
+        self, tmp_path: Path
+    ) -> None:
+        """Calling initialize() concurrently must not open the connection twice."""
+        s = OAuthStorage(tmp_path / "race.db")
+        try:
+            # Neither has run; race them.
+            await asyncio.gather(s.initialize(), s.initialize())
+            # If both opens happened, _initialized would be set twice -- but the
+            # lock ensures exactly one open. Verify by checking a simple query works
+            # and the storage is usable (schema applied once, no "table already exists" error).
+            await s.save_access_token("probe", _access_token("probe"))
+            row = await s.get_access_token("probe")
+            assert row is not None
+        finally:
+            await s.close()
+
+    async def test_initialize_is_idempotent(self, storage: OAuthStorage) -> None:
+        """Calling initialize() on an already-initialized storage is a no-op."""
+        # Should not raise, should not double-migrate, and storage stays usable.
+        await storage.initialize()
+        await storage.initialize()
+        await storage.save_access_token("idempotent", _access_token("idempotent"))
+        assert await storage.get_access_token("idempotent") is not None
+
+    async def test_close_then_initialize_reapplies_schema(self, tmp_path: Path) -> None:
+        """Closing and reinitializing must reapply schema on the new connection."""
+        storage = OAuthStorage(tmp_path / "reinit.db")
+        try:
+            await storage.initialize()
+            await storage.close()
+            await storage.initialize()
+            await storage.save_client(_client())
+            assert await storage.get_client("client-1") is not None
+        finally:
+            await storage.close()
+
+    async def test_atomic_rolls_back_on_cancellation(self, tmp_path: Path) -> None:
+        """CancelledError inside _atomic must roll back the open transaction."""
+        storage = OAuthStorage(tmp_path / "cancel.db")
+        try:
+            await storage.initialize()
+            with pytest.raises(asyncio.CancelledError):
+                await _cancel_inside_atomic(storage)
+            conn = await storage._get_conn()
+            assert not conn.in_transaction
+            async with storage._lock:
+                await conn.execute("BEGIN IMMEDIATE")
+                await conn.rollback()
+        finally:
+            await storage.close()
+
+
+class TestAtomicRotationInterleave:
+    async def test_rotation_leaves_no_half_state_under_concurrency(
+        self, storage: OAuthStorage
+    ) -> None:
+        """Two rotate_refresh_token calls on different pairs must not interleave writes."""
+        # Seed two independent (access, refresh) pairs.
+        await storage.save_issued_token_pair(
+            "at-a", _access_token("at-a"), "rt-a", _refresh_token("rt-a")
+        )
+        await storage.save_issued_token_pair(
+            "at-b", _access_token("at-b"), "rt-b", _refresh_token("rt-b")
+        )
+
+        async def rotate_a() -> None:
+            await storage.rotate_refresh_token(
+                "rt-a",
+                "at-a2",
+                _access_token("at-a2"),
+                "rt-a2",
+                _refresh_token("rt-a2"),
+            )
+
+        async def rotate_b() -> None:
+            await storage.rotate_refresh_token(
+                "rt-b",
+                "at-b2",
+                _access_token("at-b2"),
+                "rt-b2",
+                _refresh_token("rt-b2"),
+            )
+
+        await asyncio.gather(rotate_a(), rotate_b())
+
+        # Old tokens must be gone.
+        assert await storage.get_access_token("at-a") is None
+        assert await storage.get_access_token("at-b") is None
+        assert await storage.get_refresh_token("rt-a") is None
+        assert await storage.get_refresh_token("rt-b") is None
+
+        # New tokens must be present.
+        assert await storage.get_access_token("at-a2") is not None
+        assert await storage.get_access_token("at-b2") is not None
+        assert await storage.get_refresh_token("rt-a2") is not None
+        assert await storage.get_refresh_token("rt-b2") is not None
+
+    async def test_rotation_old_tokens_gone_new_tokens_present(self, storage: OAuthStorage) -> None:
+        """Sequential rotation: old pair removed, new pair inserted atomically."""
+        await storage.save_issued_token_pair(
+            "at1", _access_token("at1"), "rt1", _refresh_token("rt1")
+        )
+        await storage.rotate_refresh_token(
+            "rt1",
+            "at2",
+            _access_token("at2"),
+            "rt2",
+            _refresh_token("rt2"),
+        )
+        assert await storage.get_access_token("at1") is None
+        assert await storage.get_refresh_token("rt1") is None
+        assert await storage.get_access_token("at2") is not None
+        assert await storage.get_refresh_token("rt2") is not None

@@ -31,7 +31,7 @@ Deployment posture (D3 from Task CO.17a -- locked by Lead):
 from __future__ import annotations
 
 import secrets
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
@@ -266,7 +266,7 @@ class SelfHostStrategy:
 
     def __init__(
         self,
-        token_validator: Callable[[str], frozenset[str] | None] | None,
+        token_validator: Callable[[str], Awaitable[frozenset[str] | None]] | None,
         operator_user_id: UUID | None,
     ) -> None:
         self.name = "selfhost"
@@ -278,7 +278,7 @@ class SelfHostStrategy:
         if self.token_validator is None:
             return None
         token = _extract_bearer_token(request)
-        granted = self.token_validator(token)
+        granted = await self.token_validator(token)
         if granted is None:
             return None
         if self.operator_user_id is None:

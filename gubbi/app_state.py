@@ -35,7 +35,7 @@ from typing import TYPE_CHECKING, cast
 from fastapi import Request
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
     from uuid import UUID
 
     from redis.asyncio import Redis as RedisClient
@@ -156,20 +156,20 @@ def get_optional_hydra_introspector(request: Request) -> HydraIntrospector | Non
 
 def require_selfhost_token_validator(
     request: Request,
-) -> Callable[[str], frozenset[str] | None]:
+) -> Callable[[str], Awaitable[frozenset[str] | None]]:
     """Return ``request.app.state.selfhost_token_validator`` or raise if absent."""
     value = getattr(request.app.state, "selfhost_token_validator", None)
     if value is None:
         raise RuntimeError("selfhost_token_validator not initialised")
-    return cast("Callable[[str], frozenset[str] | None]", value)
+    return cast("Callable[[str], Awaitable[frozenset[str] | None]]", value)
 
 
 def get_optional_selfhost_token_validator(
     request: Request,
-) -> Callable[[str], frozenset[str] | None] | None:
+) -> Callable[[str], Awaitable[frozenset[str] | None]] | None:
     """Return ``request.app.state.selfhost_token_validator`` or ``None``."""
     return cast(
-        "Callable[[str], frozenset[str] | None] | None",
+        "Callable[[str], Awaitable[frozenset[str] | None]] | None",
         getattr(request.app.state, "selfhost_token_validator", None),
     )
 

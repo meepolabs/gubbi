@@ -35,8 +35,9 @@ cryptography = ">=46,<47"  # TIGHT: crypto primitives; major bumps deprecate alg
 # Database migrations
 alembic = "^1.14.0"
 sqlalchemy = "^2.0.0"
-psycopg = {version = "^3.2.0", extras = ["binary"]}  # Required by alembic env.py URL rewrite to postgresql+psycopg://.
-cachetools = ">=5.5,<6"
+   psycopg = {version = "^3.2.0", extras = ["binary"]}  # Required by alembic env.py URL rewrite to postgresql+psycopg://.
+   aiosqlite = ">=0.22,<0.23"  # TIGHT: 0.x; pre-1.0 minors have shipped Connection/cursor API tweaks. Match tokenizers/httpx pin style.
+   cachetools = ">=5.5,<6"
 
 # OpenTelemetry instrumentation packages are pre-1.0 betas with breaking
 # instrumentor-class signature changes between minor versions. Cap below
