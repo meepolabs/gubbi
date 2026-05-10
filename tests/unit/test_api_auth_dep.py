@@ -7,7 +7,7 @@ Uses strategy-based auth via ``request.app.state.auth_strategies``.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock
 from uuid import UUID
 
 import pytest
@@ -38,7 +38,7 @@ def _build_strategies(
     api_key_scopes: list[str] | None,
     operator_user_id: UUID | None,
     hydra_introspector: AsyncMock | None,
-    selfhost_token_validator: MagicMock | None,
+    selfhost_token_validator: AsyncMock | None,
     gateway_require_signature: bool,
     gateway_secret: bytes | None,
 ) -> list:  # AuthStrategy -- avoid forward ref issues in test module
@@ -84,7 +84,7 @@ def _make_app(
     api_key_scopes: list[str] | None = None,
     operator_user_id: UUID | None = TEST_OP_ID,
     hydra_introspector: AsyncMock | None = None,
-    selfhost_token_validator: MagicMock | None = None,
+    selfhost_token_validator: AsyncMock | None = None,
     require_scope_arg: str | None = None,
     gateway_require_signature: bool = False,
     gateway_secret: bytes | None = None,
@@ -408,10 +408,10 @@ class TestSelfhostOAuthMode:
     """Auth mode (d): self-host OAuth token validation."""
 
     @pytest.fixture
-    def mock_validator(self) -> MagicMock:
-        return MagicMock(return_value=frozenset({"journal:read", "journal:write"}))
+    def mock_validator(self) -> AsyncMock:
+        return AsyncMock(return_value=frozenset({"journal:read", "journal:write"}))
 
-    async def test_valid_token_returns_user_and_scopes(self, mock_validator: MagicMock) -> None:
+    async def test_valid_token_returns_user_and_scopes(self, mock_validator: AsyncMock) -> None:
         app = _make_app(
             api_key="",
             api_key_scopes=[],
@@ -425,7 +425,7 @@ class TestSelfhostOAuthMode:
         assert data["user_id"] == str(TEST_OP_ID)
         assert sorted(data["scopes"]) == ["journal:read", "journal:write"]
 
-    async def test_rejected_token_returns_401(self, mock_validator: MagicMock) -> None:
+    async def test_rejected_token_returns_401(self, mock_validator: AsyncMock) -> None:
         mock_validator.return_value = None
         app = _make_app(
             api_key="",
@@ -448,7 +448,7 @@ class TestSelfhostOAuthMode:
         resp = client.get("/test-auth", headers={"Authorization": "Bearer some_token"})
         assert resp.status_code == 401
 
-    async def test_no_operator_returns_503(self, mock_validator: MagicMock) -> None:
+    async def test_no_operator_returns_503(self, mock_validator: AsyncMock) -> None:
         app = _make_app(
             api_key="",
             api_key_scopes=[],
@@ -570,7 +570,7 @@ class TestTrustGatewayBoundarySecurity:
 
     async def test_selfhost_rejected_when_trust_gateway(self) -> None:
         """When trust_gateway=True, a self-host token should not be accepted."""
-        mock_validator = MagicMock(return_value=frozenset({"journal:read"}))
+        mock_validator = AsyncMock(return_value=frozenset({"journal:read"}))
         app = _make_app(
             trust_gateway=True,
             api_key="",

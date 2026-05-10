@@ -6,8 +6,8 @@ classes share the same SQLite db file (WAL mode permits concurrent readers
 and one writer); the `rate_limit_events` table DDL still lives in
 `OAuthStorage._init_schema` so schema management stays centralized.
 
-`RateLimitStorage` owns its own `threading.Lock` and connection -- it does
-NOT share `OAuthStorage._lock` because the lock scope is per-connection.
+`RateLimitStorage` owns its own `asyncio.Lock` and aiosqlite connection -- it
+does NOT share `OAuthStorage._lock` because the lock scope is per-connection.
 
 Prerequisite: the `rate_limit_events` table is created by
 `OAuthStorage._init_schema`. Callers MUST construct (and trigger schema
@@ -20,10 +20,11 @@ with a clear remediation hint when it does not.
 
 from __future__ import annotations
 
-import sqlite3
-import threading
+import asyncio
 import time
 from pathlib import Path
+
+import aiosqlite
 
 from gubbi.storage.constants import DB_BUSY_TIMEOUT_MS
 
@@ -42,26 +43,24 @@ class RateLimitStorage:
 
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        self._conn: sqlite3.Connection | None = None
-        self._lock = threading.Lock()
+        self._conn: aiosqlite.Connection | None = None
+        self._lock = asyncio.Lock()
         self._schema_verified = False
 
-    @property
-    def conn(self) -> sqlite3.Connection:
-        if self._conn is None:
-            self._conn = sqlite3.connect(
-                str(self.db_path),
-                check_same_thread=False,
-            )
-            self._conn.row_factory = sqlite3.Row
-            self._conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
-        if not self._schema_verified:
-            self._verify_schema(self._conn)
-            self._schema_verified = True
+    async def _get_conn(self) -> aiosqlite.Connection:
+        """Return the lazily-initialized aiosqlite connection."""
+        async with self._lock:
+            if self._conn is None:
+                self._conn = await aiosqlite.connect(str(self.db_path))
+                self._conn.row_factory = aiosqlite.Row
+                await self._conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+            if not self._schema_verified:
+                await self._verify_schema(self._conn)
+                self._schema_verified = True
         return self._conn
 
     @staticmethod
-    def _verify_schema(conn: sqlite3.Connection) -> None:
+    async def _verify_schema(conn: aiosqlite.Connection) -> None:
         """Raise RuntimeError if the `rate_limit_events` table is absent.
 
         The table is owned by `OAuthStorage._init_schema`; if it's missing,
@@ -69,9 +68,10 @@ class RateLimitStorage:
         initializing `OAuthStorage` on the same db_path. Surface a clear
         remediation hint instead of a raw `sqlite3.OperationalError`.
         """
-        row = conn.execute(
+        cur = await conn.execute(
             "SELECT name FROM sqlite_master " "WHERE type = 'table' AND name = 'rate_limit_events'"
-        ).fetchone()
+        )
+        row = await cur.fetchone()
         if row is None:
             raise RuntimeError(
                 "rate_limit_events table not initialised; construct "
@@ -79,40 +79,62 @@ class RateLimitStorage:
             )
 
     def close(self) -> None:
-        if self._conn is not None:
-            self._conn.close()
-            self._conn = None
-        # Re-verify schema if the connection is later reopened against a
-        # potentially-different db file state.
+        """Synchronously mark connection for closure.
+
+        NOTE: aiosqlite connections are closed asynchronously; callers that
+        hold a running event loop should use ``await storage.aclose()`` instead.
+        This sync form is kept for teardown contexts (e.g. pytest fixtures)
+        where the loop may no longer be running. It resets the internal state
+        so the next ``_get_conn()`` call opens a fresh connection.
+
+        Re-verify schema if the connection is later reopened against a
+        potentially-different db file state.
+        """
+        # Reset the connection reference so next _get_conn re-opens.
+        # The underlying aiosqlite worker thread will be reaped when the
+        # Connection object is garbage-collected.
+        self._conn = None
         self._schema_verified = False
 
-    def record_event(self, event_key: str) -> None:
+    async def aclose(self) -> None:
+        """Async close: flush and terminate the aiosqlite worker thread."""
+        async with self._lock:
+            if self._conn is not None:
+                await self._conn.close()
+                self._conn = None
+            self._schema_verified = False
+
+    async def record_event(self, event_key: str) -> None:
         """Record a single rate-limit event (e.g. 'login_failure:1.2.3.4')."""
-        with self._lock:
-            self.conn.execute(
+        conn = await self._get_conn()
+        async with self._lock:
+            await conn.execute(
                 "INSERT INTO rate_limit_events (event_key, occurred_at) VALUES (?, ?)",
                 (event_key, int(time.time())),
             )
-            self.conn.commit()
+            await conn.commit()
 
-    def count_events(self, event_key: str, window_secs: int) -> int:
+    async def count_events(self, event_key: str, window_secs: int) -> int:
         """Count events for a key that occurred within the last window_secs seconds."""
-        with self._lock:
+        conn = await self._get_conn()
+        async with self._lock:
             cutoff = int(time.time()) - window_secs
-            row = self.conn.execute(
+            cur = await conn.execute(
                 "SELECT COUNT(*) AS c FROM rate_limit_events "
                 "WHERE event_key = ? AND occurred_at >= ?",
                 (event_key, cutoff),
-            ).fetchone()
-            return int(row["c"]) if row else 0
+            )
+            row = await cur.fetchone()
+        return int(row["c"]) if row else 0
 
-    def prune(self, retention_secs: int) -> int:
+    async def prune(self, retention_secs: int) -> int:
         """Delete events older than retention_secs. Returns rows deleted."""
-        with self._lock:
+        conn = await self._get_conn()
+        async with self._lock:
             cutoff = int(time.time()) - retention_secs
-            cur = self.conn.execute(
+            cur = await conn.execute(
                 "DELETE FROM rate_limit_events WHERE occurred_at < ?",
                 (cutoff,),
             )
-            self.conn.commit()
+            await conn.commit()
             return int(cur.rowcount)

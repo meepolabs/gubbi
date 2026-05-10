@@ -7,22 +7,22 @@ storage handle so that the lifespan's ``finally:`` block can close it.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import logging
+from collections.abc import Awaitable, Callable
 
-import structlog
 from fastapi import FastAPI
 
 from gubbi.config import Settings
 from gubbi.oauth.router import register_oauth_routes
 from gubbi.oauth.storage import OAuthStorage
 
-logger = structlog.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
-def setup_oauth(
+async def setup_oauth(
     app: FastAPI,
     settings: Settings,
-) -> tuple[OAuthStorage, Callable[[str], frozenset[str] | None] | None]:
+) -> tuple[OAuthStorage, Callable[[str], Awaitable[frozenset[str] | None]] | None]:
     """Set up OAuth storage and routes.
 
     Performs the three steps from the lifespan body (lines 331-339):
@@ -35,13 +35,13 @@ def setup_oauth(
     block so the caller retains control over resource lifecycle.
     """
     oauth_storage = OAuthStorage(settings.oauth_db_path)
-    _ = oauth_storage.conn  # trigger lazy init
+    await oauth_storage.initialize()
 
-    expired = oauth_storage.cleanup_expired()
+    expired = await oauth_storage.cleanup_expired()
     if expired > 0:
-        logger.info("OAuth cleanup", expired_tokens=expired)
+        logger.info("OAuth cleanup expired_tokens=%d", expired)
 
-    token_validator = register_oauth_routes(app, oauth_storage, settings)
+    token_validator = await register_oauth_routes(app, oauth_storage, settings)
     if token_validator:
         logger.info("OAuth endpoints registered")
 

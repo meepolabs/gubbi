@@ -81,7 +81,7 @@ def _build_test_strategies(
     *,
     api_key: str = "",
     introspector: HydraIntrospector | None = None,
-    selfhost_token_validator: Callable[[str], frozenset[str] | None] | None = None,
+    selfhost_token_validator: Callable[[str], Awaitable[frozenset[str] | None]] | None = None,
     operator_user_id: UUID | None = TEST_OP_ID,
     trust_gateway: bool = False,
     gateway_secret: bytes | None = None,
@@ -392,7 +392,7 @@ class TestMissingAndOversizedTokens:
 
 class TestSelfhostValidator:
     async def test_selfhost_validator_rejects(self) -> None:
-        mock_validator = MagicMock(return_value=None)
+        mock_validator = AsyncMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             strategies=[
@@ -412,7 +412,7 @@ class TestSelfhostValidator:
         mock_validator.assert_called_once()
 
     async def test_selfhost_validator_accepts(self) -> None:
-        mock_validator = MagicMock(return_value=frozenset({"journal:read", "journal:write"}))
+        mock_validator = AsyncMock(return_value=frozenset({"journal:read", "journal:write"}))
         mw = BearerAuthMiddleware(
             _asgi_app(),
             strategies=[
@@ -427,7 +427,7 @@ class TestSelfhostValidator:
 
     async def test_ory_token_no_introspector_falls_to_selfhost_validator(self) -> None:
         """Ory token with no introspector falls through to self-host validator check."""
-        mock_validator = MagicMock(return_value=None)
+        mock_validator = AsyncMock(return_value=None)
         mw = BearerAuthMiddleware(
             _asgi_app(),
             strategies=[

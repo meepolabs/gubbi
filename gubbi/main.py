@@ -266,7 +266,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     operator_user_id = app_ctx.operator_user_id
 
     # OAuth -- storage, routes, expired-token cleanup.
-    oauth_storage, token_validator = setup_oauth(app, settings)
+    oauth_storage, token_validator = await setup_oauth(app, settings)
     if token_validator:
         await logger.info("OAuth endpoints registered")
 
@@ -374,7 +374,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         if admin_pool is not None:
             await admin_pool.close()
         await pool.close()
-        oauth_storage.close()
+        await oauth_storage.close()
         # Explicit two-step Redis teardown: redis_client.aclose() does NOT drain
         # an externally-supplied ConnectionPool (redis-py: "If a pool is passed
         # in, do not close it"). Disconnect the pool ourselves to avoid

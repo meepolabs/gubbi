@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -42,20 +43,19 @@ def test_oauth_backfill_caps_at_10000(tmp_path: Path) -> None:
     conn.commit()
     conn.close()
 
-    # Re-open via OAuthStorage — this triggers backfill.
+    # Re-open via OAuthStorage -- this triggers backfill.
     storage = OAuthStorage(db_path)
-    _ = storage.conn  # forces lazy init -> migrations + backfill
 
-    # Count how many rows now have expires_at set.
-    result = storage.conn.execute(
-        "SELECT COUNT(*) AS c FROM access_tokens WHERE expires_at IS NOT NULL"
-    )
-    row = result.fetchone()
-    count_with_expires = row["c"] if row else 0
+    async def _run():
+        await storage.initialize()
+        conn2 = await storage._get_conn()
+        async with storage._lock:
+            cur = await conn2.execute(
+                "SELECT COUNT(*) AS c FROM access_tokens WHERE expires_at IS NOT NULL"
+            )
+            row = await cur.fetchone()
+        count = int(row["c"]) if row else 0
+        assert count == 10000, f"Expected exactly 10000 backfilled rows, got {count}"
+        await storage.close()
 
-    # Should be capped at 10000 (excess rows remain NULL).
-    assert (
-        count_with_expires == 10000
-    ), f"Expected exactly 10000 backfilled rows, got {count_with_expires}"
-
-    storage.close()
+    asyncio.run(_run())
