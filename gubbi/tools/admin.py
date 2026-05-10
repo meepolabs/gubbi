@@ -5,6 +5,7 @@ import logging
 import time
 from datetime import UTC
 from datetime import datetime as datetime_cls
+from typing import Any
 
 import asyncpg
 
@@ -49,7 +50,9 @@ async def _db_reindex_cooldown(pool: asyncpg.Pool) -> int | None:
     return None
 
 
-async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentCipher) -> dict:
+async def _run_reindex(
+    app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentCipher
+) -> dict[str, Any]:
     """Rebuild semantic embeddings for unindexed entries.
 
     Callers MUST acquire ``pg_try_advisory_lock(_REINDEX_ADVISORY_LOCK_KEY)``

@@ -235,7 +235,7 @@ async def extract_conversation(
     ctx: ExtractionContext,
     conversation_id: int,
     user_id: str,
-) -> dict:
+) -> dict[str, Any]:
     """Arq job: categorize a conversation and write structured journal entries.
 
     NOTE: conversation_id is ``int`` (DB integer primary key) even though the

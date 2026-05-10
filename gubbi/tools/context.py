@@ -134,7 +134,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:read")
-    async def journal_briefing() -> dict:
+    async def journal_briefing() -> dict[str, Any]:
         """Get the user's identity, recent activity, and topic list — the complete
         context for this person.
 
@@ -187,7 +187,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
 
         cipher = require_cipher(app_ctx)
-        key_facts: list[dict] | None = None
+        key_facts: list[dict[str, Any]] | None = None
         key_facts_status: str = "missing"
 
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
@@ -225,7 +225,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     {int(row["entry_id"]) for row in raw_facts if row.get("entry_id") is not None}
                 )
 
-                facts_list: list[dict] = []
+                facts_list: list[dict[str, Any]] = []
                 decrypted_entries: dict[int, tuple[str, str | None]] = {}
                 try:
                     decrypted_entries = await entry_repo.get_texts(conn, cipher, fact_entry_ids)
@@ -307,7 +307,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         period: str,
         limit: int = DEFAULT_TIMELINE_LIMIT,
         offset: int = 0,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """navigation index -- use to find interesting dates, then drill in via
         journal_read_topic / journal_search for full content.
 

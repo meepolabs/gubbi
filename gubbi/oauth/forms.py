@@ -164,7 +164,7 @@ def create_login_handler(
             expires_at=time.time() + auth_code_ttl,
             client_id=client_id,
             code_challenge=code_challenge,
-            redirect_uri=redirect_uri,  # type: ignore[arg-type]
+            redirect_uri=redirect_uri,
             redirect_uri_provided_explicitly=True,
         )
         storage.save_auth_code(code, auth_code)
