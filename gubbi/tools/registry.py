@@ -193,8 +193,8 @@ def patch_tool_manager(tm: ToolManager) -> None:
 
     # Replace the bound method on the specific ToolManager instance.
     # We use a closure that wraps the original, bypassing descriptor protocol.
-    bound_patched = patched_call_tool.__get__(tm, type(tm))  # type: ignore[attr-defined]
-    tm.call_tool = bound_patched  # type: ignore[assignment]
+    bound_patched = patched_call_tool.__get__(tm, type(tm))  # type: ignore[attr-defined]  # function.__get__ binds method; mypy lacks descriptor inference here
+    tm.call_tool = bound_patched  # type: ignore[method-assign]  # FastMCP exposes no typed hook for tool-call instrumentation; runtime monkeypatch is intentional (sanity-checked via __wrapped__ tripwire)
 
     # Sanity-check: verify we actually wrapped the SDK call_tool. A future MCP
     # SDK refactor could change how ToolManager exposes call_tool (e.g. make it
@@ -232,7 +232,7 @@ def wire_scope_filter(mcp: FastMCP) -> None:
         visible = set(filter_tools_by_scope([t.name for t in all_tools], scopes))
         return [t for t in all_tools if t.name in visible]
 
-    mcp._mcp_server.list_tools()(_scope_filtered_list_tools)
+    mcp._mcp_server.list_tools()(_scope_filtered_list_tools)  # type: ignore[no-untyped-call]  # MCP SDK lowlevel handler-decorator chain is untyped
 
 
 def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:

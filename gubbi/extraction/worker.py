@@ -76,8 +76,10 @@ async def startup(ctx: ExtractionContext) -> None:
 
     # Redis pub/sub client.
     redis_url = _redis_url()
-    redis_client = await aioredis.from_url(redis_url)
+    redis_pool = aioredis.ConnectionPool.from_url(redis_url)
+    redis_client = aioredis.Redis(connection_pool=redis_pool)
     ctx["redis"] = redis_client
+    ctx["redis_pool"] = redis_pool
     logger.info("Extraction worker Redis client ready")
 
 
@@ -91,6 +93,14 @@ async def shutdown(ctx: ExtractionContext) -> None:
     if redis_client is not None:
         await redis_client.aclose()
         logger.info("Extraction worker Redis client closed")
+
+    # redis_client.aclose() does NOT drain an externally-supplied
+    # ConnectionPool; close the pool explicitly to avoid leaking
+    # pooled connections across worker restarts.
+    redis_pool = ctx.get("redis_pool")
+    if redis_pool is not None:
+        await redis_pool.aclose()
+        logger.info("Extraction worker Redis pool closed")
 
 
 def _run_health_server() -> None:

@@ -395,7 +395,7 @@ async def get_by_date_range(
     ascending: bool = True,
     offset: int = 0,
     title_only: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Get entries and conversations updated within a date range.
 
     Used by journal_briefing and journal_timeline.
@@ -480,7 +480,7 @@ async def get_by_date_range(
     if cipher is None and not title_only:
         raise RuntimeError("get_by_date_range requires cipher when title_only=False")
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
     for r in rows:
         if title_only:
             results.append(_to_title_only_row(r, cipher))
@@ -515,7 +515,7 @@ def _decrypt_conv_title_or_none(cipher: ContentCipher | None, row: asyncpg.Recor
         return str(row.get("topic_title") or "")
 
 
-def _to_title_only_row(r: asyncpg.Record, cipher: ContentCipher | None) -> dict:
+def _to_title_only_row(r: asyncpg.Record, cipher: ContentCipher | None) -> dict[str, Any]:
     """Shape a UNION ALL row into a title-only result dict.
 
     No decryption performed -- best-effort conversation title decode only.
@@ -544,7 +544,7 @@ def _to_title_only_row(r: asyncpg.Record, cipher: ContentCipher | None) -> dict:
     }
 
 
-def _to_full_row(r: asyncpg.Record, cipher: ContentCipher) -> dict:
+def _to_full_row(r: asyncpg.Record, cipher: ContentCipher) -> dict[str, Any]:
     """Shape a UNION ALL row into a full-content result dict.
 
     Decrypts content/title/summary as needed. Raises ``RuntimeError`` on
@@ -616,7 +616,7 @@ async def get_unindexed(
     cipher: ContentCipher,
     last_id: int,
     batch_size: int,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return a cursor-paginated batch of entries needing semantic indexing."""
     rows = await conn.fetch(
         """
@@ -633,7 +633,7 @@ async def get_unindexed(
         last_id,
         batch_size,
     )
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for r in rows:
         decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
         if decrypted is None:
