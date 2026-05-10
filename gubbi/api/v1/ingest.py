@@ -19,12 +19,15 @@ from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
 from gubbi.app_context import AppContext
-from gubbi.app_state import require_app_ctx
+from gubbi.app_state import get_optional_arq_pool, require_app_ctx
+from gubbi.audit.sql import record_audit
 from gubbi.crypto.guard import require_cipher
 from gubbi.models.conversation import Message
 from gubbi.storage.connection import safe_user_scoped_connection
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
+from gubbi.storage.repositories import extraction_jobs
+from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
 from gubbi.storage.repositories.topics import create as create_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_title
@@ -113,6 +116,8 @@ async def ingest_conversations(
     conversations_saved = 0
     conversations_skipped_dedupe = 0
     superseded_json_paths: list[str] = []
+    # Collect (job_uuid, conversation_id, source) tuples for post-commit enqueue.
+    enqueue_tasks: list[tuple[UUID, int, str]] = []
 
     async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
         # Ensure the inbox topic exists before saving conversations
@@ -170,6 +175,33 @@ async def ingest_conversations(
                         conv.platform,
                         conv.platform_id,
                     )
+
+                    # Enqueue extraction job for this newly saved conversation.
+                    # On partial-unique conflict (same conversation already in-flight),
+                    # reuse the existing job_id for idempotent semantics.
+                    try:
+                        job_uuid = await extraction_jobs.create_pending(
+                            conn,
+                            user_id=user_id,
+                            conversation_id=save_result.conversation_id,
+                            source=conv.platform,
+                        )
+                    except ExtractionJobAlreadyInFlight as exc:
+                        job_uuid = exc.existing_job_id
+
+                    await record_audit(
+                        conn,
+                        actor_type="user",
+                        actor_id=str(user_id),
+                        action="extraction_job.created",
+                        target_kind="extraction_job",
+                        target_id=str(job_uuid),
+                        metadata={
+                            "conversation_id": save_result.conversation_id,
+                            "source": conv.platform,
+                        },
+                    )
+
             except asyncpg.UniqueViolationError:
                 await log.warning(
                     "Dedupe race: platform_id already exists, treating as skip",
@@ -182,6 +214,20 @@ async def ingest_conversations(
             if save_result.superseded_json_path is not None:
                 superseded_json_paths.append(save_result.superseded_json_path)
             conversations_saved += 1
+            # Collect for post-commit arq enqueue (outside the DB transaction).
+            enqueue_tasks.append((job_uuid, save_result.conversation_id, conv.platform))
+
+    # Post-commit: enqueue arq jobs AFTER the DB transaction has committed so
+    # the worker cannot race ahead of the committed rows.
+    arq_pool = get_optional_arq_pool(request)
+    if arq_pool is not None:
+        for job_uuid, conversation_id, _source in enqueue_tasks:
+            await arq_pool.enqueue_job(
+                "extract_conversation",
+                conversation_id,
+                str(user_id),
+                _job_id=str(job_uuid),
+            )
 
     for path in superseded_json_paths:
         conv_repo.delete_superseded_json_archive(app_ctx.settings.conversations_json_dir, path)

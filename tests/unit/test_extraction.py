@@ -132,17 +132,17 @@ async def test_extraction_service_categorize() -> None:
 @pytest.mark.asyncio
 async def test_extraction_service_extract_entries() -> None:
     service = ExtractionService(_MockExtractProvider())
-    results = await service.extract_entries(
+    result = await service.extract_entries(
         [{"role": "user", "content": "I started jogging daily"}],
         "health/fitness",
     )
-    assert len(results) == 2
-    assert isinstance(results[0], ExtractedEntry)
-    assert results[0].content == "Started daily jogging"
-    assert results[0].reasoning == "New exercise habit worth recording"
-    assert results[0].tags == ["exercise", "health"]
-    assert results[0].entry_date == "2026-04-15"
-    assert results[1].entry_date is None
+    assert len(result.entries) == 2
+    assert isinstance(result.entries[0], ExtractedEntry)
+    assert result.entries[0].content == "Started daily jogging"
+    assert result.entries[0].reasoning == "New exercise habit worth recording"
+    assert result.entries[0].tags == ["exercise", "health"]
+    assert result.entries[0].entry_date == "2026-04-15"
+    assert result.entries[1].entry_date is None
 
 
 # ---------------------------------------------------------------------------

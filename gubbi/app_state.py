@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from uuid import UUID
 
+    from arq.connections import ArqRedis
     from redis.asyncio import Redis as RedisClient
 
     from gubbi.app_context import AppContext
@@ -47,6 +48,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "get_optional_app_ctx",
+    "get_optional_arq_pool",
     "get_optional_auth_strategies",
     "get_optional_gateway_secret",
     "get_optional_hydra_introspector",
@@ -54,6 +56,7 @@ __all__ = [
     "get_optional_redis_client",
     "get_optional_selfhost_token_validator",
     "require_app_ctx",
+    "require_arq_pool",
     "require_auth_strategies",
     "require_hydra_introspector",
     "require_operator_user_id",
@@ -213,4 +216,30 @@ def get_optional_redis_client(request: Request) -> RedisClient | None:
     return cast(
         "RedisClient | None",
         getattr(request.app.state, "redis_client", None),
+    )
+
+
+# ---------------------------------------------------------------------------
+# arq_pool -- Arq Redis connection pool for background job enqueue.
+#
+# Populated during lifespan startup alongside the aioredis SSE client.
+# None is a valid state for self-host deployments that do not run the
+# extraction worker, so get_optional is the safe accessor; require is
+# provided for request-path code that cannot proceed without the pool.
+# ---------------------------------------------------------------------------
+
+
+def require_arq_pool(request: Request) -> ArqRedis:
+    """Return ``request.app.state.arq_pool`` or raise if not initialised."""
+    value = getattr(request.app.state, "arq_pool", None)
+    if value is None:
+        raise RuntimeError("arq_pool not initialised")
+    return cast("ArqRedis", value)
+
+
+def get_optional_arq_pool(request: Request) -> ArqRedis | None:
+    """Return ``request.app.state.arq_pool`` or ``None``."""
+    return cast(
+        "ArqRedis | None",
+        getattr(request.app.state, "arq_pool", None),
     )

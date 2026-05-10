@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
-from gubbi.extraction.jobs.extract_conversation import extract_conversation
-from gubbi.extraction.service import CategorizationResult, ExtractedEntry
+from gubbi.extraction.jobs.extract_conversation import _classify_error, extract_conversation
+from gubbi.extraction.service import CategorizationResult, ExtractedEntry, ExtractionEntriesResult
 from gubbi.storage.exceptions import TopicNotFoundError
 
 # ---------------------------------------------------------------------------
@@ -77,6 +77,17 @@ def _make_usc_side_effect(*conns: AsyncMock) -> list[AsyncMock]:
         cm.__aexit__ = AsyncMock(return_value=False)
         cms.append(cm)
     return cms
+
+
+def _make_entries_result(
+    entries: list[ExtractedEntry], input_tokens: int = 0, output_tokens: int = 0
+) -> ExtractionEntriesResult:
+    """Build an ExtractionEntriesResult for use in test mocks."""
+    return ExtractionEntriesResult(
+        entries=entries,
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +187,9 @@ class TestExtractConversationJob:
                     entry_date="2026-04-16",
                 ),
             ]
-            mock_ctx["extraction_service"].extract_entries.return_value = fake_entries
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                fake_entries
+            )
 
             # --- Execute ---
             result = await extract_conversation(mock_ctx, conversation_id, user_id)
@@ -387,7 +400,9 @@ class TestExtractConversationJob:
                 tags=["coding"],
                 entry_date="2026-05-01",
             )
-            mock_ctx["extraction_service"].extract_entries.return_value = [fake_entry]
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [fake_entry]
+            )
 
             await extract_conversation(mock_ctx, conversation_id, user_id)
 
@@ -448,9 +463,9 @@ class TestExtractConversationJob:
                 summary="s",
                 confidence=0.9,
             )
-            mock_ctx["extraction_service"].extract_entries.return_value = [
-                ExtractedEntry(content="c", reasoning=None, tags=[], entry_date="2026-01-01")
-            ]
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [ExtractedEntry(content="c", reasoning=None, tags=[], entry_date="2026-01-01")]
+            )
 
             result = await extract_conversation(mock_ctx, conversation_id, user_id)
 
@@ -599,10 +614,12 @@ class TestExtractConversationJob:
                 summary="s",
                 confidence=0.9,
             )
-            mock_ctx["extraction_service"].extract_entries.return_value = [
-                ExtractedEntry(content="e1", reasoning=None, tags=[], entry_date="2026-01-01"),
-                ExtractedEntry(content="e2", reasoning=None, tags=[], entry_date="2026-01-02"),
-            ]
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [
+                    ExtractedEntry(content="e1", reasoning=None, tags=[], entry_date="2026-01-01"),
+                    ExtractedEntry(content="e2", reasoning=None, tags=[], entry_date="2026-01-02"),
+                ]
+            )
 
             # Fail on second append.
             mock_append.side_effect = [None, RuntimeError("DB write error")]
@@ -674,3 +691,258 @@ class TestExtractConversationJob:
 
             # extract_entries never called.
             mock_ctx["extraction_service"].extract_entries.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for _classify_error
+# ---------------------------------------------------------------------------
+
+
+class TestClassifyError:
+    """Unit tests for the _classify_error private helper."""
+
+    def test_rate_limit_error(self) -> None:
+        import anthropic
+
+        exc = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+        assert _classify_error(exc) == "llm_rate_limited"
+
+    def test_api_error(self) -> None:
+        import anthropic
+
+        exc = anthropic.APIError.__new__(anthropic.APIError)
+        assert _classify_error(exc) == "llm_provider_error"
+
+    def test_runtime_error_falls_back_to_internal(self) -> None:
+        exc = RuntimeError("something unexpected")
+        assert _classify_error(exc) == "internal_error"
+
+    def test_value_error_falls_back_to_internal(self) -> None:
+        exc = ValueError("bad data")
+        assert _classify_error(exc) == "internal_error"
+
+    def test_exception_falls_back_to_internal(self) -> None:
+        exc = Exception("generic")
+        assert _classify_error(exc) == "internal_error"
+
+
+# ---------------------------------------------------------------------------
+# Unit tests for lifecycle UPDATEs (mark_running / mark_failed wiring)
+# ---------------------------------------------------------------------------
+
+
+class TestLifecycleUpdates:
+    """Verify that mark_running is called in Phase 1 and mark_failed is called
+    on exception, both using the correct connections."""
+
+    @pytest.mark.asyncio
+    async def test_mark_running_called_after_idempotency_check(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+        conn2: AsyncMock,
+    ) -> None:
+        """mark_running is called on conn1 when job_id is provided and
+        the conversation has not been processed yet."""
+        conversation_id = 201
+        user_id = "00000000-0000-0000-0000-000000000201"
+        job_id = "aaaaaaaa-0000-0000-0000-000000000001"
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock()
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.conversations.mark_processed"),
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.storage.repositories.topics.get_id") as mock_gti,
+            patch("gubbi.storage.repositories.entries.append"),
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1, conn2)
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+            mock_gti.return_value = 1
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/lifecycle",
+                topic_title="Lifecycle",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+            )
+
+            await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
+
+            # mark_running must have been called with conn1 and the UUID.
+            mock_jobs.mark_running.assert_awaited_once()
+            call_args = mock_jobs.mark_running.await_args
+            assert call_args is not None
+            assert call_args.args[0] is conn1
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_called_on_llm_error_with_job_id(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+    ) -> None:
+        """When extract_entries raises and job_id is given, mark_failed is
+        called on a FRESH connection (not conn1 or conn2)."""
+        conversation_id = 202
+        user_id = "00000000-0000-0000-0000-000000000202"
+        job_id = "bbbbbbbb-0000-0000-0000-000000000002"
+
+        failure_conn = AsyncMock()
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock()
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+        ):
+            mock_gpa.return_value = None
+            # conn1 for Phase 1, failure_conn for _mark_job_failed.
+            mock_usc.side_effect = _make_usc_side_effect(conn1, failure_conn)
+
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/lifecycle",
+                topic_title="Lifecycle",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.side_effect = RuntimeError("LLM down")
+
+            with pytest.raises(RuntimeError, match="LLM down"):
+                await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
+
+            # mark_failed must have been called.
+            mock_jobs.mark_failed.assert_awaited_once()
+            call_args = mock_jobs.mark_failed.await_args
+            assert call_args is not None
+            # Called with failure_conn (the fresh connection, not conn1).
+            assert call_args.args[0] is failure_conn
+            # error_code kwarg should be populated (internal_error for RuntimeError).
+            assert call_args.kwargs.get("error_code") == "internal_error"
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_not_called_without_job_id(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+    ) -> None:
+        """When no job_id is provided (default 'unknown'), mark_failed is
+        never called even if an exception occurs."""
+        conversation_id = 203
+        user_id = "00000000-0000-0000-0000-000000000203"
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock()
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1)
+
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+
+            mock_ctx["extraction_service"].categorize_conversation.side_effect = RuntimeError(
+                "fail"
+            )
+
+            with pytest.raises(RuntimeError, match="fail"):
+                await extract_conversation(mock_ctx, conversation_id, user_id)
+
+            mock_jobs.mark_failed.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_result_includes_cents_spent(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+        conn2: AsyncMock,
+    ) -> None:
+        """Result dict includes cents_spent derived from token counts."""
+        conversation_id = 204
+        user_id = "00000000-0000-0000-0000-000000000204"
+
+        # Give the mock LLM provider an estimate_cost_cents method.
+        mock_provider = MagicMock()
+        mock_provider.estimate_cost_cents.return_value = 5.0  # will be rounded to int
+        mock_ctx["extraction_service"]._llm = mock_provider
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock()
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.conversations.mark_processed"),
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.storage.repositories.topics.get_id") as mock_gti,
+            patch("gubbi.storage.repositories.entries.append"),
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1, conn2)
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+            mock_gti.return_value = 1
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/cost",
+                topic_title="Cost Test",
+                summary="s",
+                confidence=0.9,
+                input_tokens=100,
+                output_tokens=50,
+            )
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")],
+                input_tokens=200,
+                output_tokens=80,
+            )
+
+            result = await extract_conversation(mock_ctx, conversation_id, user_id)
+
+            # estimate_cost_cents should be called with sum of tokens.
+            mock_provider.estimate_cost_cents.assert_called_once_with(300, 130)
+            assert result["cents_spent"] == 5
+            assert result["input_tokens"] == 300
+            assert result["output_tokens"] == 130
