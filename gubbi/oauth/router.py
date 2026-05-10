@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI
 from pydantic import AnyHttpUrl
@@ -16,19 +16,14 @@ from gubbi.oauth.wellknown import register as register_wellknown
 
 __all__: list[str] = ["register_oauth_routes"]
 
-# Stays on stdlib ``logging`` because every emit below runs in a sync
-# context (``register_oauth_routes`` is called from lifespan setup).
-# ``structlog.AsyncBoundLogger`` emits return coroutines that must be
-# awaited; sync callers cannot use it. CO.50-followup may revisit if
-# lifespan setup migrates to async.
 logger = logging.getLogger(__name__)
 
 
-def register_oauth_routes(
+async def register_oauth_routes(
     app: FastAPI,
     oauth_storage: OAuthStorage,
     settings: Settings,
-) -> Callable[[str], frozenset[str] | None] | None:
+) -> Callable[[str], Awaitable[frozenset[str] | None]] | None:
     """Register OAuth endpoints on the FastAPI app if configured.
 
     Dispatches across three deploy shapes:
@@ -56,6 +51,6 @@ def register_oauth_routes(
         return None
 
     # Mode 2: self-host OAuth.
-    token_validator = register_selfhost(app, oauth_storage, settings)
+    token_validator = await register_selfhost(app, oauth_storage, settings)
     logger.info("Registered self-host OAuth routes (Mode 2)")
     return token_validator

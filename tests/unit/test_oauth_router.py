@@ -56,10 +56,10 @@ def _routes_exist(app: FastAPI, desired_paths: list[str]) -> bool:
     return all(p in registered for p in desired_paths)
 
 
-def _make_storage(tmp_path: Path) -> OAuthStorage:
+async def _make_storage(tmp_path: Path) -> OAuthStorage:
     """Create an OAuthStorage backed by a temp file."""
     storage = OAuthStorage(tmp_path / "oauth.db")
-    _ = storage.conn  # Force schema init
+    await storage.initialize()
     return storage
 
 
@@ -69,22 +69,21 @@ class TestMode1NoOAuth:
     No OAuth routes should be registered. The function returns None.
     """
 
-    def test_returns_none(self, tmp_path: Path) -> None:
+    async def test_returns_none(self, tmp_path: Path) -> None:
         settings = _make_settings()
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        # Storage is auto-cleaned by tmp_path fixture on test exit
-        result = register_oauth_routes(app, storage, settings)
-        storage.close()
+        storage = await _make_storage(tmp_path)
+        result = await register_oauth_routes(app, storage, settings)
+        await storage.close()
         assert result is None
 
-    def test_no_oauth_routes_registered(self, tmp_path: Path) -> None:
+    async def test_no_oauth_routes_registered(self, tmp_path: Path) -> None:
         settings = _make_settings()
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        register_oauth_routes(app, storage, settings)
+        storage = await _make_storage(tmp_path)
+        await register_oauth_routes(app, storage, settings)
         route_paths = [r.path for r in app.routes if isinstance(r, Route)]
-        storage.close()
+        await storage.close()
         oauth_paths = [
             "/authorize",
             "/token",
@@ -105,19 +104,19 @@ class TestMode2SelfHostOAuth:
     A token_validator callable is returned.
     """
 
-    def test_returns_token_validator(self, tmp_path: Path) -> None:
+    async def test_returns_token_validator(self, tmp_path: Path) -> None:
         settings = _make_settings(password_hash="hashedpw123")
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        result = register_oauth_routes(app, storage, settings)
-        storage.close()
+        storage = await _make_storage(tmp_path)
+        result = await register_oauth_routes(app, storage, settings)
+        await storage.close()
         assert callable(result)
 
-    def test_all_oauth_routes_present(self, tmp_path: Path) -> None:
+    async def test_all_oauth_routes_present(self, tmp_path: Path) -> None:
         settings = _make_settings(password_hash="hashedpw123")
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        register_oauth_routes(app, storage, settings)
+        storage = await _make_storage(tmp_path)
+        await register_oauth_routes(app, storage, settings)
         expected_paths = [
             "/authorize",
             "/token",
@@ -125,7 +124,7 @@ class TestMode2SelfHostOAuth:
             "/.well-known/oauth-protected-resource/mcp",
             "/login",
         ]
-        storage.close()
+        await storage.close()
         assert _routes_exist(app, expected_paths), (
             "Missing OAuth routes. "
             f"Registered: {[r.path for r in app.routes if isinstance(r, Route)]}"
@@ -141,27 +140,27 @@ class TestMode3HydraBacked:
     Returns None because Hydra introspection middleware owns auth.
     """
 
-    def test_returns_none(self, tmp_path: Path) -> None:
+    async def test_returns_none(self, tmp_path: Path) -> None:
         settings = _make_settings(
             hydra_admin_url="http://hydra:4445",
             hydra_public_issuer_url="https://auth-dev.gubbi.ai",
         )
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        result = register_oauth_routes(app, storage, settings)
-        storage.close()
+        storage = await _make_storage(tmp_path)
+        result = await register_oauth_routes(app, storage, settings)
+        await storage.close()
         assert result is None
 
-    def test_only_protected_resource_route(self, tmp_path: Path) -> None:
+    async def test_only_protected_resource_route(self, tmp_path: Path) -> None:
         settings = _make_settings(
             hydra_admin_url="http://hydra:4445",
             hydra_public_issuer_url="https://auth-dev.gubbi.ai",
         )
         app = FastAPI()
-        storage = _make_storage(tmp_path)
-        register_oauth_routes(app, storage, settings)
+        storage = await _make_storage(tmp_path)
+        await register_oauth_routes(app, storage, settings)
         route_paths = [r.path for r in app.routes if isinstance(r, Route)]
-        storage.close()
+        await storage.close()
         assert any(
             ".well-known/oauth-protected-resource/mcp" in p for p in route_paths
         ), f"Missing protected-resource route; got: {route_paths}"
@@ -192,7 +191,7 @@ class TestDeployShapeValidator:
 
         return get_settings()
 
-    def test_valid_mode3_both_hydra_fields_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    async def test_valid_mode3_both_hydra_fields_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
         self._patch_mode3(monkeypatch)
         # Should succeed when both hydra fields are present
         settings = self._get_settings()

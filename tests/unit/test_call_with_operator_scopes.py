@@ -9,7 +9,7 @@ Also verifies that a validator returning None (invalid token) produces 401.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import UUID
 
@@ -43,7 +43,7 @@ def _build_test_strategies(
     api_key: str = "",
     operator_user_id: UUID | None = TEST_OP_ID,
     introspector: Any = None,
-    selfhost_token_validator: Callable[[str], frozenset[str] | None] | None = None,
+    selfhost_token_validator: Callable[[str], Awaitable[frozenset[str] | None]] | None = None,
     api_key_scopes: tuple[str, ...] | None = None,
 ) -> list:
     effective_api_key = "" if introspector is not None else api_key
@@ -130,7 +130,7 @@ class TestMode2ValidatorScopes:
         """Validator returns frozenset({"journal:read"}) -> middleware sets that."""
         captured: list[frozenset[str] | None] = []
 
-        def validator(token: str) -> frozenset[str] | None:
+        async def validator(token: str) -> frozenset[str] | None:
             return frozenset({"journal:read"})
 
         mw = BearerAuthMiddleware(
@@ -152,7 +152,7 @@ class TestMode2ValidatorScopes:
     async def test_validator_returns_none_returns_401(self) -> None:
         """Validator returns None (invalid token) -> 401."""
 
-        def validator(token: str) -> frozenset[str] | None:
+        async def validator(token: str) -> frozenset[str] | None:
             return None
 
         mw = BearerAuthMiddleware(
