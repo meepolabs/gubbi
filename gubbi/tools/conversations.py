@@ -175,7 +175,7 @@ async def _journal_save_conversation(
     try:
         embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, linked_content)
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-            await app_ctx.embedding_service.store_by_vector(conn, linked_entry_id, embedding)
+            await app_ctx.embedding_service.save_by_vector(conn, linked_entry_id, embedding)
             await entry_repo.mark_indexed(conn, linked_entry_id)
     except Exception as e:
         logger.warning("Failed to embed linked entry %s: %s", linked_entry_id, e, exc_info=True)
