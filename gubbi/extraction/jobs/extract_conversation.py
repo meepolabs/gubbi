@@ -156,6 +156,7 @@ async def _mark_skipped_no_topic(
     pool: asyncpg.Pool,
     user_uuid: UUID,
     conversation_id: int,
+    job_id: str,
 ) -> None:
     """Open a short-lived connection to mark a conversation as processed (no-topic path).
 
@@ -165,6 +166,24 @@ async def _mark_skipped_no_topic(
     """
     async with user_scoped_connection(pool, user_id=user_uuid) as conn:
         await conv_repo.mark_processed(conn, conversation_id)
+        if job_id != "unknown":
+            updated = await extraction_jobs.mark_completed(
+                conn,
+                UUID(job_id),
+                topics_created=0,
+                entries_created=0,
+                cents_spent=0,
+            )
+            if updated:
+                await record_audit(
+                    conn,
+                    action="extraction_job.completed",
+                    actor_type="user",
+                    actor_id=str(user_uuid),
+                    target_kind="extraction_job",
+                    target_id=job_id,
+                    metadata={"conversation_id": conversation_id, "entries_created": 0},
+                )
 
 
 def _classify_error(exc: BaseException) -> str:
@@ -199,21 +218,29 @@ async def _mark_job_failed(
     """
     try:
         async with user_scoped_connection(pool, user_id=user_uuid) as conn:
-            await extraction_jobs.mark_failed(conn, UUID(job_id), error_code=error_code)
-            await record_audit(
-                conn,
-                action="extraction_job.failed",
-                actor_type="user",
-                actor_id=str(user_uuid),
-                target_kind="extraction_job",
-                target_id=str(job_id),
-                metadata={"error_code": error_code, "conversation_id": conversation_id},
-            )
-    except Exception:  # noqa: S110
+            updated = await extraction_jobs.mark_failed(conn, UUID(job_id), error_code=error_code)
+            if updated:
+                await record_audit(
+                    conn,
+                    action="extraction_job.failed",
+                    actor_type="user",
+                    actor_id=str(user_uuid),
+                    target_kind="extraction_job",
+                    target_id=str(job_id),
+                    metadata={"error_code": error_code, "conversation_id": conversation_id},
+                )
+    except Exception:  # noqa: BLE001
         # Swallow secondary failure -- the original exception is what Arq needs.
         # The job row may remain in 'running' and will be cleaned up by a
         # future monitor / TTL sweep.
-        pass
+        await logger.warning(
+            "mark_job_failed_secondary_error",
+            user_id=str(user_uuid),
+            job_id=job_id,
+            conversation_id=conversation_id,
+            error_code=error_code,
+            exc_info=True,
+        )
 
 
 async def _persist_extraction(
@@ -223,7 +250,7 @@ async def _persist_extraction(
     conversation_id: int,
     topic_path: str,
     categorization: CategorizationResult,
-    extracted_entries: list[ExtractedEntry],
+    extracted_entries: tuple[ExtractedEntry, ...],
     extraction_attempt_id: str,
     job_id: str,
     cents_spent: int,
@@ -285,7 +312,6 @@ async def _persist_extraction(
         actor_type="user",
         actor_id=str(user_uuid),
         action=Action.CONVERSATION_EXTRACTED,
-        target_type="conversation",
         target_kind="conversation",
         target_id=str(conversation_id),
         metadata={
@@ -300,22 +326,23 @@ async def _persist_extraction(
     # Skip when job_id is the sentinel 'unknown' (tests without a real job row).
     if job_id != "unknown":
         topics_created_count = 1 if topic_created else 0
-        await extraction_jobs.mark_completed(
+        updated = await extraction_jobs.mark_completed(
             conn,
             UUID(job_id),
             topics_created=topics_created_count,
             entries_created=entries_created,
             cents_spent=cents_spent,
         )
-        await record_audit(
-            conn,
-            action="extraction_job.completed",
-            actor_type="user",
-            actor_id=str(user_uuid),
-            target_kind="extraction_job",
-            target_id=str(job_id),
-            metadata={"conversation_id": conversation_id, "entries_created": entries_created},
-        )
+        if updated:
+            await record_audit(
+                conn,
+                action="extraction_job.completed",
+                actor_type="user",
+                actor_id=str(user_uuid),
+                target_kind="extraction_job",
+                target_id=str(job_id),
+                metadata={"conversation_id": conversation_id, "entries_created": entries_created},
+            )
 
     return entries_created
 
@@ -463,7 +490,7 @@ async def extract_conversation(
 
         if topic_path is None:
             # No usable topic -- mark processed via a short dedicated connection.
-            await _mark_skipped_no_topic(pool, user_uuid, conversation_id)
+            await _mark_skipped_no_topic(pool, user_uuid, conversation_id, job_id)
             return {
                 "topic_path": None,
                 "entries_created": 0,
@@ -502,6 +529,7 @@ async def extract_conversation(
                 if isinstance(raw_cost, int | float):
                     cents_spent = int(round(raw_cost))
             except Exception:  # noqa: BLE001
+                await log.warning("cost_estimation_failed", exc_info=True)
                 cents_spent = 0
 
         # ------------------------------------------------------------------
