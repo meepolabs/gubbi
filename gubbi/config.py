@@ -54,7 +54,10 @@ OAUTH_ACCESS_TOKEN_TTL_SECS: Final[int] = 3600  # 1 hour
 OAUTH_REFRESH_TOKEN_TTL_SECS: Final[int] = 2592000  # 30 days
 OAUTH_AUTH_CODE_TTL_SECS: Final[int] = 300  # 5 minutes
 
-_config_logger = logging.getLogger("gubbi.config")
+# Stays on stdlib ``logging`` because the only emit is in a Pydantic
+# ``@model_validator(mode="after")`` which runs sync. ``structlog.AsyncBoundLogger``
+# emits return coroutines that must be awaited; sync callers cannot use it.
+logger = logging.getLogger(__name__)
 
 # Maps old flat env var names (without JOURNAL_ prefix) to new double-underscore
 # nested names that pydantic-settings v2 understands with env_nested_delimiter="__".
@@ -140,7 +143,7 @@ class AuthConfig(BaseModel):
     @model_validator(mode="after")
     def _warn_on_require_signature_without_secret(self) -> Self:
         if self.gateway_require_signature and not self.gateway_secret:
-            _config_logger.warning(
+            logger.warning(
                 "JOURNAL_GATEWAY_REQUIRE_SIGNATURE=true but "
                 "JOURNAL_GUBBI_GATEWAY_SECRET is empty -- set a hex-encoded "
                 "shared secret (>= 64 hex chars) before enabling this "

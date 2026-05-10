@@ -46,6 +46,7 @@ import logging
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ParamSpec, TypeVar
 
+import structlog
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.app_context import AppContext
@@ -53,7 +54,12 @@ from gubbi.audit.sql import record_audit
 from gubbi.auth_context import current_user_id
 from gubbi.telemetry.metrics import record_audit_persistence_failure
 
-logger = logging.getLogger(__name__)
+# ``logger`` is the canonical async-context logger (used inside the
+# ``wrapper`` coroutine). ``_sync_log`` is reserved for the sync
+# decoration-time emit in ``audited()`` itself; ``structlog.AsyncBoundLogger``
+# emits return coroutines that cannot be used from sync callers.
+logger = structlog.get_logger(__name__)
+_sync_log = logging.getLogger(__name__)
 
 __all__: list[str] = [
     "ACTION_CONVERSATION_SAVED",
@@ -106,7 +112,9 @@ def audited(
     """
 
     if target_type not in _TARGET_KEYS:
-        logger.warning(
+        # Sync emit -- routes through stdlib ``logging`` because ``audited()``
+        # is a sync decorator factory called at import / setup time.
+        _sync_log.warning(
             "audited() target_type=%r has no _TARGET_KEYS entry; "
             "audit rows for action=%r will be written with target_id=None",
             target_type,
@@ -145,11 +153,11 @@ def audited(
                                 target_kind=effective_kind,
                             )
                     except Exception:
-                        logger.warning(
-                            "Audit write failed for %s (action=%s, target_type=%s)",
-                            fn.__name__,
-                            action,
-                            target_type,
+                        await logger.warning(
+                            "Audit write failed",
+                            handler=fn.__name__,
+                            action=action,
+                            target_type=target_type,
                             exc_info=True,
                         )
                         record_audit_persistence_failure(action)

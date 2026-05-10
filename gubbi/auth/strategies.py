@@ -30,18 +30,19 @@ Deployment posture (D3 from Task CO.17a -- locked by Lead):
 
 from __future__ import annotations
 
-import logging
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 from uuid import UUID
 
+import structlog
 from gubbi_common.auth.gateway_signature import (
     GATEWAY_CONTRACT_VERSION,
     SignatureError,
     verify_signature,
 )
+from gubbi_common.telemetry import bound_logger
 from starlette.requests import Request
 
 from gubbi.auth.hydra import HydraIntrospector, HydraInvalidToken, HydraUnreachable
@@ -57,7 +58,11 @@ __all__: list[str] = [
     "TrustGatewayStrategy",
 ]
 
-_logger = logging.getLogger("gubbi.auth.strategies")
+# ``logger`` is the canonical async-context logger (used inside async
+# ``authenticate`` methods via ``bound_logger(request)``). All emit sites are
+# async, including ``_resolve_scopes``, so a sync stdlib fallback is no longer
+# needed.
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Public types
@@ -106,11 +111,11 @@ class AuthStrategy(Protocol):
 _DEFAULT_SCOPES: frozenset[str] = frozenset({"journal:read", "journal:write"})
 
 
-def _resolve_scopes(scopes_header: str) -> frozenset[str]:
+async def _resolve_scopes(scopes_header: str) -> frozenset[str]:
     """Parse X-Auth-Scopes header into a frozenset, falling back to defaults."""
     parsed = frozenset(s for s in scopes_header.split() if s)
     if not parsed:
-        _logger.debug("Empty X-Auth-Scopes -- falling back to default scopes")
+        await logger.debug("Empty X-Auth-Scopes -- falling back to default scopes")
         return _DEFAULT_SCOPES
     return parsed
 
@@ -157,6 +162,7 @@ class TrustGatewayStrategy:
         self.gateway_require_signature = gateway_require_signature
 
     async def authenticate(self, request: Request) -> AuthResult | None:
+        log = bound_logger(request)
         user_id_header = request.headers.get("x-auth-user-id", "")
         if not user_id_header:
             raise AuthRejected(detail="Missing X-Auth-User-Id header", status=401)
@@ -178,7 +184,7 @@ class TrustGatewayStrategy:
             if contract_version != str(GATEWAY_CONTRACT_VERSION):
                 raise AuthRejected(detail="Unsupported X-Auth-Contract-Version", status=401)
             if self.gateway_secret is None:
-                _logger.warning("gateway_require_signature=true but secret not configured")
+                await log.warning("gateway_require_signature=true but secret not configured")
                 raise AuthRejected(detail="gateway secret not configured", status=503)
             try:
                 verify_signature(
@@ -191,17 +197,15 @@ class TrustGatewayStrategy:
                     request.url.path,
                 )
             except SignatureError as exc:
-                _logger.warning(
+                await log.warning(
                     "Gateway signature verification failed",
-                    extra={
-                        "error_type": type(exc).__name__,
-                        "user_id": user_id_header,
-                        "token_fp": token_fp,
-                    },
+                    error_type=type(exc).__name__,
+                    user_id=user_id_header,
+                    token_fp=token_fp,
                 )
                 raise AuthRejected(detail="Invalid gateway signature", status=401) from None
 
-        resolved_scopes = _resolve_scopes(scopes_header)
+        resolved_scopes = await _resolve_scopes(scopes_header)
         return AuthResult(user_id=user_uuid, scopes=resolved_scopes)
 
 

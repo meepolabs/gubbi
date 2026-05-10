@@ -26,6 +26,9 @@ from gubbi.storage.constants import DB_BUSY_TIMEOUT_MS
 
 __all__: list[str] = ["OAuthStorage", "SCHEMA"]
 
+# Stays on stdlib ``logging`` because the backfill helper runs in a
+# sync code path. ``structlog.AsyncBoundLogger`` emits return coroutines
+# that must be awaited; sync callers cannot use it.
 logger = logging.getLogger(__name__)
 
 SCHEMA = """

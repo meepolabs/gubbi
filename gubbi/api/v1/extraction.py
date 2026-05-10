@@ -6,7 +6,6 @@ forwards events to connected clients as Server-Sent Events.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncGenerator
 from typing import Annotated
 from uuid import UUID
@@ -23,8 +22,6 @@ __all__: list[str] = [
     "extraction_progress",
     "router",
 ]
-
-logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/extraction", tags=["extraction"])
 

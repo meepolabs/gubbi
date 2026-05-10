@@ -1,13 +1,13 @@
 """Reindex primitives (library). Used by the admin API; no longer exposed as an MCP tool."""
 
 import asyncio
-import logging
 import time
 from datetime import UTC
 from datetime import datetime as datetime_cls
 from typing import Any
 
 import asyncpg
+import structlog
 
 from gubbi.app_context import AppContext
 from gubbi.crypto.cipher import ContentCipher
@@ -18,7 +18,7 @@ from gubbi.tools.constants import REINDEX_BATCH_SIZE
 # All functions are private; registered via MCP tool registry, not direct import.
 __all__: list[str] = []
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # PostgreSQL advisory lock key for reindex coordination.
 # Must be unique across all advisory locks used by this application so that a
@@ -90,12 +90,12 @@ async def _run_reindex(
                     await app_ctx.embedding_service.save_by_vector(conn, r["id"], embedding)
                 succeeded_ids.append(r["id"])
                 embeddings_generated += 1
-            except Exception as e:
+            except Exception as exc:
                 embeddings_failed += 1
-                logger.warning(
-                    "Failed to embed entry %s during reindex: %s",
-                    r["id"],
-                    e,
+                await logger.warning(
+                    "Failed to embed entry during reindex",
+                    entry_id=r["id"],
+                    error=str(exc),
                     exc_info=True,
                 )
 

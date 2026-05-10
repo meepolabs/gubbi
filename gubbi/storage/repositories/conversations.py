@@ -17,6 +17,7 @@ from typing import Any, NamedTuple
 from uuid import UUID, uuid4
 
 import asyncpg
+import structlog
 
 from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
 from gubbi.models.conversation import ConversationMeta, Message
@@ -43,7 +44,12 @@ __all__: list[str] = [
     "set_platform_metadata",
 ]
 
-logger = logging.getLogger(__name__)
+# ``logger`` is the canonical async-context logger (used inside async
+# repository functions). ``_sync_log`` covers the sync archive-cleanup
+# helper (``delete_superseded_json_archive``); ``structlog.AsyncBoundLogger``
+# emits return coroutines that cannot be used from sync callers.
+logger = structlog.get_logger(__name__)
+_sync_log = logging.getLogger(__name__)
 
 
 def _parse_ts(ts: str | None) -> datetime_cls | None:
@@ -298,7 +304,7 @@ def delete_superseded_json_archive(conversations_json_dir: Path, json_path: str)
         if not candidate.is_symlink():
             candidate.unlink(missing_ok=True)
     except OSError:
-        logger.exception("Failed to delete superseded JSON archive: %s", json_path)
+        _sync_log.exception("Failed to delete superseded JSON archive: %s", json_path)
 
 
 async def _upsert_conversation_record(
@@ -809,16 +815,16 @@ async def get_titles_summaries(
             title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
             summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
             if title is None or summary is None:
-                logger.warning(
-                    "Skipping conversation %d: title/summary decrypted to None",
-                    cid,
+                await logger.warning(
+                    "Skipping conversation: title/summary decrypted to None",
+                    conversation_id=cid,
                 )
                 continue
             result[cid] = (title, summary)
         except DecryptionError as exc:
-            logger.warning(
-                "Skipping conversation %d: decryption failed (%s)",
-                cid,
-                type(exc).__name__,
+            await logger.warning(
+                "Skipping conversation: decryption failed",
+                conversation_id=cid,
+                error_type=type(exc).__name__,
             )
     return result

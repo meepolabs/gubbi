@@ -16,7 +16,12 @@ from gubbi.oauth.wellknown import register as register_wellknown
 
 __all__: list[str] = ["register_oauth_routes"]
 
-_logger = logging.getLogger("gubbi.oauth.router")
+# Stays on stdlib ``logging`` because every emit below runs in a sync
+# context (``register_oauth_routes`` is called from lifespan setup).
+# ``structlog.AsyncBoundLogger`` emits return coroutines that must be
+# awaited; sync callers cannot use it. CO.50-followup may revisit if
+# lifespan setup migrates to async.
+logger = logging.getLogger(__name__)
 
 
 def register_oauth_routes(
@@ -42,7 +47,7 @@ def register_oauth_routes(
     if settings.auth.hydra_admin_url:
         issuer_url = AnyHttpUrl(settings.auth.hydra_public_issuer_url)
         register_wellknown(app, settings, authorization_servers=[issuer_url])
-        _logger.info("Registered protected-resource routes (Mode 3: Hydra)")
+        logger.info("Registered protected-resource routes (Mode 3: Hydra)")
         return None
 
     # Mode 1: no OAuth path configured.
@@ -52,5 +57,5 @@ def register_oauth_routes(
 
     # Mode 2: self-host OAuth.
     token_validator = register_selfhost(app, oauth_storage, settings)
-    _logger.info("Registered self-host OAuth routes (Mode 2)")
+    logger.info("Registered self-host OAuth routes (Mode 2)")
     return token_validator

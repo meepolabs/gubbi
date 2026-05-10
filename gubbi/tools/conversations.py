@@ -2,9 +2,9 @@
 journal_read_conversation."""
 
 import asyncio
-import logging
 from typing import Any, NotRequired, TypedDict
 
+import structlog
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -49,7 +49,7 @@ __all__: list[str] = [
     "register",
 ]
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class MessageInput(TypedDict):
@@ -182,8 +182,13 @@ async def _journal_save_conversation(
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             await app_ctx.embedding_service.save_by_vector(conn, linked_entry_id, embedding)
             await entry_repo.mark_indexed(conn, linked_entry_id)
-    except Exception as e:
-        logger.warning("Failed to embed linked entry %s: %s", linked_entry_id, e, exc_info=True)
+    except Exception as exc:
+        await logger.warning(
+            "Failed to embed linked entry",
+            linked_entry_id=linked_entry_id,
+            error=str(exc),
+            exc_info=True,
+        )
 
     result: dict[str, Any] = {
         "status": "updated" if is_update else "saved",

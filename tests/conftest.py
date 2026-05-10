@@ -13,9 +13,12 @@ Set TEST_DATABASE_URL to point at it, or run:
 Then run: pytest tests/
 """
 
+import logging
+import logging.handlers
 import os
 import subprocess
 import sys
+import tempfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -24,6 +27,8 @@ import asyncpg
 import bcrypt
 import pytest
 import pytest_asyncio
+import structlog
+from gubbi_common.telemetry import initialize_logger
 
 from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
@@ -43,6 +48,43 @@ def tmp_journal(tmp_path: Path) -> Path:
     (tmp_path / "knowledge").mkdir()
     (tmp_path / "conversations_json").mkdir()
     return tmp_path
+
+
+@pytest.fixture(autouse=True, scope="session")
+def _configure_structlog_for_tests() -> Iterator[None]:
+    """Configure structlog via the canonical ``initialize_logger`` for tests.
+
+    Production runtime calls ``gubbi_common.telemetry.initialize_logger`` during
+    lifespan, which sets ``wrapper_class=AsyncBoundLogger`` so emit calls
+    (``info`` / ``warning`` / ``error``) return coroutines that callers
+    ``await``. Tests do not run lifespan, so without this fixture
+    ``structlog.get_logger`` falls back to its default (sync) ``BoundLogger``
+    and ``await logger.info(...)`` blows up with ``NoneType can't be awaited``.
+
+    Delegates to the canonical initializer so the processor chain matches
+    production exactly (including OTel context enrichment, log-level filter,
+    structlog/stdlib interop). The only divergence is the file-handler
+    target -- a per-session tempdir keeps log output off the repo and
+    avoids racing with parallel test runs. ``initialize_logger`` does not
+    expose a "test mode" toggle today; the tempdir is the closest we get
+    to processor-chain parity without forking the helper.
+    """
+    with tempfile.TemporaryDirectory(prefix="gubbi-test-logs-") as log_dir:
+        initialize_logger("gubbi-test", log_dir=log_dir)
+        try:
+            yield
+        finally:
+            structlog.reset_defaults()
+            # Detach our session-scoped file handler from the root logger so
+            # subsequent reconfigs (or pytest reruns in the same process) do
+            # not leak references to the tempdir we are about to remove.
+            root = logging.getLogger()
+            for handler in list(root.handlers):
+                if isinstance(handler, logging.handlers.TimedRotatingFileHandler) and getattr(
+                    handler, "baseFilename", ""
+                ).startswith(log_dir):
+                    root.removeHandler(handler)
+                    handler.close()
 
 
 _TEST_ENV: dict[str, str] = {
