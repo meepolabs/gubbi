@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 from uuid import UUID
 
@@ -10,6 +10,7 @@ import structlog
 
 if TYPE_CHECKING:
     import asyncpg
+    from arq.connections import ArqRedis
 
     from gubbi.config import Settings
     from gubbi.crypto.cipher import ContentCipher
@@ -43,6 +44,11 @@ class AppContext:
     Built from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*`` env vars at startup.
     ``None`` = no master key configured; required once TASK-02.13 wires
     repository encrypt/decrypt.
+
+    ``arq_pool`` is the Arq Redis connection pool used to enqueue background
+    jobs (e.g. extract_conversation). Created during lifespan startup;
+    ``None`` until wired (acceptable for self-host deployments that do not
+    run the extraction worker).
     """
 
     pool: asyncpg.Pool
@@ -52,3 +58,4 @@ class AppContext:
     admin_pool: asyncpg.Pool | None = None
     operator_user_id: UUID | None = None
     cipher: ContentCipher | None = None
+    arq_pool: ArqRedis | None = field(default=None)
