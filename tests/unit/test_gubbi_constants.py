@@ -33,7 +33,7 @@ def test_constants_import_smoke() -> None:
 def test_replaced_inline_literal_values() -> None:
     assert DB_COMMAND_TIMEOUT_SECS == 30
     assert APP_POOL_SIZE_MIN == 2
-    assert APP_POOL_SIZE_MAX == 5
+    assert APP_POOL_SIZE_MAX == 12
     assert ARQ_JOB_TIMEOUT_SECS == 600
     assert ANTHROPIC_MAX_RETRIES == 5
 

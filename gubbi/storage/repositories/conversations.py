@@ -784,9 +784,14 @@ async def mark_processed(
     conn: asyncpg.Connection,
     conversation_id: int,
 ) -> None:
-    """Set conversations.processed_at = now() WHERE id = $conversation_id."""
+    """Set conversations.processed_at = now() WHERE id = $conversation_id AND processed_at IS NULL.
+
+    Idempotent under retry: if processed_at is already set this becomes a no-op (UPDATE 0).
+    Safe to call from concurrent workers -- the last-write-wins race is prevented by the
+    WHERE predicate; only one winner will observe rowcount == 1.
+    """
     await conn.execute(
-        "UPDATE conversations SET processed_at = now() WHERE id = $1",
+        "UPDATE conversations SET processed_at = now() WHERE id = $1 AND processed_at IS NULL",
         conversation_id,
     )
 
