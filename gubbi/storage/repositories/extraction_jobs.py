@@ -126,7 +126,13 @@ async def create_pending(
             conversation_id,
             source,
         )
-        existing_id = UUID(str(existing_row["id"])) if existing_row else UUID(int=0)
+        if existing_row is None:
+            raise RuntimeError(
+                "Conflict on "
+                f"(user_id={user_id}, conversation_id={conversation_id}, source={source}) "
+                "but no existing row found"
+            ) from None
+        existing_id = UUID(str(existing_row["id"]))
         raise ExtractionJobAlreadyInFlight(existing_id) from None
 
     if row is None:
@@ -143,10 +149,11 @@ async def create_pending(
 
 
 async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> None:
-    """Transition job from 'pending' to 'running'.
+    """Transition job from 'pending' or 'failed' to 'running'.
 
-    Uses COALESCE(started_at, now()) so a repeated call (e.g. arq retry) does
-    not clobber the original start timestamp. No-op if status != 'pending'.
+    Retry attempts are allowed to revive a previously failed row, so the
+    transition resets started_at and clears any stale error_code. No-op if the
+    row is already terminal-completed or currently running.
 
     Stub for Part 3 -- reserved for worker use; not called by ingest.
     """
@@ -154,9 +161,10 @@ async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> None:
         """
         UPDATE extraction_jobs
         SET status = 'running',
-            started_at = COALESCE(started_at, now())
+            started_at = now(),
+            error_code = NULL
         WHERE id = $1
-          AND status = 'pending'
+          AND status IN ('pending', 'failed')
         """,
         job_id,
     )
@@ -181,26 +189,27 @@ async def update_progress(
 
     Stub for Part 3 -- reserved for worker use; not called by ingest.
     """
-    if topics_created is not None:
-        await conn.execute(
-            """
-            UPDATE extraction_jobs
-            SET topics_created = GREATEST(topics_created, $2)
-            WHERE id = $1
-            """,
-            job_id,
-            topics_created,
-        )
-    if entries_created is not None:
-        await conn.execute(
-            """
-            UPDATE extraction_jobs
-            SET entries_created = GREATEST(entries_created, $2)
-            WHERE id = $1
-            """,
-            job_id,
-            entries_created,
-        )
+    if topics_created is None and entries_created is None:
+        return
+
+    await conn.execute(
+        """
+        UPDATE extraction_jobs
+        SET topics_created = CASE
+                WHEN $2::integer IS NULL THEN topics_created
+                ELSE GREATEST(topics_created, $2)
+            END,
+            entries_created = CASE
+                WHEN $3::integer IS NULL THEN entries_created
+                ELSE GREATEST(entries_created, $3)
+            END
+        WHERE id = $1
+          AND status NOT IN ('completed', 'failed')
+        """,
+        job_id,
+        topics_created,
+        entries_created,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -215,14 +224,14 @@ async def mark_completed(
     topics_created: int,
     entries_created: int,
     cents_spent: int,
-) -> None:
+) -> bool:
     """Transition job to 'completed' and record final counters + timestamp.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'. This makes the function safe
     to call from idempotent worker retry paths.
     """
-    await conn.execute(
+    result = await conn.execute(
         """
         UPDATE extraction_jobs
         SET status = 'completed',
@@ -238,6 +247,7 @@ async def mark_completed(
         entries_created,
         cents_spent,
     )
+    return str(result) == "UPDATE 1"
 
 
 # ---------------------------------------------------------------------------
@@ -250,13 +260,13 @@ async def mark_failed(
     job_id: UUID,
     *,
     error_code: str,
-) -> None:
+) -> bool:
     """Transition job to 'failed' and record the error_code.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'.
     """
-    await conn.execute(
+    result = await conn.execute(
         """
         UPDATE extraction_jobs
         SET status = 'failed',
@@ -268,6 +278,7 @@ async def mark_failed(
         job_id,
         error_code,
     )
+    return str(result) == "UPDATE 1"
 
 
 # ---------------------------------------------------------------------------

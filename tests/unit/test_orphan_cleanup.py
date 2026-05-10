@@ -70,7 +70,7 @@ async def test_young_rows_untouched() -> None:
     # Threshold passed as parameter to the DB call
     call_args = pool.fetchval.call_args
     assert call_args is not None
-    assert call_args[0][1] == "30"
+    assert call_args[0][1] == 30
 
 
 @pytest.mark.asyncio
@@ -96,6 +96,32 @@ async def test_postgres_error_caught_loop_continues() -> None:
 
     # Should have called fetchval twice (once raised, once succeeded)
     assert pool.fetchval.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_os_error_caught_loop_continues() -> None:
+    """OSError must be caught, logged, and the loop must continue."""
+    pool = AsyncMock(spec=asyncpg.Pool)
+    pool.fetchval = AsyncMock(side_effect=[OSError("socket reset"), 0])
+    mock_log = AsyncMock()
+    call_count = 0
+
+    async def _sleep_then_count(seconds: float) -> None:
+        nonlocal call_count
+        call_count += 1
+        if call_count >= 3:
+            raise asyncio.CancelledError
+
+    with (
+        patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_sleep_then_count),
+        patch("gubbi.extraction.orphan_cleanup.logger.bind", return_value=mock_log),
+    ):
+        task = asyncio.create_task(run_orphan_cleanup(pool, threshold_minutes=30, sleep_seconds=1))
+        with suppress(asyncio.CancelledError):
+            await task
+
+    assert pool.fetchval.call_count == 2
+    mock_log.warning.assert_awaited_once_with("orphan_cleanup_failed", exc_info=True)
 
 
 @pytest.mark.asyncio

@@ -20,10 +20,12 @@ from gubbi.storage.exceptions import TopicNotFoundError
 @pytest.fixture
 def mock_ctx() -> dict:
     """Build a minimal Arq worker context with mocked dependencies."""
+    extraction_service = AsyncMock()
+    extraction_service._llm = None
     return {
         "pool": MagicMock(),
         "cipher": MagicMock(),
-        "extraction_service": AsyncMock(),
+        "extraction_service": extraction_service,
         "redis": AsyncMock(),
     }
 
@@ -68,11 +70,11 @@ def conn2() -> AsyncMock:
 # ---------------------------------------------------------------------------
 
 
-def _make_usc_side_effect(*conns: AsyncMock) -> list[AsyncMock]:
+def _make_usc_side_effect(*conns: AsyncMock) -> list[MagicMock]:
     """Build a list of context-manager mocks, one per conn, for side_effect."""
-    cms = []
+    cms: list[MagicMock] = []
     for conn in conns:
-        cm = AsyncMock()
+        cm = MagicMock()
         cm.__aenter__ = AsyncMock(return_value=conn)
         cm.__aexit__ = AsyncMock(return_value=False)
         cms.append(cm)
@@ -84,7 +86,7 @@ def _make_entries_result(
 ) -> ExtractionEntriesResult:
     """Build an ExtractionEntriesResult for use in test mocks."""
     return ExtractionEntriesResult(
-        entries=entries,
+        entries=tuple(entries),
         input_tokens=input_tokens,
         output_tokens=output_tokens,
     )
@@ -650,6 +652,10 @@ class TestExtractConversationJob:
         skip_conn = AsyncMock()
         skip_conn.fetchval.return_value = None
 
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock(return_value=True)
+
         with (
             patch(
                 "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
@@ -658,6 +664,10 @@ class TestExtractConversationJob:
             patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
             patch("gubbi.storage.repositories.conversations.mark_processed") as mock_mp,
             patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+            patch(
+                "gubbi.extraction.jobs.extract_conversation.record_audit", new=AsyncMock()
+            ) as mock_audit,
         ):
             mock_gpa.return_value = None
             mock_usc.side_effect = _make_usc_side_effect(conn1, skip_conn)
@@ -678,7 +688,8 @@ class TestExtractConversationJob:
                 confidence=0.1,
             )
 
-            result = await extract_conversation(mock_ctx, conversation_id, user_id)
+            job_id = "cccccccc-0000-0000-0000-000000000014"
+            result = await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
 
             assert result["skipped"] is True
             assert result["topic_path"] is None
@@ -688,6 +699,13 @@ class TestExtractConversationJob:
 
             # mark_processed called once (via the skip_conn).
             mock_mp.assert_awaited_once_with(skip_conn, conversation_id)
+            mock_jobs.mark_completed.assert_awaited_once()
+            completed_call = mock_jobs.mark_completed.await_args
+            assert completed_call is not None
+            assert completed_call.kwargs["topics_created"] == 0
+            assert completed_call.kwargs["entries_created"] == 0
+            assert completed_call.kwargs["cents_spent"] == 0
+            mock_audit.assert_awaited_once()
 
             # extract_entries never called.
             mock_ctx["extraction_service"].extract_entries.assert_not_called()
@@ -806,7 +824,7 @@ class TestLifecycleUpdates:
 
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
-        mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock(return_value=True)
 
         with (
             patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
@@ -847,6 +865,53 @@ class TestLifecycleUpdates:
             assert call_args.kwargs.get("error_code") == "internal_error"
 
     @pytest.mark.asyncio
+    async def test_original_exception_propagates_when_mark_failed_connection_fails(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+    ) -> None:
+        """Secondary failure in _mark_job_failed must not mask the original error."""
+        conversation_id = 205
+        user_id = "00000000-0000-0000-0000-000000000205"
+        job_id = "bbbbbbbb-0000-0000-0000-000000000005"
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock()
+
+        failure_cm = MagicMock()
+        failure_cm.__aenter__.side_effect = RuntimeError("fresh connection failed")
+        failure_cm.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+            patch("gubbi.extraction.jobs.extract_conversation.logger.warning", new=AsyncMock()),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = [*_make_usc_side_effect(conn1), failure_cm]
+
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/lifecycle",
+                topic_title="Lifecycle",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.side_effect = RuntimeError("LLM down")
+
+            with pytest.raises(RuntimeError, match="LLM down"):
+                await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
+
+    @pytest.mark.asyncio
     async def test_mark_failed_not_called_without_job_id(
         self,
         mock_ctx: dict,
@@ -859,7 +924,7 @@ class TestLifecycleUpdates:
 
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
-        mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock(return_value=True)
 
         with (
             patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
@@ -903,7 +968,7 @@ class TestLifecycleUpdates:
 
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
-        mock_jobs.mark_completed = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock(return_value=True)
         mock_jobs.mark_failed = AsyncMock()
 
         with (
