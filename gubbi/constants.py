@@ -14,7 +14,8 @@ EMBEDDING_REQUEST_TIMEOUT_SECS: Final = (
 
 DB_COMMAND_TIMEOUT_SECS: Final = 30  # asyncpg connection-level command timeout (seconds)
 APP_POOL_SIZE_MIN: Final = 2  # app-role pool minimum size
-APP_POOL_SIZE_MAX: Final = 5  # app-role pool maximum size
+APP_POOL_SIZE_MAX: Final = 12  # Bumped (m-h5-h6) above worker max_jobs=10; leaves headroom for
+# idempotency probes + audit writes during the connection-split extraction job.
 ADMIN_POOL_SIZE_MIN: Final = 2  # admin-role pool minimum size (same bounds as app pool for now)
 ADMIN_POOL_SIZE_MAX: Final = 5  # admin-role pool maximum size (same bounds as app pool for now)
 
