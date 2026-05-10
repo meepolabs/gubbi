@@ -135,8 +135,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     )
     @require_scope("journal:read")
     async def journal_briefing() -> dict[str, Any]:
-        """Get the user's identity, recent activity, and topic list — the complete
-        context for this person.
+        """Identity, recent activity, and topic list -- complete context for this person.
 
         Call this FIRST in every new conversation before responding.
         Without calling this, you have no memory of who this person is or what they care about.
@@ -308,8 +307,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit: int = DEFAULT_TIMELINE_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """navigation index -- use to find interesting dates, then drill in via
-        journal_read_topic / journal_search for full content.
+        """Navigation index -- find interesting dates, drill in via read_topic/search.
 
         Browse what happened during a time period. Returns only IDs, dates,
         topics, and short titles (no decrypted body text). Use this to pick

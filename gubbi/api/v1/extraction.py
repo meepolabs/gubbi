@@ -86,7 +86,7 @@ async def extraction_progress(
     request: Request,
     auth: Annotated[tuple[UUID, frozenset[str]], Depends(require_scope("journal:read"))],
 ) -> StreamingResponse:
-    """GET /api/v1/extraction/progress
+    """GET /api/v1/extraction/progress.
 
     Returns a Server-Sent Events stream that publishes extraction progress
     events in real time. The client connects, receives events as they are

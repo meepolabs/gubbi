@@ -1,5 +1,4 @@
-"""MCP tools: journal_save_conversation, journal_list_conversations,
-journal_read_conversation."""
+"""MCP tools: journal_save_conversation, journal_list_conversations, journal_read_conversation."""
 
 import asyncio
 from typing import Any, NotRequired, TypedDict
@@ -330,8 +329,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         tags: list[str] | None = None,
         date: str | None = None,
     ) -> dict[str, Any]:
-        """Save a conversation transcript to the journal — "save this chat" or
-        "remember what we discussed."
+        """Save a conversation transcript -- "save this chat" or "remember what we discussed".
 
         Call when the user asks to save, or offer during meaningful moments:
         decisions, plans, breakthroughs, or reflections. The topic must already
@@ -380,7 +378,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit: int = DEFAULT_CONVERSATIONS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Browse saved conversations by topic — 'what conversations have we had about X?'
+        """Browse saved conversations by topic — 'what conversations have we had about X?'.
 
         Use this tool when the user wants to browse a list of chats, not find
         specific content within them. For keyword search across both entries AND

@@ -60,6 +60,7 @@ def _build_content_cipher() -> ContentCipher | None:
 
 
 async def startup(ctx: ExtractionContext) -> None:
+    """Arq worker startup hook: init logging, health server, PG pool, and Redis client."""
     # Load settings.
     settings = get_settings()
 
@@ -101,6 +102,7 @@ async def startup(ctx: ExtractionContext) -> None:
 
 
 async def shutdown(ctx: ExtractionContext) -> None:
+    """Arq worker shutdown hook: close PG pool and Redis client/connection pool."""
     pool = ctx.get("pool")
     if pool is not None:
         await pool.close()

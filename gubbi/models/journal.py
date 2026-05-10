@@ -23,6 +23,7 @@ class TopicMeta(BaseModel):
     @field_validator("topic")
     @classmethod
     def check_topic(cls, v: str) -> str:
+        """Validate entry topic path against the shared topic-rules grammar."""
         return validate_topic(v)
 
 
