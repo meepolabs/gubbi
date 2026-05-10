@@ -123,7 +123,7 @@ async def test_embedding_insert_under_scoped_conn_binds_user_id(
     cipher: ContentCipher,
     tenant_a: UUID,
 ) -> None:
-    """EmbeddingService.store_by_vector via user_scoped_connection ->
+    """EmbeddingService.save_by_vector via user_scoped_connection ->
     INSERT into entry_embeddings populates user_id from the GUC.
 
     The repo-layer embedding INSERT is what powers journal_append_entry's
@@ -131,7 +131,7 @@ async def test_embedding_insert_under_scoped_conn_binds_user_id(
     bound correctly even when the embedding is stored as a separate
     transaction from the entries INSERT.
     """
-    # store_by_vector does not load the ONNX model, so the default EmbeddingService
+    # save_by_vector does not load the ONNX model, so the default EmbeddingService
     # constructor is enough -- no encode() call in this test.
     embedding_service = EmbeddingService()
 
@@ -143,7 +143,7 @@ async def test_embedding_insert_under_scoped_conn_binds_user_id(
 
     unit_vector = [1.0] + [0.0] * 383
     async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
-        await embedding_service.store_by_vector(conn, entry_id, unit_vector)
+        await embedding_service.save_by_vector(conn, entry_id, unit_vector)
 
     async with admin_pool.acquire() as conn:
         embed_row = await conn.fetchrow(

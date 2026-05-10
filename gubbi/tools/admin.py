@@ -81,7 +81,7 @@ async def _run_reindex(app_ctx: AppContext, pool: asyncpg.Pool, cipher: ContentC
                 # (10-200ms) and should not hold a pool connection during that time.
                 embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
                 async with safe_acquire(pool) as conn:
-                    await app_ctx.embedding_service.store_by_vector(conn, r["id"], embedding)
+                    await app_ctx.embedding_service.save_by_vector(conn, r["id"], embedding)
                 succeeded_ids.append(r["id"])
                 embeddings_generated += 1
             except Exception as e:
