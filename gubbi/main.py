@@ -18,6 +18,8 @@ import asyncpg
 import httpx
 import redis.asyncio as aioredis
 import structlog
+from arq import create_pool as arq_create_pool
+from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from mcp.server.fastmcp import FastMCP
@@ -303,6 +305,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     redis_client = aioredis.Redis(connection_pool=redis_pool)
     app.state.redis_client = redis_client
 
+    # Arq pool for background job enqueue (separate from the SSE aioredis client).
+    arq_pool = await arq_create_pool(ArqRedisSettings.from_dsn(str(settings.redis_url)))
+    app.state.arq_pool = arq_pool
+    app_ctx.arq_pool = arq_pool
+
     # Mode 3 (hosted) disables the shared static API key path -- operators
     # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
     # compare in the middleware can never match (every token is >= one char).
@@ -381,6 +388,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # leaking pooled connections across lifespan restarts.
         await redis_client.aclose()
         await redis_pool.aclose()
+        # Close the Arq pool (separate Redis connection used for job enqueue).
+        await arq_pool.close()
 
 
 # Create FastAPI app

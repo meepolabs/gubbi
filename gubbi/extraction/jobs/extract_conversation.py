@@ -19,6 +19,7 @@ import json
 from typing import Any, cast
 from uuid import UUID, uuid4
 
+import anthropic
 import asyncpg
 import structlog
 from gubbi_common.audit.actions import Action
@@ -28,10 +29,16 @@ from gubbi.audit import record_audit
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.llm.provider import LLMMessage
-from gubbi.extraction.service import CategorizationResult, ExtractedEntry, ExtractionService
+from gubbi.extraction.service import (
+    CategorizationResult,
+    ExtractedEntry,
+    ExtractionEntriesResult,
+    ExtractionService,
+)
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
+from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.validation import harden_llm_topic_path
 
@@ -158,6 +165,55 @@ async def _mark_skipped_no_topic(
         await conv_repo.mark_processed(conn, conversation_id)
 
 
+def _classify_error(exc: BaseException) -> str:
+    """Map an exception to a short error_code string for extraction_jobs.error_code.
+
+    Uses raw string values (no typed enum). Expand as new exception types surface.
+    """
+    if isinstance(exc, anthropic.RateLimitError):
+        return "llm_rate_limited"
+    if isinstance(exc, anthropic.APIError):
+        return "llm_provider_error"
+    return "internal_error"
+
+
+async def _mark_job_failed(
+    pool: asyncpg.Pool,
+    user_uuid: UUID,
+    job_id: str,
+    conversation_id: int,
+    error_code: str,
+) -> None:
+    """Open a fresh user_scoped_connection to write the failed terminal state.
+
+    Called from the outer except block AFTER the SAVEPOINT has already been
+    poisoned (rolled back). Must NOT reuse any existing connection or be
+    called inside an existing transaction context.
+
+    Mirrors the _mark_skipped_no_topic pattern: short dedicated connection,
+    do the work, release.
+
+    Does NOT re-raise -- callers must re-raise the original exception themselves.
+    """
+    try:
+        async with user_scoped_connection(pool, user_id=user_uuid) as conn:
+            await extraction_jobs.mark_failed(conn, UUID(job_id), error_code=error_code)
+            await record_audit(
+                conn,
+                action="extraction_job.failed",
+                actor_type="user",
+                actor_id=str(user_uuid),
+                target_kind="extraction_job",
+                target_id=str(job_id),
+                metadata={"error_code": error_code, "conversation_id": conversation_id},
+            )
+    except Exception:  # noqa: S110
+        # Swallow secondary failure -- the original exception is what Arq needs.
+        # The job row may remain in 'running' and will be cleaned up by a
+        # future monitor / TTL sweep.
+        pass
+
+
 async def _persist_extraction(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
@@ -167,6 +223,8 @@ async def _persist_extraction(
     categorization: CategorizationResult,
     extracted_entries: list[ExtractedEntry],
     extraction_attempt_id: str,
+    job_id: str,
+    cents_spent: int,
     log: structlog.stdlib.AsyncBoundLogger,
 ) -> int:
     """Upsert the topic (if needed) and persist pre-extracted entries.
@@ -188,13 +246,16 @@ async def _persist_extraction(
     the start of Phase 3.
     """
     # Topic upsert (get_id / create with race-tolerance).
+    topic_created = False
     try:
         await topic_repo.get_id(conn, topic_path)
     except TopicNotFoundError:
+        topic_created = True
         try:
             await topic_repo.create(conn, topic_path, title=categorization.topic_title)
         except ValueError as exc:
             if "already exists" in str(exc):
+                topic_created = False
                 await log.debug("Topic race on create, proceeding", error=str(exc))
             else:
                 raise
@@ -232,6 +293,27 @@ async def _persist_extraction(
             "extraction_attempt_id": extraction_attempt_id,
         },
     )
+
+    # Lifecycle terminal: mark job completed with final counters.
+    # Skip when job_id is the sentinel 'unknown' (tests without a real job row).
+    if job_id != "unknown":
+        topics_created_count = 1 if topic_created else 0
+        await extraction_jobs.mark_completed(
+            conn,
+            UUID(job_id),
+            topics_created=topics_created_count,
+            entries_created=entries_created,
+            cents_spent=cents_spent,
+        )
+        await record_audit(
+            conn,
+            action="extraction_job.completed",
+            actor_type="user",
+            actor_id=str(user_uuid),
+            target_kind="extraction_job",
+            target_id=str(job_id),
+            metadata={"conversation_id": conversation_id, "entries_created": entries_created},
+        )
 
     return entries_created
 
@@ -276,6 +358,7 @@ async def extract_conversation(
     ctx: ExtractionContext,
     conversation_id: int,
     user_id: str,
+    job_id: str = "unknown",
 ) -> dict[str, Any]:
     """Arq job: categorize a conversation and write structured journal entries.
 
@@ -305,17 +388,27 @@ async def extract_conversation(
       Phase 2 -- LLM phase: no database connection held.
       Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
 
+    Lifecycle UPDATEs (Part 3):
+      mark_running  -- called in Phase 1 after idempotency check passes.
+      mark_completed -- called inside the Phase 3 SAVEPOINT via _persist_extraction.
+      mark_failed   -- called on a FRESH connection in the outer except block,
+                       AFTER the SAVEPOINT is already poisoned.
+
     Args:
         ctx: Arq worker context (pool, cipher, extraction_service, redis
             injected by on_startup).
         conversation_id: Database integer ID of the conversation to process.
         user_id: UUID string of the owning user (used for RLS scoping and
             pub/sub channel).
+        job_id: UUID string of the extraction_jobs row created by ingest.
+            Arq passes the value set via _job_id at enqueue time.  Defaults
+            to "unknown" so the function remains callable from tests that
+            pre-date the Part 3 signature change.
 
     Returns:
-        Summary dict with topic_path, entries_created, input_tokens (0 until
-        service layer exposes token counts), output_tokens (same), and skipped
-        (bool, True if idempotency check short-circuited).
+        Summary dict with topic_path, entries_created, input_tokens,
+        output_tokens, cents_spent, and skipped (bool, True if idempotency
+        check short-circuited).
     """
     pool = ctx["pool"]
     cipher = cast(ContentCipher, ctx["cipher"])
@@ -334,90 +427,125 @@ async def extract_conversation(
     )
     user_uuid = user_id if isinstance(user_id, UUID) else UUID(user_id)
 
-    # ------------------------------------------------------------------
-    # Phase 1 -- conn1: read-only load + early idempotency check.
-    # conn1 is released before any LLM call.
-    # ------------------------------------------------------------------
-    async with user_scoped_connection(pool, user_id=user_uuid) as conn1:
-        if await _check_idempotent(conn1, conversation_id, user_id, log):
-            return {
-                "topic_path": None,
-                "entries_created": 0,
-                "input_tokens": 0,
-                "output_tokens": 0,
-                "skipped": True,
-            }
-
-        _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
-            conn1, cipher, conversation_id, user_id, log
-        )
-    # conn1 released here -- pool slot returned before LLM calls.
-
-    # ------------------------------------------------------------------
-    # Phase 2 -- LLM phase: no database connection held.
-    # ------------------------------------------------------------------
-    categorization, topic_path = await _categorize_and_resolve_topic(
-        extraction_service, message_dicts, existing_topics, user_id, conversation_id, log
-    )
-
-    if topic_path is None:
-        # No usable topic -- mark processed via a short dedicated connection.
-        await _mark_skipped_no_topic(pool, user_uuid, conversation_id)
-        return {
-            "topic_path": None,
-            "entries_created": 0,
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "skipped": True,
-        }
-
-    # Extract entries while no DB connection is held.
-    extracted_entries: list[ExtractedEntry] = []
     try:
-        extracted_entries = await extraction_service.extract_entries(message_dicts, topic_path)
-    except Exception:
-        await log.error(
-            "Entry extraction failed",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            exc_info=True,
-        )
-        raise
-
-    # ------------------------------------------------------------------
-    # Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
-    # Second idempotency check here guards against a concurrent worker
-    # that raced through Phase 2 while we were doing LLM calls.
-    # ------------------------------------------------------------------
-    async with user_scoped_connection(pool, user_id=user_uuid) as conn2:  # noqa: SIM117
-        async with conn2.transaction():  # nested SAVEPOINT inside user_scoped_connection
-            # Last-write-wins guard: if another worker committed first, bail.
-            if await _check_idempotent(conn2, conversation_id, user_id, log):
+        # ------------------------------------------------------------------
+        # Phase 1 -- conn1: read-only load + early idempotency check.
+        # conn1 is released before any LLM call.
+        # ------------------------------------------------------------------
+        async with user_scoped_connection(pool, user_id=user_uuid) as conn1:
+            if await _check_idempotent(conn1, conversation_id, user_id, log):
                 return {
                     "topic_path": None,
                     "entries_created": 0,
                     "input_tokens": 0,
                     "output_tokens": 0,
+                    "cents_spent": 0,
                     "skipped": True,
                 }
 
-            entries_created = await _persist_extraction(
-                conn2,
-                cipher,
-                user_uuid,
-                conversation_id,
-                topic_path,
-                categorization,
-                extracted_entries,
-                extraction_attempt_id,
-                log,
+            # Lifecycle: transition pending -> running.
+            if job_id != "unknown":
+                await extraction_jobs.mark_running(conn1, UUID(job_id))
+
+            _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
+                conn1, cipher, conversation_id, user_id, log
             )
-    # conn2 released here -- SAVEPOINT committed atomically.
+        # conn1 released here -- pool slot returned before LLM calls.
+
+        # ------------------------------------------------------------------
+        # Phase 2 -- LLM phase: no database connection held.
+        # ------------------------------------------------------------------
+        categorization, topic_path = await _categorize_and_resolve_topic(
+            extraction_service, message_dicts, existing_topics, user_id, conversation_id, log
+        )
+
+        if topic_path is None:
+            # No usable topic -- mark processed via a short dedicated connection.
+            await _mark_skipped_no_topic(pool, user_uuid, conversation_id)
+            return {
+                "topic_path": None,
+                "entries_created": 0,
+                "input_tokens": categorization.input_tokens,
+                "output_tokens": categorization.output_tokens,
+                "cents_spent": 0,
+                "skipped": True,
+            }
+
+        # Extract entries while no DB connection is held.
+        extraction_result: ExtractionEntriesResult
+        try:
+            extraction_result = await extraction_service.extract_entries(message_dicts, topic_path)
+        except Exception:
+            await log.error(
+                "Entry extraction failed",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                exc_info=True,
+            )
+            raise
+
+        extracted_entries = extraction_result.entries
+
+        # Accumulate token counts across both LLM calls and compute cost.
+        total_input_tokens = categorization.input_tokens + extraction_result.input_tokens
+        total_output_tokens = categorization.output_tokens + extraction_result.output_tokens
+        llm_provider = getattr(extraction_service, "_llm", None)
+        cents_spent = 0
+        if llm_provider is not None and callable(
+            getattr(llm_provider, "estimate_cost_cents", None)
+        ):
+            try:
+                raw_cost = llm_provider.estimate_cost_cents(total_input_tokens, total_output_tokens)
+                # Guard against async mock returning a coroutine in tests.
+                if isinstance(raw_cost, int | float):
+                    cents_spent = int(round(raw_cost))
+            except Exception:  # noqa: BLE001
+                cents_spent = 0
+
+        # ------------------------------------------------------------------
+        # Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
+        # Second idempotency check here guards against a concurrent worker
+        # that raced through Phase 2 while we were doing LLM calls.
+        # ------------------------------------------------------------------
+        async with user_scoped_connection(pool, user_id=user_uuid) as conn2:  # noqa: SIM117
+            async with conn2.transaction():  # nested SAVEPOINT inside user_scoped_connection
+                # Last-write-wins guard: if another worker committed first, bail.
+                if await _check_idempotent(conn2, conversation_id, user_id, log):
+                    return {
+                        "topic_path": None,
+                        "entries_created": 0,
+                        "input_tokens": total_input_tokens,
+                        "output_tokens": total_output_tokens,
+                        "cents_spent": cents_spent,
+                        "skipped": True,
+                    }
+
+                entries_created = await _persist_extraction(
+                    conn2,
+                    cipher,
+                    user_uuid,
+                    conversation_id,
+                    topic_path,
+                    categorization,
+                    extracted_entries,
+                    extraction_attempt_id,
+                    job_id,
+                    cents_spent,
+                    log,
+                )
+        # conn2 released here -- SAVEPOINT committed atomically.
+
+    except Exception as exc:
+        # SAVEPOINT is already poisoned (rolled back). Open a FRESH connection
+        # to record the failure terminal state -- do NOT reuse conn1 or conn2.
+        if job_id != "unknown":
+            error_code = _classify_error(exc)
+            await _mark_job_failed(pool, user_uuid, job_id, conversation_id, error_code)
+        raise
 
     # ------------------------------------------------------------------
     # Publish progress event (outside DB connection -- non-fatal).
     # ------------------------------------------------------------------
-    job_id = ctx.get("job_id", "unknown")
     await _publish_progress(
         redis, user_id, conversation_id, str(job_id), topic_path, entries_created, log
     )
@@ -433,7 +561,8 @@ async def extract_conversation(
     return {
         "topic_path": topic_path,
         "entries_created": entries_created,
-        "input_tokens": 0,
-        "output_tokens": 0,
+        "input_tokens": total_input_tokens,
+        "output_tokens": total_output_tokens,
+        "cents_spent": cents_spent,
         "skipped": False,
     }

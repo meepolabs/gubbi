@@ -5,6 +5,9 @@ Tests cover:
 - Persistence rollback leaves no partial state.
 - Pool not starved under concurrency (10 concurrent jobs against pool max=12).
 - Multi-worker race: both workers for same conversation_id, bounded READ COMMITTED outcome.
+- Lifecycle UPDATEs: mark_running -> mark_completed / mark_failed.
+- Audit rows at terminals: extraction_job.completed / extraction_job.failed.
+- Retry idempotency: lifecycle UPDATEs are no-ops on second invocation.
 
 Requires a running PostgreSQL instance with migrations applied through head.
 Uses mock LLM service -- no API key needed.
@@ -25,7 +28,8 @@ import pytest
 from gubbi.constants import APP_POOL_SIZE_MAX
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
-from gubbi.extraction.service import CategorizationResult, ExtractedEntry
+from gubbi.extraction.service import CategorizationResult, ExtractedEntry, ExtractionEntriesResult
+from gubbi.storage.repositories import extraction_jobs
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
@@ -86,6 +90,16 @@ async def _seed_conversation_modern(conn: asyncpg.Connection) -> int:
     return int(conv_id)
 
 
+async def _seed_extraction_job(conn: asyncpg.Connection, conversation_id: int) -> UUID:
+    """Insert a pending extraction_jobs row and return the job_id UUID."""
+    return await extraction_jobs.create_pending(
+        conn,
+        user_id=_USER_UUID,
+        conversation_id=conversation_id,
+        source="claude",
+    )
+
+
 def _make_mock_ctx(pool: asyncpg.Pool) -> dict:
     mock_extraction_service = AsyncMock()
     mock_extraction_service.categorize_conversation.return_value = CategorizationResult(
@@ -94,20 +108,24 @@ def _make_mock_ctx(pool: asyncpg.Pool) -> dict:
         summary="Resilience test summary",
         confidence=0.95,
     )
-    mock_extraction_service.extract_entries.return_value = [
-        ExtractedEntry(
-            content="Resilience entry one",
-            reasoning="Reason one",
-            tags=["test"],
-            entry_date="2026-05-10",
-        ),
-        ExtractedEntry(
-            content="Resilience entry two",
-            reasoning="Reason two",
-            tags=["test"],
-            entry_date="2026-05-10",
-        ),
-    ]
+    mock_extraction_service.extract_entries.return_value = ExtractionEntriesResult(
+        entries=[
+            ExtractedEntry(
+                content="Resilience entry one",
+                reasoning="Reason one",
+                tags=["test"],
+                entry_date="2026-05-10",
+            ),
+            ExtractedEntry(
+                content="Resilience entry two",
+                reasoning="Reason two",
+                tags=["test"],
+                entry_date="2026-05-10",
+            ),
+        ],
+        input_tokens=100,
+        output_tokens=50,
+    )
     mock_redis = AsyncMock()
     mock_redis.publish = AsyncMock()
     return {
@@ -145,20 +163,24 @@ async def test_idempotent_reentry_after_llm_failure(
 
     # Second run: succeeds.
     ctx["extraction_service"].extract_entries.side_effect = None
-    ctx["extraction_service"].extract_entries.return_value = [
-        ExtractedEntry(
-            content="Resilience entry one",
-            reasoning="Reason one",
-            tags=["test"],
-            entry_date="2026-05-10",
-        ),
-        ExtractedEntry(
-            content="Resilience entry two",
-            reasoning="Reason two",
-            tags=["test"],
-            entry_date="2026-05-10",
-        ),
-    ]
+    ctx["extraction_service"].extract_entries.return_value = ExtractionEntriesResult(
+        entries=[
+            ExtractedEntry(
+                content="Resilience entry one",
+                reasoning="Reason one",
+                tags=["test"],
+                entry_date="2026-05-10",
+            ),
+            ExtractedEntry(
+                content="Resilience entry two",
+                reasoning="Reason two",
+                tags=["test"],
+                entry_date="2026-05-10",
+            ),
+        ],
+        input_tokens=100,
+        output_tokens=50,
+    )
 
     result = await extract_conversation(ctx, conv_id, _USER_ID_STR)
     assert result["skipped"] is False
@@ -193,10 +215,14 @@ async def test_persistence_rollback_leaves_no_partial_state(
 
     ctx = _make_mock_ctx(clean_rls_db)
     # Two entries configured -- first succeeds, second fails.
-    ctx["extraction_service"].extract_entries.return_value = [
-        ExtractedEntry(content="Good entry", reasoning="ok", tags=[], entry_date="2026-05-10"),
-        ExtractedEntry(content="Bad entry", reasoning="bad", tags=[], entry_date="2026-05-10"),
-    ]
+    ctx["extraction_service"].extract_entries.return_value = ExtractionEntriesResult(
+        entries=[
+            ExtractedEntry(content="Good entry", reasoning="ok", tags=[], entry_date="2026-05-10"),
+            ExtractedEntry(content="Bad entry", reasoning="bad", tags=[], entry_date="2026-05-10"),
+        ],
+        input_tokens=100,
+        output_tokens=50,
+    )
 
     # We patch entry_repo.append at the repository level to inject the failure
     # on the second call.
@@ -261,16 +287,20 @@ async def test_pool_not_starved_under_concurrency(
                 confidence=0.9,
             )
 
-        async def _slow_extract(*_args: object, **_kwargs: object) -> list[ExtractedEntry]:
+        async def _slow_extract(*_args: object, **_kwargs: object) -> ExtractionEntriesResult:
             await asyncio.sleep(0.1)  # simulate LLM latency
-            return [
-                ExtractedEntry(
-                    content=f"Entry for {conv_id}",
-                    reasoning="concurrent",
-                    tags=[],
-                    entry_date="2026-05-10",
-                )
-            ]
+            return ExtractionEntriesResult(
+                entries=[
+                    ExtractedEntry(
+                        content=f"Entry for {conv_id}",
+                        reasoning="concurrent",
+                        tags=[],
+                        entry_date="2026-05-10",
+                    )
+                ],
+                input_tokens=10,
+                output_tokens=5,
+            )
 
         mock_svc.categorize_conversation = _slow_categorize
         mock_svc.extract_entries = _slow_extract
@@ -319,16 +349,20 @@ async def test_multi_worker_race_idempotent(
                 confidence=0.9,
             )
 
-        async def _slow_extract(*_args: object, **_kwargs: object) -> list[ExtractedEntry]:
+        async def _slow_extract(*_args: object, **_kwargs: object) -> ExtractionEntriesResult:
             await asyncio.sleep(0.05)
-            return [
-                ExtractedEntry(
-                    content="Race entry",
-                    reasoning="race",
-                    tags=[],
-                    entry_date="2026-05-10",
-                )
-            ]
+            return ExtractionEntriesResult(
+                entries=[
+                    ExtractedEntry(
+                        content="Race entry",
+                        reasoning="race",
+                        tags=[],
+                        entry_date="2026-05-10",
+                    )
+                ],
+                input_tokens=10,
+                output_tokens=5,
+            )
 
         mock_svc.categorize_conversation = _slow_categorize
         mock_svc.extract_entries = _slow_extract
@@ -374,3 +408,209 @@ async def test_multi_worker_race_idempotent(
     assert 1 <= audit_count <= 2, f"Expected 1-2 audit rows, got {audit_count}"
     assert 1 <= entry_count <= 2, f"Expected 1-2 entries, got {entry_count}"
     assert processed_at is not None, "Conversation should be marked processed"
+
+
+# ---------------------------------------------------------------------------
+# Part 3: lifecycle UPDATE integration tests
+# ---------------------------------------------------------------------------
+
+
+async def test_lifecycle_happy_path(
+    clean_rls_db: asyncpg.Pool,
+) -> None:
+    """Worker lifecycle: pending -> running -> completed.
+
+    Asserts:
+    - Row transitions happen correctly.
+    - cents_spent, topics_created, entries_created are populated after completion.
+    - extraction_job.completed audit row written with actor_type='user'.
+    """
+    async with clean_rls_db.acquire() as conn:
+        conv_id = await _seed_conversation_modern(conn)
+        job_id = await _seed_extraction_job(conn, conv_id)
+
+    ctx = _make_mock_ctx(clean_rls_db)
+
+    # Use a deterministic mock provider so cents_spent is calculable.
+    from unittest.mock import MagicMock
+
+    mock_provider = MagicMock()
+    mock_provider.estimate_cost_cents.return_value = 3.0
+    ctx["extraction_service"]._llm = mock_provider
+
+    result = await extract_conversation(ctx, conv_id, _USER_ID_STR, str(job_id))
+
+    assert result["skipped"] is False
+    assert result["entries_created"] == 2
+    assert result["cents_spent"] == 3
+
+    # Verify row state in DB.
+    async with clean_rls_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, entries_created, cents_spent, started_at, completed_at "
+            "FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert row["status"] == "completed"
+    assert row["entries_created"] == 2
+    assert row["cents_spent"] == 3
+    assert row["started_at"] is not None
+    assert row["completed_at"] is not None
+
+    # Verify extraction_job.completed audit row.
+    async with clean_rls_db.acquire() as conn:
+        audit_row = await conn.fetchrow(
+            "SELECT actor_type, actor_id, action, target_kind, target_id "
+            "FROM audit_log "
+            "WHERE action = 'extraction_job.completed' AND target_id = $1",
+            str(job_id),
+        )
+    assert audit_row is not None
+    assert audit_row["actor_type"] == "user"
+    assert audit_row["actor_id"] == _USER_ID_STR
+    assert audit_row["target_kind"] == "extraction_job"
+
+
+async def test_lifecycle_on_failure(
+    clean_rls_db: asyncpg.Pool,
+) -> None:
+    """Worker lifecycle on LLM failure: pending -> running -> failed.
+
+    Asserts:
+    - Row transitions correctly to 'failed'.
+    - error_code is populated.
+    - extraction_job.failed audit row written with actor_type='user'.
+    """
+    async with clean_rls_db.acquire() as conn:
+        conv_id = await _seed_conversation_modern(conn)
+        job_id = await _seed_extraction_job(conn, conv_id)
+
+    ctx = _make_mock_ctx(clean_rls_db)
+    ctx["extraction_service"].extract_entries.side_effect = RuntimeError("LLM hard failure")
+
+    with pytest.raises(RuntimeError, match="LLM hard failure"):
+        await extract_conversation(ctx, conv_id, _USER_ID_STR, str(job_id))
+
+    # Verify row state.
+    async with clean_rls_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, error_code, started_at, completed_at "
+            "FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "internal_error"
+    assert row["started_at"] is not None
+    assert row["completed_at"] is not None
+
+    # Verify extraction_job.failed audit row.
+    async with clean_rls_db.acquire() as conn:
+        audit_row = await conn.fetchrow(
+            "SELECT actor_type, actor_id, action, target_kind, target_id "
+            "FROM audit_log "
+            "WHERE action = 'extraction_job.failed' AND target_id = $1",
+            str(job_id),
+        )
+    assert audit_row is not None
+    assert audit_row["actor_type"] == "user"
+    assert audit_row["actor_id"] == _USER_ID_STR
+    assert audit_row["target_kind"] == "extraction_job"
+
+
+async def test_lifecycle_retry_idempotency(
+    clean_rls_db: asyncpg.Pool,
+) -> None:
+    """Lifecycle UPDATEs are no-ops on retry after terminal state is set.
+
+    Simulate a successful run followed by a second invocation of the same
+    job_id. The second run short-circuits via the idempotency check (processed_at
+    already set) and the mark_completed / mark_running calls in the repo are no-ops
+    (WHERE clause guards prevent overwriting a terminal row).
+
+    Asserts that the extraction_jobs row stays in 'completed' after the retry
+    and is not duplicated.
+    """
+    async with clean_rls_db.acquire() as conn:
+        conv_id = await _seed_conversation_modern(conn)
+        job_id = await _seed_extraction_job(conn, conv_id)
+
+    ctx = _make_mock_ctx(clean_rls_db)
+
+    from unittest.mock import MagicMock
+
+    mock_provider = MagicMock()
+    mock_provider.estimate_cost_cents.return_value = 2.0
+    ctx["extraction_service"]._llm = mock_provider
+
+    # First run: succeeds.
+    result1 = await extract_conversation(ctx, conv_id, _USER_ID_STR, str(job_id))
+    assert result1["skipped"] is False
+
+    # Second run with same job_id: idempotency check fires, returns skipped.
+    result2 = await extract_conversation(ctx, conv_id, _USER_ID_STR, str(job_id))
+    assert result2["skipped"] is True
+
+    # Row should still be 'completed', not clobbered.
+    async with clean_rls_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert row["status"] == "completed"
+
+    # Exactly one extraction_job.completed audit row (second run was idempotent).
+    async with clean_rls_db.acquire() as conn:
+        completed_audit_count: int = await conn.fetchval(
+            "SELECT COUNT(*) FROM audit_log "
+            "WHERE action = 'extraction_job.completed' AND target_id = $1",
+            str(job_id),
+        )
+    assert (
+        completed_audit_count == 1
+    ), f"Expected exactly 1 extraction_job.completed audit row, got {completed_audit_count}"
+
+
+async def test_audit_rows_actor_type_user(
+    clean_rls_db: asyncpg.Pool,
+) -> None:
+    """Both terminal audit rows use actor_type='user', not 'service'."""
+    async with clean_rls_db.acquire() as conn:
+        conv_id_ok = await _seed_conversation_modern(conn)
+        job_id_ok = await _seed_extraction_job(conn, conv_id_ok)
+        conv_id_fail = await _seed_conversation_modern(conn)
+        job_id_fail = await _seed_extraction_job(conn, conv_id_fail)
+
+    # Happy path job.
+    ctx_ok = _make_mock_ctx(clean_rls_db)
+    from unittest.mock import MagicMock
+
+    mock_provider = MagicMock()
+    mock_provider.estimate_cost_cents.return_value = 1.0
+    ctx_ok["extraction_service"]._llm = mock_provider
+    await extract_conversation(ctx_ok, conv_id_ok, _USER_ID_STR, str(job_id_ok))
+
+    # Failure job.
+    ctx_fail = _make_mock_ctx(clean_rls_db)
+    ctx_fail["extraction_service"].extract_entries.side_effect = RuntimeError("injected fail")
+    with pytest.raises(RuntimeError):
+        await extract_conversation(ctx_fail, conv_id_fail, _USER_ID_STR, str(job_id_fail))
+
+    async with clean_rls_db.acquire() as conn:
+        completed_row = await conn.fetchrow(
+            "SELECT actor_type FROM audit_log "
+            "WHERE action = 'extraction_job.completed' AND target_id = $1",
+            str(job_id_ok),
+        )
+        failed_row = await conn.fetchrow(
+            "SELECT actor_type FROM audit_log "
+            "WHERE action = 'extraction_job.failed' AND target_id = $1",
+            str(job_id_fail),
+        )
+
+    assert completed_row is not None
+    assert completed_row["actor_type"] == "user"
+    assert failed_row is not None
+    assert failed_row["actor_type"] == "user"
