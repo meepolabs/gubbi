@@ -4,4 +4,4 @@ from fastapi import FastAPI
 
 
 def register(app: FastAPI) -> None:
-    return None
+    """No-op: register no OAuth routes (Mode 1/3 -- gateway or API-key auth)."""

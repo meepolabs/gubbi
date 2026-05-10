@@ -719,6 +719,7 @@ async def get_title_summary(
     cipher: ContentCipher,
     conversation_id: int,
 ) -> tuple[str, str] | None:
+    """Decrypt and return (title, summary) for a conversation, or None if not found."""
     row = await conn.fetchrow(
         "SELECT title_encrypted, title_nonce, summary_encrypted, summary_nonce "
         "FROM conversations WHERE id = $1",

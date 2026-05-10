@@ -1,5 +1,4 @@
-"""MCP tools: journal_append_entry, journal_read_topic, journal_update_entry,
-journal_delete_entry."""
+"""MCP tools: journal_append_entry / read_topic / update_entry / delete_entry."""
 
 import asyncio
 from typing import Any, Literal
@@ -331,9 +330,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         tags: list[str] | None = None,
         date: str | None = None,
     ) -> dict[str, Any]:
-        """Record a life event, decision, or update — "remember this",
-        "note that we decided X", or "I just did Y.". Call proactively when the
-        user shares significant news, decisions, progress, or milestones.
+        """Record a life event, decision, or update -- "remember this" / "I just did Y".
+
+        Call proactively when the user shares significant news, decisions,
+        progress, or milestones.
 
         The topic must already exist — check the briefing for recently used topics,
         journal_list_topics to see all available topics, or create one with journal_create_topic.
@@ -381,8 +381,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         date_to: str | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Read entries from a topic — "show me my notes on health" or
-        "what did I write about work?"
+        """Read entries from a topic -- "show me my notes" / "what did I write".
 
         Use when the user wants to review a specific topic's entries.
         Returns entries in chronological order with content and reasoning.
@@ -423,7 +422,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         date: str | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Correct or expand a journal entry — "fix that entry" or "add more detail."
+        """Correct or expand a journal entry — "fix that entry" or "add more detail.".
 
         Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
@@ -459,7 +458,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         entry_id: int,
     ) -> dict[str, Any]:
         """Remove a journal entry permanently — wrong data, duplicate, or mistake.
-        Trigger: 'delete that', 'forget that', 'undo that', 'scratch that', 'that was wrong.'
+
+        Trigger: 'delete that', 'forget that', 'undo that', 'scratch that', 'that was wrong.'.
 
         Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 

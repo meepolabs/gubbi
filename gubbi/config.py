@@ -133,6 +133,7 @@ class AuthConfig(BaseModel):
     @field_validator("api_key")
     @classmethod
     def validate_api_key(cls, v: str) -> str:
+        """Reject keys shorter than 32 chars (empty allowed for Mode 3)."""
         # Non-empty keys must still be strong. Length enforcement for the
         # "required vs optional" contract lives in the model validator below,
         # so Mode 3 can leave this empty without tripping the length check.
@@ -304,10 +305,12 @@ class Settings(BaseSettings):
 
     @property
     def knowledge_dir(self) -> Path:
+        """Filesystem location of user-knowledge markdown (profile, key facts)."""
         return self.data_dir / "knowledge"
 
     @property
     def conversations_json_dir(self) -> Path:
+        """Filesystem location of archived conversation JSON blobs."""
         return self.data_dir / "conversations_json"
 
     @property
@@ -326,6 +329,7 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Inject _FlatCompatEnvSource so legacy flat env vars resolve before nested ones."""
         return (
             init_settings,
             _FlatCompatEnvSource(settings_cls),

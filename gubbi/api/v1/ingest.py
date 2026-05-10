@@ -1,4 +1,4 @@
-"""REST API: POST /api/v1/ingest/conversations
+"""REST API: POST /api/v1/ingest/conversations.
 
 Accepts normalized conversation batches from the browser extension.
 Transforms, dedupes, and saves to conversations table.

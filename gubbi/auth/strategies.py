@@ -101,7 +101,9 @@ class AuthStrategy(Protocol):
 
     name: str  # for logging / spans, e.g. "trust_gateway", "api_key", "hydra", "selfhost"
 
-    async def authenticate(self, request: Request) -> AuthResult | None: ...
+    async def authenticate(self, request: Request) -> AuthResult | None:
+        """Authenticate the request; return AuthResult, None to defer, or raise AuthRejected."""
+        ...
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +164,7 @@ class TrustGatewayStrategy:
         self.gateway_require_signature = gateway_require_signature
 
     async def authenticate(self, request: Request) -> AuthResult | None:
+        """Verify gateway-injected X-Auth-* headers (and HMAC signature when required)."""
         log = bound_logger(request)
         user_id_header = request.headers.get("x-auth-user-id", "")
         if not user_id_header:
@@ -224,6 +227,7 @@ class ApiKeyStrategy:
         self.operator_user_id = operator_user_id
 
     async def authenticate(self, request: Request) -> AuthResult | None:
+        """Match the bearer token against the configured static API key (timing-safe)."""
         token = _extract_bearer_token(request)
         if not self.api_key or not secrets.compare_digest(token, self.api_key):
             return None
@@ -240,6 +244,7 @@ class HydraStrategy:
         self.introspector = introspector
 
     async def authenticate(self, request: Request) -> AuthResult | None:
+        """Introspect ory_at_* bearer tokens via Hydra; return None if no introspector wired."""
         if self.introspector is None:
             return None
         token = _extract_bearer_token(request)
@@ -269,6 +274,7 @@ class SelfHostStrategy:
         self.operator_user_id = operator_user_id
 
     async def authenticate(self, request: Request) -> AuthResult | None:
+        """Validate self-host OAuth callback token via the supplied validator callable."""
         if self.token_validator is None:
             return None
         token = _extract_bearer_token(request)

@@ -38,7 +38,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit: int = DEFAULT_TOPICS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Browse all journal topics — "what topics do I have?" or "what do I track?"
+        """Browse all journal topics — "what topics do I have?" or "what do I track?".
 
         Use when the user asks about their journal structure, or when you need to
         discover valid topic paths for other tools.
@@ -97,7 +97,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         description: str = "",
     ) -> dict[str, Any]:
         """Create a new journal topic for an area of the user's life not yet tracked.
-        e.g., "I want to start tracking my fitness" or "make a topic for the house renovation."
+
+        e.g., "I want to start tracking my fitness" or "make a topic for the house renovation.".
 
         Required before writing entries or conversations to a new topic.
         Check journal_list_topics or the briefing first to avoid duplicates.

@@ -84,6 +84,7 @@ class BearerAuthMiddleware:
         self.protected_resource_metadata_url = protected_resource_metadata_url
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Run each auth strategy in order; first non-None result wins, else 401."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return

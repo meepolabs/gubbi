@@ -15,6 +15,7 @@ async def get_topic_ids_by_prefix(
     conn: asyncpg.Connection,
     topic_prefix: str,
 ) -> list[int]:
+    """Return all topic ids whose path starts with the given prefix (LIKE-escaped)."""
     rows = await conn.fetch(
         "SELECT id FROM topics WHERE path LIKE $1 ESCAPE '!'",
         _escape_like(topic_prefix) + "%",
@@ -30,6 +31,7 @@ async def fts_search(
     date_to: str | None,
     limit: int,
 ) -> list[SearchResult]:
+    """Run FTS over entries + conversations with optional topic/date filters."""
     params: list[Any] = [query]
 
     entry_where = [
