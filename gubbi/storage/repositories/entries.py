@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping, Sequence
 from datetime import UTC
 from datetime import date as date_cls
@@ -37,6 +38,9 @@ __all__: list[str] = [
 ]
 
 logger = structlog.get_logger(__name__)
+# Sync stdlib logger -- used inside the sync ``_build_entry`` closure where we
+# cannot ``await`` an AsyncBoundLogger. Mirrors the embedding_service.py pattern.
+_sync_logger = logging.getLogger(__name__)
 
 
 # ── module-private helpers ────────────────────────────────────────────────────
@@ -169,8 +173,25 @@ async def read(
     where = " AND ".join(where_parts)
 
     def _build_entry(r: Any) -> Entry:
-        content = cast(str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce"))
-        reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
+        try:
+            content = cast(
+                str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+            )
+            reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
+        except DecryptionError:
+            _sync_logger.warning(
+                "entry_decryption_failed entry_id=%s topic=%s",
+                r["id"],
+                topic,
+            )
+            return Entry(
+                id=r["id"],
+                date=str(r["date"]),
+                content="[decryption-failed]",
+                reasoning=None,
+                conversation_id=r["conversation_id"],
+                tags=list(r["tags"] or []),
+            )
         return Entry(
             id=r["id"],
             date=str(r["date"]),

@@ -45,6 +45,15 @@ _CATEGORIZE_SCHEMA: Mapping[str, Any] = {
     "required": ["topic_path", "topic_title", "summary", "confidence"],
 }
 
+_CATEGORIZE_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {"topic_path", "topic_title", "summary", "confidence"}
+)
+
+
+class ExtractionError(Exception):
+    """Raised when an LLM extraction response fails contract validation."""
+
+
 _EXTRACT_SCHEMA: Mapping[str, Any] = {
     "type": "object",
     "properties": {
@@ -92,6 +101,9 @@ class ExtractionService:
         response = await self._llm.complete([user_msg], system_prompt, _CATEGORIZE_SCHEMA)
 
         parsed = self._parse_content(response.content)
+        missing = _CATEGORIZE_REQUIRED_FIELDS - parsed.keys()
+        if missing:
+            raise ExtractionError(f"categorize response missing required fields: {sorted(missing)}")
         return CategorizationResult(
             topic_path=parsed["topic_path"],
             topic_title=parsed["topic_title"],
