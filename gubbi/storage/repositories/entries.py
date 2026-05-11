@@ -697,7 +697,7 @@ async def get_unindexed(
     """
     rows = await conn.fetch(
         """
-        SELECT e.id, e.content_encrypted, e.content_nonce,
+        SELECT e.id, e.user_id, e.content_encrypted, e.content_nonce,
                e.tags, e.date::text AS date, t.path AS topic, t.title
         FROM entries e
         JOIN topics t ON t.id = e.topic_id
@@ -722,9 +722,17 @@ async def get_unindexed(
             raise RuntimeError(
                 f"Entry {r['id']}: content decrypted to None; schema invariant violated"
             )
+        # ``user_id`` is surfaced so ``_run_reindex`` can bind
+        # ``app.current_user_id`` per row before issuing the embedding
+        # UPSERT; without it, ``entry_embeddings.user_id`` would resolve
+        # to NULL on the admin-pool write path (the GUC is unset on a
+        # BYPASSRLS connection) and HNSW + RLS would later miss those
+        # rows.  Keeping the propagation in ``_run_reindex`` (not here)
+        # preserves the existing transaction-scoping contract.
         result.append(
             {
                 "id": r["id"],
+                "user_id": r["user_id"],
                 "content": decrypted,
                 "tags": list(r["tags"] or []),
                 "date": r["date"],
