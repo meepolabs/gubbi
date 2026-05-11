@@ -3,11 +3,26 @@ import random
 from collections.abc import Mapping
 from typing import Any
 
-from anthropic import AsyncAnthropic, RateLimitError
+from anthropic import (
+    APIConnectionError,
+    APITimeoutError,
+    AsyncAnthropic,
+    InternalServerError,
+    RateLimitError,
+)
 
 from gubbi.config import LLMConfig
-from gubbi.constants import ANTHROPIC_MAX_RETRIES
+from gubbi.constants import ANTHROPIC_MAX_RETRIES, ANTHROPIC_REQUEST_TIMEOUT_SECS
 from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
+
+# Retryable Anthropic SDK exception classes. Transient network/server-side failures
+# get backoff + retry; client errors (auth, validation, etc.) propagate immediately.
+_RETRYABLE_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
+    RateLimitError,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+)
 
 # Model pricing in $USD per million tokens (input, output).
 # Values are approximate and should be updated when pricing changes.
@@ -29,7 +44,10 @@ class AnthropicProvider(LLMProvider):
     def __init__(self, config: LLMConfig) -> None:
         self._api_key = config.api_key
         self._model = config.model or "claude-haiku-4-5-20251001"
-        self._client = AsyncAnthropic(api_key=self._api_key)
+        self._client = AsyncAnthropic(
+            api_key=self._api_key,
+            timeout=ANTHROPIC_REQUEST_TIMEOUT_SECS,
+        )
 
     async def complete(
         self,
@@ -92,7 +110,7 @@ class AnthropicProvider(LLMProvider):
         for attempt in range(max_retries):
             try:
                 return await self._client.messages.create(**kwargs)
-            except RateLimitError:
+            except _RETRYABLE_ANTHROPIC_ERRORS:
                 if attempt < max_retries - 1:
                     base = base_delay * (2**attempt)
                     # Not cryptographic -- simple jitter to prevent thundering herd.

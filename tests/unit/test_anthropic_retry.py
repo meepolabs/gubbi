@@ -6,6 +6,11 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from anthropic import (
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+)
 from anthropic._exceptions import RateLimitError
 from anthropic.types import Message, Usage
 
@@ -126,3 +131,58 @@ async def test_anthropic_retry_jitter_is_added() -> None:
         assert (
             duration <= base_delay + jitter_range
         ), f"delay {duration} exceeds max base+jitter ({base_delay + jitter_range})"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("exc_factory", "label"),
+    [
+        (
+            lambda: APIConnectionError(request=MagicMock()),
+            "APIConnectionError",
+        ),
+        (
+            lambda: APITimeoutError(request=MagicMock()),
+            "APITimeoutError",
+        ),
+        (
+            lambda: InternalServerError(
+                message="boom",
+                response=MagicMock(status_code=500),
+                body=None,
+            ),
+            "InternalServerError",
+        ),
+    ],
+)
+async def test_anthropic_retries_on_broadened_transient_errors(
+    exc_factory: object, label: str
+) -> None:
+    """Item 3: APIConnectionError / APITimeoutError / InternalServerError now retry."""
+    from gubbi.config import LLMConfig
+    from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
+
+    config = LLMConfig(api_key="test-key", model="claude-haiku-4-5-20251001")
+    provider = AnthropicProvider(config)
+
+    mock_message = Message(
+        id="msg_1",
+        type="message",
+        role="assistant",
+        content=[{"type": "text", "text": "ok"}],
+        model="claude-haiku-4-5-20251001",
+        stop_reason="end_turn",
+        usage=Usage(input_tokens=1, output_tokens=1),
+    )
+
+    with patch.object(provider._client.messages, "create", new_callable=AsyncMock) as mock_create:
+        mock_create.side_effect = [exc_factory(), mock_message]  # type: ignore[operator]
+
+        async def no_sleep(_d: float) -> None:
+            return None
+
+        with patch("asyncio.sleep", new=no_sleep):
+            result = await provider._call_with_retry({})
+
+    assert result == mock_message, f"{label} should be retried and ultimately succeed"
+    assert mock_create.call_count == 2, f"{label} should retry exactly once before success"
