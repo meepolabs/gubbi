@@ -7,7 +7,7 @@ that would otherwise produce a confusing KeyError deep in the call site.
 
 from __future__ import annotations
 
-from typing import Any
+import pathlib
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -17,9 +17,8 @@ from gubbi.extraction.service import ExtractionError, ExtractionService
 
 
 @pytest.mark.unit
-@pytest.mark.asyncio
 async def test_categorize_raises_extraction_error_when_required_field_missing(
-    tmp_path: Any,
+    tmp_path: pathlib.Path,
 ) -> None:
     """LLM dict missing ``topic_path`` raises ExtractionError, not KeyError."""
     # Provide a stub prompts dir so the service _read_prompt call doesn't fail.

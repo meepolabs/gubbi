@@ -1,10 +1,11 @@
 import asyncio
 import random
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 from anthropic import (
     APIConnectionError,
+    APIStatusError,
     APITimeoutError,
     AsyncAnthropic,
     InternalServerError,
@@ -17,12 +18,29 @@ from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
 
 # Retryable Anthropic SDK exception classes. Transient network/server-side failures
 # get backoff + retry; client errors (auth, validation, etc.) propagate immediately.
+# Note: anthropic 0.49.x does not export OverloadedError or ServiceUnavailableError
+# at the top level. Their wire surface (HTTP 503/529/etc.) arrives as APIStatusError
+# with a 5xx status_code -- _is_retryable_anthropic_error filters to that subset.
+# Revisit this list on the next anthropic SDK upgrade.
 _RETRYABLE_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
     RateLimitError,
     APIConnectionError,
     APITimeoutError,
     InternalServerError,
+    APIStatusError,
 )
+
+
+def _is_retryable_anthropic_error(exc: Exception) -> bool:
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, APIConnectionError):
+        return True
+    if isinstance(exc, APIStatusError):
+        status_error = cast(APIStatusError, exc)
+        return cast(int, status_error.status_code) >= 500
+    return False
+
 
 # Model pricing in $USD per million tokens (input, output).
 # Values are approximate and should be updated when pricing changes.
@@ -110,7 +128,9 @@ class AnthropicProvider(LLMProvider):
         for attempt in range(max_retries):
             try:
                 return await self._client.messages.create(**kwargs)
-            except _RETRYABLE_ANTHROPIC_ERRORS:
+            except _RETRYABLE_ANTHROPIC_ERRORS as exc:
+                if not _is_retryable_anthropic_error(exc):
+                    raise
                 if attempt < max_retries - 1:
                     base = base_delay * (2**attempt)
                     # Not cryptographic -- simple jitter to prevent thundering herd.
