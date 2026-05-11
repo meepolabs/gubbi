@@ -115,13 +115,33 @@ class TestLazyInitRace:
         await storage.save_access_token("idempotent", _access_token("idempotent"))
         assert await storage.get_access_token("idempotent") is not None
 
-    async def test_close_then_initialize_reapplies_schema(self, tmp_path: Path) -> None:
-        """Closing and reinitializing must reapply schema on the new connection."""
+    async def test_close_then_initialize_reapplies_schema(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Closing and reinitializing must reapply schema on the new connection.
+
+        Beyond verifying that close() + initialize() does not crash, this test
+        spies on _init_schema to confirm the schema is actively reapplied on
+        the post-close initialize() -- the first close drops the in-memory
+        _initialized flag, so the next initialize() must call _init_schema
+        again on the fresh connection.
+        """
         storage = OAuthStorage(tmp_path / "reinit.db")
+        call_count = 0
+        original_init_schema = OAuthStorage._init_schema
+
+        async def _counting_init_schema(self: OAuthStorage) -> None:
+            nonlocal call_count
+            call_count += 1
+            await original_init_schema(self)
+
+        monkeypatch.setattr(OAuthStorage, "_init_schema", _counting_init_schema)
         try:
             await storage.initialize()
+            assert call_count == 1, "first initialize() must apply schema"
             await storage.close()
             await storage.initialize()
+            assert call_count == 2, "post-close initialize() must reapply schema"
             await storage.save_client(_client())
             assert await storage.get_client("client-1") is not None
         finally:
