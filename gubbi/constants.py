@@ -26,6 +26,7 @@ ARQ_JOB_TIMEOUT_SECS: Final = 600  # Arq worker job timeout (seconds)
 # -- LLM retry budgets ----------------------------------------------------------
 
 ANTHROPIC_MAX_RETRIES: Final = 5  # Anthropic SDK retry budget on RateLimitError
+ANTHROPIC_REQUEST_TIMEOUT_SECS: Final = 120  # Anthropic SDK per-request timeout (seconds)
 
 # -- Pagination -----------------------------------------------------------------
 
