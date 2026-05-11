@@ -6,13 +6,16 @@ for the extraction job to use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
+from contextlib import suppress
 
 import redis.asyncio as aioredis
 import structlog
 from arq.connections import RedisSettings
+from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
 from gubbi.config import get_settings
@@ -84,6 +87,28 @@ async def startup(ctx: ExtractionContext) -> None:
     pool = await init_pool(settings.db.app_url)
     ctx["pool"] = pool
     await logger.info("Extraction worker PG pool ready")
+
+    # Postgres log-settings probe (mirrors gubbi.main lifespan): refuse to
+    # start when the cluster would capture statement text or bound
+    # parameters in its log -- the worker hits the same encrypted INSERT
+    # path as the HTTP API via ``extract_conversation``. Mode is read
+    # from JOURNAL_PG_LOG_PROBE_MODE (strict|warn|off; default strict).
+    pg_log_probe_mode = os.environ.get("JOURNAL_PG_LOG_PROBE_MODE", "strict")
+    try:
+        await probe_pg_log_settings(pool, mode=pg_log_probe_mode)
+    except BaseException:
+        # Catch BaseException (not Exception) so CancelledError /
+        # KeyboardInterrupt during the probe still close the pool
+        # before unwinding. Best-effort teardown; original error or
+        # cancellation must propagate.
+        # Suppress asyncio.CancelledError from close() explicitly --
+        # CancelledError is a BaseException (not Exception) since
+        # Python 3.8, so a bare ``suppress(Exception)`` would let a
+        # cancelled close() clobber the original cancellation we're
+        # about to ``raise``.
+        with suppress(Exception, asyncio.CancelledError):
+            await pool.close()
+        raise
 
     # Content cipher.
     cipher = _build_content_cipher()

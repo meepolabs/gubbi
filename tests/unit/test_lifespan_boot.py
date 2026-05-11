@@ -226,6 +226,10 @@ def _patch_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
     monkeypatch.setattr("gubbi.main.configure_otel", MagicMock())
     monkeypatch.setattr("gubbi.main.initialize_logger", MagicMock())
 
+    # pg_log_probe: stub to a no-op AsyncMock so the lifespan's startup
+    # check never tries to fetch real Postgres GUCs from the stub pool.
+    monkeypatch.setattr("gubbi.main.probe_pg_log_settings", AsyncMock(return_value=None))
+
     return {
         "app_ctx": app_ctx,
         "pool": pool,
