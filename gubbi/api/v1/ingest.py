@@ -14,6 +14,7 @@ from uuid import UUID
 import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Request
+from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
@@ -23,7 +24,7 @@ from gubbi.app_state import get_optional_arq_pool, require_app_ctx
 from gubbi.audit.sql import record_audit
 from gubbi.crypto.guard import require_cipher
 from gubbi.models.conversation import Message
-from gubbi.storage.connection import safe_user_scoped_connection
+from gubbi.storage.connection import safe_acquire
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import extraction_jobs
@@ -80,10 +81,28 @@ class IngestConversationRequest(BaseModel):
 
 
 class IngestConversationResponse(BaseModel):
-    """Response indicating how many conversations were saved vs deduped."""
+    """Response with per-batch save + extraction-enqueue counters.
+
+    conversations_saved        -- rows committed to ``conversations``.
+    conversations_skipped_dedupe -- rows skipped because the user already had
+                                  this (platform, platform_id) pair.
+    extractions_enqueued       -- arq jobs enqueued for new saves.
+    extractions_skipped_budget -- saves where pre_charge denied (budget cap hit).
+    extractions_skipped_error  -- saves where TXN 2 (extraction_jobs INSERT) failed;
+                                  conversation row is durable, pre-charge refunded.
+    budget_exhausted           -- True if any conversation hit the cap in this batch.
+
+    Invariant:
+    conversations_saved == extractions_enqueued + extractions_skipped_budget
+                        + extractions_skipped_error
+    """
 
     conversations_saved: int
     conversations_skipped_dedupe: int
+    extractions_enqueued: int
+    extractions_skipped_budget: int
+    extractions_skipped_error: int
+    budget_exhausted: bool
 
 
 def _get_app_ctx(request: Request) -> AppContext:
@@ -107,26 +126,53 @@ async def ingest_conversations(
     Each conversation is deduped by (user_id, platform, platform_id),
     saved under the default "inbox" topic, and returns counts of saved
     vs skipped conversations.
+
+    Transaction design (B3-H1 fix):
+    - Acquires ONE connection for the request (no outer transaction).
+    - Each conversation save is its own top-level transaction (TXN 1).
+    - Each extraction_jobs INSERT is its own top-level transaction (TXN 2).
+    - TXN 1 and TXN 2 commit independently: a TXN 2 failure does NOT roll
+      back TXN 1 (conversation save is durable per D1).
+    - RLS GUC is set with SET LOCAL inside each transaction via set_config.
+    - On TXN 2 failure: refund pre-charge, count as extractions_skipped_error,
+      continue (HTTP 200).
     """
     user_id, _scopes = auth
     app_ctx = _get_app_ctx(request)
     cipher = require_cipher(app_ctx)
     log = bound_logger(request)
 
+    helper = app_ctx.budget_helper  # may be None (self-host / budget disabled)
+    period_start = current_period_start()  # compute once outside the loop
+
     conversations_saved = 0
     conversations_skipped_dedupe = 0
+    extractions_skipped_budget = 0
+    extractions_skipped_error = 0
+    budget_exhausted = False
     superseded_json_paths: list[str] = []
-    # Collect (job_uuid, conversation_id, source) tuples for post-commit enqueue.
     enqueue_tasks: list[tuple[UUID, int, str]] = []
 
-    async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-        # Ensure the inbox topic exists before saving conversations
-        try:
-            await get_topic_id(conn, DEFAULT_INBOX_TOPIC)
-        except TopicNotFoundError:
-            await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
+    async with safe_acquire(app_ctx.pool) as conn:
+        # Ensure inbox topic exists -- run in its own txn so failure does not
+        # poison subsequent conversation saves.
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, true)",
+                str(user_id),
+            )
+            try:
+                await get_topic_id(conn, DEFAULT_INBOX_TOPIC)
+            except TopicNotFoundError:
+                await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
 
         for conv in body.conversations:
+            # Dedupe pre-check: read-only, no explicit txn needed; the UNIQUE
+            # constraint on (platform, platform_id) inside TXN 1 catches the race.
+            await conn.execute(
+                "SELECT set_config('app.current_user_id', $1, true)",
+                str(user_id),
+            )
             existing = await conv_repo.exists_by_platform_id(
                 conn,
                 user_id,
@@ -152,12 +198,19 @@ async def ingest_conversations(
                 for msg in conv.messages
             ]
 
-            # Wrap the save + platform UPDATE in a savepoint so that a
-            # UniqueViolationError on the platform-id race does not abort
-            # the outer per-request transaction (which would break every
-            # subsequent loop iteration).
+            # ============================================================
+            # TRANSACTION 1: save conversation + set platform metadata.
+            # Top-level (no outer txn active) so it commits independently.
+            # UniqueViolationError on the platform_id race rolls back ONLY
+            # this txn; treat as dedupe skip.
+            # ============================================================
+            save_result = None
             try:
                 async with conn.transaction():
+                    await conn.execute(
+                        "SELECT set_config('app.current_user_id', $1, true)",
+                        str(user_id),
+                    )
                     save_result = await conv_repo.save_conversation(
                         conn,
                         cipher,
@@ -175,16 +228,59 @@ async def ingest_conversations(
                         conv.platform,
                         conv.platform_id,
                     )
+            except asyncpg.UniqueViolationError:
+                await log.warning(
+                    "Dedupe race: platform_id already exists, treating as skip",
+                    platform=conv.platform,
+                    platform_id=conv.platform_id,
+                )
+                conversations_skipped_dedupe += 1
+                continue
 
-                    # Enqueue extraction job for this newly saved conversation.
-                    # On partial-unique conflict (same conversation already in-flight),
-                    # reuse the existing job_id for idempotent semantics.
+            # TXN 1 committed -- conversation row is durable (D1).
+            assert save_result is not None  # noqa: S101  -- mypy; TXN 1 sets this
+            conversations_saved += 1
+            if save_result.superseded_json_path is not None:
+                superseded_json_paths.append(save_result.superseded_json_path)
+
+            # ============================================================
+            # PRE-CHARGE: outside any txn.
+            # helper is None -> budget disabled -> treat as pre_charged=True.
+            # ============================================================
+            if helper is None:
+                pre_charged = True
+            else:
+                pre_charged = await helper.pre_charge(
+                    user_id=user_id,
+                    period_start=period_start,
+                    estimated_cents=PRE_CHARGE_CENTS,
+                )
+
+            if not pre_charged:
+                extractions_skipped_budget += 1
+                budget_exhausted = True
+                continue  # conv committed; just don't enqueue.
+
+            # ============================================================
+            # TRANSACTION 2: extraction_jobs INSERT + audit.
+            # Top-level -- rolls back independently of TXN 1.
+            # On failure: refund pre-charge (D4), log, count, CONTINUE.
+            # HTTP 200 is still returned (D3); save is durable (D1).
+            # ============================================================
+            job_uuid: UUID | None = None
+            try:
+                async with conn.transaction():
+                    await conn.execute(
+                        "SELECT set_config('app.current_user_id', $1, true)",
+                        str(user_id),
+                    )
                     try:
                         job_uuid = await extraction_jobs.create_pending(
                             conn,
                             user_id=user_id,
                             conversation_id=save_result.conversation_id,
                             source=conv.platform,
+                            period_start=period_start,
                         )
                     except ExtractionJobAlreadyInFlight as exc:
                         job_uuid = exc.existing_job_id
@@ -201,24 +297,39 @@ async def ingest_conversations(
                             "source": conv.platform,
                         },
                     )
-
-            except asyncpg.UniqueViolationError:
+            except Exception:
+                # TXN 2 rolled back.  Conv save (TXN 1) is already durable.
+                # Refund pre-charge so user is not over-billed (D4).
+                extractions_skipped_error += 1
+                if helper is not None:
+                    try:
+                        await helper.record_actual_cost(
+                            user_id=user_id,
+                            period_start=period_start,
+                            actual_cents=0,
+                            estimated_cents=PRE_CHARGE_CENTS,
+                        )
+                    except Exception:  # noqa: BLE001
+                        await log.warning(
+                            "pre_charge_refund_failed",
+                            user_id=str(user_id),
+                            conversation_id=save_result.conversation_id,
+                            exc_info=True,
+                        )
                 await log.warning(
-                    "Dedupe race: platform_id already exists, treating as skip",
-                    platform=conv.platform,
-                    platform_id=conv.platform_id,
+                    "extraction_job_txn_failed",
+                    user_id=str(user_id),
+                    conversation_id=save_result.conversation_id,
+                    exc_info=True,
                 )
-                conversations_skipped_dedupe += 1
-                continue
+                continue  # do NOT re-raise; conv save is durable, return 200.
 
-            if save_result.superseded_json_path is not None:
-                superseded_json_paths.append(save_result.superseded_json_path)
-            conversations_saved += 1
-            # Collect for post-commit arq enqueue (outside the DB transaction).
+            # TXN 2 committed.  Collect for post-commit arq enqueue.
+            assert job_uuid is not None  # noqa: S101  -- mypy; TXN 2 sets this
             enqueue_tasks.append((job_uuid, save_result.conversation_id, conv.platform))
 
-    # Post-commit: enqueue arq jobs AFTER the DB transaction has committed so
-    # the worker cannot race ahead of the committed rows.
+    # Outside the connection.  Post-commit: enqueue arq jobs AFTER the DB
+    # transactions have committed so the worker cannot race ahead of the rows.
     arq_pool = get_optional_arq_pool(request)
     if arq_pool is not None:
         for job_uuid, conversation_id, _source in enqueue_tasks:
@@ -235,4 +346,8 @@ async def ingest_conversations(
     return IngestConversationResponse(
         conversations_saved=conversations_saved,
         conversations_skipped_dedupe=conversations_skipped_dedupe,
+        extractions_enqueued=len(enqueue_tasks),
+        extractions_skipped_budget=extractions_skipped_budget,
+        extractions_skipped_error=extractions_skipped_error,
+        budget_exhausted=budget_exhausted,
     )

@@ -24,7 +24,8 @@ StatusCounts        -- dataclass returned by get_status_counts
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
+from typing import cast
 from uuid import UUID
 
 import asyncpg
@@ -33,6 +34,7 @@ __all__: list[str] = [
     "ExtractionJobAlreadyInFlight",
     "StatusCounts",
     "create_pending",
+    "get_period_start",
     "get_status_counts",
     "mark_completed",
     "mark_failed",
@@ -83,6 +85,8 @@ async def create_pending(
     user_id: UUID,
     conversation_id: int,
     source: str,
+    *,
+    period_start: date,
 ) -> UUID:
     """INSERT a new extraction job row with status='pending'.
 
@@ -101,13 +105,14 @@ async def create_pending(
         row = await conn.fetchrow(
             """
             INSERT INTO extraction_jobs
-                (user_id, conversation_id, source, status)
-            VALUES ($1, $2, $3, 'pending')
+                (user_id, conversation_id, source, status, period_start)
+            VALUES ($1, $2, $3, 'pending', $4)
             RETURNING id
             """,
             user_id,
             conversation_id,
             source,
+            period_start,
         )
     except asyncpg.UniqueViolationError:
         # The partial unique index fired -- an in-flight job exists.
@@ -141,6 +146,30 @@ async def create_pending(
             f"user_id={user_id} conversation_id={conversation_id} source={source!r}"
         )
     return UUID(str(row["id"]))
+
+
+# ---------------------------------------------------------------------------
+# get_period_start
+# ---------------------------------------------------------------------------
+
+
+async def get_period_start(
+    conn: asyncpg.Connection,
+    job_id: UUID,
+) -> date | None:
+    """Fetch the period_start date stored on an extraction_jobs row.
+
+    Returns None if no row matches (e.g. job not yet visible under RLS,
+    or job_id is invalid). The caller should fall back to
+    current_period_start() when None is returned.
+    """
+    row = await conn.fetchrow(
+        "SELECT period_start FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    if row is None:
+        return None
+    return cast(date, row["period_start"])
 
 
 # ---------------------------------------------------------------------------

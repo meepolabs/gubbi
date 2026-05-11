@@ -655,6 +655,7 @@ class TestExtractConversationJob:
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
         mock_jobs.mark_completed = AsyncMock(return_value=True)
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
 
         with (
             patch(
@@ -770,6 +771,7 @@ class TestLifecycleUpdates:
         mock_jobs.mark_running = AsyncMock()
         mock_jobs.mark_completed = AsyncMock()
         mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
 
         with (
             patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
@@ -825,6 +827,7 @@ class TestLifecycleUpdates:
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
         mock_jobs.mark_failed = AsyncMock(return_value=True)
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
 
         with (
             patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
@@ -878,6 +881,7 @@ class TestLifecycleUpdates:
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
         mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
 
         failure_cm = MagicMock()
         failure_cm.__aenter__.side_effect = RuntimeError("fresh connection failed")
@@ -925,6 +929,7 @@ class TestLifecycleUpdates:
         mock_jobs = MagicMock()
         mock_jobs.mark_running = AsyncMock()
         mock_jobs.mark_failed = AsyncMock(return_value=True)
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
 
         with (
             patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
@@ -970,6 +975,7 @@ class TestLifecycleUpdates:
         mock_jobs.mark_running = AsyncMock()
         mock_jobs.mark_completed = AsyncMock(return_value=True)
         mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
 
         with (
             patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,

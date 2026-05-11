@@ -199,6 +199,14 @@ def _patch_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
         MagicMock(return_value=redis_client_stub),
     )
 
+    # Arq pool: stub arq_create_pool so it does not attempt a real Redis
+    # connection.  The returned stub needs .close() to be awaitable for the
+    # lifespan teardown path.
+    arq_pool_stub = MagicMock()
+    arq_pool_stub.close = AsyncMock()
+    arq_create_pool_mock = AsyncMock(return_value=arq_pool_stub)
+    monkeypatch.setattr("gubbi.main.arq_create_pool", arq_create_pool_mock)
+
     # Do NOT patch httpx.AsyncClient -- the test client transport in
     # Cases B/C uses the same symbol. The lifespan only constructs an
     # AsyncClient when JOURNAL_HYDRA_ADMIN_URL is set, which the
@@ -223,6 +231,7 @@ def _patch_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
         "pool": pool,
         "redis_pool": redis_pool_stub,
         "redis_client": redis_client_stub,
+        "arq_pool": arq_pool_stub,
         "oauth_storage": oauth_storage_stub,
         "build_app_ctx": build_app_ctx_mock,
     }
@@ -273,6 +282,12 @@ async def test_lifespan_populates_app_state_before_first_request(
         assert hasattr(app.state, "gubbi_gateway_secret")
         # None is a valid configured-disabled state.
 
+        # budget_helper: must be set (or None) after lifespan startup (B3-L3).
+        # With JOURNAL_LLM__BUDGET_ENABLED unset (default False), the value is None.
+        assert hasattr(app.state, "budget_helper")
+        # The value is None in minimal-env (budget disabled by default).
+        assert app.state.budget_helper is None
+
         # require_*() accessors must NOT raise for the populated fields.
         scope = {"type": "http", "app": app, "headers": []}
         request = httpx.Request("GET", "http://testserver/")
@@ -292,6 +307,7 @@ async def test_lifespan_populates_app_state_before_first_request(
     handles["pool"].close.assert_awaited_once()
     handles["redis_client"].aclose.assert_awaited_once()
     handles["redis_pool"].aclose.assert_awaited_once()
+    handles["arq_pool"].close.assert_awaited_once()
     handles["oauth_storage"].close.assert_called_once()
 
 

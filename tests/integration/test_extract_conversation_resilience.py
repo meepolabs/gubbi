@@ -19,6 +19,7 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
@@ -97,6 +98,7 @@ async def _seed_extraction_job(conn: asyncpg.Connection, conversation_id: int) -
         user_id=_USER_UUID,
         conversation_id=conversation_id,
         source="claude",
+        period_start=date(2026, 5, 1),
     )
 
 

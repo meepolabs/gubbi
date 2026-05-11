@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+from datetime import date
 from uuid import UUID
 
 import asyncpg
@@ -107,7 +108,9 @@ async def test_user_b_cannot_see_user_a_jobs(
 
     # User A creates a pending job.
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        await create_pending(conn, user_a, conversation_for_a, "chatgpt")
+        await create_pending(
+            conn, user_a, conversation_for_a, "chatgpt", period_start=date(2026, 5, 1)
+        )
         a_counts = await get_status_counts(conn)
 
     # User A sees their own job.
@@ -133,7 +136,9 @@ async def test_user_b_cannot_read_user_a_row_by_pk(
 
     # User A creates a job; capture the UUID.
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(conn, user_a, conversation_for_a, "chatgpt")
+        job_id = await create_pending(
+            conn, user_a, conversation_for_a, "chatgpt", period_start=date(2026, 5, 1)
+        )
 
     # Admin pool can see the row (BYPASSRLS).
     async with admin_pool.acquire() as conn:

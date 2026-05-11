@@ -42,8 +42,8 @@ async def _seed_pending_row(
     await conn.execute(
         """
         INSERT INTO extraction_jobs
-            (id, user_id, conversation_id, source, status, created_at, updated_at)
-        VALUES ($1, $2, $3, 'test', 'pending', $4, $4)
+            (id, user_id, conversation_id, source, status, period_start, created_at, updated_at)
+        VALUES ($1, $2, $3, 'test', 'pending', '2026-05-01'::date, $4, $4)
         """,
         job_id,
         user_id,

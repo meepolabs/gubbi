@@ -15,7 +15,7 @@ environments without a running Postgres (all DB tests skipped).
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
@@ -126,12 +126,13 @@ async def _seed_job(
     await admin_conn.execute(
         """
         INSERT INTO extraction_jobs
-            (user_id, conversation_id, source, status, completed_at)
-        VALUES ($1, $2, 'extension_chatgpt', $3, $4)
+            (user_id, conversation_id, source, status, period_start, completed_at)
+        VALUES ($1, $2, 'extension_chatgpt', $3, $4::date, $5)
         """,
         user_id,
         conversation_id,
         status,
+        date(2026, 5, 1),
         completed_at,
     )
 

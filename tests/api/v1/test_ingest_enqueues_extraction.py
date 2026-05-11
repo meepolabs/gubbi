@@ -6,6 +6,10 @@ Verifies that POST /api/v1/ingest/conversations:
   - Skipped-by-dedup conversations produce neither a row nor an enqueue call
   - An audit row is written for each created job
   - Replay (re-POST same payload) does NOT duplicate in-flight rows (idempotency)
+  - Pre-charge denial: conversation saves but no extraction row / no enqueue (D1, D2, D3)
+  - Mid-batch exhaustion: correct per-conversation counters
+  - Pre-charge succeeds + savepoint 2 fails: refund called with actual=0 (D4)
+  - helper=None (self-host): all conversations enqueue unconditionally
 
 The arq pool is mocked -- no Redis required.
 
@@ -18,7 +22,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import asyncpg
@@ -34,6 +38,7 @@ from gubbi.app_context import AppContext
 from gubbi.config import Settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -121,6 +126,7 @@ async def app_with_arq(
         operator_user_id=TEST_USER_ID,
         cipher=cipher,
         arq_pool=mock_arq_pool,
+        budget_helper=None,  # default: self-host semantics; tests may override
     )
     app = FastAPI()
     app.state.app_ctx = app_ctx
@@ -166,6 +172,10 @@ class TestIngestEnqueuesExtraction:
         data = resp.json()
         assert data["conversations_saved"] == 2
         assert data["conversations_skipped_dedupe"] == 0
+        assert data["extractions_enqueued"] == 2
+        assert data["extractions_skipped_budget"] == 0
+        assert data["extractions_skipped_error"] == 0
+        assert data["budget_exhausted"] is False
 
         # Verify two pending extraction_jobs rows were created.
         async with pool.acquire() as conn:
@@ -328,3 +338,372 @@ class TestIngestEnqueuesExtraction:
             )
 
         assert count_after == count_before
+
+    async def test_pre_charge_denies_save_commits_no_enqueue(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        app_with_arq: FastAPI,
+    ) -> None:
+        """Pre-charge returns False -- conversation saves; no extraction row; no enqueue.
+
+        Asserts D1 + D2 + D3: save commits unconditionally, response carries
+        extractions_skipped_budget=1 and budget_exhausted=True, HTTP 200.
+        """
+        # Arrange: install a mock helper that denies pre_charge.
+        helper_mock = MagicMock()
+        helper_mock.pre_charge = AsyncMock(return_value=False)
+        helper_mock.record_actual_cost = AsyncMock()
+        app_with_arq.state.app_ctx.budget_helper = helper_mock
+
+        mock_arq: AsyncMock = app_with_arq.state.arq_pool
+        mock_arq.enqueue_job.reset_mock()
+
+        payload = {
+            "source": "extension_chatgpt",
+            "conversations": [_build_conv("denied-001", title="Denied")],
+        }
+
+        # Act
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+
+        # Assert
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["conversations_saved"] == 1
+        assert data["extractions_enqueued"] == 0
+        assert data["extractions_skipped_budget"] == 1
+        assert data["budget_exhausted"] is True
+
+        # No extraction_jobs row (scoped by platform_id to avoid cross-test pollution).
+        async with pool.acquire() as conn:
+            count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM extraction_jobs ej
+                JOIN conversations c ON c.id = ej.conversation_id
+                WHERE c.user_id = $1
+                  AND c.platform = 'chatgpt'
+                  AND c.platform_id = 'denied-001'
+                """,
+                TEST_USER_ID,
+            )
+        assert count == 0
+
+        # No arq enqueue.
+        assert mock_arq.enqueue_job.call_count == 0
+
+        # No refund (pre_charge was False, nothing to refund).
+        helper_mock.record_actual_cost.assert_not_called()
+
+        # Cleanup: reset helper so later tests in same class are unaffected.
+        app_with_arq.state.app_ctx.budget_helper = None
+
+    async def test_mid_batch_budget_exhaustion(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        app_with_arq: FastAPI,
+    ) -> None:
+        """3 conversations; pre_charge True/True/False -- exact counter values."""
+        helper_mock = MagicMock()
+        helper_mock.pre_charge = AsyncMock(side_effect=[True, True, False])
+        helper_mock.record_actual_cost = AsyncMock()
+        app_with_arq.state.app_ctx.budget_helper = helper_mock
+
+        mock_arq: AsyncMock = app_with_arq.state.arq_pool
+        mock_arq.enqueue_job.reset_mock()
+
+        payload = {
+            "source": "extension_chatgpt",
+            "conversations": [
+                _build_conv("mid-001", title="A"),
+                _build_conv("mid-002", title="B"),
+                _build_conv("mid-003", title="C"),
+            ],
+        }
+
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+        assert resp.status_code == 200, resp.text
+
+        data = resp.json()
+        assert data["conversations_saved"] == 3
+        assert data["conversations_skipped_dedupe"] == 0
+        assert data["extractions_enqueued"] == 2
+        assert data["extractions_skipped_budget"] == 1
+        assert data["budget_exhausted"] is True
+
+        assert mock_arq.enqueue_job.call_count == 2
+
+        # Cleanup.
+        app_with_arq.state.app_ctx.budget_helper = None
+
+    async def test_pre_charge_succeeds_inner_savepoint_fails_refund_called(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        app_with_arq: FastAPI,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pre-charge True -> TXN 2 INSERT raises -> refund + continue (200).
+
+        Asserts B3-H1 + D4:
+        - HTTP 200 (not 500; TXN 2 failure is counted, not propagated).
+        - extractions_skipped_error == 1.
+        - conversations_saved == 1 (TXN 1 committed independently).
+        - Refund is called with actual_cents=0, estimated_cents=PRE_CHARGE_CENTS.
+        """
+        from gubbi_common.budget import PRE_CHARGE_CENTS  # noqa: PLC0415
+
+        helper_mock = MagicMock()
+        helper_mock.pre_charge = AsyncMock(return_value=True)
+        helper_mock.record_actual_cost = AsyncMock()
+        app_with_arq.state.app_ctx.budget_helper = helper_mock
+
+        # Force extraction_jobs.create_pending to raise an unexpected error
+        # (NOT ExtractionJobAlreadyInFlight, which is caught and reused).
+        async def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise asyncpg.PostgresError("simulated insert failure")
+
+        monkeypatch.setattr(
+            "gubbi.api.v1.ingest.extraction_jobs.create_pending",
+            _boom,
+        )
+
+        payload = {
+            "source": "extension_chatgpt",
+            "conversations": [_build_conv("refund-001", title="Refund")],
+        }
+
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+
+        # B3-H1: TXN 2 failure continues; HTTP 200 (not 500).
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["conversations_saved"] == 1
+        assert data["extractions_enqueued"] == 0
+        assert data["extractions_skipped_error"] == 1
+        assert data["extractions_skipped_budget"] == 0
+
+        # Conversation row IS committed (TXN 1 succeeded independently).
+        # Scoped to platform_id to avoid interference from other tests (B3-H3).
+        async with pool.acquire() as conn:
+            conv_count = await conn.fetchval(
+                """
+                SELECT COUNT(*) FROM conversations
+                WHERE user_id = $1
+                  AND platform = 'chatgpt'
+                  AND platform_id = 'refund-001'
+                """,
+                TEST_USER_ID,
+            )
+            job_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM extraction_jobs ej
+                JOIN conversations c ON c.id = ej.conversation_id
+                WHERE c.user_id = $1
+                  AND c.platform = 'chatgpt'
+                  AND c.platform_id = 'refund-001'
+                """,
+                TEST_USER_ID,
+            )
+        assert conv_count == 1
+        assert job_count == 0  # TXN 2 rolled back
+
+        # Refund called with actual=0, estimated=50.
+        helper_mock.record_actual_cost.assert_called_once()
+        kwargs = helper_mock.record_actual_cost.call_args.kwargs
+        assert kwargs["actual_cents"] == 0
+        assert kwargs["estimated_cents"] == PRE_CHARGE_CENTS
+
+        # Cleanup.
+        app_with_arq.state.app_ctx.budget_helper = None
+
+    async def test_helper_is_none_self_host_unconditional_enqueue(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        app_with_arq: FastAPI,
+    ) -> None:
+        """helper=None (self-host / budget disabled) -- no pre_charge, all enqueue."""
+        # Default fixture has budget_helper=None already.
+        assert app_with_arq.state.app_ctx.budget_helper is None
+
+        mock_arq: AsyncMock = app_with_arq.state.arq_pool
+        mock_arq.enqueue_job.reset_mock()
+
+        payload = {
+            "source": "extension_chatgpt",
+            "conversations": [
+                _build_conv("self-001", title="A"),
+                _build_conv("self-002", title="B"),
+            ],
+        }
+
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+        assert resp.status_code == 200
+
+        data = resp.json()
+        assert data["conversations_saved"] == 2
+        assert data["extractions_enqueued"] == 2
+        assert data["extractions_skipped_budget"] == 0
+        assert data["extractions_skipped_error"] == 0
+        assert data["budget_exhausted"] is False
+        assert mock_arq.enqueue_job.call_count == 2
+
+    async def test_conv_level_dedupe_does_not_call_pre_charge(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        app_with_arq: FastAPI,
+    ) -> None:
+        """Re-POST of the same (platform, platform_id) is caught by conv-level dedupe.
+
+        exists_by_platform_id fires BEFORE TXN 1, so pre_charge is never called
+        on the second POST and the existing extraction row is untouched.
+        """
+        # Arrange
+        helper_mock = MagicMock()
+        helper_mock.pre_charge = AsyncMock(return_value=True)
+        helper_mock.record_actual_cost = AsyncMock()
+        app_with_arq.state.app_ctx.budget_helper = helper_mock
+
+        mock_arq: AsyncMock = app_with_arq.state.arq_pool
+        mock_arq.enqueue_job.reset_mock()
+
+        conv = _build_conv("conv-dedupe-budget-001", title="Conv-level dedupe test")
+        payload = {"source": "extension_chatgpt", "conversations": [conv]}
+
+        # Act: first POST saves + pre-charges + enqueues
+        resp1 = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+        assert resp1.status_code == 200
+        data1 = resp1.json()
+        assert data1["conversations_saved"] == 1
+        assert data1["extractions_enqueued"] == 1
+        assert data1["extractions_skipped_budget"] == 0
+        assert helper_mock.pre_charge.call_count == 1
+
+        mock_arq.enqueue_job.reset_mock()
+        helper_mock.pre_charge.reset_mock()
+
+        # Act: second POST with identical payload -- conv-level dedupe fires
+        resp2 = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+        assert resp2.status_code == 200
+        data2 = resp2.json()
+
+        # Assert: dedupe counter increments, no new pre-charge, no new enqueue
+        assert data2["conversations_saved"] == 0
+        assert data2["conversations_skipped_dedupe"] == 1
+        assert data2["extractions_enqueued"] == 0
+        assert data2["extractions_skipped_budget"] == 0
+        assert data2["extractions_skipped_error"] == 0
+        helper_mock.pre_charge.assert_not_called()
+        mock_arq.enqueue_job.assert_not_called()
+
+        # Exactly one extraction_jobs row for this conversation
+        async with pool.acquire() as conn:
+            job_count = await conn.fetchval(
+                """
+                SELECT COUNT(*)
+                FROM extraction_jobs ej
+                JOIN conversations c ON c.id = ej.conversation_id
+                WHERE c.user_id = $1
+                  AND c.platform = 'chatgpt'
+                  AND c.platform_id = 'conv-dedupe-budget-001'
+                """,
+                TEST_USER_ID,
+            )
+        assert job_count == 1
+
+        # Cleanup
+        app_with_arq.state.app_ctx.budget_helper = None
+
+    async def test_already_in_flight_budget_enabled_does_not_refund(
+        self,
+        client: AsyncClient,
+        app_with_arq: FastAPI,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When ExtractionJobAlreadyInFlight fires inside TXN 2, audit runs but no refund.
+
+        The intentional 'preserve-debit-for-idempotent-re-POST' semantic: the
+        existing extraction job will eventually consume the pre-charge, so
+        refunding would over-credit the user.
+
+        Uses monkeypatch to inject ExtractionJobAlreadyInFlight from create_pending
+        so the integration test exercises the TXN 2 in-flight branch directly,
+        bypassing the conv-level dedupe that normally prevents this branch from
+        being reached in normal flow (race-condition-only code path).
+        """
+        # Arrange
+        helper_mock = MagicMock()
+        helper_mock.pre_charge = AsyncMock(return_value=True)
+        helper_mock.record_actual_cost = AsyncMock()
+        app_with_arq.state.app_ctx.budget_helper = helper_mock
+
+        mock_arq: AsyncMock = app_with_arq.state.arq_pool
+        mock_arq.enqueue_job.reset_mock()
+
+        existing_job_id = UUID("eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee")
+
+        async def _already_in_flight(*args: object, **kwargs: object) -> UUID:
+            raise ExtractionJobAlreadyInFlight(existing_job_id)
+
+        monkeypatch.setattr(
+            "gubbi.api.v1.ingest.extraction_jobs.create_pending",
+            _already_in_flight,
+        )
+
+        conv = _build_conv("inflight-monkeypatch-001", title="AlreadyInFlight monkeypatch test")
+        payload = {"source": "extension_chatgpt", "conversations": [conv]}
+
+        # Act
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+
+        # Assert: ingest succeeds and the existing job gets enqueued
+        assert resp.status_code == 200
+        data = resp.json()
+        # The conversation saves (TXN 1 succeeds before create_pending is called).
+        assert data["conversations_saved"] == 1
+        # The existing job is treated as the enqueued job -- no error counter.
+        assert data["extractions_skipped_error"] == 0
+        assert data["extractions_skipped_budget"] == 0
+        # pre_charge fired once (before create_pending); NO record_actual_cost refund.
+        assert helper_mock.pre_charge.call_count == 1
+        helper_mock.record_actual_cost.assert_not_called()
+        # arq.enqueue_job called with the existing_job_id (reuse semantics).
+        mock_arq.enqueue_job.assert_called_once()
+        call_kwargs = mock_arq.enqueue_job.call_args
+        assert str(existing_job_id) in str(call_kwargs)
+
+        # Cleanup
+        app_with_arq.state.app_ctx.budget_helper = None
