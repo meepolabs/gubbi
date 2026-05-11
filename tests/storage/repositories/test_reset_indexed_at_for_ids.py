@@ -44,3 +44,31 @@ async def test_reset_indexed_at_for_ids_empty_list_is_noop() -> None:
     await entry_repo.reset_indexed_at_for_ids(conn, [])
 
     conn.execute.assert_not_awaited()
+
+
+@pytest.mark.unit
+async def test_reset_indexed_at_for_ids_filters_tombstoned_rows() -> None:
+    """The UPDATE WHERE clause must include ``AND deleted_at IS NULL``.
+
+    Symmetric with ``reset_indexed_at`` (entries.py:402) which already
+    filters tombstoned rows. Without this guard a tombstoned id in the
+    failed-batch list would have its ``indexed_at`` cleared; the next
+    ``get_unindexed`` would skip it (it filters ``deleted_at IS NULL``),
+    so the row would be permanently stranded. The compensating reset
+    must be a no-op for tombstoned rows.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_execute(query: str, *args: Any, **kwargs: Any) -> str:
+        captured["query"] = query
+        captured["args"] = args
+        return "UPDATE 0"
+
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=fake_execute)
+
+    await entry_repo.reset_indexed_at_for_ids(conn, [1, 2, 3])
+
+    assert (
+        "AND deleted_at IS NULL" in captured["query"]
+    ), f"reset_indexed_at_for_ids must skip tombstoned rows; query was: {captured['query']!r}"

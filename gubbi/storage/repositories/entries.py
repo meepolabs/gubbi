@@ -420,7 +420,7 @@ async def reset_indexed_at_for_ids(conn: asyncpg.Connection, entry_ids: Sequence
     if not entry_ids:
         return
     await conn.execute(
-        "UPDATE entries SET indexed_at = NULL WHERE id = ANY($1)",
+        "UPDATE entries SET indexed_at = NULL WHERE id = ANY($1) AND deleted_at IS NULL",
         list(entry_ids),
     )
 
