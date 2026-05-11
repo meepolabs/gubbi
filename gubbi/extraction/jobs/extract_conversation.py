@@ -16,6 +16,7 @@ max_jobs concurrent workers are all mid-LLM.
 from __future__ import annotations
 
 import json
+from datetime import date
 from typing import Any, cast
 from uuid import UUID, uuid4
 
@@ -23,11 +24,10 @@ import anthropic
 import asyncpg
 import structlog
 from gubbi_common.audit.actions import Action
+from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.audit import record_audit
-from gubbi.budget import PRE_CHARGE_CENTS, current_period_start, record_extraction_cost
-from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.llm.provider import LLMMessage
@@ -461,6 +461,11 @@ async def extract_conversation(
         # Phase 1 -- conn1: read-only load + early idempotency check.
         # conn1 is released before any LLM call.
         # ------------------------------------------------------------------
+        # period_start loaded from the job row so the budget delta in Phase 3
+        # lands in the same billing bucket that ingest pre-charged (B3-H2).
+        # Falls back to current_period_start() when job_id is 'unknown' (tests)
+        # or the row is not visible under RLS.
+        job_period_start: date | None = None
         async with user_scoped_connection(pool, user_id=user_uuid) as conn1:
             if await _check_idempotent(conn1, conversation_id, user_id, log):
                 return {
@@ -474,12 +479,19 @@ async def extract_conversation(
 
             # Lifecycle: transition pending -> running.
             if job_id != "unknown":
-                await extraction_jobs.mark_running(conn1, UUID(job_id))
+                job_uuid_for_phase1 = UUID(job_id)
+                await extraction_jobs.mark_running(conn1, job_uuid_for_phase1)
+                job_period_start = await extraction_jobs.get_period_start(
+                    conn1, job_uuid_for_phase1
+                )
 
             _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
                 conn1, cipher, conversation_id, user_id, log
             )
         # conn1 released here -- pool slot returned before LLM calls.
+
+        # Resolve period_start: prefer the DB value; fall back to runtime.
+        effective_period_start: date = job_period_start or current_period_start()
 
         # ------------------------------------------------------------------
         # Phase 2 -- LLM phase: no database connection held.
@@ -567,14 +579,16 @@ async def extract_conversation(
                 # Best-effort budget delta write. Must NOT affect the SAVEPOINT:
                 # extraction succeeded and the row is committed; the pre-charge
                 # already protected the cap. Log + continue on any Redis failure.
-                if get_settings().llm.journal_llm_budget_enabled and redis is not None:
+                # Uses effective_period_start (loaded from job row in Phase 1)
+                # to ensure the delta lands in the same bucket as the pre-charge.
+                helper = ctx.get("budget_helper")
+                if helper is not None:
                     try:
-                        await record_extraction_cost(
-                            user_uuid,
-                            current_period_start(),
+                        await helper.record_actual_cost(
+                            user_id=user_uuid,
+                            period_start=effective_period_start,
                             actual_cents=cents_spent,
                             estimated_cents=PRE_CHARGE_CENTS,
-                            redis=redis,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
                         )
                     except Exception:  # broad: redis errors come in many shapes
                         await log.warning("budget_delta_failed", exc_info=True)

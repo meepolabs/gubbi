@@ -22,6 +22,7 @@ from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
@@ -310,6 +311,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     arq_pool = await arq_create_pool(ArqRedisSettings.from_dsn(str(settings.redis_url)))
     app.state.arq_pool = arq_pool
     app_ctx.arq_pool = arq_pool
+
+    # BudgetHelper -- shared facade over Redis pre-charge + delta writes.
+    # Disabled in self-host mode (Mode 1/2); constructed only when the
+    # operator has opted into LLM budget enforcement.
+    if settings.llm.journal_llm_budget_enabled:
+        pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
+        budget_helper = BudgetHelper(
+            redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+            pre_charge_script=pre_charge_script,
+        )
+        app.state.budget_helper = budget_helper
+        app_ctx.budget_helper = budget_helper
+        await logger.info("BudgetHelper ready (lifespan)")
+    else:
+        app.state.budget_helper = None
+        app_ctx.budget_helper = None
+        await logger.info("BudgetHelper disabled (journal_llm_budget_enabled=False)")
 
     # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
     # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no

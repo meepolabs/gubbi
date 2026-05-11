@@ -25,6 +25,7 @@ _TENANT_TABLES = frozenset(
         "messages",
         "entry_embeddings",
         "users",  # added by migration 0019_rls_users (m234 C-7)
+        "extraction_jobs",  # added by migration 0023_extraction_jobs_relocate; RLS policy extraction_jobs_user_isolation
     }
 )
 

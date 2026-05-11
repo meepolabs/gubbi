@@ -33,7 +33,7 @@ _FAKE_EXTRACTION = ExtractionEntriesResult(
 )
 
 
-def _make_minimal_ctx(redis: Any = None) -> dict[str, Any]:
+def _make_minimal_ctx(redis: Any = None, budget_helper: Any = None) -> dict[str, Any]:
     """Build a minimal ExtractionContext-like dict."""
     # Set _llm=None so the cost-estimation getattr chain in
     # extract_conversation returns 0 cents cleanly without spawning
@@ -45,20 +45,24 @@ def _make_minimal_ctx(redis: Any = None) -> dict[str, Any]:
         "cipher": MagicMock(),
         "extraction_service": extraction_service,
         "redis": redis,
+        "budget_helper": budget_helper,
     }
 
 
 def _make_patch_stack(
     *,
     budget_enabled: bool,
-    record_side_effect: Any = None,
     persist_side_effect: Any = None,
 ) -> list[Any]:
-    """Return list of context managers to patch all private helpers."""
-    mock_settings = MagicMock()
-    mock_settings.llm.journal_llm_budget_enabled = budget_enabled
+    """Return list of context managers to patch all private helpers.
 
-    record_mock = AsyncMock(side_effect=record_side_effect) if record_side_effect else AsyncMock()
+    budget_enabled is kept as a parameter for API compatibility with existing
+    test call sites.  The extract_conversation worker no longer checks
+    get_settings().llm.journal_llm_budget_enabled -- the helper presence
+    alone gates the delta write (B3-L2 simplification).  The parameter is
+    therefore unused inside this function but retained so callers need no
+    changes.
+    """
 
     async def _persist(*args: Any, **kwargs: Any) -> int:
         if persist_side_effect is not None:
@@ -66,10 +70,6 @@ def _make_patch_stack(
         return 1
 
     return [
-        patch(
-            "gubbi.extraction.jobs.extract_conversation.get_settings", return_value=mock_settings
-        ),
-        patch("gubbi.extraction.jobs.extract_conversation.record_extraction_cost", new=record_mock),
         patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
         patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
         patch(
@@ -87,6 +87,10 @@ def _make_patch_stack(
         patch(
             "gubbi.extraction.jobs.extract_conversation.current_period_start",
             return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
         ),
     ]
 
@@ -111,63 +115,70 @@ def _setup_conn_mock(mock_conn_cm: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_budget_delta_called_when_flag_enabled() -> None:
-    """When budget flag is enabled and redis is set, record_extraction_cost is called."""
+    """When helper is set, record_actual_cost is called with all required kwargs."""
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
     redis = AsyncMock()
-    ctx = _make_minimal_ctx(redis=redis)
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
 
     patches = _make_patch_stack(budget_enabled=True)
-
     with (
-        patches[0] as _,
-        patches[1] as mock_record,
-        patches[2] as mock_conn_cm,
-        patches[3] as _,
-        patches[4] as _,
-        patches[5] as _,
-        patches[6] as _,
-        patches[7] as _,
-        patches[8] as _,
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
     ):
         _setup_conn_mock(mock_conn_cm)
         await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
 
-    assert mock_record.called
-    call_kwargs = mock_record.call_args[1]
-    assert "actual_cents" in call_kwargs
-    assert "estimated_cents" in call_kwargs
-    assert "redis" in call_kwargs
+    helper.record_actual_cost.assert_called_once()
+    kwargs = helper.record_actual_cost.call_args.kwargs
+    assert "user_id" in kwargs
+    assert "period_start" in kwargs
+    assert "actual_cents" in kwargs
+    assert "estimated_cents" in kwargs
 
 
 @pytest.mark.asyncio
-async def test_budget_delta_not_called_when_flag_disabled() -> None:
-    """When budget flag is False, record_extraction_cost must NOT be called."""
+async def test_budget_delta_called_when_helper_is_set() -> None:
+    """Delta is written whenever helper is not None, regardless of budget flag.
+
+    After B3-L2: the worker checks only `helper is not None`.
+    The budget flag controls whether BudgetHelper is constructed at startup;
+    at runtime the helper presence is the sole gate.
+    """
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
     redis = AsyncMock()
-    ctx = _make_minimal_ctx(redis=redis)
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
 
+    # budget_enabled param is kept for API compat but no longer drives the gate.
     patches = _make_patch_stack(budget_enabled=False)
-
     with (
-        patches[0] as _,
-        patches[1] as mock_record,
-        patches[2] as mock_conn_cm,
-        patches[3] as _,
-        patches[4] as _,
-        patches[5] as _,
-        patches[6] as _,
-        patches[7] as _,
-        patches[8] as _,
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
     ):
         _setup_conn_mock(mock_conn_cm)
         await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
 
-    assert not mock_record.called
+    # helper is set -> delta is written (flag no longer suppresses).
+    helper.record_actual_cost.assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_budget_delta_redis_failure_does_not_rollback() -> None:
     """Redis failure in budget delta must NOT affect the persistence transaction."""
     redis = AsyncMock()
-    ctx = _make_minimal_ctx(redis=redis)
 
     persist_called = False
 
@@ -179,22 +190,24 @@ async def test_budget_delta_redis_failure_does_not_rollback() -> None:
     async def _raise(*args: Any, **kwargs: Any) -> None:
         raise ConnectionError("redis is down")
 
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock(side_effect=_raise)
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
     patches = _make_patch_stack(
         budget_enabled=True,
-        record_side_effect=_raise,
         persist_side_effect=_persist,
     )
 
     with (
-        patches[0] as _,
-        patches[1] as _,
-        patches[2] as mock_conn_cm,
-        patches[3] as _,
-        patches[4] as _,
-        patches[5] as _,
-        patches[6] as _,
-        patches[7] as _,
-        patches[8] as _,
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
     ):
         _setup_conn_mock(mock_conn_cm)
         # Must NOT raise -- Redis failure is swallowed
@@ -205,4 +218,30 @@ async def test_budget_delta_redis_failure_does_not_rollback() -> None:
     # Persistence happened (SAVEPOINT was NOT rolled back)
     assert persist_called
     # Function returned a normal result (skipped=False)
+    assert result["skipped"] is False
+
+
+@pytest.mark.asyncio
+async def test_budget_delta_skipped_when_helper_is_none() -> None:
+    """Worker without a budget_helper in ctx (self-host) skips delta cleanly."""
+    redis = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=None)
+
+    patches = _make_patch_stack(budget_enabled=True)
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        result = await extract_conversation(
+            ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID
+        )
+
+    # No exception, skipped=False, no helper to assert against.
     assert result["skipped"] is False
