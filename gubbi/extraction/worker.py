@@ -13,6 +13,7 @@ import threading
 import redis.asyncio as aioredis
 import structlog
 from arq.connections import RedisSettings
+from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
 from gubbi.config import get_settings
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
@@ -98,6 +99,19 @@ async def startup(ctx: ExtractionContext) -> None:
     redis_client = aioredis.Redis(connection_pool=redis_pool)
     ctx["redis"] = redis_client
     ctx["redis_pool"] = redis_pool
+
+    # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
+    # register the Lua script anyway (cheapest option; no API split).
+    if settings.llm.journal_llm_budget_enabled:
+        pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
+        ctx["budget_helper"] = BudgetHelper(
+            redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+            pre_charge_script=pre_charge_script,
+        )
+        await logger.info("Extraction worker BudgetHelper ready")
+    else:
+        await logger.info("Extraction worker BudgetHelper disabled (budget_enabled=False)")
+
     await logger.info("Extraction worker Redis client ready")
 
 
