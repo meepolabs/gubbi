@@ -35,6 +35,8 @@ jobs:
   env-contract-lint:
     name: Env-contract drift lint
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -47,6 +49,8 @@ jobs:
     name: Security invariants (RLS + encryption + unit)
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
 
     services:
       postgres:

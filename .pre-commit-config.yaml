@@ -21,9 +21,12 @@ repos:
     hooks:
       - id: mypy
         additional_dependencies:
-          - pydantic
-          - pydantic-settings
-          - types-PyYAML
+          # Versions pinned from poetry.lock to keep the pre-commit mypy hook
+          # (which runs in an isolated venv) deterministic across CI + local
+          # runs. Bump in lock-step with poetry.lock when those deps move.
+          - pydantic==2.13.3
+          - pydantic-settings==2.13.1
+          - types-PyYAML==6.0.12.20260408
         exclude: ^(tests/)
 
   - repo: local
