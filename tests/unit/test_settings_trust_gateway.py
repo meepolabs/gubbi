@@ -28,7 +28,7 @@ def _base_env(**extra: str) -> dict[str, str]:
 
 def _make_settings(**extra: str) -> Settings:
     env = _base_env(**extra)
-    with patch.dict(os.environ, env, clear=False):
+    with patch.dict(os.environ, env, clear=True):
         return Settings()
 
 
