@@ -74,7 +74,7 @@ requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
 
 [tool.ruff]
-target-version = "py311"
+target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
@@ -117,7 +117,7 @@ known-first-party = ["gubbi"]
 # `disable_error_code = "import-untyped"` covers vendor libs without py.typed
 # markers (asyncpg, mcp, opentelemetry-instrumentation-*, onnxruntime, etc.)
 # without needing a per-module `[[tool.mypy.overrides]]` block per dep.
-python_version = "3.11"
+python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = true
