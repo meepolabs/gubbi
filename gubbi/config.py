@@ -2,7 +2,7 @@ import logging
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final, Self
+from typing import Any, Final, Literal, Self
 
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import (
@@ -124,7 +124,7 @@ class AuthConfig(BaseModel):
     operator_email: str = ""
     trust_gateway: bool = False
     gateway_secret: str = ""
-    gateway_require_signature: bool = False
+    gateway_require_signature: bool = True
     api_key_scopes: list[str] = ["journal:read", "journal:write"]
     # When True, client_ip() honours the leftmost X-Forwarded-For header as
     # the original client IP.  Requires a trusted reverse-proxy in front of
@@ -212,6 +212,10 @@ class Settings(BaseSettings):
       health server listens on 0.0.0.0 instead of 127.0.0.1 (default
       localhost-only; M-9.7).
     """
+
+    # Deploy environment marker. Controls safe-by-default gates that should
+    # only relax in local development. Env var: JOURNAL_APP_ENV.
+    app_env: Literal["dev", "prod"] = "prod"
 
     db: DbConfig
     auth: AuthConfig = AuthConfig()
@@ -306,6 +310,20 @@ class Settings(BaseSettings):
                 "JOURNAL_OPERATOR_EMAIL is required unless JOURNAL_HYDRA_ADMIN_URL "
                 "is set -- Modes 1/2 bind every authenticated request to the "
                 "operator UUID resolved from this email."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_trust_gateway_signature(self) -> "Settings":
+        """Refuse trust_gateway=True without signature enforcement outside dev."""
+        if (
+            self.auth.trust_gateway
+            and not self.auth.gateway_require_signature
+            and self.app_env != "dev"
+        ):
+            raise ValueError(
+                "auth.trust_gateway=True requires "
+                "auth.gateway_require_signature=True outside dev"
             )
         return self
 
