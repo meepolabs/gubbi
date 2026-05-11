@@ -258,3 +258,38 @@ async def test_reset_indexed_at_for_ids_clears_only_target_rows(
         assert by_id[eid] is None, f"entry {eid} should have been reset"
     for eid in entry_ids[3:]:
         assert by_id[eid] is not None, f"entry {eid} should remain stamped"
+
+
+async def test_reset_indexed_at_for_ids_skips_tombstoned_rows(
+    admin_pool: asyncpg.Pool,
+    seeded_entries: tuple[UUID, list[int]],
+) -> None:
+    """Direct-call regression: tombstoned ids must remain stamped during reset."""
+    tenant_id, entry_ids = seeded_entries
+    live_id, tombstoned_id = entry_ids[:2]
+
+    async with admin_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE entries SET indexed_at = now() WHERE user_id = $1",
+            tenant_id,
+        )
+        await conn.execute(
+            "UPDATE entries SET deleted_at = now() WHERE id = $1",
+            tombstoned_id,
+        )
+
+        await entry_repo.reset_indexed_at_for_ids(conn, [live_id, tombstoned_id])
+
+        rows = await conn.fetch(
+            "SELECT id, indexed_at, deleted_at FROM entries WHERE user_id = $1 ORDER BY id",
+            tenant_id,
+        )
+
+    by_id = {r["id"]: (r["indexed_at"], r["deleted_at"]) for r in rows}
+    assert by_id[live_id] == (None, None), f"live entry {live_id} should have been reset"
+    assert (
+        by_id[tombstoned_id][0] is not None
+    ), f"tombstoned entry {tombstoned_id} must keep its indexed_at stamp"
+    assert (
+        by_id[tombstoned_id][1] is not None
+    ), f"tombstoned entry {tombstoned_id} must remain tombstoned"
