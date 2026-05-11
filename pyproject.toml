@@ -149,3 +149,12 @@ markers = [
     "unit: fast, isolated unit tests with no external dependencies",
     "integration: tests that exercise multiple components or require a running service",
 ]
+
+[tool.coverage.report]
+# Ratchet quarterly. Current as of 2026-05-11: 60.55%.
+# Locked at floor(current) = 60 (rather than floor+1=61) because the
+# precise total sits below 61, so a fail_under=61 gate would flap CI on
+# the very first run after this lands. Ratchet plan: when a coverage
+# improvement PR pushes the total above 61, bump this to 61. Aspirational
+# target is 80%.
+fail_under = 60
