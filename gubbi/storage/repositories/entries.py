@@ -372,7 +372,16 @@ async def mark_indexed(conn: asyncpg.Connection, entry_id: int) -> None:
 
 
 async def mark_indexed_batch(conn: asyncpg.Connection, entry_ids: list[int]) -> None:
-    """Stamp indexed_at = now() for a batch of entries in one query."""
+    """Stamp indexed_at = now() for a batch of entries in one query.
+
+    Requires a BYPASSRLS connection (e.g. the ``admin_pool``). The UPDATE
+    spans rows owned by potentially many users -- the reindex worker is
+    a cross-tenant operation -- and a user-scoped (RLS-enforced)
+    connection would silently match only the rows whose ``user_id``
+    equals the current ``app.current_user_id`` GUC. Setting that GUC at
+    call time is insufficient: there is no single user_id valid for a
+    batch sourced from the cross-user reindex queue.
+    """
     if not entry_ids:
         return
     await conn.execute(
@@ -382,8 +391,38 @@ async def mark_indexed_batch(conn: asyncpg.Connection, entry_ids: list[int]) -> 
 
 
 async def reset_indexed_at(conn: asyncpg.Connection) -> None:
-    """Clear indexed_at on all non-deleted entries so reindex re-embeds everything."""
+    """Clear indexed_at on all non-deleted entries so reindex re-embeds everything.
+
+    Requires a BYPASSRLS connection (e.g. the ``admin_pool``). The UPDATE
+    spans every tenant; a user-scoped (RLS-enforced) connection would
+    restrict the rowcount to the current ``app.current_user_id`` GUC.
+    Setting that GUC is insufficient: there is no single user_id valid
+    for "every non-deleted row in the table".
+    """
     await conn.execute("UPDATE entries SET indexed_at = NULL WHERE deleted_at IS NULL")
+
+
+async def reset_indexed_at_for_ids(conn: asyncpg.Connection, entry_ids: Sequence[int]) -> None:
+    """Clear indexed_at for a specific set of entries (compensating reset).
+
+    Used by ``_run_reindex`` to roll back the claim stamp when encode or
+    save fails for a subset of the claimed batch, so a subsequent reindex
+    pass picks them up again.
+
+    Requires a BYPASSRLS connection (e.g. the ``admin_pool``). The
+    failed-id set is sourced from a cross-tenant reindex batch; a
+    user-scoped connection would silently drop ids whose ``user_id``
+    differs from the current ``app.current_user_id`` GUC and strand
+    those ids in the claimed-but-never-processed state. Setting the
+    GUC per-call would require iterating per-user, which defeats the
+    point of batching the reset.
+    """
+    if not entry_ids:
+        return
+    await conn.execute(
+        "UPDATE entries SET indexed_at = NULL WHERE id = ANY($1)",
+        list(entry_ids),
+    )
 
 
 async def get_by_date_range(
@@ -617,18 +656,40 @@ async def get_unindexed(
     last_id: int,
     batch_size: int,
 ) -> list[dict[str, Any]]:
-    """Return a cursor-paginated batch of entries needing semantic indexing."""
+    """Return a cursor-paginated batch of entries needing semantic indexing.
+
+    The inner subquery does ``FOR UPDATE SKIP LOCKED`` against the
+    ``entries`` table only -- no JOIN inside the locking SELECT, so
+    the row locks are scoped exactly to rows the worker is about to
+    claim. The outer SELECT then joins ``topics`` for the path/title
+    just for the rows the inner SELECT actually returned.
+
+    Cursor semantics (``last_id``): the caller advances ``last_id``
+    past rows it actually claimed and processed. Rows skipped because
+    another worker held their lock stay below ``last_id`` and become
+    visible again on the next pass once the holder commits/aborts. The
+    outer ``ORDER BY e.id`` is what makes ``batch[-1]["id"]`` a safe
+    cursor for the caller.
+
+    Callers MUST run this inside an explicit transaction; the row locks
+    are released on commit/rollback.
+    """
     rows = await conn.fetch(
         """
         SELECT e.id, e.content_encrypted, e.content_nonce,
                e.tags, e.date::text AS date, t.path AS topic, t.title
         FROM entries e
         JOIN topics t ON t.id = e.topic_id
-        WHERE e.deleted_at IS NULL
-          AND e.indexed_at IS NULL
-          AND e.id > $1
+        WHERE e.id IN (
+            SELECT id FROM entries
+            WHERE deleted_at IS NULL
+              AND indexed_at IS NULL
+              AND id > $1
+            ORDER BY id
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        )
         ORDER BY e.id
-        LIMIT $2
         """,
         last_id,
         batch_size,

@@ -8,6 +8,7 @@ the lifespan and read back through typed accessors in
 """
 
 import asyncio
+import os
 import textwrap
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
@@ -22,6 +23,7 @@ from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
@@ -266,6 +268,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Core startup: pools, operator scaffold, caching, cipher.
     app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, logger)
     app.state.app_ctx = app_ctx
+
+    # Postgres log-settings probe -- refuses to start when the cluster is
+    # configured to capture statement text or bound parameters in its log
+    # (which would silently turn the DB into a plaintext sink for journal
+    # content). Mode is read from JOURNAL_PG_LOG_PROBE_MODE
+    # (strict|warn|off; default strict). On failure, close pools
+    # symmetrically before propagating.
+    pg_log_probe_mode = os.environ.get("JOURNAL_PG_LOG_PROBE_MODE", "strict")
+    try:
+        await probe_pg_log_settings(pool, mode=pg_log_probe_mode)
+    except BaseException:
+        # Catch BaseException (not Exception) so CancelledError /
+        # KeyboardInterrupt during the probe still trip pool teardown
+        # before the original exception propagates. Pool close is
+        # best-effort -- a teardown failure must not mask the probe
+        # error or the cancellation that triggered the unwind.
+        # Suppress asyncio.CancelledError from the close() calls
+        # explicitly: under Python 3.8+ CancelledError is a BaseException
+        # (not Exception), so a bare ``suppress(Exception)`` would let a
+        # cancelled close() escape and clobber the original cancellation
+        # that the surrounding ``raise`` is meant to re-raise.
+        with suppress(Exception, asyncio.CancelledError):
+            await pool.close()
+        if admin_pool is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await admin_pool.close()
+        raise
 
     operator_user_id = app_ctx.operator_user_id
 

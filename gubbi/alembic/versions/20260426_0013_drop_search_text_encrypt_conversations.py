@@ -6,6 +6,20 @@ This migration does three things:
    from GENERATED columns to regular ``tsvector`` columns populated by app SQL.
 3. Adds nullable encrypted conversation title/summary columns with 12-byte
    nonce checks. NOT NULL is enforced in migration 0014 after backfill.
+
+Encrypted-at-rest tradeoff (EDR-jc H4): plaintext is still passed as a
+bound parameter to ``to_tsvector('english', $N)`` for the duration of an
+INSERT/UPDATE round-trip. The column ends up storing only the lexeme
+vector -- not the plaintext -- but Postgres logging can capture
+parameters in transit if the cluster is configured loudly
+(``log_statement='all'|'mod'``, ``log_min_duration_statement >= 0``,
+``log_parameter_max_length > 0``, ``auto_explain.log_min_duration >= 0``,
+``pg_stat_statements.track='all'``). Both gubbi and gubbi-cloud refuse
+to start when their lifespan probe (``probe_pg_log_settings`` from
+``gubbi-common >= 0.9.0``) detects any of those settings; the probe is
+the only enforcement on managed Postgres providers where ``ALTER SYSTEM``
+is forbidden. See ``llm_context/tasks/m234-review-fix/cluster-C-architect.md``
+for the full threat model.
 """
 
 from alembic import op

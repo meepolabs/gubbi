@@ -78,8 +78,14 @@ _SKIP_KEYWORDS = frozenset(
         "entry",
         # Common English word that appears as false positive after FROM in prose
         "the",
+        # Common English pronoun that appears after UPDATE in prose
+        # (e.g. ``"... cross-user UPDATE that a user-scoped pool ..."``)
+        "that",
         # PL/pgSQL variables captured by INTO (DO-block locals, not tables)
         "nxt",
+        # Reserved words after UPDATE in row-level locking clauses
+        # (``FOR UPDATE SKIP LOCKED`` -- ``skip`` is not a table)
+        "skip",
     }
 )
 
