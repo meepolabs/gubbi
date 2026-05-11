@@ -397,6 +397,7 @@ def _out(msg: str, file: Any = sys.stdout) -> None:
 
 
 def main() -> None:
+    """CLI entry point: parse args and run the env-contract drift check."""
     parser = argparse.ArgumentParser(
         description="Check env-var contract drift between Settings and compose."
     )
