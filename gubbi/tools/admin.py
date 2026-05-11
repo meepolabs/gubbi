@@ -134,7 +134,19 @@ async def _run_reindex(
                 # Encode outside the connection acquire - ONNX inference is CPU-bound
                 # (10-200ms) and should not hold a pool connection during that time.
                 embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
-                async with safe_acquire(admin_pool) as conn:
+                # The admin pool is BYPASSRLS, so ``app.current_user_id``
+                # is unset on a fresh checkout. ``save_by_vector`` reads
+                # that GUC to populate ``entry_embeddings.user_id``; if
+                # we do not bind it explicitly the column lands NULL and
+                # HNSW + RLS will later filter the row out of every
+                # tenant's semantic search. Bind the row's owning user
+                # per save inside a transaction so ``SET LOCAL`` is
+                # scoped to the embedding UPSERT and released on commit.
+                async with safe_acquire(admin_pool) as conn, conn.transaction():
+                    await conn.execute(
+                        "SELECT set_config('app.current_user_id', $1, true)",
+                        str(r["user_id"]),
+                    )
                     await app_ctx.embedding_service.save_by_vector(conn, r["id"], embedding)
                 succeeded_ids.append(r["id"])
                 embeddings_generated += 1
