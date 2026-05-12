@@ -250,3 +250,64 @@ def test_find_compose_file_empty_list_returns_default() -> None:
     """Empty compose_files list returns 'docker-compose.yml' without IndexError."""
     result = lint._find_compose_file_for_service("any-service", [])
     assert result == "docker-compose.yml"
+
+
+# ---------------------------------------------------------------------------
+# B1-T7: Environment Literal cross-repo parity (DEC-094).
+# ---------------------------------------------------------------------------
+
+
+def test_environment_literal_byte_identical(tmp_path: Path) -> None:
+    """Two repos carrying the same canonical line produce zero drift."""
+    canonical = 'Environment = Literal["dev", "ci", "staging", "production"]'
+    a = tmp_path / "gubbi_config.py"
+    b = tmp_path / "cloud_config.py"
+    a.write_text(f"from typing import Literal\n\n{canonical}\n\nclass S: ...\n")
+    b.write_text(f"from typing import Literal\n\n{canonical}\n\nclass S: ...\n")
+
+    drifts = lint.check_environment_literal_parity(str(a), str(b))
+
+    assert drifts == []
+
+
+def test_environment_literal_drift_detected(tmp_path: Path) -> None:
+    """A literal that differs between the two repos surfaces a DRIFT message."""
+    a = tmp_path / "gubbi_config.py"
+    b = tmp_path / "cloud_config.py"
+    a.write_text(
+        "from typing import Literal\n\n"
+        'Environment = Literal["dev", "ci", "staging", "production"]\n'
+    )
+    b.write_text("from typing import Literal\n\n" 'Environment = Literal["dev", "prod"]\n')
+
+    drifts = lint.check_environment_literal_parity(str(a), str(b))
+
+    assert len(drifts) == 1
+    assert "DRIFT" in drifts[0]
+    assert "differs" in drifts[0]
+    assert "DEC-094" in drifts[0]
+
+
+def test_environment_literal_parity_missing_path_hard_fails(tmp_path: Path) -> None:
+    """A non-existent cross-repo config path is itself a drift signal.
+
+    DEC-094 rule 2 ("drift fails CI") -- the parity check must NOT silently
+    skip when the cross-repo path does not resolve; it must surface a DRIFT
+    message so the CI invocation exits non-zero.
+    """
+    # Arrange: real path on the gubbi side, missing path on the cloud side.
+    a = tmp_path / "gubbi_config.py"
+    a.write_text(
+        "from typing import Literal\n\n"
+        'Environment = Literal["dev", "ci", "staging", "production"]\n'
+    )
+    missing = tmp_path / "does_not_exist.py"
+
+    # Act
+    drifts = lint.check_environment_literal_parity(str(a), str(missing))
+
+    # Assert
+    assert len(drifts) == 1
+    assert "DRIFT" in drifts[0]
+    assert "cross-repo config path not found" in drifts[0]
+    assert str(missing) in drifts[0]
