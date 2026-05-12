@@ -16,6 +16,7 @@ __all__: list[str] = [
     "ALLOWED_ORIGINS",
     "AuthConfig",
     "DbConfig",
+    "Environment",
     "HYDRA_INTROSPECT_TIMEOUT_SECS",
     "LLMConfig",
     "OAUTH_ACCESS_TOKEN_TTL_SECS",
@@ -177,6 +178,11 @@ class LLMConfig(BaseModel):
     orphan_cleanup_threshold_minutes: int = 30
 
 
+# Canonical Environment Literal (mirrored byte-for-byte across gubbi + gubbi-cloud).
+# See DEC-094 (canonical app_env literal); env-contract-lint enforces parity.
+Environment = Literal["dev", "ci", "staging", "production"]
+
+
 class Settings(BaseSettings):
     """Application settings, loaded from environment variables.
 
@@ -215,7 +221,9 @@ class Settings(BaseSettings):
 
     # Deploy environment marker. Controls safe-by-default gates that should
     # only relax in local development. Env var: JOURNAL_APP_ENV.
-    app_env: Literal["dev", "prod"] = "prod"
+    # See DEC-094 (canonical app_env literal); default stays "dev" to honour
+    # the self-host first principle.
+    app_env: Environment = "dev"
 
     db: DbConfig
     auth: AuthConfig = AuthConfig()
@@ -315,17 +323,30 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_trust_gateway_signature(self) -> "Settings":
-        """Refuse trust_gateway=True without signature enforcement outside dev."""
-        if (
-            self.auth.trust_gateway
-            and not self.auth.gateway_require_signature
-            and self.app_env != "dev"
-        ):
+        """Refuse trust_gateway=True without signature enforcement in deployed envs.
+
+        Gated on ``self.is_deployed`` (True for staging+production) per
+        DEC-094. The unsafe combination is reachable in non-deployed
+        envs (``dev``, ``ci``) for local trust-gateway smoke tests and
+        the CI harness, but never in ``staging``/``production``.
+        """
+        if self.auth.trust_gateway and not self.auth.gateway_require_signature and self.is_deployed:
             raise ValueError(
                 "auth.trust_gateway=True requires "
-                "auth.gateway_require_signature=True outside dev"
+                "auth.gateway_require_signature=True in deployed envs "
+                "(staging/production)"
             )
         return self
+
+    @property
+    def is_deployed(self) -> bool:
+        """Return True when running in a deployed environment.
+
+        Canonical predicate replacing every ``app_env != "dev"`` check across
+        both gubbi and gubbi-cloud (DEC-094). dev + ci are non-deployed
+        (developer laptop, CI runner); staging + production are deployed.
+        """
+        return self.app_env in ("staging", "production")
 
     @property
     def knowledge_dir(self) -> Path:
