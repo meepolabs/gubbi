@@ -11,7 +11,6 @@ POST compares the cookie value to the form value (timing-safe).
 
 from __future__ import annotations
 
-import ipaddress
 import secrets
 import time
 from collections.abc import Callable, Coroutine
@@ -19,6 +18,7 @@ from typing import Any
 
 import bcrypt
 import structlog
+from gubbi_common.http import client_ip as _client_ip
 from gubbi_common.telemetry import bound_logger
 from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 from starlette.requests import Request
@@ -48,27 +48,30 @@ def client_ip(request: Request) -> str:
     """Extract client IP, optionally honouring X-Forwarded-For.
 
     Honours JOURNAL_AUTH__TRUST_FORWARDED_HEADERS (default False).  When
-    True the leftmost X-Forwarded-For value is treated as the original
-    client IP; when False only request.client.host is used so reverse-
-    proxy headers cannot forge the caller address.
+    True the RIGHTMOST X-Forwarded-For value (the trusted-proxy stamp,
+    per DEC-086 rule 4) is treated as the originating client IP; when
+    False the XFF header is ignored and only request.client.host is
+    used so reverse-proxy headers cannot forge the caller address.
 
-    Operators enabling this flag MUST ensure a trusted reverse proxy is in
-    front of gubbi and that direct access to the application is not
+    Operators enabling this flag MUST ensure a trusted reverse proxy is
+    in front of gubbi and that direct access to the application is not
     possible.  (M-9.3).
+
+    Delegates to gubbi_common.http.client_ip which is the single source
+    of truth for XFF parsing across both gubbi and gubbi-cloud (helper
+    introduced in gubbi-common 0.10.0; see DEC-086).  The helper returns
+    None when no IP is recoverable; this wrapper preserves the legacy
+    "unknown" sentinel for log-shape stability.
     """
     from gubbi.config import get_settings
 
-    if not get_settings().auth.trust_forwarded_headers:
-        return request.client.host if request.client else "unknown"
-    xff: str = request.headers.get("x-forwarded-for", "") or ""
-    if xff:
-        candidate = xff.split(",")[0].strip()
-        try:
-            ipaddress.ip_address(candidate)
-        except ValueError:
-            return request.client.host if request.client else "unknown"
-        return candidate
-    return request.client.host if request.client else "unknown"
+    return (
+        _client_ip(
+            request,
+            trust_forwarded_headers=get_settings().auth.trust_forwarded_headers,
+        )
+        or "unknown"
+    )
 
 
 def create_login_handler(

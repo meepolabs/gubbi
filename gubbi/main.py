@@ -23,6 +23,7 @@ from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from gubbi_common.auth.prm import build_prm_metadata_url
 from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from mcp.server.fastmcp import FastMCP
@@ -384,11 +385,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     protected_resource_metadata_url: str | None = None
     if introspector is not None or token_validator is not None:
         server_base = settings.server.url.rstrip("/")
-        protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource/mcp"
-        if protected_resource_metadata_url and not any(
-            protected_resource_metadata_url.startswith(pre) for pre in ("http://", "https://")
-        ):
-            protected_resource_metadata_url = None
+        protected_resource_metadata_url = build_prm_metadata_url(
+            f"{server_base}/mcp", legacy_suffix=True
+        )
 
     # Build auth strategy list. Trust-gateway deployments use ONLY
     # TrustGatewayStrategy; non-trust builds compose ApiKey + Hydra + SelfHost.

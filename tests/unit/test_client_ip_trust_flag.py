@@ -35,7 +35,7 @@ class TestClientIpTrustFlag:
                 os.environ["JOURNAL_AUTH__TRUST_FORWARDED_HEADERS"] = old_val
 
     async def test_client_ip_trust_flag_enabled(self) -> None:
-        """When trust flag set to 'true', leftmost XFF wins."""
+        """When trust flag set to 'true', RIGHTMOST XFF wins (DEC-086)."""
         from gubbi.oauth.forms import client_ip
 
         mock_request = MagicMock()
@@ -49,7 +49,34 @@ class TestClientIpTrustFlag:
 
         try:
             ip = client_ip(mock_request)
-            assert ip == "10.0.0.5", "With trust flag, leftmost XFF is used as client IP"
+            assert ip == "172.16.0.1", (
+                "With trust flag, rightmost XFF is the trusted-proxy stamp " "(DEC-086 rule 4)"
+            )
+        finally:
+            del os.environ["JOURNAL_AUTH__TRUST_FORWARDED_HEADERS"]
+
+    async def test_login_rate_limit_uses_rightmost_xff(self) -> None:
+        """DEC-086 rule 4: rightmost XFF entry is the trusted-proxy stamp.
+
+        Supplies a 3-hop XFF chain "1.2.3.4, 5.6.7.8, 9.10.11.12" and
+        asserts client_ip() returns the rightmost ("9.10.11.12"), not
+        the leftmost client-controllable value. Regression-locks the
+        H-A4 fix (gubbi-common 0.10.0 client_ip helper).
+        """
+        from gubbi.oauth.forms import client_ip
+
+        mock_request = MagicMock()
+        mock_request.headers.get.return_value = "1.2.3.4, 5.6.7.8, 9.10.11.12"
+        mock_client = MagicMock()
+        mock_client.host = "192.168.1.10"
+        mock_request.client = mock_client
+
+        os.environ["JOURNAL_AUTH__TRUST_FORWARDED_HEADERS"] = "true"
+        get_settings.cache_clear()
+
+        try:
+            ip = client_ip(mock_request)
+            assert ip == "9.10.11.12", "Rightmost XFF entry must win per DEC-086 rule 4"
         finally:
             del os.environ["JOURNAL_AUTH__TRUST_FORWARDED_HEADERS"]
 
