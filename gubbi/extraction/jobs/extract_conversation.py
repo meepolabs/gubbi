@@ -24,6 +24,7 @@ import anthropic
 import asyncpg
 import structlog
 from gubbi_common.audit.actions import Action
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.db.user_scoped import user_scoped_connection
 
@@ -180,7 +181,7 @@ async def _mark_skipped_no_topic(
                     action="extraction_job.completed",
                     actor_type="user",
                     actor_id=str(user_uuid),
-                    target_kind="extraction_job",
+                    target_kind=TargetKind.EXTRACTION_JOB,
                     target_id=job_id,
                     metadata={"conversation_id": conversation_id, "entries_created": 0},
                 )
@@ -225,7 +226,7 @@ async def _mark_job_failed(
                     action="extraction_job.failed",
                     actor_type="user",
                     actor_id=str(user_uuid),
-                    target_kind="extraction_job",
+                    target_kind=TargetKind.EXTRACTION_JOB,
                     target_id=str(job_id),
                     metadata={"error_code": error_code, "conversation_id": conversation_id},
                 )
@@ -312,7 +313,7 @@ async def _persist_extraction(
         actor_type="user",
         actor_id=str(user_uuid),
         action=Action.CONVERSATION_EXTRACTED,
-        target_kind="conversation",
+        target_kind=TargetKind.CONVERSATION,
         target_id=str(conversation_id),
         metadata={
             "via": "extraction-worker",
@@ -339,7 +340,7 @@ async def _persist_extraction(
                 action="extraction_job.completed",
                 actor_type="user",
                 actor_id=str(user_uuid),
-                target_kind="extraction_job",
+                target_kind=TargetKind.EXTRACTION_JOB,
                 target_id=str(job_id),
                 metadata={"conversation_id": conversation_id, "entries_created": entries_created},
             )

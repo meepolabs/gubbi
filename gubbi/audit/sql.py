@@ -52,6 +52,7 @@ from typing import Any
 import asyncpg
 from gubbi_common.audit.actions import Action
 from gubbi_common.audit.sql import VALID_ACTOR_TYPES
+from gubbi_common.audit.targets import TargetKind
 from opentelemetry import trace
 
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
@@ -75,7 +76,7 @@ async def record_audit(
     action: Action | str,
     target_type: str | None = None,
     target_id: str | None = None,
-    target_kind: str | None = None,
+    target_kind: TargetKind | str | None = None,
     reason: str | None = None,
     metadata: dict[str, Any] | None = None,
     ip_address: str | None = None,
