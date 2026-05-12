@@ -47,6 +47,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Any, ParamSpec, TypeVar
 
 import structlog
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.app_context import AppContext
@@ -93,7 +94,7 @@ def audited(
     target_type: str,
     app_ctx: AppContext,
     *,
-    target_kind: str | None = None,
+    target_kind: TargetKind | str | None = None,
 ) -> Callable[[Callable[P, Awaitable[R]]], Callable[P, Awaitable[R]]]:
     """Decorate an MCP write-tool handler to record an audit event on success.
 

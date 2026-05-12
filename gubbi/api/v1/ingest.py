@@ -14,6 +14,7 @@ from uuid import UUID
 import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Request
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
@@ -290,7 +291,7 @@ async def ingest_conversations(
                         actor_type="user",
                         actor_id=str(user_id),
                         action="extraction_job.created",
-                        target_kind="extraction_job",
+                        target_kind=TargetKind.EXTRACTION_JOB,
                         target_id=str(job_uuid),
                         metadata={
                             "conversation_id": save_result.conversation_id,

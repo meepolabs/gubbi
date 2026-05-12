@@ -4,6 +4,7 @@ import asyncio
 from typing import Any, NotRequired, TypedDict
 
 import structlog
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -317,7 +318,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     @audited(
         ACTION_CONVERSATION_SAVED,
         target_type="conversation",
-        target_kind="conversation",
+        target_kind=TargetKind.CONVERSATION,
         app_ctx=app_ctx,
     )
     async def journal_save_conversation(
