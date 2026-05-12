@@ -46,13 +46,13 @@ def upgrade() -> None:
             IF current_user = 'journal_admin' AND NEW.actor_type = 'user' THEN
                 RAISE EXCEPTION
                     'journal_admin cannot insert audit_log row with actor_type=user;'
-                    ' use app_pool/user_scoped_connection or set actor_type to system/admin/founder'
+                    ' use app_pool/user_scoped_connection or set actor_type to system/admin/hydra_subject'
                     USING ERRCODE = 'insufficient_privilege';
             END IF;
             RETURN NEW;
         END;
         $func$ LANGUAGE plpgsql
-        """
+        """  # noqa: E501
     )
     op.execute(
         """
