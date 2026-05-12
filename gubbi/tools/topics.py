@@ -2,6 +2,7 @@
 
 from typing import Any
 
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
@@ -90,7 +91,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_TOPIC_CREATED, target_type="topic", target_kind="topic", app_ctx=app_ctx)
+    @audited(
+        ACTION_TOPIC_CREATED, target_type="topic", target_kind=TargetKind.TOPIC, app_ctx=app_ctx
+    )
     async def journal_create_topic(
         topic: str,
         title: str,
