@@ -30,10 +30,10 @@ import pytest_asyncio
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+from gubbi.app_context import AppContext
+from gubbi.auth_context import current_user_id
 from gubbi.config import get_settings
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.tools.registry import register_tools
 from tests.fixtures.tenants import TenantSeed, seed_for  # noqa: F401 -- pytest discovery
 
@@ -49,7 +49,7 @@ class _StubEmbeddingService:
     def encode(self, text: str) -> list[float]:
         return [0.0] * 384
 
-    async def store_by_vector(self, conn: Any, entry_id: int, embedding: list[float]) -> None:
+    async def save_by_vector(self, conn: Any, entry_id: int, embedding: list[float]) -> None:
         pass
 
     async def search_by_vector(

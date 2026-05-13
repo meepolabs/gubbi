@@ -35,9 +35,9 @@ from mcp.types import Tool as MCPTool
 # Imported for type info when available; but we monkey-patch via ToolManager
 from opentelemetry import trace
 
-from gubbi.core.auth_context import current_token_scopes
-from gubbi.core.context import AppContext
-from gubbi.core.scope import SCOPE_GRANTS
+from gubbi.app_context import AppContext
+from gubbi.auth.scope import SCOPE_GRANTS
+from gubbi.auth_context import current_token_scopes
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
 from gubbi.tools import (
     context,
@@ -46,6 +46,16 @@ from gubbi.tools import (
     search,
     topics,
 )
+
+__all__: list[str] = [
+    "ALL_TOOLS",
+    "READ_TOOLS",
+    "WRITE_TOOLS",
+    "filter_tools_by_scope",
+    "patch_tool_manager",
+    "register_tools",
+    "wire_scope_filter",
+]
 
 # ---------------------------------------------------------------------------
 # Tool categorization lists (used by future read/write scope split)
@@ -127,7 +137,7 @@ logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer(_TRACER_NAME)
 
 
-def _patch_tool_manager(tm: ToolManager) -> None:
+def patch_tool_manager(tm: ToolManager) -> None:
     """Monkey-patch ToolManager.call_tool to emit mcp.tool_call spans.
 
     Every tool dispatch is wrapped with a span containing:
@@ -183,8 +193,8 @@ def _patch_tool_manager(tm: ToolManager) -> None:
 
     # Replace the bound method on the specific ToolManager instance.
     # We use a closure that wraps the original, bypassing descriptor protocol.
-    bound_patched = patched_call_tool.__get__(tm, type(tm))  # type: ignore[attr-defined]
-    tm.call_tool = bound_patched  # type: ignore[assignment]
+    bound_patched = patched_call_tool.__get__(tm, type(tm))  # type: ignore[attr-defined]  # function.__get__ binds method; mypy lacks descriptor inference here
+    tm.call_tool = bound_patched  # type: ignore[method-assign]  # FastMCP exposes no typed hook for tool-call instrumentation; runtime monkeypatch is intentional (sanity-checked via __wrapped__ tripwire)
 
     # Sanity-check: verify we actually wrapped the SDK call_tool. A future MCP
     # SDK refactor could change how ToolManager exposes call_tool (e.g. make it
@@ -194,7 +204,7 @@ def _patch_tool_manager(tm: ToolManager) -> None:
     # silently broken; we want it loud at startup.
     wrapped = getattr(tm.call_tool, "__wrapped__", None)
     if wrapped is None:
-        raise RuntimeError("ToolManager.call_tool was not wrapped by _patch_tool_manager")
+        raise RuntimeError("ToolManager.call_tool was not wrapped by patch_tool_manager")
     if not hasattr(wrapped, "__func__"):
         raise RuntimeError(
             "Wrapped call_tool lacks __func__ -- SDK refactor may have broken wrapping"
@@ -206,7 +216,7 @@ def _patch_tool_manager(tm: ToolManager) -> None:
         )
 
 
-def _wire_scope_filter(mcp: FastMCP) -> None:
+def wire_scope_filter(mcp: FastMCP) -> None:
     """Wire scope filter into tools/list handler (defense in depth).
 
     Replaces the lowlevel handler set by FastMCP._setup_handlers() so
@@ -222,7 +232,7 @@ def _wire_scope_filter(mcp: FastMCP) -> None:
         visible = set(filter_tools_by_scope([t.name for t in all_tools], scopes))
         return [t for t in all_tools if t.name in visible]
 
-    mcp._mcp_server.list_tools()(_scope_filtered_list_tools)
+    mcp._mcp_server.list_tools()(_scope_filtered_list_tools)  # type: ignore[no-untyped-call]  # MCP SDK lowlevel handler-decorator chain is untyped
 
 
 def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
@@ -253,7 +263,7 @@ def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
             type(tool_manager).__name__,
         )
     else:
-        _patch_tool_manager(tool_manager)
+        patch_tool_manager(tool_manager)
         logger.debug("OTel tool-call span wrapper installed on ToolManager")
 
-    _wire_scope_filter(mcp)
+    wire_scope_filter(mcp)

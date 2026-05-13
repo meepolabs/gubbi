@@ -19,7 +19,8 @@ from uuid import UUID
 import httpx
 from gubbi_common.auth.gateway_signature import build_signature
 
-from gubbi.core.auth_context import current_token_scopes, current_user_id
+from gubbi.auth.strategies import TrustGatewayStrategy
+from gubbi.auth_context import current_token_scopes, current_user_id
 from gubbi.middleware.auth import BearerAuthMiddleware
 
 TEST_GATEWAY_SECRET = bytes.fromhex("a" * 64)  # 32 bytes / 64 hex chars
@@ -101,6 +102,23 @@ def _headers(
     return hdrs
 
 
+def _gw_middleware(
+    gateway_secret: bytes | None,
+    gateway_require_signature: bool,
+    response_status: int = 200,
+) -> BearerAuthMiddleware:
+    """Build TrustGatewayStrategy-based middleware (helper for all tests)."""
+    return BearerAuthMiddleware(
+        _asgi_app(response_status=response_status),
+        strategies=[
+            TrustGatewayStrategy(
+                gateway_secret=gateway_secret,
+                gateway_require_signature=gateway_require_signature,
+            ),
+        ],
+    )
+
+
 # ---------------------------------------------------------------------------
 # Legacy path: REQUIRE_SIGNATURE=false
 # ---------------------------------------------------------------------------
@@ -112,12 +130,20 @@ class TestLegacyPath:
     async def test_no_sig_no_scopes_returns_200_with_default_scopes(self) -> None:
         """Legacy path: no signature, no scopes header -> default scopes applied."""
         captured_scopes: list[frozenset[str] | None] = []
+
+        async def capture_app(scope, receive, send):
+            captured_scopes.append(current_token_scopes.get())
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
         mw = BearerAuthMiddleware(
-            _asgi_app(capture_scopes=captured_scopes),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=None,
-            gateway_require_signature=False,
+            capture_app,
+            strategies=[
+                TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -129,12 +155,20 @@ class TestLegacyPath:
     async def test_no_sig_with_scopes_returns_200_with_parsed_scopes(self) -> None:
         """Legacy path: no signature, scopes present -> scopes parsed from header."""
         captured_scopes: list[frozenset[str] | None] = []
+
+        async def capture_app(scope, receive, send):
+            captured_scopes.append(current_token_scopes.get())
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
         mw = BearerAuthMiddleware(
-            _asgi_app(capture_scopes=captured_scopes),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=None,
-            gateway_require_signature=False,
+            capture_app,
+            strategies=[
+                TrustGatewayStrategy(
+                    gateway_secret=None,
+                    gateway_require_signature=False,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -150,10 +184,12 @@ class TestLegacyPath:
         """REQUIRE_SIGNATURE=false but signature present -> verification runs and fails."""
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=TEST_GATEWAY_SECRET,
-            gateway_require_signature=False,
+            strategies=[
+                TrustGatewayStrategy(
+                    gateway_secret=TEST_GATEWAY_SECRET,
+                    gateway_require_signature=False,
+                ),
+            ],
         )
         bad_sig = "0" * 64
         async with httpx.AsyncClient(
@@ -169,13 +205,21 @@ class TestLegacyPath:
     async def test_valid_sig_with_flag_false_verifies_and_returns_200(self) -> None:
         """REQUIRE_SIGNATURE=false but valid signature present -> verification passes."""
         captured_scopes: list[frozenset[str] | None] = []
+
+        async def capture_app(scope, receive, send):
+            captured_scopes.append(current_token_scopes.get())
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
         sig = _make_sig(scopes="journal:read")
         mw = BearerAuthMiddleware(
-            _asgi_app(capture_scopes=captured_scopes),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=TEST_GATEWAY_SECRET,
-            gateway_require_signature=False,
+            capture_app,
+            strategies=[
+                TrustGatewayStrategy(
+                    gateway_secret=TEST_GATEWAY_SECRET,
+                    gateway_require_signature=False,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -198,10 +242,7 @@ class TestSignatureRequired:
 
     async def test_no_signature_returns_401(self) -> None:
         """REQUIRE_SIGNATURE=true, no signature header -> 401."""
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -214,13 +255,21 @@ class TestSignatureRequired:
     async def test_valid_signature_returns_200_with_scopes(self) -> None:
         """REQUIRE_SIGNATURE=true, valid signature -> 200 with parsed scopes."""
         captured_scopes: list[frozenset[str] | None] = []
+
+        async def capture_app(scope, receive, send):
+            captured_scopes.append(current_token_scopes.get())
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
         sig = _make_sig(scopes="journal:read journal:write")
         mw = BearerAuthMiddleware(
-            _asgi_app(capture_scopes=captured_scopes),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=TEST_GATEWAY_SECRET,
-            gateway_require_signature=True,
+            capture_app,
+            strategies=[
+                TrustGatewayStrategy(
+                    gateway_secret=TEST_GATEWAY_SECRET,
+                    gateway_require_signature=True,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -234,11 +283,8 @@ class TestSignatureRequired:
 
     async def test_secret_not_configured_returns_503(self) -> None:
         """REQUIRE_SIGNATURE=true, secret=None on app.state -> 503."""
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=None,  # not configured
+        mw = _gw_middleware(
+            gateway_secret=None,
             gateway_require_signature=True,
         )
         async with httpx.AsyncClient(
@@ -251,10 +297,7 @@ class TestSignatureRequired:
     async def test_wrong_contract_version_returns_401(self) -> None:
         """Contract version != 1 -> 401."""
         sig = _make_sig()
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -275,17 +318,14 @@ class TestSignatureRequired:
 
 
 class TestTimestampSkew:
-    """Signature verification enforces ±30s skew window."""
+    """Signature verification enforces +/-30s skew window."""
 
     async def test_stale_timestamp_returns_401(self) -> None:
         """Timestamp > 30s in the past -> 401."""
         now = datetime.now(UTC)
         stale_ts = (now - timedelta(seconds=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
         sig = _make_sig(timestamp=stale_ts)
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -304,10 +344,7 @@ class TestTimestampSkew:
         now = datetime.now(UTC)
         future_ts = (now + timedelta(seconds=31)).strftime("%Y-%m-%dT%H:%M:%SZ")
         sig = _make_sig(timestamp=future_ts)
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -334,10 +371,7 @@ class TestTamperedFields:
         """Signature was built for user A, request uses user B -> 401."""
         sig = _make_sig(user_id=str(TEST_USER_UUID))
         other_uuid = UUID("22222222-3333-4444-5555-666666666666")
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -357,10 +391,7 @@ class TestTamperedFields:
     async def test_tampered_method_returns_401(self) -> None:
         """Signature was built for GET, request uses POST -> 401."""
         sig = _make_sig(method="GET")
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -377,10 +408,7 @@ class TestTamperedFields:
     async def test_tampered_path_returns_401(self) -> None:
         """Signature was built for /mcp, request uses /other -> 401."""
         sig = _make_sig(path="/mcp")
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )
@@ -406,13 +434,21 @@ class TestEmptyScopes:
     async def test_empty_scopes_legacy_default_200(self) -> None:
         """Empty scopes header with valid sig -> 200, default scopes."""
         captured_scopes: list[frozenset[str] | None] = []
+
+        async def capture_app(scope, receive, send):
+            captured_scopes.append(current_token_scopes.get())
+            await send({"type": "http.response.start", "status": 200, "headers": []})
+            await send({"type": "http.response.body", "body": b"ok"})
+
         sig = _make_sig(scopes="")
         mw = BearerAuthMiddleware(
-            _asgi_app(capture_scopes=captured_scopes),
-            api_key="",
-            trust_gateway=True,
-            gateway_secret=TEST_GATEWAY_SECRET,
-            gateway_require_signature=True,
+            capture_app,
+            strategies=[
+                TrustGatewayStrategy(
+                    gateway_secret=TEST_GATEWAY_SECRET,
+                    gateway_require_signature=True,
+                ),
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -436,10 +472,7 @@ class TestContextVarReset:
     async def test_contextvars_reset_after_request(self) -> None:
         """User_id and token_scopes reset after signed gateway request."""
         sig = _make_sig()
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            api_key="",
-            trust_gateway=True,
+        mw = _gw_middleware(
             gateway_secret=TEST_GATEWAY_SECRET,
             gateway_require_signature=True,
         )

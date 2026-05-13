@@ -16,7 +16,7 @@ from cryptography.exceptions import InvalidTag
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from gubbi.core.crypto import (
+from gubbi.crypto.cipher import (
     ContentCipher,
     DecryptionError,
     decrypt_or_raise,

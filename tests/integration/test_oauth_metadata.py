@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
-from starlette.testclient import TestClient
 
 from gubbi.config import AuthConfig, DbConfig, ServerConfig, Settings
 from gubbi.oauth.router import register_oauth_routes
@@ -32,13 +32,14 @@ def _make_mode3_settings() -> Settings:
     )  # type: ignore[call-arg]
 
 
-def _make_app(storage: OAuthStorage) -> FastAPI:
+async def _make_app(storage: OAuthStorage) -> FastAPI:
     """Create a minimal FastAPI app with only Mode 3 OAuth routes."""
     app = FastAPI()
-    register_oauth_routes(app, storage, _make_mode3_settings())
+    await register_oauth_routes(app, storage, _make_mode3_settings())
     return app
 
 
+@pytest.mark.asyncio
 class TestMode3ProtectedResourceMetadata:
     """Verify the /.well-known/oauth-protected-resource/mcp endpoint in Mode 3.
 
@@ -46,56 +47,66 @@ class TestMode3ProtectedResourceMetadata:
     "authorization_servers" fields.
     """
 
-    def test_get_protected_resource_returns_200(self, tmp_path: Path) -> None:
+    async def test_get_protected_resource_returns_200(self, tmp_path: Path) -> None:
+        from starlette.testclient import TestClient
+
         storage = OAuthStorage(tmp_path / "oauth.db")
-        _ = storage.conn  # Force schema init
-        app = _make_app(storage)
-        storage.close()
+        await storage.initialize()
+        app = await _make_app(storage)
+        await storage.close()
         client = TestClient(app)
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         assert response.status_code == 200
 
-    def test_response_is_valid_json(self, tmp_path: Path) -> None:
+    async def test_response_is_valid_json(self, tmp_path: Path) -> None:
+        from starlette.testclient import TestClient
+
         storage = OAuthStorage(tmp_path / "oauth.db")
-        _ = storage.conn
-        app = _make_app(storage)
-        storage.close()
+        await storage.initialize()
+        app = await _make_app(storage)
+        await storage.close()
         client = TestClient(app)
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         data = response.json()
         assert isinstance(data, dict)
 
-    def test_response_contains_resource_field(self, tmp_path: Path) -> None:
+    async def test_response_contains_resource_field(self, tmp_path: Path) -> None:
+        from starlette.testclient import TestClient
+
         storage = OAuthStorage(tmp_path / "oauth.db")
-        _ = storage.conn
-        app = _make_app(storage)
-        storage.close()
+        await storage.initialize()
+        app = await _make_app(storage)
+        await storage.close()
         client = TestClient(app)
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         data = response.json()
         assert data["resource"] == "http://localhost:8100/mcp"
 
-    def test_authorization_servers_points_at_public_issuer(self, tmp_path: Path) -> None:
+    async def test_authorization_servers_points_at_public_issuer(self, tmp_path: Path) -> None:
         """The authorization_servers list must reference the PUBLIC issuer URL,
         not the internal hydra_admin_url. This is the critical correctness
         check.
         """
+        from starlette.testclient import TestClient
+
         storage = OAuthStorage(tmp_path / "oauth.db")
-        _ = storage.conn
-        app = _make_app(storage)
-        storage.close()
+        await storage.initialize()
+        app = await _make_app(storage)
+        await storage.close()
         client = TestClient(app)
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         data = response.json()
         # AnyHttpUrl adds a trailing slash in its string representation.
         assert data["authorization_servers"] == ["https://auth-dev.gubbi.ai/"]
 
-    def test_rfc9728_compliant_fields(self, tmp_path: Path) -> None:
+    async def test_rfc9728_compliant_fields(self, tmp_path: Path) -> None:
         """RFC 9728 requires 'resource' and 'authorization_servers' keys."""
+        from starlette.testclient import TestClient
+
         storage = OAuthStorage(tmp_path / "oauth.db")
-        _ = storage.conn
-        app = _make_app(storage)
-        storage.close()
+        await storage.initialize()
+        app = await _make_app(storage)
+        await storage.close()
         client = TestClient(app)
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         data = response.json()

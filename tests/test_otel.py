@@ -161,7 +161,7 @@ def test_correlation_id_in_span_attributes(in_memory_tracer: tuple[Any, InMemory
     """Correlation ID must appear as a span attribute when routed through safe_set_attributes."""
     tracer, exporter = in_memory_tracer
 
-    from gubbi.telemetry.logging import set_correlation_id
+    from gubbi_common.telemetry.logging import set_correlation_id
 
     cid = str(uuid.uuid4())
     set_correlation_id(cid)
@@ -176,34 +176,6 @@ def test_correlation_id_in_span_attributes(in_memory_tracer: tuple[Any, InMemory
     assert (
         attrs.get("correlation_id") == cid
     ), f"Expected correlation_id={cid!r} in span attributes, got {attrs.get('correlation_id')!r}"
-
-
-def test_correlation_id_generated_when_missing() -> None:
-    """CorrelationIDMiddleware must generate a UUID when no header is present."""
-    from gubbi.middleware.correlation import CorrelationIDMiddleware
-
-    # Test the extract method directly
-    scope: dict[str, Any] = {"headers": []}
-    cid = CorrelationIDMiddleware._extract_or_generate(scope)
-    assert cid is not None
-    assert len(cid) > 0
-    # Verify it's a valid UUID
-    parsed = uuid.UUID(cid)
-    assert str(parsed) == cid
-
-
-def test_correlation_id_extracted_from_header() -> None:
-    """CorrelationIDMiddleware must extract correlation_id from request header."""
-    from gubbi.middleware.correlation import CorrelationIDMiddleware
-
-    cid_in = str(uuid.uuid4())
-    scope: dict[str, Any] = {
-        "headers": [
-            (b"x-correlation-id", cid_in.encode("latin-1")),
-        ]
-    }
-    cid_out = CorrelationIDMiddleware._extract_or_generate(scope)
-    assert cid_out == cid_in
 
 
 # ---------------------------------------------------------------------------
@@ -241,7 +213,7 @@ def test_safe_set_attributes_unknown_span_name(
 
 def test_structured_log_formatter_has_required_fields() -> None:
     """StructuredLogFormatter must emit JSON with required schema fields."""
-    from gubbi.telemetry.logging import StructuredLogFormatter
+    from gubbi_common.telemetry.logging import StructuredLogFormatter
 
     formatter = StructuredLogFormatter()
     record = logging.LogRecord(

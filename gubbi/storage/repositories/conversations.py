@@ -14,18 +14,42 @@ from datetime import date as date_cls
 from datetime import datetime as datetime_cls
 from pathlib import Path
 from typing import Any, NamedTuple
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import asyncpg
+import structlog
 
-from gubbi.core.crypto import ContentCipher, DecryptionError, decrypt_or_raise
-from gubbi.core.validation import slugify, validate_title, validate_topic
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
 from gubbi.models.conversation import ConversationMeta, Message
 from gubbi.storage.exceptions import ConversationNotFoundError
 from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.storage.repositories.topics import get_id as get_topic_id
+from gubbi.validation import slugify, validate_title, validate_topic
 
-logger = logging.getLogger(__name__)
+__all__: list[str] = [
+    "SaveConversationResult",
+    "count_conversations",
+    "delete_superseded_json_archive",
+    "exists_by_platform_id",
+    "get_conversation",
+    "get_processed_at",
+    "get_title_summary",
+    "get_titles_summaries",
+    "list_conversations",
+    "mark_processed",
+    "read_conversation",
+    "read_conversation_by_id",
+    "read_conversation_by_id_paginated",
+    "save_conversation",
+    "set_platform_metadata",
+]
+
+# ``logger`` is the canonical async-context logger (used inside async
+# repository functions). ``_sync_log`` covers the sync archive-cleanup
+# helper (``delete_superseded_json_archive``); ``structlog.AsyncBoundLogger``
+# emits return coroutines that cannot be used from sync callers.
+logger = structlog.get_logger(__name__)
+_sync_log = logging.getLogger(__name__)
 
 
 def _parse_ts(ts: str | None) -> datetime_cls | None:
@@ -150,11 +174,11 @@ async def save_conversation(
 ) -> SaveConversationResult:
     """Save a conversation. Idempotent -- same topic+title overwrites.
 
-    The caller MUST supply ``conn`` already inside a transaction -- e.g. from
-    ``gubbi_common.db.user_scoped.user_scoped_connection`` -- because this function issues
-    multiple writes (upsert conversation, delete/insert messages, upsert
-    linked entry, update topic) that only stay consistent when grouped into
-    one atomic commit.
+    Transaction contract: the caller MUST wrap any multi-statement
+    write method in ``conn.transaction()``. Multi-statement methods
+    assert ``conn.is_in_transaction()`` at entry and raise
+    AssertionError in non-prod if called outside a transaction.
+    Single-statement read methods do not require a transaction.
 
     Returns a ``SaveConversationResult`` named tuple. The
     ``superseded_json_path`` field is the **previous** ``json_path`` of
@@ -181,6 +205,8 @@ async def save_conversation(
       it; the row reverts to that path and remains internally
       consistent.
     """
+    transaction_required = "conversations.save_conversation: caller must wrap in conn.transaction()"
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     topic = validate_topic(topic)
     title = validate_title(title)
     slug = slugify(title)
@@ -278,7 +304,7 @@ def delete_superseded_json_archive(conversations_json_dir: Path, json_path: str)
         if not candidate.is_symlink():
             candidate.unlink(missing_ok=True)
     except OSError:
-        logger.exception("Failed to delete superseded JSON archive: %s", json_path)
+        _sync_log.exception("Failed to delete superseded JSON archive: %s", json_path)
 
 
 async def _upsert_conversation_record(
@@ -516,7 +542,7 @@ async def list_conversations(
     return [_row_to_meta(cipher, r) for r in rows], total
 
 
-async def read_conversation(
+async def get_conversation(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
     topic: str,
@@ -526,6 +552,8 @@ async def read_conversation(
 
     Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
     """
+    transaction_required = "conversations.get_conversation: caller must wrap in conn.transaction()"
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     topic = validate_topic(topic)
     slug = slugify(title)
 
@@ -562,6 +590,12 @@ async def read_conversation(
     ]
 
 
+# Deprecated alias for one release per Part 9.8 of the code-org review (CO.43).
+# `get_conversation` is the canonical name; `read_conversation` was inconsistent
+# with the `get_*` verb used elsewhere in this module.
+read_conversation = get_conversation
+
+
 async def read_conversation_by_id(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
@@ -577,6 +611,10 @@ async def read_conversation_by_id(
     Returns (ConversationMeta, messages, total_messages).
     Raises ConversationNotFoundError if not found.
     """
+    transaction_required = (
+        "conversations.read_conversation_by_id: caller must wrap in conn.transaction()"
+    )
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     row = await conn.fetchrow(
         """
         SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
@@ -634,6 +672,10 @@ async def read_conversation_by_id_paginated(
     Returns (ConversationMeta, paged_messages, total_messages).
     Raises ConversationNotFoundError if not found.
     """
+    transaction_required = (
+        "conversations.read_conversation_by_id_paginated: caller must wrap in conn.transaction()"
+    )
+    assert conn.is_in_transaction(), transaction_required  # noqa: S101
     row = await conn.fetchrow(
         """
         SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
@@ -677,6 +719,7 @@ async def get_title_summary(
     cipher: ContentCipher,
     conversation_id: int,
 ) -> tuple[str, str] | None:
+    """Decrypt and return (title, summary) for a conversation, or None if not found."""
     row = await conn.fetchrow(
         "SELECT title_encrypted, title_nonce, summary_encrypted, summary_nonce "
         "FROM conversations WHERE id = $1",
@@ -691,6 +734,66 @@ async def get_title_summary(
             "Conversation title/summary decrypted to None; schema invariant violated"
         )
     return title, summary
+
+
+async def exists_by_platform_id(
+    conn: asyncpg.Connection,
+    user_id: UUID,
+    platform: str,
+    platform_id: str,
+) -> bool:
+    """Return True iff a conversation row matches (user_id, platform, platform_id)."""
+    return bool(
+        await conn.fetchval(
+            "SELECT 1 FROM conversations"
+            " WHERE user_id = $1 AND platform = $2 AND platform_id = $3",
+            user_id,
+            platform,
+            platform_id,
+        )
+    )
+
+
+async def set_platform_metadata(
+    conn: asyncpg.Connection,
+    conversation_id: int,
+    platform: str,
+    platform_id: str,
+) -> None:
+    """Set the platform + platform_id columns on a conversations row."""
+    await conn.execute(
+        "UPDATE conversations SET platform = $1, platform_id = $2 WHERE id = $3",
+        platform,
+        platform_id,
+        conversation_id,
+    )
+
+
+async def get_processed_at(
+    conn: asyncpg.Connection,
+    conversation_id: int,
+) -> datetime_cls | None:
+    """Return the conversations.processed_at timestamp, or None if NULL."""
+    return await conn.fetchval(  # type: ignore[no-any-return]
+        "SELECT processed_at FROM conversations WHERE id = $1",
+        conversation_id,
+    )
+
+
+async def mark_processed(
+    conn: asyncpg.Connection,
+    conversation_id: int,
+) -> None:
+    """Set conversations.processed_at = now() WHERE id = $conversation_id AND processed_at IS NULL.
+
+    Idempotent under retry: if processed_at is already set this becomes a no-op (UPDATE 0).
+    Safe to call from concurrent workers -- the last-write-wins race is prevented by the
+    WHERE predicate; only one winner will observe rowcount == 1.
+    """
+    await conn.execute(
+        "UPDATE conversations SET processed_at = now() WHERE id = $1 AND processed_at IS NULL",
+        conversation_id,
+    )
 
 
 async def get_titles_summaries(
@@ -718,16 +821,16 @@ async def get_titles_summaries(
             title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
             summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
             if title is None or summary is None:
-                logger.warning(
-                    "Skipping conversation %d: title/summary decrypted to None",
-                    cid,
+                await logger.warning(
+                    "Skipping conversation: title/summary decrypted to None",
+                    conversation_id=cid,
                 )
                 continue
             result[cid] = (title, summary)
         except DecryptionError as exc:
-            logger.warning(
-                "Skipping conversation %d: decryption failed (%s)",
-                cid,
-                type(exc).__name__,
+            await logger.warning(
+                "Skipping conversation: decryption failed",
+                conversation_id=cid,
+                error_type=type(exc).__name__,
             )
     return result

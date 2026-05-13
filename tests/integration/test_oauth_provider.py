@@ -81,7 +81,7 @@ class TestCodeExchange:
             redirect_uri="http://localhost/callback",
             redirect_uri_provided_explicitly=True,
         )
-        oauth_storage.save_auth_code("test-code", auth_code)
+        await oauth_storage.save_auth_code("test-code", auth_code)
 
         # Load it
         loaded = await provider.load_authorization_code(client, "test-code")
@@ -94,7 +94,7 @@ class TestCodeExchange:
         assert token.expires_in == OAUTH_ACCESS_TOKEN_TTL_SECS
 
         # Code is deleted after exchange (one-time use)
-        assert oauth_storage.get_auth_code("test-code") is None
+        assert await oauth_storage.get_auth_code("test-code") is None
 
     async def test_exchange_code_wrong_client_burns_code(self, oauth_storage: OAuthStorage) -> None:
         """Fix #2: auth code is deleted when wrong client attempts to use it."""
@@ -110,7 +110,7 @@ class TestCodeExchange:
             redirect_uri="http://localhost/callback",
             redirect_uri_provided_explicitly=True,
         )
-        oauth_storage.save_auth_code("test-code", auth_code)
+        await oauth_storage.save_auth_code("test-code", auth_code)
 
         # Wrong client can't load the code
         loaded = await provider.load_authorization_code(other_client, "test-code")
@@ -134,7 +134,7 @@ class TestCodeExchange:
             redirect_uri="http://localhost/callback",
             redirect_uri_provided_explicitly=True,
         )
-        oauth_storage.save_auth_code("expired-code", auth_code)
+        await oauth_storage.save_auth_code("expired-code", auth_code)
 
         loaded = await provider.load_authorization_code(client, "expired-code")
         assert loaded is None
@@ -155,7 +155,7 @@ class TestTokenRefresh:
             redirect_uri="http://localhost/callback",
             redirect_uri_provided_explicitly=True,
         )
-        oauth_storage.save_auth_code("code-1", auth_code)
+        await oauth_storage.save_auth_code("code-1", auth_code)
         loaded = await provider.load_authorization_code(client, "code-1")
         initial_token = await provider.exchange_authorization_code(client, loaded)
 
@@ -187,22 +187,22 @@ class TestTokenRefresh:
             redirect_uri="http://localhost/callback",
             redirect_uri_provided_explicitly=True,
         )
-        oauth_storage.save_auth_code("code-2", auth_code)
+        await oauth_storage.save_auth_code("code-2", auth_code)
         loaded = await provider.load_authorization_code(client, "code-2")
         initial_token = await provider.exchange_authorization_code(client, loaded)
         old_access = initial_token.access_token
 
         # Verify old access token exists
-        assert oauth_storage.get_access_token(old_access) is not None
+        assert await oauth_storage.get_access_token(old_access) is not None
 
         # Refresh
         refresh = await provider.load_refresh_token(client, initial_token.refresh_token)
         new_token = await provider.exchange_refresh_token(client, refresh, ["read"])
 
         # Old access token is gone
-        assert oauth_storage.get_access_token(old_access) is None
+        assert await oauth_storage.get_access_token(old_access) is None
         # New access token exists
-        assert oauth_storage.get_access_token(new_token.access_token) is not None
+        assert await oauth_storage.get_access_token(new_token.access_token) is not None
 
 
 class TestAccessTokenValidation:
@@ -215,7 +215,7 @@ class TestAccessTokenValidation:
             scopes=["read"],
             expires_at=int(time.time()) + 3600,
         )
-        oauth_storage.save_access_token("valid-token", token)
+        await oauth_storage.save_access_token("valid-token", token)
 
         loaded = await provider.load_access_token("valid-token")
         assert loaded is not None
@@ -230,7 +230,7 @@ class TestAccessTokenValidation:
             scopes=["read"],
             expires_at=int(time.time()) - 10,
         )
-        oauth_storage.save_access_token("expired-token", token)
+        await oauth_storage.save_access_token("expired-token", token)
 
         loaded = await provider.load_access_token("expired-token")
         assert loaded is None
@@ -250,7 +250,7 @@ class TestRevocation:
             scopes=["read"],
             expires_at=int(time.time()) + 3600,
         )
-        oauth_storage.save_access_token("revoke-me", token)
+        await oauth_storage.save_access_token("revoke-me", token)
 
         await provider.revoke_token(token)
         assert await provider.load_access_token("revoke-me") is None
@@ -272,7 +272,7 @@ class TestRotationAtomicity:
             redirect_uri="http://localhost/callback",  # type: ignore[arg-type]
             redirect_uri_provided_explicitly=True,
         )
-        oauth_storage.save_auth_code("code-atomic", auth_code)
+        await oauth_storage.save_auth_code("code-atomic", auth_code)
         loaded = await provider.load_authorization_code(client, "code-atomic")
         assert loaded is not None
         initial = await provider.exchange_authorization_code(client, loaded)
@@ -280,7 +280,7 @@ class TestRotationAtomicity:
         # Monkey-patch storage to raise mid-rotation
         original = oauth_storage.rotate_refresh_token
 
-        def boom(**kwargs: object) -> None:
+        async def boom(**kwargs: object) -> None:
             raise sqlite3.OperationalError("simulated mid-rotation failure")
 
         oauth_storage.rotate_refresh_token = boom  # type: ignore[assignment]
@@ -293,5 +293,5 @@ class TestRotationAtomicity:
             oauth_storage.rotate_refresh_token = original  # type: ignore[assignment]
 
         # Old access + refresh must still be valid
-        assert oauth_storage.get_access_token(initial.access_token) is not None
-        assert oauth_storage.get_refresh_token(initial.refresh_token) is not None  # type: ignore[arg-type]
+        assert await oauth_storage.get_access_token(initial.access_token) is not None
+        assert await oauth_storage.get_refresh_token(initial.refresh_token) is not None  # type: ignore[arg-type]

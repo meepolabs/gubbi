@@ -21,9 +21,9 @@ from httpx import ASGITransport, AsyncClient
 
 from gubbi.api.v1.ingest import IngestConversationResponse
 from gubbi.api.v1.ingest import router as ingest_router
+from gubbi.app_context import AppContext
 from gubbi.config import Settings
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.embedding_service import EmbeddingService
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")

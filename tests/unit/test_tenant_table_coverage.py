@@ -25,6 +25,7 @@ _TENANT_TABLES = frozenset(
         "messages",
         "entry_embeddings",
         "users",  # added by migration 0019_rls_users (m234 C-7)
+        "extraction_jobs",  # added by migration 0023_extraction_jobs_relocate; RLS policy extraction_jobs_user_isolation
     }
 )
 
@@ -77,8 +78,14 @@ _SKIP_KEYWORDS = frozenset(
         "entry",
         # Common English word that appears as false positive after FROM in prose
         "the",
+        # Common English pronoun that appears after UPDATE in prose
+        # (e.g. ``"... cross-user UPDATE that a user-scoped pool ..."``)
+        "that",
         # PL/pgSQL variables captured by INTO (DO-block locals, not tables)
         "nxt",
+        # Reserved words after UPDATE in row-level locking clauses
+        # (``FOR UPDATE SKIP LOCKED`` -- ``skip`` is not a table)
+        "skip",
     }
 )
 
@@ -96,6 +103,10 @@ def _extract_table_names(source: str) -> set[str]:
         if name.lower() in _SKIP_KEYWORDS:
             continue
         if name.startswith("pg_") or name == "information_schema":
+            continue
+        # SQLite system catalogue (analog of pg_* / information_schema):
+        # used by gubbi/oauth/_rate_limit.py for schema-existence probes.
+        if name == "sqlite_master":
             continue
         tables.add(name)
     return tables

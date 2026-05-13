@@ -32,12 +32,12 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Final
+from typing import Any, Final
 
 import asyncpg
 
 from gubbi.audit import Action, record_audit
-from gubbi.core.crypto import ContentCipher, DecryptionError, load_master_keys_from_env
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, load_master_keys_from_env
 from gubbi.storage.pg_setup import init_pool
 
 logger = logging.getLogger("rotate.encryption.key")
@@ -77,9 +77,9 @@ def _resolve_admin_dsn() -> str:
     )
 
 
-async def _collect_dry_run_counts(pool: asyncpg.Pool, source_version: int) -> list[dict]:
+async def _collect_dry_run_counts(pool: asyncpg.Pool, source_version: int) -> list[dict[str, Any]]:
     """Collect per-table row counts that are at ``source_version``."""
-    reports: list[dict] = []
+    reports: list[dict[str, Any]] = []
     hex_pfx = f"{source_version:02x}"
 
     for table, col_enc, col_nonce in _ROTATION_SCREENS:  # noqa: S608

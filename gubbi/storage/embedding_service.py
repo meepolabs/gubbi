@@ -1,4 +1,4 @@
-"""EmbeddingService — ONNX-based semantic embeddings backed by pgvector."""
+"""EmbeddingService -- ONNX-based semantic embeddings backed by pgvector."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
+import warnings
 from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -17,6 +18,8 @@ if TYPE_CHECKING:
     import asyncpg
 
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
+
+__all__: list[str] = ["EmbeddingService"]
 
 logger = logging.getLogger(__name__)
 
@@ -173,7 +176,7 @@ class EmbeddingService:
 
         return result  # type: ignore[no-any-return]
 
-    async def store_by_vector(
+    async def save_by_vector(
         self,
         conn: asyncpg.Connection,
         entry_id: int,
@@ -203,15 +206,29 @@ class EmbeddingService:
             embedding,
         )
 
+    async def store_by_vector(
+        self,
+        conn: asyncpg.Connection,
+        entry_id: int,
+        embedding: list[float],
+    ) -> None:
+        """Deprecated alias for save_by_vector. Kept for one release per Part 9.8."""
+        warnings.warn(
+            "EmbeddingService.store_by_vector is deprecated; use save_by_vector",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        await self.save_by_vector(conn, entry_id, embedding)
+
     async def store(
         self,
         conn: asyncpg.Connection,
         entry_id: int,
         text: str,
     ) -> None:
-        """Upsert embedding for entry_id. Encodes text then calls store_by_vector.
+        """Upsert embedding for entry_id. Encodes text then calls save_by_vector.
 
-        Prefer encode() + store_by_vector() when conn comes from a pool to avoid
+        Prefer encode() + save_by_vector() when conn comes from a pool to avoid
         pinning a connection during CPU-bound ONNX inference.
         """
         embedding = await asyncio.to_thread(self.encode, text)
@@ -241,7 +258,7 @@ class EmbeddingService:
         topic_prefix: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Return top-k entries by a pre-computed embedding vector.
 
         Callers should encode text via asyncio.to_thread(self.encode, text) before
@@ -251,7 +268,7 @@ class EmbeddingService:
         topic_prefix: filter to topics whose path starts with this prefix.
         date_from / date_to: filter by entry date (datetime.date objects).
         """
-        params: list = [embedding, limit]  # $1=embedding, $2=limit
+        params: list[Any] = [embedding, limit]  # $1=embedding, $2=limit
         where_clauses = ["e.deleted_at IS NULL"]
 
         if topic_prefix:
@@ -290,7 +307,7 @@ class EmbeddingService:
         text: str,
         limit: int = 10,
         topic_prefix: str | None = None,
-    ) -> list[dict]:
+    ) -> list[dict[str, Any]]:
         """Encode text then search. Convenience wrapper — holds conn during inference.
 
         Prefer encode() + search_by_vector() when conn comes from a pool to avoid

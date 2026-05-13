@@ -2,53 +2,59 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import time
-from dataclasses import dataclass
 from typing import Protocol, cast
 from uuid import UUID
 
 import httpx
 import structlog
-from cachetools import TTLCache  # type: ignore[import-untyped]
+from cachetools import TTLCache
+from gubbi_common.auth.hydra import (
+    HydraError,
+    HydraInvalidToken,
+    HydraUnreachable,
+    TokenClaims,
+)
 
-
-@dataclass(frozen=True)
-class TokenClaims:
-    sub: UUID
-    scope: str  # raw space-delimited scope string from Hydra
-    exp: int  # unix timestamp
-
-
-class HydraError(Exception):
-    pass
-
-
-class HydraUnreachable(HydraError):
-    pass
-
-
-class HydraInvalidToken(HydraError):
-    pass
+__all__ = [
+    "TokenClaims",
+    "HydraError",
+    "HydraUnreachable",
+    "HydraInvalidToken",
+    "HydraCache",
+    "HydraIntrospector",
+    "InMemoryHydraCache",
+]
 
 
 class HydraCache(Protocol):
-    def get(self, token_fp: str) -> TokenClaims | None: ...
+    def get(self, token_fp: str) -> TokenClaims | None:
+        """Return cached claims for a token fingerprint, or None on miss."""
+        ...
 
-    def set(self, token_fp: str, claims: TokenClaims) -> None: ...
+    def set(self, token_fp: str, claims: TokenClaims) -> None:
+        """Store introspection claims under a token fingerprint."""
+        ...
 
 
 class InMemoryHydraCache:
+    """TTL-bounded in-process cache for Hydra introspection results."""
+
     def __init__(self, ttl_seconds: int = 30, maxsize: int = 10_000) -> None:
+        """Build an LRU+TTL cache; defaults: 30s TTL, 10k entries."""
         self._cache = TTLCache(maxsize=maxsize, ttl=ttl_seconds)
 
     def get(self, token_fp: str) -> TokenClaims | None:
+        """Return cached claims by fingerprint, or None on miss/expiry."""
         val = self._cache.get(token_fp)
         if val is None:
             return None
         return cast("TokenClaims", val)
 
     def set(self, token_fp: str, claims: TokenClaims) -> None:
+        """Insert claims keyed by token fingerprint."""
         self._cache[token_fp] = claims
 
 
@@ -85,17 +91,11 @@ class HydraIntrospector:
         self.logger = logger
         self.cache = cache
         self.timeout_seconds = timeout_seconds
+        self._inflight: dict[str, asyncio.Future[TokenClaims]] = {}
+        self._inflight_lock: asyncio.Lock = asyncio.Lock()
 
-    async def introspect(self, token: str) -> TokenClaims:
-        cache_key, fp = _token_digest(token)
-
-        if self.cache is not None:
-            cached = self.cache.get(cache_key)
-            if cached is not None:
-                return cached
-
+    async def _call_upstream(self, token: str, fp: str) -> TokenClaims:
         try:
-            # httpx auto-sets Content-Type: application/x-www-form-urlencoded when data is a dict
             resp = await self.http_client.post(
                 f"{self.admin_url}/admin/oauth2/introspect",
                 data={"token": token},
@@ -139,7 +139,6 @@ class HydraIntrospector:
             await self.logger.error("Hydra introspect timeout", token_fp=fp)
             raise HydraUnreachable("introspect timed out") from None
         except (httpx.ConnectError, httpx.NetworkError):
-            # ConnectTimeout is a subclass of TimeoutException and is already handled above
             await self.logger.error("Hydra introspect connection failed", token_fp=fp)
             raise HydraUnreachable("Hydra unreachable") from None
         except httpx.HTTPStatusError as exc:
@@ -181,7 +180,42 @@ class HydraIntrospector:
             scopes=scope,
         )
 
-        if self.cache is not None:
-            self.cache.set(cache_key, claims)
-
         return claims
+
+    async def introspect(self, token: str) -> TokenClaims:
+        """Resolve a bearer token to claims via Hydra, with cache + single-flight de-dup."""
+        cache_key, fp = _token_digest(token)
+
+        # cache hit
+        if self.cache is not None:
+            cached = self.cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        leader = False
+        async with self._inflight_lock:
+            if cache_key in self._inflight:
+                fut = self._inflight[cache_key]
+                leader = False
+            else:
+                loop = asyncio.get_running_loop()
+                fut = loop.create_future()
+                self._inflight[cache_key] = fut
+                leader = True
+
+        if not leader:
+            return await fut
+
+        # Leader path: call upstream and set the future
+        try:
+            claims = await self._call_upstream(token, fp)
+            if self.cache is not None:
+                self.cache.set(cache_key, claims)
+            fut.set_result(claims)
+            return claims
+        except BaseException as exc:
+            fut.set_exception(exc)
+            raise
+        finally:
+            async with self._inflight_lock:
+                self._inflight.pop(cache_key, None)

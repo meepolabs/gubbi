@@ -4,7 +4,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, StringConstraints, field_validator
 
-from gubbi.core.validation import validate_topic
+from gubbi.validation import validate_topic
 
 Tag128 = Annotated[str, StringConstraints(max_length=128)]
 
@@ -23,6 +23,7 @@ class TopicMeta(BaseModel):
     @field_validator("topic")
     @classmethod
     def check_topic(cls, v: str) -> str:
+        """Validate entry topic path against the shared topic-rules grammar."""
         return validate_topic(v)
 
 
