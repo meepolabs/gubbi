@@ -8,6 +8,15 @@ KEEP_ROLES: Final = frozenset({"user", "assistant"})
 # Per-message character cap — prevents runaway tool output from bloating storage
 MAX_MSG_CHARS: Final = 20_000
 
+# Per-entry content character cap -- applied pre-sanitization in journal_append_entry
+# and journal_update_entry so we report the real input size, not the post-strip size.
+# Tight cap because an entry "headline" should be scannable, not a wall of text.
+MAX_ENTRY_CONTENT_CHARS: Final = 1_000
+
+# Per-entry reasoning character cap -- larger than content because reasoning
+# captures tradeoffs/context and is only loaded on full read.
+MAX_ENTRY_REASONING_CHARS: Final = 5_000
+
 # Briefing / context tool display limits
 BRIEFING_MAX_TOPICS: Final = 20
 BRIEFING_MAX_WEEK_ENTRIES: Final = 25
