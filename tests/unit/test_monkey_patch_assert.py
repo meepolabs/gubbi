@@ -9,11 +9,11 @@ from mcp.server.fastmcp.tools import ToolManager
 
 def test_monkey_patch_assert_at_startup() -> None:
     """Patching ToolManager.call_tool sets __wrapped__ and passes check."""
-    from gubbi.tools.registry import _patch_tool_manager
+    from gubbi.tools.registry import patch_tool_manager
 
     tm = ToolManager()
     # Patch should install without side-effects.
-    _patch_tool_manager(tm)
+    patch_tool_manager(tm)
 
     # Check the wrapper chain: __wrapped__ must exist on the bound method.
     wrapped = getattr(tm.call_tool, "__wrapped__", None)
@@ -26,10 +26,10 @@ def test_monkey_patch_assert_at_startup() -> None:
 
 def test_patch_removed_wasted_attrs() -> None:
     """The patched call_tool no longer emits empty user_id / scope_required."""
-    from gubbi.tools.registry import _patch_tool_manager
+    from gubbi.tools.registry import patch_tool_manager
 
     tm = ToolManager()
-    _patch_tool_manager(tm)
+    patch_tool_manager(tm)
 
     # Inspect the source of the wrapper function to confirm fields were
     # removed rather than left as stale placeholders.

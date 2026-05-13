@@ -1,28 +1,49 @@
-"""Journal MCP Server — FastAPI application entry point.
+"""Journal MCP Server -- FastAPI application entry point.
 
 Serves the MCP protocol over streamable HTTP (production) or
-stdio (local development). Based on fastapi_template patterns:
-CustomFastAPI subclass, lifespan, AppContext, structlog.
+stdio (local development). Application-scoped resources (pools,
+cipher, MCP server, auth strategies) are written to ``app.state`` by
+the lifespan and read back through typed accessors in
+``gubbi.app_state``.
 """
 
 import asyncio
-import ipaddress
-import socket
+import os
 import textwrap
 from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
+from typing import Any
 from uuid import UUID
 
 import asyncpg
 import httpx
 import redis.asyncio as aioredis
 import structlog
+from arq import create_pool as arq_create_pool
+from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from gubbi_common.auth.prm import build_prm_metadata_url
+from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
+from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
+from gubbi.app_context import AppContext
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
+from gubbi.auth.strategies import (
+    ApiKeyStrategy,
+    AuthStrategy,
+    HydraStrategy,
+    SelfHostStrategy,
+    TrustGatewayStrategy,
+)
+from gubbi.bootstrap import (
+    build_mcp_middleware,
+    check_trust_gateway_bind_address,
+    decode_gateway_secret,
+    setup_oauth,
+)
 from gubbi.config import (
     ALLOWED_ORIGINS,
     HYDRA_INTROSPECT_TIMEOUT_SECS,
@@ -30,34 +51,29 @@ from gubbi.config import (
     Settings,
     get_settings,
 )
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import ContentCipher, load_master_keys_from_env
-from gubbi.core.logger import initialize_logger
+from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
+from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
 from gubbi.middleware import (
-    BearerAuthMiddleware,
     CorrelationIDMiddleware,
     MCPPathNormalizer,
-    OriginValidationMiddleware,
 )
-from gubbi.oauth.router import register_oauth_routes
-from gubbi.oauth.storage import OAuthStorage
 from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.exceptions import DatabaseUnavailable
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import configure_otel
+from gubbi.telemetry.logger import initialize_logger
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
 
-
-class CustomFastAPI(FastAPI):
-    """Extended FastAPI with journal-specific attributes."""
-
-    logger: structlog.stdlib.AsyncBoundLogger
-    pool: asyncpg.Pool
-    admin_pool: asyncpg.Pool | None
-    embedding_service: EmbeddingService
-    settings: Settings
-    cipher: ContentCipher | None
-    mcp: FastMCP
+__all__: list[str] = [
+    "create_mcp_server",
+    "database_unavailable_handler",
+    "general_exception_handler",
+    "lifespan",
+    "main",
+    "mcp_health",
+    "server",
+]
 
 
 async def _build_content_cipher(
@@ -180,64 +196,6 @@ def create_mcp_server(app_ctx: AppContext) -> FastMCP:
     return mcp
 
 
-async def _check_trust_gateway_bind_address(
-    host: str,
-    trust_gateway: bool,
-    logger: structlog.stdlib.AsyncBoundLogger,
-) -> None:
-    """Fail fast when trust_gateway is paired with a public-routable bind address."""
-    if not trust_gateway:
-        return
-
-    addresses: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
-
-    # Try parsing the bind address as a literal IP first.
-    try:
-        addresses.append(ipaddress.ip_address(host))
-    except ValueError:
-        # Hostname -- resolve before classifying.
-        loop = asyncio.get_running_loop()
-        try:
-            resolved = await loop.run_in_executor(
-                None,
-                socket.getaddrinfo,
-                host,
-                None,
-                socket.AF_UNSPEC,
-                socket.SOCK_STREAM,
-            )
-        except socket.gaierror:
-            raise RuntimeError(
-                f"JOURNAL_TRUST_GATEWAY=true -- bind address '{host}' failed to resolve. "
-                "Set JOURNAL_HOST to a resolvable address."
-            ) from None
-
-        for _family, _type, _proto, _canonname, sockaddr in resolved:
-            addresses.append(ipaddress.ip_address(sockaddr[0]))
-
-    has_unspecified = False
-    for addr in addresses:
-        if addr.is_unspecified:
-            has_unspecified = True
-            continue
-
-        if addr.is_loopback or addr.is_private or addr.is_link_local:
-            continue
-
-        # Public-routable -- fail fast.
-        raise RuntimeError(
-            f"JOURNAL_TRUST_GATEWAY=true is incompatible with bind address "
-            f"'{host}' -- set JOURNAL_HOST to a loopback or private-network address."
-        )
-
-    if has_unspecified:
-        await logger.warning(
-            "JOURNAL_TRUST_GATEWAY=true with bind address '%s' -- "
-            "exposure depends on network/proxy layer",
-            host,
-        )
-
-
 async def _build_app_ctx(
     settings: Settings,
     logger: structlog.stdlib.AsyncBoundLogger,
@@ -292,84 +250,74 @@ async def _build_app_ctx(
 
 
 @asynccontextmanager
-async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown."""
     settings = get_settings()
 
     initialize_logger("gubbi", log_dir=str(settings.log_dir))
-    app.logger = structlog.get_logger("gubbi")
+    logger = structlog.get_logger("gubbi")
 
     configure_otel(app)
 
-    await app.logger.info("Server starting up")
+    await logger.info("Server starting up")
 
-    app.settings = settings
-
-    await _check_trust_gateway_bind_address(
-        settings.server.host, settings.auth.trust_gateway, app.logger
+    # Security: fail fast when trust_gateway is paired with a public-routable bind address.
+    await check_trust_gateway_bind_address(
+        settings.server.host, settings.auth.trust_gateway, logger
     )
 
-    app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, app.logger)
-    app.pool = pool
-    app.admin_pool = admin_pool
-    app.embedding_service = app_ctx.embedding_service
-    app.cipher = app_ctx.cipher
-    app.mcp = mcp
+    # Core startup: pools, operator scaffold, caching, cipher.
+    app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, logger)
     app.state.app_ctx = app_ctx
+
+    # Postgres log-settings probe -- refuses to start when the cluster is
+    # configured to capture statement text or bound parameters in its log
+    # (which would silently turn the DB into a plaintext sink for journal
+    # content). Mode is read from JOURNAL_PG_LOG_PROBE_MODE
+    # (strict|warn|off; default strict). On failure, close pools
+    # symmetrically before propagating.
+    pg_log_probe_mode = os.environ.get("JOURNAL_PG_LOG_PROBE_MODE", "strict")
+    try:
+        await probe_pg_log_settings(pool, mode=pg_log_probe_mode)
+    except BaseException:
+        # Catch BaseException (not Exception) so CancelledError /
+        # KeyboardInterrupt during the probe still trip pool teardown
+        # before the original exception propagates. Pool close is
+        # best-effort -- a teardown failure must not mask the probe
+        # error or the cancellation that triggered the unwind.
+        # Suppress asyncio.CancelledError from the close() calls
+        # explicitly: under Python 3.8+ CancelledError is a BaseException
+        # (not Exception), so a bare ``suppress(Exception)`` would let a
+        # cancelled close() escape and clobber the original cancellation
+        # that the surrounding ``raise`` is meant to re-raise.
+        with suppress(Exception, asyncio.CancelledError):
+            await pool.close()
+        if admin_pool is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await admin_pool.close()
+        raise
 
     operator_user_id = app_ctx.operator_user_id
 
-    # OAuth (stays SQLite -- own connection, out of scope for PG migration)
-    oauth_storage = OAuthStorage(settings.oauth_db_path)
-    _ = oauth_storage.conn
-    expired = oauth_storage.cleanup_expired()
-    if expired:
-        await app.logger.info("OAuth cleanup", expired_tokens=expired)
-
-    token_validator = register_oauth_routes(app, oauth_storage, settings)
+    # OAuth -- storage, routes, expired-token cleanup.
+    oauth_storage, token_validator = await setup_oauth(app, settings)
     if token_validator:
-        await app.logger.info("OAuth endpoints registered")
+        await logger.info("OAuth endpoints registered")
 
-    # Gateway HMAC secret: decode the hex-encoded shared secret from config.
-    # If empty or invalid, stash None (verification will fall through to
-    # legacy path or 503 depending on gateway_require_signature).
-    gateway_secret: bytes | None = None
-    if settings.auth.gateway_secret:
-        try:
-            decoded = bytes.fromhex(settings.auth.gateway_secret)
-            if len(decoded) >= 32:
-                gateway_secret = decoded
-            else:
-                await app.logger.warning(
-                    "JOURNAL_GUBBI_GATEWAY_SECRET decodes to less than 32 bytes "
-                    "-- gateway signature verification disabled"
-                )
-        except ValueError:
-            await app.logger.warning(
-                "JOURNAL_GUBBI_GATEWAY_SECRET is not valid hex "
-                "-- gateway signature verification disabled"
-            )
-    if settings.auth.gateway_require_signature and gateway_secret is None:
-        await app.logger.warning(
-            "JOURNAL_GATEWAY_REQUIRE_SIGNATURE=true but JOURNAL_GUBBI_GATEWAY_SECRET "
-            "is missing or invalid -- signed requests will fail with 503"
-        )
-    if settings.auth.trust_gateway and not settings.auth.gateway_require_signature:
-        await app.logger.warning(
-            "trust_gateway=true but gateway_require_signature=false -- "
-            "requests are accepted without HMAC verification"
-        )
-    app.state.gubbi_gateway_secret = gateway_secret
+    # Gateway HMAC secret (three warning branches preserved verbatim).
+    app.state.gubbi_gateway_secret = await decode_gateway_secret(
+        settings.auth.gateway_secret,
+        require_signature=settings.auth.gateway_require_signature,
+        trust_gateway=settings.auth.trust_gateway,
+        logger=logger,
+    )
 
-    # Expose auth dependencies on app.state for REST API routes
+    # Expose auth dependencies on app.state for REST API routes.
     app.state.hydra_introspector = None  # may be replaced below
     app.state.selfhost_token_validator = token_validator  # may be None
     app.state.operator_user_id = operator_user_id  # may be None
 
-    mcp_http = app.mcp.streamable_http_app()
-
     # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
-    # When on, the static API key path is disabled (hosted mode is OAuth-only).
     introspector: HydraIntrospector | None = None
     hydra_http_client: httpx.AsyncClient | None = None
     if settings.auth.hydra_admin_url:
@@ -377,16 +325,53 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
         introspector = HydraIntrospector(
             admin_url=settings.auth.hydra_admin_url,
             http_client=hydra_http_client,
-            logger=app.logger,
+            logger=logger,
             cache=InMemoryHydraCache(),
             timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
         )
-        await app.logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
+        await logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
         app.state.hydra_introspector = introspector
 
     # Shared Redis client for SSE pub/sub (extraction progress).
-    redis_client = aioredis.from_url(str(settings.redis_url))
+    redis_pool = aioredis.ConnectionPool.from_url(str(settings.redis_url))
+    redis_client = aioredis.Redis(connection_pool=redis_pool)
     app.state.redis_client = redis_client
+
+    # Arq pool for background job enqueue (separate from the SSE aioredis client).
+    arq_pool = await arq_create_pool(ArqRedisSettings.from_dsn(str(settings.redis_url)))
+    app.state.arq_pool = arq_pool
+    app_ctx.arq_pool = arq_pool
+
+    # BudgetHelper -- shared facade over Redis pre-charge + delta writes.
+    # Disabled in self-host mode (Mode 1/2); constructed only when the
+    # operator has opted into LLM budget enforcement.
+    if settings.llm.journal_llm_budget_enabled:
+        pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
+        budget_helper = BudgetHelper(
+            redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+            pre_charge_script=pre_charge_script,
+        )
+        app.state.budget_helper = budget_helper
+        app_ctx.budget_helper = budget_helper
+        await logger.info("BudgetHelper ready (lifespan)")
+    else:
+        app.state.budget_helper = None
+        app_ctx.budget_helper = None
+        await logger.info("BudgetHelper disabled (journal_llm_budget_enabled=False)")
+
+    # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
+    # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
+    # admin pool is configured (single-tenant dev fallback).
+    app.state.background_tasks = set()
+    cron_task: asyncio.Task[None] | None = None
+    if admin_pool is not None:
+        cron_task = asyncio.create_task(
+            run_orphan_cleanup(
+                admin_pool,
+                threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
+            ),
+        )
+        app.state.background_tasks.add(cron_task)
 
     # Mode 3 (hosted) disables the shared static API key path -- operators
     # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
@@ -397,55 +382,83 @@ async def lifespan(app: CustomFastAPI) -> AsyncGenerator[None, None]:
     # discover the authorization server (MCP spec 2025-11-25). Only surface
     # the URL when OAuth is actually wired -- pure Mode 1 API-key deployments
     # have no metadata endpoint to advertise.
-    #
-    # RFC 9728 mounts the metadata at <.well-known>/oauth-protected-resource
-    # + the resource path, so for resource <server_url>/mcp the SDK serves
-    # the doc at /.well-known/oauth-protected-resource/mcp. Must match the
-    # resource_url passed to create_protected_resource_routes in router.py
-    # (which uses the same /mcp suffix); a mismatch breaks discovery.
     protected_resource_metadata_url: str | None = None
     if introspector is not None or token_validator is not None:
         server_base = settings.server.url.rstrip("/")
-        protected_resource_metadata_url = f"{server_base}/.well-known/oauth-protected-resource/mcp"
-        # Guard: resource_metadata must be an absolute URI (RFC 8414 s3).
-        if protected_resource_metadata_url and not any(
-            protected_resource_metadata_url.startswith(pre) for pre in ("http://", "https://")
-        ):
-            protected_resource_metadata_url = None
+        protected_resource_metadata_url = build_prm_metadata_url(
+            f"{server_base}/mcp", legacy_suffix=True
+        )
 
-    authed_mcp = BearerAuthMiddleware(
+    # Build auth strategy list. Trust-gateway deployments use ONLY
+    # TrustGatewayStrategy; non-trust builds compose ApiKey + Hydra + SelfHost.
+    if settings.auth.trust_gateway:
+        auth_strategies: list[AuthStrategy] = [
+            TrustGatewayStrategy(
+                gateway_secret=app.state.gubbi_gateway_secret,
+                gateway_require_signature=settings.auth.gateway_require_signature,
+            ),
+        ]
+    else:
+        _raw_strategies: list[AuthStrategy | None] = [
+            (
+                ApiKeyStrategy(
+                    api_key=effective_api_key,
+                    api_key_scopes=tuple(settings.auth.api_key_scopes),
+                    operator_user_id=operator_user_id,
+                )
+            )
+            if effective_api_key
+            else None,
+            HydraStrategy(introspector=introspector) if introspector is not None else None,
+            SelfHostStrategy(
+                token_validator=token_validator,
+                operator_user_id=operator_user_id,
+            )
+            if token_validator is not None
+            else None,
+        ]
+        auth_strategies = [s for s in _raw_strategies if s is not None]
+
+    app.state.auth_strategies = auth_strategies
+
+    # Assemble MCP middleware chain and mount at /mcp.
+    mcp_http = mcp.streamable_http_app()
+    origin_validated_mcp = build_mcp_middleware(
         mcp_http,
-        api_key=effective_api_key,
-        introspector=introspector,
+        strategies=auth_strategies,
         required_scope=REQUIRED_OAUTH_SCOPE,
-        selfhost_token_validator=token_validator,
-        operator_user_id=operator_user_id,
         protected_resource_metadata_url=protected_resource_metadata_url,
-        trust_gateway=settings.auth.trust_gateway,
-        gateway_secret=gateway_secret,
-        gateway_require_signature=settings.auth.gateway_require_signature,
-        api_key_scopes=frozenset(settings.auth.api_key_scopes),
+        allowed_origins=ALLOWED_ORIGINS,
     )
-    # Origin validation: prevents DNS-rebinding attacks on the MCP endpoint.
-    origin_validated_mcp = OriginValidationMiddleware(authed_mcp, ALLOWED_ORIGINS)
     app.mount("/mcp", origin_validated_mcp)
 
     try:
-        async with app.mcp.session_manager.run():
+        async with mcp.session_manager.run():
             yield
     finally:
-        await app.logger.info("Server shutting down")
+        await logger.info("Server shutting down")
+        if cron_task is not None:
+            cron_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await cron_task
         if hydra_http_client is not None:
             await hydra_http_client.aclose()
-        if app.admin_pool is not None:
-            await app.admin_pool.close()
-        await app.pool.close()
-        oauth_storage.close()
+        if admin_pool is not None:
+            await admin_pool.close()
+        await pool.close()
+        await oauth_storage.close()
+        # Explicit two-step Redis teardown: redis_client.aclose() does NOT drain
+        # an externally-supplied ConnectionPool (redis-py: "If a pool is passed
+        # in, do not close it"). Disconnect the pool ourselves to avoid
+        # leaking pooled connections across lifespan restarts.
         await redis_client.aclose()
+        await redis_pool.aclose()
+        # Close the Arq pool (separate Redis connection used for job enqueue).
+        await arq_pool.close()
 
 
 # Create FastAPI app
-server = CustomFastAPI(
+server = FastAPI(
     title="gubbi",
     description="Personal journal MCP server",
     version="0.2.0",
@@ -463,6 +476,19 @@ from gubbi.api.v1.ingest import router as ingest_router  # noqa: E402
 
 server.include_router(ingest_router, prefix="/api/v1")
 server.include_router(extraction_router, prefix="/api/v1")
+
+
+@server.exception_handler(DatabaseUnavailable)
+async def database_unavailable_handler(
+    request: Request,
+    exc: DatabaseUnavailable,  # noqa: ARG001
+) -> JSONResponse:
+    """Map transient DB errors to HTTP 503 with Retry-After header."""
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "database temporarily unavailable"},
+        headers={"Retry-After": "5"},
+    )
 
 
 @server.exception_handler(Exception)
@@ -485,7 +511,7 @@ async def general_exception_handler(
 
 
 @server.get("/health")
-async def mcp_health() -> dict:
+async def mcp_health() -> dict[str, Any]:
     """Liveness probe for Docker health checks.
 
     NOTE: do NOT add @server.get("/mcp/") here -- it shadows the

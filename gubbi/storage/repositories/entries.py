@@ -10,17 +10,37 @@ from datetime import datetime as datetime_cls
 from typing import Any, cast
 
 import asyncpg
+import structlog
 
-from gubbi.core.crypto import ContentCipher, DecryptionError, decrypt_or_raise
-from gubbi.core.validation import validate_date as _validate_date
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
 from gubbi.models.journal import Entry, TopicMeta
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
 from gubbi.storage.repositories.base import _add_param
 from gubbi.storage.repositories.topics import get as get_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
+from gubbi.validation import validate_date as _validate_date
 
-logger = logging.getLogger(__name__)
+__all__: list[str] = [
+    "append",
+    "delete",
+    "get_by_date_range",
+    "get_max_indexed_at",
+    "get_stats",
+    "get_text",
+    "get_texts",
+    "get_unindexed",
+    "mark_indexed",
+    "mark_indexed_batch",
+    "read",
+    "reset_indexed_at",
+    "update",
+]
+
+logger = structlog.get_logger(__name__)
+# Sync stdlib logger -- used inside the sync ``_build_entry`` closure where we
+# cannot ``await`` an AsyncBoundLogger. Mirrors the embedding_service.py pattern.
+_sync_logger = logging.getLogger(__name__)
 
 
 # ── module-private helpers ────────────────────────────────────────────────────
@@ -129,6 +149,7 @@ async def read(
     Returns (TopicMeta, entries, total_matching).
     Raises TopicNotFoundError if topic missing.
     """
+    assert conn.is_in_transaction(), "entries.read: caller must wrap in conn.transaction()"  # noqa: S101
     # Defense-in-depth: validate date formats here even though the tool layer
     # validates first -- protects migration scripts and direct test calls.
     if date_from:
@@ -152,8 +173,25 @@ async def read(
     where = " AND ".join(where_parts)
 
     def _build_entry(r: Any) -> Entry:
-        content = cast(str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce"))
-        reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
+        try:
+            content = cast(
+                str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+            )
+            reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
+        except DecryptionError:
+            _sync_logger.warning(
+                "entry_decryption_failed entry_id=%s topic=%s",
+                r["id"],
+                topic,
+            )
+            return Entry(
+                id=r["id"],
+                date=str(r["date"]),
+                content="[decryption-failed]",
+                reasoning=None,
+                conversation_id=r["conversation_id"],
+                tags=list(r["tags"] or []),
+            )
         return Entry(
             id=r["id"],
             date=str(r["date"]),
@@ -231,86 +269,84 @@ async def update(
         date: New date string YYYY-MM-DD (None = leave unchanged).
         tags: New tags list (None = leave unchanged).
     """
-    async with conn.transaction():
-        row = await conn.fetchrow(
-            "SELECT id, content_encrypted, content_nonce,"
-            " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
-            " FROM entries WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
-            entry_id,
+    assert conn.is_in_transaction(), "entries.update: caller must wrap in conn.transaction()"  # noqa: S101
+    row = await conn.fetchrow(
+        "SELECT id, content_encrypted, content_nonce,"
+        " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
+        " FROM entries WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        entry_id,
+    )
+    if not row:
+        msg = f"Entry id {entry_id} not found"
+        raise EntryNotFoundError(msg)
+
+    old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
+    old_reasoning = _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce")
+    if old_content is None:
+        raise RuntimeError(
+            f"Entry {entry_id}: content decrypted to None; schema invariant violated"
         )
-        if not row:
-            msg = f"Entry id {entry_id} not found"
-            raise EntryNotFoundError(msg)
 
-        old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
-        old_reasoning = _decrypt_content_field(
-            cipher, row, "reasoning_encrypted", "reasoning_nonce"
+    new_content: str
+    new_reasoning: str | None
+    if content is not None:
+        if mode == "replace":
+            new_content = content
+        elif mode == "append":
+            new_content = f"{old_content}\n\n{content}".strip()
+        else:
+            msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
+            raise ValueError(msg)
+    else:
+        new_content = old_content
+
+    if reasoning is not None:
+        if mode == "append" and old_reasoning:
+            new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
+        else:
+            new_reasoning = reasoning
+    else:
+        new_reasoning = old_reasoning
+
+    new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
+    new_tags: Sequence[str] = tags if tags is not None else list(row["tags"] or [])
+    now = datetime_cls.now(UTC)
+
+    # Encrypt new content and reasoning (if not None); else None pair for reasoning.
+    new_content_ct, new_content_nonce = cipher.encrypt(new_content)
+    if new_reasoning is not None:
+        new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
+    else:
+        new_reasoning_ct = None
+        new_reasoning_nonce = None
+
+    # CTE: update entry + update topic timestamp in one round-trip.
+    # indexed_at = NULL signals the embedding needs regenerating.
+    await conn.execute(
+        """
+        WITH updated AS (
+            UPDATE entries
+            SET date=$1, tags=$2,
+                updated_at=$3, indexed_at=NULL,
+                content_encrypted=$4, content_nonce=$5,
+                reasoning_encrypted=$6, reasoning_nonce=$7,
+                search_vector=to_tsvector('english', $8)
+            WHERE id=$9
+            RETURNING topic_id
         )
-        if old_content is None:
-            raise RuntimeError(
-                f"Entry {entry_id}: content decrypted to None; schema invariant violated"
-            )
-
-        new_content: str
-        new_reasoning: str | None
-        if content is not None:
-            if mode == "replace":
-                new_content = content
-            elif mode == "append":
-                new_content = f"{old_content}\n\n{content}".strip()
-            else:
-                msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
-                raise ValueError(msg)
-        else:
-            new_content = old_content
-
-        if reasoning is not None:
-            if mode == "append" and old_reasoning:
-                new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
-            else:
-                new_reasoning = reasoning
-        else:
-            new_reasoning = old_reasoning
-
-        new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
-        new_tags: Sequence[str] = tags if tags is not None else list(row["tags"] or [])
-        now = datetime_cls.now(UTC)
-
-        # Encrypt new content and reasoning (if not None); else None pair for reasoning.
-        new_content_ct, new_content_nonce = cipher.encrypt(new_content)
-        if new_reasoning is not None:
-            new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
-        else:
-            new_reasoning_ct = None
-            new_reasoning_nonce = None
-
-        # CTE: update entry + update topic timestamp in one round-trip.
-        # indexed_at = NULL signals the embedding needs regenerating.
-        await conn.execute(
-            """
-            WITH updated AS (
-                UPDATE entries
-                SET date=$1, tags=$2,
-                    updated_at=$3, indexed_at=NULL,
-                    content_encrypted=$4, content_nonce=$5,
-                    reasoning_encrypted=$6, reasoning_nonce=$7,
-                    search_vector=to_tsvector('english', $8)
-                WHERE id=$9
-                RETURNING topic_id
-            )
-            UPDATE topics SET updated_at=$3
-            FROM updated WHERE topics.id = updated.topic_id
-            """,
-            new_date,
-            new_tags,
-            now,
-            new_content_ct,
-            new_content_nonce,
-            new_reasoning_ct,
-            new_reasoning_nonce,
-            new_content,
-            entry_id,
-        )
+        UPDATE topics SET updated_at=$3
+        FROM updated WHERE topics.id = updated.topic_id
+        """,
+        new_date,
+        new_tags,
+        now,
+        new_content_ct,
+        new_content_nonce,
+        new_reasoning_ct,
+        new_reasoning_nonce,
+        new_content,
+        entry_id,
+    )
 
 
 async def delete(conn: asyncpg.Connection, entry_id: int) -> int:
@@ -357,7 +393,16 @@ async def mark_indexed(conn: asyncpg.Connection, entry_id: int) -> None:
 
 
 async def mark_indexed_batch(conn: asyncpg.Connection, entry_ids: list[int]) -> None:
-    """Stamp indexed_at = now() for a batch of entries in one query."""
+    """Stamp indexed_at = now() for a batch of entries in one query.
+
+    Requires a BYPASSRLS connection (e.g. the ``admin_pool``). The UPDATE
+    spans rows owned by potentially many users -- the reindex worker is
+    a cross-tenant operation -- and a user-scoped (RLS-enforced)
+    connection would silently match only the rows whose ``user_id``
+    equals the current ``app.current_user_id`` GUC. Setting that GUC at
+    call time is insufficient: there is no single user_id valid for a
+    batch sourced from the cross-user reindex queue.
+    """
     if not entry_ids:
         return
     await conn.execute(
@@ -367,8 +412,38 @@ async def mark_indexed_batch(conn: asyncpg.Connection, entry_ids: list[int]) -> 
 
 
 async def reset_indexed_at(conn: asyncpg.Connection) -> None:
-    """Clear indexed_at on all non-deleted entries so reindex re-embeds everything."""
+    """Clear indexed_at on all non-deleted entries so reindex re-embeds everything.
+
+    Requires a BYPASSRLS connection (e.g. the ``admin_pool``). The UPDATE
+    spans every tenant; a user-scoped (RLS-enforced) connection would
+    restrict the rowcount to the current ``app.current_user_id`` GUC.
+    Setting that GUC is insufficient: there is no single user_id valid
+    for "every non-deleted row in the table".
+    """
     await conn.execute("UPDATE entries SET indexed_at = NULL WHERE deleted_at IS NULL")
+
+
+async def reset_indexed_at_for_ids(conn: asyncpg.Connection, entry_ids: Sequence[int]) -> None:
+    """Clear indexed_at for a specific set of entries (compensating reset).
+
+    Used by ``_run_reindex`` to roll back the claim stamp when encode or
+    save fails for a subset of the claimed batch, so a subsequent reindex
+    pass picks them up again.
+
+    Requires a BYPASSRLS connection (e.g. the ``admin_pool``). The
+    failed-id set is sourced from a cross-tenant reindex batch; a
+    user-scoped connection would silently drop ids whose ``user_id``
+    differs from the current ``app.current_user_id`` GUC and strand
+    those ids in the claimed-but-never-processed state. Setting the
+    GUC per-call would require iterating per-user, which defeats the
+    point of batching the reset.
+    """
+    if not entry_ids:
+        return
+    await conn.execute(
+        "UPDATE entries SET indexed_at = NULL WHERE id = ANY($1) AND deleted_at IS NULL",
+        list(entry_ids),
+    )
 
 
 async def get_by_date_range(
@@ -380,7 +455,7 @@ async def get_by_date_range(
     ascending: bool = True,
     offset: int = 0,
     title_only: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Get entries and conversations updated within a date range.
 
     Used by journal_briefing and journal_timeline.
@@ -465,83 +540,13 @@ async def get_by_date_range(
     if cipher is None and not title_only:
         raise RuntimeError("get_by_date_range requires cipher when title_only=False")
 
-    results: list[dict] = []
+    results: list[dict[str, Any]] = []
     for r in rows:
         if title_only:
-            # Minimal metadata -- no decryption at all (or best-effort conv title decode).
-            if r["doc_type"] == "entry":
-                results.append(
-                    {
-                        "entry_id": r["doc_id"],
-                        "conversation_id": None,
-                        "doc_type": "entry",
-                        "topic": r["topic"],
-                        "topic_title": r["topic_title"],
-                        "title": _build_entry_title(r),
-                        "updated": r["date"],
-                        "tags": list(r["tags"] or []),
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "entry_id": None,
-                        "conversation_id": r["conv_id"],
-                        "doc_type": "conversation",
-                        "topic": r["topic"],
-                        "topic_title": r["topic_title"],
-                        "title": _decrypt_conv_title_or_none(cipher, r),
-                        "updated": r["date"],
-                        "tags": list(r["tags"] or []),
-                    }
-                )
+            results.append(_to_title_only_row(r, cipher))
         else:
-            if cipher is None:
-                raise RuntimeError("get_by_date_range: cipher required when title_only=False")
-            # Full content path (used by journal_briefing).
-            if r["doc_type"] == "entry":
-                decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
-                if decrypted is None:
-                    raise RuntimeError(
-                        f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
-                    )
-                content = decrypted
-                title = content.split("\n", 1)[0][:80]
-            else:
-                conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
-                summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
-                if conv_title is None or summary is None:
-                    raise RuntimeError(
-                        "Conversation title/summary decrypted to None; schema invariant violated"
-                    )
-                title = conv_title
-                content = summary
-            if r["doc_type"] == "entry":
-                results.append(
-                    {
-                        "entry_id": r["doc_id"],
-                        "conversation_id": None,
-                        "doc_type": "entry",
-                        "topic": r["topic"],
-                        "title": title if title else r["topic_title"],
-                        "description": content[:SNIPPET_PREVIEW_LEN],
-                        "tags": list(r["tags"] or []),
-                        "updated": r["date"],
-                    }
-                )
-            else:
-                results.append(
-                    {
-                        "entry_id": None,
-                        "conversation_id": r["conv_id"],
-                        "doc_type": "conversation",
-                        "topic": r["topic"],
-                        "title": title,
-                        "description": content[:SNIPPET_PREVIEW_LEN],
-                        "tags": list(r["tags"] or []),
-                        "updated": r["date"],
-                    }
-                )
+            assert cipher is not None  # noqa: S101 - narrowed by guard above
+            results.append(_to_full_row(r, cipher))
     return results
 
 
@@ -568,6 +573,78 @@ def _decrypt_conv_title_or_none(cipher: ContentCipher | None, row: asyncpg.Recor
         return title or ""
     except DecryptionError:
         return str(row.get("topic_title") or "")
+
+
+def _to_title_only_row(r: asyncpg.Record, cipher: ContentCipher | None) -> dict[str, Any]:
+    """Shape a UNION ALL row into a title-only result dict.
+
+    No decryption performed -- best-effort conversation title decode only.
+    """
+    if r["doc_type"] == "entry":
+        return {
+            "entry_id": r["doc_id"],
+            "conversation_id": None,
+            "doc_type": "entry",
+            "topic": r["topic"],
+            "topic_title": r["topic_title"],
+            "title": _build_entry_title(r),
+            "updated": r["date"],
+            "tags": list(r["tags"] or []),
+        }
+    # conversation path
+    return {
+        "entry_id": None,
+        "conversation_id": r["conv_id"],
+        "doc_type": "conversation",
+        "topic": r["topic"],
+        "topic_title": r["topic_title"],
+        "title": _decrypt_conv_title_or_none(cipher, r),
+        "updated": r["date"],
+        "tags": list(r["tags"] or []),
+    }
+
+
+def _to_full_row(r: asyncpg.Record, cipher: ContentCipher) -> dict[str, Any]:
+    """Shape a UNION ALL row into a full-content result dict.
+
+    Decrypts content/title/summary as needed. Raises ``RuntimeError`` on
+    schema-invariant violations (None decryption results).
+    """
+    if r["doc_type"] == "entry":
+        decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+        if decrypted is None:
+            raise RuntimeError(
+                f"Entry {r['doc_id']}: content decrypted to None; schema invariant violated"
+            )
+        content = decrypted
+        title_text = content.split("\n", 1)[0][:80]
+        return {
+            "entry_id": r["doc_id"],
+            "conversation_id": None,
+            "doc_type": "entry",
+            "topic": r["topic"],
+            "title": title_text if title_text else r["topic_title"],
+            "description": content[:SNIPPET_PREVIEW_LEN],
+            "tags": list(r["tags"] or []),
+            "updated": r["date"],
+        }
+    # conversation path
+    conv_title = _decrypt_content_field(cipher, r, "title_encrypted", "title_nonce")
+    summary = _decrypt_content_field(cipher, r, "summary_encrypted", "summary_nonce")
+    if conv_title is None or summary is None:
+        raise RuntimeError(
+            "Conversation title/summary decrypted to None; schema invariant violated"
+        )
+    return {
+        "entry_id": None,
+        "conversation_id": r["conv_id"],
+        "doc_type": "conversation",
+        "topic": r["topic"],
+        "title": conv_title,
+        "description": summary[:SNIPPET_PREVIEW_LEN],
+        "tags": list(r["tags"] or []),
+        "updated": r["date"],
+    }
 
 
 async def get_stats(conn: asyncpg.Connection) -> dict[str, int]:
@@ -599,33 +676,63 @@ async def get_unindexed(
     cipher: ContentCipher,
     last_id: int,
     batch_size: int,
-) -> list[dict]:
-    """Return a cursor-paginated batch of entries needing semantic indexing."""
+) -> list[dict[str, Any]]:
+    """Return a cursor-paginated batch of entries needing semantic indexing.
+
+    The inner subquery does ``FOR UPDATE SKIP LOCKED`` against the
+    ``entries`` table only -- no JOIN inside the locking SELECT, so
+    the row locks are scoped exactly to rows the worker is about to
+    claim. The outer SELECT then joins ``topics`` for the path/title
+    just for the rows the inner SELECT actually returned.
+
+    Cursor semantics (``last_id``): the caller advances ``last_id``
+    past rows it actually claimed and processed. Rows skipped because
+    another worker held their lock stay below ``last_id`` and become
+    visible again on the next pass once the holder commits/aborts. The
+    outer ``ORDER BY e.id`` is what makes ``batch[-1]["id"]`` a safe
+    cursor for the caller.
+
+    Callers MUST run this inside an explicit transaction; the row locks
+    are released on commit/rollback.
+    """
     rows = await conn.fetch(
         """
-        SELECT e.id, e.content_encrypted, e.content_nonce,
+        SELECT e.id, e.user_id, e.content_encrypted, e.content_nonce,
                e.tags, e.date::text AS date, t.path AS topic, t.title
         FROM entries e
         JOIN topics t ON t.id = e.topic_id
-        WHERE e.deleted_at IS NULL
-          AND e.indexed_at IS NULL
-          AND e.id > $1
+        WHERE e.id IN (
+            SELECT id FROM entries
+            WHERE deleted_at IS NULL
+              AND indexed_at IS NULL
+              AND id > $1
+            ORDER BY id
+            LIMIT $2
+            FOR UPDATE SKIP LOCKED
+        )
         ORDER BY e.id
-        LIMIT $2
         """,
         last_id,
         batch_size,
     )
-    result: list[dict] = []
+    result: list[dict[str, Any]] = []
     for r in rows:
         decrypted = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
         if decrypted is None:
             raise RuntimeError(
                 f"Entry {r['id']}: content decrypted to None; schema invariant violated"
             )
+        # ``user_id`` is surfaced so ``_run_reindex`` can bind
+        # ``app.current_user_id`` per row before issuing the embedding
+        # UPSERT; without it, ``entry_embeddings.user_id`` would resolve
+        # to NULL on the admin-pool write path (the GUC is unset on a
+        # BYPASSRLS connection) and HNSW + RLS would later miss those
+        # rows.  Keeping the propagation in ``_run_reindex`` (not here)
+        # preserves the existing transaction-scoping contract.
         result.append(
             {
                 "id": r["id"],
+                "user_id": r["user_id"],
                 "content": decrypted,
                 "tags": list(r["tags"] or []),
                 "date": r["date"],
@@ -689,10 +796,10 @@ async def get_texts(
             reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
             result[eid] = (content, reasoning)
         except DecryptionError as exc:
-            logger.warning(
-                "Entry %d could not be decrypted (%s); included with failure marker",
-                eid,
-                type(exc).__name__,
+            await logger.warning(
+                "Entry could not be decrypted; included with failure marker",
+                entry_id=eid,
+                error_type=type(exc).__name__,
             )
             result[eid] = ("[decryption-failed]", None)  # sentinel for search.py to surface (M-9.8)
     return result

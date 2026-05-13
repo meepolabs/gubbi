@@ -2,23 +2,26 @@
 
 from typing import Any
 
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.audit_decorator import ACTION_TOPIC_CREATED, audited
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.context import AppContext
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import (
+from gubbi.app_context import AppContext
+from gubbi.audit import ACTION_TOPIC_CREATED, audited
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
+from gubbi.storage.repositories import topics as topic_repo
+from gubbi.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
+from gubbi.tools.errors import already_exists, invalid_topic, validation_error
+from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import (
     sanitize_freetext,
     sanitize_label,
     validate_topic,
 )
-from gubbi.storage.repositories import topics as topic_repo
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
-from gubbi.tools.constants import DEFAULT_TOPICS_LIMIT, MAX_TOPICS_RESULTS
-from gubbi.tools.errors import already_exists, invalid_topic, validation_error
+
+__all__: list[str] = ["register"]
 
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
@@ -36,7 +39,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit: int = DEFAULT_TOPICS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Browse all journal topics — "what topics do I have?" or "what do I track?"
+        """Browse all journal topics — "what topics do I have?" or "what do I track?".
 
         Use when the user asks about their journal structure, or when you need to
         discover valid topic paths for other tools.
@@ -72,7 +75,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "offset": offset,
             "limit": limit,
         }
-        err = _assert_response_ok(result, tool_name="journal_list_topics")
+        err = check_response_size(result, tool_name="journal_list_topics")
         if err:
             await _report_oversized("journal_list_topics", err)
             return err
@@ -88,14 +91,17 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_TOPIC_CREATED, target_type="topic", target_kind="topic", app_ctx=app_ctx)
+    @audited(
+        ACTION_TOPIC_CREATED, target_type="topic", target_kind=TargetKind.TOPIC, app_ctx=app_ctx
+    )
     async def journal_create_topic(
         topic: str,
         title: str,
         description: str = "",
     ) -> dict[str, Any]:
         """Create a new journal topic for an area of the user's life not yet tracked.
-        e.g., "I want to start tracking my fitness" or "make a topic for the house renovation."
+
+        e.g., "I want to start tracking my fitness" or "make a topic for the house renovation.".
 
         Required before writing entries or conversations to a new topic.
         Check journal_list_topics or the briefing first to avoid duplicates.

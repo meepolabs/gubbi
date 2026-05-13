@@ -100,12 +100,17 @@ async def test_admin_pool_system_actor_succeeds(
     assert row_id > 0
 
 
-@pytest.mark.parametrize("actor_type", ["admin", "founder"])
+@pytest.mark.parametrize("actor_type", ["admin", "hydra_subject"])
 async def test_admin_pool_non_user_actor_succeeds(
     admin_pool: asyncpg.Pool,
     actor_type: str,
 ) -> None:
-    """Admin pool can INSERT with actor_type='admin' or 'founder'."""
+    """Admin pool can INSERT with actor_type='admin' or 'hydra_subject'.
+
+    Note: 'founder' was retired by migration 0012 and removed from the
+    audit_log_actor_type CHECK constraint; the parametrize previously
+    included it and would have raised CheckViolationError at runtime.
+    """
     async with admin_pool.acquire() as conn:
         row_id = await conn.fetchval(
             "INSERT INTO audit_log (actor_type, actor_id, action) "
@@ -133,3 +138,31 @@ async def test_admin_pool_user_actor_blocked(
                 """,
                 str(tenant_a),
             )
+
+
+async def test_admin_no_user_actor_message_mentions_hydra_subject(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+) -> None:
+    """Trigger error string lists 'hydra_subject' (post-0012) and not 'founder'.
+
+    Migration 0012 retired 'founder' from the actor_type CHECK and added
+    'hydra_subject'. The 0020 trigger error message must steer operators
+    toward the current valid set, not the retired one.
+    """
+    async with admin_pool.acquire() as conn:
+        with pytest.raises(asyncpg.PostgresError) as exc_info:
+            await conn.execute(
+                """
+                INSERT INTO audit_log (actor_type, actor_id, action)
+                VALUES ('user', $1, 'test')
+                """,
+                str(tenant_a),
+            )
+    message = str(exc_info.value)
+    assert (
+        "hydra_subject" in message
+    ), f"expected 'hydra_subject' in trigger error message, got: {message!r}"
+    assert (
+        "founder" not in message
+    ), f"expected 'founder' to be absent from trigger error message, got: {message!r}"

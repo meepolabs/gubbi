@@ -27,8 +27,7 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import ListToolsRequest, ListToolsResult, ServerResult
 
 from gubbi.auth.hydra import HydraIntrospector, TokenClaims
-from gubbi.core.auth_context import current_token_scopes
-from gubbi.core.scope import (
+from gubbi.auth.scope import (
     _GRANT_INVERSE,
     _GRANTS_UNION,
     SCOPE_DESCRIPTIONS,
@@ -37,14 +36,16 @@ from gubbi.core.scope import (
     insufficient_scope_response,
     require_scope,
 )
+from gubbi.auth.strategies import ApiKeyStrategy, HydraStrategy
+from gubbi.auth_context import current_token_scopes
 from gubbi.middleware.auth import BearerAuthMiddleware
 from gubbi.middleware.origin import OriginValidationMiddleware
 from gubbi.tools.registry import (
     ALL_TOOLS,
     READ_TOOLS,
     WRITE_TOOLS,
-    _wire_scope_filter,
     filter_tools_by_scope,
+    wire_scope_filter,
 )
 
 TEST_API_KEY = "a" * 64
@@ -305,8 +306,7 @@ class TestMiddlewareScopeStorage:
 
         mw = BearerAuthMiddleware(
             capture_app,
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=[HydraStrategy(introspector=mock_iv)],
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -326,8 +326,7 @@ class TestMiddlewareScopeStorage:
 
         mw = BearerAuthMiddleware(
             _asgi_app(),
-            api_key=TEST_API_KEY,
-            introspector=mock_iv,
+            strategies=[HydraStrategy(introspector=mock_iv)],
             required_scope="journal",
         )
         async with httpx.AsyncClient(
@@ -348,8 +347,13 @@ class TestMiddlewareScopeStorage:
 
         mw = BearerAuthMiddleware(
             capture_app,
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
+            strategies=[
+                ApiKeyStrategy(
+                    api_key=TEST_API_KEY,
+                    api_key_scopes=("journal:read", "journal:write"),
+                    operator_user_id=TEST_OP_ID,
+                )
+            ],
         )
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
@@ -779,12 +783,11 @@ class TestRenderScopesHtml:
 
 
 # ---------------------------------------------------------------------------
-# _wire_scope_filter integration with FastMCP
-# ---------------------------------------------------------------------------
+# wire_scope_filter integration with FastMCP
 
 
 class TestScopeFilterWired:
-    """_wire_scope_filter restricts tools/list output by token scopes.
+    """wire_scope_filter restricts tools/list output by token scopes.
 
     Constructs a FastMCP instance, registers dummy tools, wires the scope
     filter, then exercises the lowlevel handler with various
@@ -799,7 +802,7 @@ class TestScopeFilterWired:
     def wired_mcp(self, mcp: FastMCP) -> FastMCP:
         """FastMCP with dummy tools + scope filter wired."""
         _register_dummy_tools(mcp)
-        _wire_scope_filter(mcp)
+        wire_scope_filter(mcp)
         return mcp
 
     async def _list_tool_names(self, mcp: FastMCP) -> set[str]:
@@ -854,7 +857,7 @@ class TestScopeFilterWired:
 
 def _register_dummy_tools(mcp: FastMCP) -> None:
     """Register one dummy async function per tool name so the tool_manager
-    has entries for _wire_scope_filter to filter against."""
+    has entries for wire_scope_filter to filter against."""
 
     async def _dummy(**kwargs: Any) -> dict[str, Any]:
         return {}

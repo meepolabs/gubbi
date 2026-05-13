@@ -11,7 +11,6 @@ inline in their respective modules using safe_set_attributes directly.
 
 from __future__ import annotations
 
-import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
@@ -23,7 +22,7 @@ from gubbi.telemetry.attrs import _TRACER_NAME, SpanNames, safe_set_attributes
 if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
-logger = logging.getLogger(__name__)
+__all__: list[str] = ["record_mcp_tool_response_size_check"]
 
 _tracer = trace.get_tracer(_TRACER_NAME)
 

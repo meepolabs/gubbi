@@ -4,27 +4,30 @@ Provides ``configure_otel(app)`` called during FastAPI app startup.
 
 Design:
     - OTEL_ENABLED env flag (default "true").
-    - If enabled: wire real OTel SDK with OTLP exporters.
-    - If disabled: wire NoOp providers so instrumentation calls are
-      safe no-ops; avoids crash loops on Collector mis-config.
-    - Auto-instrumentation for FastAPI, httpx, asyncpg, redis.
-    - Resource attributes from env: service.name, env, version, region.
+    - If enabled: wire real OTel SDK via gubbi-common's configure_otel.
+    - If disabled: gubbi-common's configure_otel uses NoOp providers.
+    - Auto-instrumentation for FastAPI, httpx, asyncpg, redis is handled
+      by gubbi's ``_wire_instrumentors(app)``; gubbi-common stays free
+      of FastAPI/instrumentor coupling.
+    - Resource attributes from env: service.name, env, version, region
+      are parsed by gubbi-common internally.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from fastapi import FastAPI
+
+__all__: list[str] = ["configure_otel"]
 
 logger = logging.getLogger(__name__)
 
 _OTEL_ENABLED_ENV = "OTEL_ENABLED"
 _OTEL_SERVICE_NAME_ENV = "OTEL_SERVICE_NAME"
-_OTEL_RESOURCE_ATTRIBUTES_ENV = "OTEL_RESOURCE_ATTRIBUTES"
 
 
 def _is_otel_enabled() -> bool:
@@ -33,29 +36,7 @@ def _is_otel_enabled() -> bool:
     return raw.strip().lower() in ("true", "1", "yes")
 
 
-def _build_resource() -> Any:
-    """Build an OTel Resource from env vars.
-
-    Reads OTEL_SERVICE_NAME (default "gubbi") and
-    OTEL_RESOURCE_ATTRIBUTES (comma-separated key=value pairs).
-    """
-    from opentelemetry.sdk.resources import Resource  # noqa: PLC0415
-
-    service_name = os.environ.get(_OTEL_SERVICE_NAME_ENV, "gubbi")
-    attrs: dict[str, str] = {"service.name": service_name}
-
-    raw_res_attrs = os.environ.get(_OTEL_RESOURCE_ATTRIBUTES_ENV, "")
-    if raw_res_attrs:
-        for pair in raw_res_attrs.split(","):
-            pair = pair.strip()
-            if "=" in pair:
-                key, value = pair.split("=", 1)
-                attrs[key.strip()] = value.strip()
-
-    return Resource.create(attrs)
-
-
-def configure_otel(app: FastAPI) -> None:  # noqa: C901
+def configure_otel(app: FastAPI) -> None:
     """Configure OpenTelemetry for the FastAPI application.
 
     Call during app lifespan startup, before any request handling.
@@ -64,63 +45,19 @@ def configure_otel(app: FastAPI) -> None:  # noqa: C901
     Args:
         app: The FastAPI application instance.
     """
-    if not _is_otel_enabled():
-        logger.info("OTel disabled (OTEL_ENABLED=false) — using NoOp providers")
-        from opentelemetry import trace  # noqa: PLC0415
-        from opentelemetry.metrics import set_meter_provider  # noqa: PLC0415
-        from opentelemetry.sdk.metrics import MeterProvider  # noqa: PLC0415
-        from opentelemetry.sdk.trace import TracerProvider  # noqa: PLC0415
+    service_name = os.environ.get(_OTEL_SERVICE_NAME_ENV, "gubbi")
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
+    enabled = _is_otel_enabled()
+    from gubbi_common.telemetry.otel import configure_otel as _common_configure_otel
 
-        noop_tracer = TracerProvider()
-        trace.set_tracer_provider(noop_tracer)
-        set_meter_provider(MeterProvider())
-
-        # Still wire instrumentors so future code that starts spans does
-        # not crash — they'll just be no-ops.
-        _wire_instrumentors(app)
-        return
-
-    logger.info("Configuring OpenTelemetry for gubbi")
-
-    from opentelemetry import trace  # noqa: PLC0415
-    from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import (  # noqa: PLC0415
-        OTLPMetricExporter,
-    )
-    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (  # noqa: PLC0415
-        OTLPSpanExporter,
-    )
-    from opentelemetry.metrics import set_meter_provider  # noqa: PLC0415
-    from opentelemetry.sdk.metrics import MeterProvider  # noqa: PLC0415
-    from opentelemetry.sdk.metrics.export import (  # noqa: PLC0415
-        PeriodicExportingMetricReader,
-    )
-    from opentelemetry.sdk.trace import TracerProvider  # noqa: PLC0415
-    from opentelemetry.sdk.trace.export import BatchSpanProcessor  # noqa: PLC0415
-
-    resource = _build_resource()
-
-    # Trace provider with OTLP exporter
-    tracer_provider = TracerProvider(resource=resource)
-    span_exporter = OTLPSpanExporter()
-    span_processor = BatchSpanProcessor(span_exporter)
-    tracer_provider.add_span_processor(span_processor)
-    trace.set_tracer_provider(tracer_provider)
-
-    # Meter provider with OTLP exporter
-    metric_exporter = OTLPMetricExporter()
-    metric_reader = PeriodicExportingMetricReader(metric_exporter)
-    meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
-    set_meter_provider(meter_provider)
-
+    _common_configure_otel(service_name, endpoint, enabled=enabled)
     _wire_instrumentors(app)
-
-    logger.info("OpenTelemetry configured: tracer + meter + auto-instrumentation ready")
 
 
 def _wire_instrumentors(app: FastAPI) -> None:
     """Register auto-instrumentation for FastAPI, httpx, asyncpg, redis.
 
-    Safe to call even when the real SDK is NoOp — instrumentors will
+    Safe to call even when the real SDK is NoOp -- instrumentors will
     use whatever tracer/meter provider is currently set.
     """
     try:
@@ -144,7 +81,7 @@ def _wire_instrumentors(app: FastAPI) -> None:
     try:
         from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor  # noqa: PLC0415
 
-        AsyncPGInstrumentor().instrument()
+        AsyncPGInstrumentor().instrument()  # type: ignore[no-untyped-call]  # opentelemetry-instrumentation-asyncpg ships no py.typed marker
         logger.debug("asyncpg auto-instrumentation wired")
     except Exception as exc:
         logger.warning("AsyncPGInstrumentor failed: %s", exc)

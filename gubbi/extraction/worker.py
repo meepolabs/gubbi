@@ -6,23 +6,35 @@ for the extraction job to use.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
+from contextlib import suppress
 
 import redis.asyncio as aioredis
+import structlog
 from arq.connections import RedisSettings
+from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
+from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
 from gubbi.config import get_settings
-from gubbi.core.crypto import ContentCipher, load_master_keys_from_env
+from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
+from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 from gubbi.extraction.service import ExtractionService
 from gubbi.storage.pg_setup import init_pool
+from gubbi.telemetry.logger import initialize_logger
 
-logger = logging.getLogger(__name__)
+# ``logger`` is the canonical async-context logger (used inside the
+# async ``startup`` / ``shutdown`` Arq hooks). ``_sync_log`` covers the
+# one sync helper (``_build_content_cipher``); ``structlog.AsyncBoundLogger``
+# emits return coroutines that cannot be used from sync callers.
+logger = structlog.get_logger(__name__)
+_sync_log = logging.getLogger(__name__)
 
 
 def _redis_url() -> str:
@@ -40,7 +52,10 @@ def _build_content_cipher() -> ContentCipher | None:
     """
     master_keys = load_master_keys_from_env()
     if not master_keys:
-        logger.warning(
+        # Sync emit -- routes through stdlib ``logging`` because
+        # ``_build_content_cipher`` is a sync helper called from
+        # ``startup`` before the ``await`` chain begins.
+        _sync_log.warning(
             "Content cipher disabled -- set JOURNAL_ENCRYPTION_MASTER_KEY_V1 "
             "to enable app-layer encryption"
         )
@@ -49,6 +64,17 @@ def _build_content_cipher() -> ContentCipher | None:
 
 
 async def startup(ctx: ExtractionContext) -> None:
+    """Arq worker startup hook: init logging, health server, PG pool, and Redis client."""
+    # Load settings.
+    settings = get_settings()
+
+    # Configure structured logging FIRST -- emits below would crash with
+    # "AttributeError: 'NoneType' object has no attribute 'msg'" otherwise,
+    # because Arq workers don't run the FastAPI lifespan that initializes
+    # structlog in the HTTP server. Tests pass via conftest's autouse
+    # session-scoped fixture, masking the production gap.
+    initialize_logger("gubbi-extraction-worker", log_dir=str(settings.log_dir))
+
     # Health server thread (existing behaviour).
     health_thread = threading.Thread(
         target=_run_health_server,
@@ -57,13 +83,32 @@ async def startup(ctx: ExtractionContext) -> None:
     health_thread.start()
     ctx["health_thread"] = health_thread
 
-    # Load settings.
-    settings = get_settings()
-
     # PostgreSQL pool.
     pool = await init_pool(settings.db.app_url)
     ctx["pool"] = pool
-    logger.info("Extraction worker PG pool ready")
+    await logger.info("Extraction worker PG pool ready")
+
+    # Postgres log-settings probe (mirrors gubbi.main lifespan): refuse to
+    # start when the cluster would capture statement text or bound
+    # parameters in its log -- the worker hits the same encrypted INSERT
+    # path as the HTTP API via ``extract_conversation``. Mode is read
+    # from JOURNAL_PG_LOG_PROBE_MODE (strict|warn|off; default strict).
+    pg_log_probe_mode = os.environ.get("JOURNAL_PG_LOG_PROBE_MODE", "strict")
+    try:
+        await probe_pg_log_settings(pool, mode=pg_log_probe_mode)
+    except BaseException:
+        # Catch BaseException (not Exception) so CancelledError /
+        # KeyboardInterrupt during the probe still close the pool
+        # before unwinding. Best-effort teardown; original error or
+        # cancellation must propagate.
+        # Suppress asyncio.CancelledError from close() explicitly --
+        # CancelledError is a BaseException (not Exception) since
+        # Python 3.8, so a bare ``suppress(Exception)`` would let a
+        # cancelled close() clobber the original cancellation we're
+        # about to ``raise``.
+        with suppress(Exception, asyncio.CancelledError):
+            await pool.close()
+        raise
 
     # Content cipher.
     cipher = _build_content_cipher()
@@ -75,21 +120,45 @@ async def startup(ctx: ExtractionContext) -> None:
 
     # Redis pub/sub client.
     redis_url = _redis_url()
-    redis_client = await aioredis.from_url(redis_url)
+    redis_pool = aioredis.ConnectionPool.from_url(redis_url)
+    redis_client = aioredis.Redis(connection_pool=redis_pool)
     ctx["redis"] = redis_client
-    logger.info("Extraction worker Redis client ready")
+    ctx["redis_pool"] = redis_pool
+
+    # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
+    # register the Lua script anyway (cheapest option; no API split).
+    if settings.llm.journal_llm_budget_enabled:
+        pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
+        ctx["budget_helper"] = BudgetHelper(
+            redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+            pre_charge_script=pre_charge_script,
+        )
+        await logger.info("Extraction worker BudgetHelper ready")
+    else:
+        await logger.info("Extraction worker BudgetHelper disabled (budget_enabled=False)")
+
+    await logger.info("Extraction worker Redis client ready")
 
 
 async def shutdown(ctx: ExtractionContext) -> None:
+    """Arq worker shutdown hook: close PG pool and Redis client/connection pool."""
     pool = ctx.get("pool")
     if pool is not None:
         await pool.close()
-        logger.info("Extraction worker PG pool closed")
+        await logger.info("Extraction worker PG pool closed")
 
     redis_client = ctx.get("redis")
     if redis_client is not None:
         await redis_client.aclose()
-        logger.info("Extraction worker Redis client closed")
+        await logger.info("Extraction worker Redis client closed")
+
+    # redis_client.aclose() does NOT drain an externally-supplied
+    # ConnectionPool; close the pool explicitly to avoid leaking
+    # pooled connections across worker restarts.
+    redis_pool = ctx.get("redis_pool")
+    if redis_pool is not None:
+        await redis_pool.aclose()
+        await logger.info("Extraction worker Redis pool closed")
 
 
 def _run_health_server() -> None:
@@ -106,6 +175,6 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10
-    job_timeout = 600
+    job_timeout = ARQ_JOB_TIMEOUT_SECS
     keep_result = 86400
     poll_delay = 0.5

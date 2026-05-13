@@ -7,6 +7,13 @@ dict access failure has the same type as a bare KeyError but a very different
 meaning.
 """
 
+__all__: list[str] = [
+    "ConversationNotFoundError",
+    "DatabaseUnavailable",
+    "EntryNotFoundError",
+    "TopicNotFoundError",
+]
+
 
 class TopicNotFoundError(LookupError):
     """Raised when a topic path does not exist in the database."""
@@ -18,3 +25,11 @@ class ConversationNotFoundError(LookupError):
 
 class EntryNotFoundError(LookupError):
     """Raised when an entry ID does not exist or has been deleted."""
+
+
+class DatabaseUnavailable(Exception):
+    """Raised when the database is temporarily unreachable.
+
+    Translated from async connectivity errors by the safe_acquire helper.
+    The FastAPI app maps this to HTTP 503 with Retry-After: 5.
+    """

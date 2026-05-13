@@ -13,7 +13,7 @@ real database to be meaningful.
 
 from __future__ import annotations
 
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.scripts.rotate_encryption_key import (
     _AUDIT_ACTION,
     _ROTATION_SCREENS,

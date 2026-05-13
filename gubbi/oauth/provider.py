@@ -8,10 +8,10 @@ Dual-mode: accepts both a shared static API key and OAuth access tokens.
 from __future__ import annotations
 
 import hashlib
-import logging
 import secrets
 import time
 
+import structlog
 from mcp.server.auth.provider import (
     AccessToken,
     AuthorizationCode,
@@ -26,10 +26,12 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from gubbi.config import OAUTH_ACCESS_TOKEN_TTL_SECS, OAUTH_REFRESH_TOKEN_TTL_SECS
 from gubbi.oauth.storage import OAuthStorage
 
-logger = logging.getLogger("gubbi.oauth.provider")
+__all__: list[str] = ["JournalOAuthProvider"]
+
+logger = structlog.get_logger(__name__)
 
 
-class JournalOAuthProvider(  # type: ignore[type-arg]
+class JournalOAuthProvider(
     OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken],
 ):
     """Single-user OAuth provider for the journal MCP server."""
@@ -43,13 +45,15 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         self.server_url = server_url.rstrip("/")
 
     async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
-        return self.storage.get_client(client_id)
+        """Look up a registered OAuth client by client_id, or return None."""
+        return await self.storage.get_client(client_id)
 
     async def register_client(
         self,
         client_info: OAuthClientInformationFull,
     ) -> None:
-        self.storage.save_client(client_info)
+        """Persist a newly-registered OAuth client (RFC 7591 dynamic registration)."""
+        await self.storage.save_client(client_info)
 
     async def authorize(
         self,
@@ -78,21 +82,25 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         client: OAuthClientInformationFull,
         authorization_code: str,
     ) -> AuthorizationCode | None:
-        code = self.storage.get_auth_code(authorization_code)
+        """Load an auth code bound to this client; reject mismatched client_id (timing-safe)."""
+        code = await self.storage.get_auth_code(authorization_code)
         if code is None:
             return None
         # Verify it belongs to this client (timing-safe)
         if not secrets.compare_digest(code.client_id, client.client_id or ""):
-            self.storage.delete_auth_code(authorization_code)
-            logger.warning("Auth code client_id mismatch for client %s", client.client_id)
+            await self.storage.delete_auth_code(authorization_code)
+            await logger.warning(
+                "Auth code client_id mismatch",
+                client_id=client.client_id,
+            )
             return None
         # Check expiry
         if code.expires_at < time.time():
-            self.storage.delete_auth_code(authorization_code)
+            await self.storage.delete_auth_code(authorization_code)
             return None
         return code
 
-    def _issue_token_pair(
+    async def _issue_token_pair(
         self,
         client_id: str,
         scopes: list[str],
@@ -116,13 +124,13 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             scopes=scopes,
             expires_at=now + OAUTH_REFRESH_TOKEN_TTL_SECS,
         )
-        self.storage.save_issued_token_pair(
+        await self.storage.save_issued_token_pair(
             access_token_str, access_token, refresh_token_str, refresh_token
         )
 
         return OAuthToken(
             access_token=access_token_str,
-            token_type="Bearer",  # noqa: S106 — protocol constant
+            token_type="Bearer",  # noqa: S106 -- protocol constant
             expires_in=OAUTH_ACCESS_TOKEN_TTL_SECS,
             refresh_token=refresh_token_str,
             scope=" ".join(scopes) if scopes else None,
@@ -134,8 +142,8 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         authorization_code: AuthorizationCode,
     ) -> OAuthToken:
         """Exchange auth code for access + refresh tokens."""
-        self.storage.delete_auth_code(authorization_code.code)
-        return self._issue_token_pair(
+        await self.storage.delete_auth_code(authorization_code.code)
+        return await self._issue_token_pair(
             client_id=client.client_id or "",
             scopes=authorization_code.scopes,
             resource=authorization_code.resource,
@@ -146,7 +154,8 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
         client: OAuthClientInformationFull,
         refresh_token: str,
     ) -> RefreshToken | None:
-        token = self.storage.get_refresh_token(refresh_token)
+        """Load a refresh token bound to this client; reject mismatched client_id."""
+        token = await self.storage.get_refresh_token(refresh_token)
         if token is None:
             return None
         if not secrets.compare_digest(token.client_id, client.client_id or ""):
@@ -160,19 +169,17 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             token_age = (
                 (now - (token.expires_at - OAUTH_REFRESH_TOKEN_TTL_SECS)) if token.expires_at else 0
             )
-            logger.warning(
+            await logger.warning(
                 "oauth.refresh.client_id_mismatch",
-                extra={
-                    "event": "oauth.refresh.client_id_mismatch",
-                    "stored_client_id_hash": stored_hash,
-                    "requesting_client_id_hash": req_hash,
-                    "token_age_seconds": token_age,
-                },
+                event="oauth.refresh.client_id_mismatch",
+                stored_client_id_hash=stored_hash,
+                requesting_client_id_hash=req_hash,
+                token_age_seconds=token_age,
             )
             return None
         # Check expiry
         if token.expires_at is not None and token.expires_at < int(time.time()):
-            self.storage.delete_refresh_token(refresh_token)
+            await self.storage.delete_refresh_token(refresh_token)
             return None
         return token
 
@@ -201,7 +208,7 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             expires_at=now + OAUTH_REFRESH_TOKEN_TTL_SECS,
         )
 
-        self.storage.rotate_refresh_token(
+        await self.storage.rotate_refresh_token(
             old_refresh_token_str=refresh_token.token,
             new_access_token_str=new_access_str,
             new_access_token=new_access,
@@ -209,10 +216,10 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
             new_refresh_token=new_refresh,
         )
 
-        logger.info("Refresh token rotated for client_id=%s", client.client_id)
+        await logger.info("Refresh token rotated", client_id=client.client_id)
         return OAuthToken(
             access_token=new_access_str,
-            token_type="Bearer",  # noqa: S106 — protocol constant
+            token_type="Bearer",  # noqa: S106 -- protocol constant
             expires_in=OAUTH_ACCESS_TOKEN_TTL_SECS,
             refresh_token=new_refresh_str,
             scope=" ".join(effective_scopes) if effective_scopes else None,
@@ -220,12 +227,12 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
 
     async def load_access_token(self, token: str) -> AccessToken | None:
         """Load and validate an OAuth access token."""
-        access_token = self.storage.get_access_token(token)
+        access_token = await self.storage.get_access_token(token)
         if access_token is None:
             return None
         # Check expiry
         if access_token.expires_at is not None and access_token.expires_at < int(time.time()):
-            self.storage.delete_access_token(token)
+            await self.storage.delete_access_token(token)
             return None
         return access_token
 
@@ -235,16 +242,16 @@ class JournalOAuthProvider(  # type: ignore[type-arg]
     ) -> None:
         """Revoke a token and its paired counterpart."""
         if isinstance(token, AccessToken):
-            paired_refresh = self.storage.get_paired_refresh_token(token.token)
-            self.storage.delete_access_token(token.token)
-            self.storage.delete_token_pair_by_access(token.token)
+            paired_refresh = await self.storage.get_paired_refresh_token(token.token)
+            await self.storage.delete_access_token(token.token)
+            await self.storage.delete_token_pair_by_access(token.token)
             if paired_refresh:
-                self.storage.delete_refresh_token(paired_refresh)
-            logger.info("Access token revoked for client_id=%s", token.client_id)
+                await self.storage.delete_refresh_token(paired_refresh)
+            await logger.info("Access token revoked", client_id=token.client_id)
         elif isinstance(token, RefreshToken):
-            paired_access = self.storage.get_paired_access_tokens(token.token)
-            self.storage.delete_refresh_token(token.token)
-            self.storage.delete_token_pair_by_refresh(token.token)
+            paired_access = await self.storage.get_paired_access_tokens(token.token)
+            await self.storage.delete_refresh_token(token.token)
+            await self.storage.delete_token_pair_by_refresh(token.token)
             for at in paired_access:
-                self.storage.delete_access_token(at)
-            logger.info("Refresh token revoked for client_id=%s", token.client_id)
+                await self.storage.delete_access_token(at)
+            await logger.info("Refresh token revoked", client_id=token.client_id)

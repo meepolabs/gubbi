@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
+import uuid
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
@@ -386,3 +388,101 @@ class TestHydraErrorHierarchy:
 
     def test_unreachable_not_invalid_token(self) -> None:
         assert not issubclass(HydraInvalidToken, HydraUnreachable)
+
+
+class TestSingleflight:
+    """Singleflight: concurrent same-token introspects collapse to one upstream call."""
+
+    @pytest.mark.asyncio
+    async def test_singleflight_collapses_concurrent_calls(
+        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
+    ) -> None:
+        """N=10 concurrent introspects on same token -> exactly 1 upstream HTTP call."""
+        call_count = 0
+
+        async def slow_post(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.05)
+            return _make_response(
+                200,
+                {
+                    "active": True,
+                    "sub": str(uuid.uuid4()),
+                    "scope": "read",
+                    "exp": int(time.time()) + 3600,
+                },
+            )
+
+        mock_httpx_client.post = slow_post
+
+        tasks = [asyncio.create_task(introspector.introspect(FAKE_TOKEN)) for _ in range(10)]
+        results = await asyncio.gather(*tasks)
+
+        assert call_count == 1, f"Expected 1 upstream call, got {call_count}"
+        assert all(isinstance(r, TokenClaims) for r in results)
+        # All callers got same claims
+        assert len({r.sub for r in results}) == 1
+        # Cache has exactly 1 entry
+        if introspector.cache is not None:
+            assert introspector.cache.get(_cache_key(FAKE_TOKEN)) is not None
+
+    @pytest.mark.asyncio
+    async def test_singleflight_propagates_invalid_token(
+        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
+    ) -> None:
+        """N=5 concurrent introspects on invalid token -> all raise HydraInvalidToken, 1 upstream call."""
+        call_count = 0
+
+        async def slow_post(*args: object, **kwargs: object) -> object:
+            nonlocal call_count
+            call_count += 1
+            await asyncio.sleep(0.05)
+            return _make_response(200, {"active": False})
+
+        mock_httpx_client.post = slow_post
+
+        tasks = [asyncio.create_task(introspector.introspect(FAKE_TOKEN)) for _ in range(5)]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        assert call_count == 1, f"Expected 1 upstream call, got {call_count}"
+        assert all(
+            isinstance(r, HydraInvalidToken) for r in results
+        ), f"Not all raised HydraInvalidToken: {results}"
+        # Cache should be empty (invalid token not cached)
+        if introspector.cache is not None:
+            assert introspector.cache.get(_cache_key(FAKE_TOKEN)) is None
+
+    @pytest.mark.asyncio
+    async def test_singleflight_releases_after_completion(
+        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
+    ) -> None:
+        """Inflight dict is cleaned up after success and failure; no stale entries."""
+        cache = InMemoryHydraCache()
+        introspector.cache = cache
+
+        # First call: success path
+        mock_httpx_client.post.return_value = _make_response(
+            200,
+            {
+                "active": True,
+                "sub": str(uuid.uuid4()),
+                "scope": "read",
+                "exp": int(time.time()) + 3600,
+            },
+        )
+        await introspector.introspect(FAKE_TOKEN)
+        assert len(introspector._inflight) == 0, "Inflight not cleaned up after success"
+
+        # Second call: cache hit (no upstream call)
+        mock_httpx_client.post.reset_mock()
+        await introspector.introspect(FAKE_TOKEN)
+        mock_httpx_client.post.assert_not_called()
+        assert len(introspector._inflight) == 0
+
+        # Third call: different token, cache miss -> failure path
+        fake_token_2 = "ory_at_different_token_xyz"
+        mock_httpx_client.post.return_value = _make_response(200, {"active": False})
+        with pytest.raises(HydraInvalidToken):
+            await introspector.introspect(fake_token_2)
+        assert len(introspector._inflight) == 0, "Inflight not cleaned up after failure"

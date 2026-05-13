@@ -21,6 +21,8 @@ from __future__ import annotations
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+__all__: list[str] = ["OriginValidationMiddleware"]
+
 
 class OriginValidationMiddleware:
     """ASGI middleware that validates the Origin header against an allowlist.
@@ -50,6 +52,7 @@ class OriginValidationMiddleware:
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Reject HTTP requests whose Origin header is not in the allowlist (DNS rebind defense)."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return

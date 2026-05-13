@@ -8,8 +8,8 @@ import pytest
 import structlog
 from mcp.server.fastmcp import FastMCP
 
+from gubbi.app_context import AppContext
 from gubbi.config import get_settings
-from gubbi.core.context import AppContext
 from gubbi.tools.constants import LIST_SUMMARY_PREVIEW_CHARS
 from gubbi.tools.registry import register_tools
 
