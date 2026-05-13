@@ -1,12 +1,46 @@
 import asyncio
 import random
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
-from anthropic import AsyncAnthropic, RateLimitError
+from anthropic import (
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncAnthropic,
+    InternalServerError,
+    RateLimitError,
+)
 
 from gubbi.config import LLMConfig
+from gubbi.constants import ANTHROPIC_MAX_RETRIES, ANTHROPIC_REQUEST_TIMEOUT_SECS
 from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
+
+# Retryable Anthropic SDK exception classes. Transient network/server-side failures
+# get backoff + retry; client errors (auth, validation, etc.) propagate immediately.
+# Note: anthropic 0.49.x does not export OverloadedError or ServiceUnavailableError
+# at the top level. Their wire surface (HTTP 503/529/etc.) arrives as APIStatusError
+# with a 5xx status_code -- _is_retryable_anthropic_error filters to that subset.
+# Revisit this list on the next anthropic SDK upgrade.
+_RETRYABLE_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
+    RateLimitError,
+    APIConnectionError,
+    APITimeoutError,
+    InternalServerError,
+    APIStatusError,
+)
+
+
+def _is_retryable_anthropic_error(exc: Exception) -> bool:
+    if isinstance(exc, RateLimitError):
+        return True
+    if isinstance(exc, APIConnectionError):
+        return True
+    if isinstance(exc, APIStatusError):
+        status_error = cast(APIStatusError, exc)
+        return cast(int, status_error.status_code) >= 500
+    return False
+
 
 # Model pricing in $USD per million tokens (input, output).
 # Values are approximate and should be updated when pricing changes.
@@ -28,7 +62,10 @@ class AnthropicProvider(LLMProvider):
     def __init__(self, config: LLMConfig) -> None:
         self._api_key = config.api_key
         self._model = config.model or "claude-haiku-4-5-20251001"
-        self._client = AsyncAnthropic(api_key=self._api_key)
+        self._client = AsyncAnthropic(
+            api_key=self._api_key,
+            timeout=ANTHROPIC_REQUEST_TIMEOUT_SECS,
+        )
 
     async def complete(
         self,
@@ -36,6 +73,7 @@ class AnthropicProvider(LLMProvider):
         system_prompt: str,
         output_schema: Mapping[str, Any] | None = None,
     ) -> LLMResponse:
+        """Call Anthropic Messages with prompt-cached system block; force tool-use for schemas."""
         system_block: dict[str, Any] = {
             "type": "text",
             "text": system_prompt,
@@ -85,12 +123,14 @@ class AnthropicProvider(LLMProvider):
         )
 
     async def _call_with_retry(self, kwargs: dict[str, Any]) -> Any:
-        max_retries = 5
+        max_retries = ANTHROPIC_MAX_RETRIES
         base_delay = 1.0
         for attempt in range(max_retries):
             try:
                 return await self._client.messages.create(**kwargs)
-            except RateLimitError:
+            except _RETRYABLE_ANTHROPIC_ERRORS as exc:
+                if not _is_retryable_anthropic_error(exc):
+                    raise
                 if attempt < max_retries - 1:
                     base = base_delay * (2**attempt)
                     # Not cryptographic -- simple jitter to prevent thundering herd.
@@ -102,6 +142,7 @@ class AnthropicProvider(LLMProvider):
         raise RuntimeError("Retry loop exited unexpectedly")
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
+        """Compute call cost in cents from per-million-token model pricing."""
         pricing = _MODEL_PRICING.get(self._model, (_DEFAULT_INPUT_PRICE, _DEFAULT_OUTPUT_PRICE))
         input_cost = (input_tokens / 1_000_000) * pricing[0] * 100
         output_cost = (output_tokens / 1_000_000) * pricing[1] * 100

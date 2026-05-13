@@ -1,26 +1,31 @@
-"""MCP tools: journal_append_entry, journal_read_topic, journal_update_entry,
-journal_delete_entry."""
+"""MCP tools: journal_append_entry / read_topic / update_entry / delete_entry."""
 
 import asyncio
-import logging
 from typing import Any, Literal
 from uuid import UUID
 
+import structlog
+from gubbi_common.audit.targets import TargetKind
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.audit_decorator import (
+from gubbi.app_context import AppContext
+from gubbi.audit import (
     ACTION_ENTRY_CREATED,
     ACTION_ENTRY_DELETED,
     ACTION_ENTRY_UPDATED,
     audited,
 )
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.context import AppContext
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import (
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
+from gubbi.crypto.guard import require_cipher
+from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
+from gubbi.storage.repositories import entries as entry_repo
+from gubbi.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
+from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
+from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import (
     is_future_date,
     local_today,
     reject_tool_call_syntax,
@@ -29,35 +34,284 @@ from gubbi.core.validation import (
     validate_date,
     validate_topic,
 )
-from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
-from gubbi.storage.repositories import entries as entry_repo
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
-from gubbi.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
-from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 
-logger = logging.getLogger(__name__)
+__all__: list[str] = ["register"]
+
+logger = structlog.get_logger(__name__)
+
+
+async def _embed_entry(
+    app_ctx: AppContext,
+    user_id: UUID,
+    entry_id: int,
+    content: str,
+) -> list[float] | None:
+    """Encode text and store embedding. Returns the embedding on success, None on failure.
+
+    Encodes outside a DB connection so the pool is free during ONNX inference.
+    """
+    try:
+        embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            await app_ctx.embedding_service.save_by_vector(conn, entry_id, embedding)
+        return embedding
+    except Exception as exc:
+        await logger.warning(
+            "Failed to embed entry",
+            entry_id=entry_id,
+            error=str(exc),
+            exc_info=True,
+        )
+        return None
+
+
+async def _journal_append_entry(
+    app_ctx: AppContext,
+    topic: str,
+    content: str,
+    reasoning: str | None = None,
+    tags: list[str] | None = None,
+    date: str | None = None,
+) -> dict[str, Any]:
+    try:
+        topic = validate_topic(topic)
+    except ValueError as e:
+        return invalid_topic(topic, str(e))
+    content = sanitize_freetext(content)
+    if not content.strip():
+        return validation_error("Content cannot be empty")
+    try:
+        reject_tool_call_syntax(content)
+    except ValueError as e:
+        return validation_error(str(e))
+    if reasoning:
+        reasoning = sanitize_freetext(reasoning)
+        try:
+            reject_tool_call_syntax(reasoning)
+        except ValueError as e:
+            return validation_error(str(e))
+    tags_dropped = 0
+    if tags:
+        original_tag_count = len(tags)
+        tags = [s for t in tags if (s := sanitize_label(t))]
+        tags_dropped = original_tag_count - len(tags)
+    if date:
+        try:
+            validate_date(date)
+        except ValueError:
+            return invalid_date(date)
+
+    resolved_date = date or local_today(app_ctx.settings.timezone)
+    user_id = current_user_id.get()
+    if user_id is None:
+        raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+    cipher = require_cipher(app_ctx)
+
+    try:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            entry_id = await entry_repo.append(
+                conn,
+                cipher,
+                topic=topic,
+                content=content,
+                reasoning=reasoning,
+                tags=tags,
+                date=resolved_date,
+            )
+    except TopicNotFoundError:
+        return not_found("Topic", topic)
+
+    # Embed after the transaction commits (embedding is best-effort)
+    if await _embed_entry(app_ctx, user_id, entry_id, content) is not None:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            await entry_repo.mark_indexed(conn, entry_id)
+
+    result: dict[str, Any] = {
+        "status": "appended",
+        "topic": topic,
+        "date": resolved_date,
+        "entry_id": entry_id,
+    }
+    notes = []
+    if date and is_future_date(date, app_ctx.settings.timezone):
+        notes.append("Date is in the future")
+    if tags_dropped:
+        notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
+    if notes:
+        result["note"] = "; ".join(notes)
+    return result
+
+
+async def _journal_read_topic(
+    app_ctx: AppContext,
+    topic: str,
+    limit: int = DEFAULT_ENTRIES_LIMIT,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    offset: int = 0,
+) -> dict[str, Any]:
+    try:
+        topic = validate_topic(topic)
+    except ValueError as e:
+        return invalid_topic(topic, str(e))
+    if date_from:
+        try:
+            validate_date(date_from)
+        except ValueError:
+            return invalid_date(date_from)
+    if date_to:
+        try:
+            validate_date(date_to)
+        except ValueError:
+            return invalid_date(date_to)
+    limit = max(1, min(limit, MAX_READ_ENTRIES))
+    offset = max(0, offset)
+    user_id = current_user_id.get()
+    if user_id is None:
+        raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+    cipher = require_cipher(app_ctx)
+    try:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            meta, entries, total = await entry_repo.read(
+                conn,
+                cipher,
+                topic,
+                limit=limit,
+                date_from=date_from,
+                date_to=date_to,
+                offset=offset,
+            )
+    except TopicNotFoundError:
+        return not_found("Topic", topic)
+
+    result = {
+        "metadata": meta.model_dump(exclude={"id", "created", "updated"}),
+        "entries": [e.model_dump() for e in entries],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
+    err = check_response_size(result, tool_name="journal_read_topic")
+    if err:
+        await _report_oversized("journal_read_topic", err)
+        return err
+    return result
+
+
+async def _journal_update_entry(
+    app_ctx: AppContext,
+    entry_id: int,
+    content: str | None = None,
+    reasoning: str | None = None,
+    mode: Literal["replace", "append"] = "replace",
+    date: str | None = None,
+    tags: list[str] | None = None,
+) -> dict[str, Any]:
+    if content is not None:
+        content = sanitize_freetext(content)
+        if not content.strip():
+            return validation_error("content cannot be empty")
+        try:
+            reject_tool_call_syntax(content)
+        except ValueError as e:
+            return validation_error(str(e))
+    if reasoning is not None:
+        reasoning = sanitize_freetext(reasoning)
+        try:
+            reject_tool_call_syntax(reasoning)
+        except ValueError as e:
+            return validation_error(str(e))
+    if date:
+        try:
+            validate_date(date)
+        except ValueError:
+            return invalid_date(date)
+    tags_dropped = 0
+    if tags:
+        original_tag_count = len(tags)
+        tags = [s for t in tags if (s := sanitize_label(t))]
+        tags_dropped = original_tag_count - len(tags)
+
+    user_id = current_user_id.get()
+    if user_id is None:
+        raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+    cipher = require_cipher(app_ctx)
+
+    # Read committed text inside the same transaction -- avoids a second round-trip.
+    # Within a transaction, reads see writes from the same transaction (savepoint).
+    row_data: tuple[str, str | None] | None = None
+    try:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            await entry_repo.update(
+                conn,
+                cipher,
+                entry_id=entry_id,
+                content=content,
+                reasoning=reasoning,
+                mode=mode,
+                date=date,
+                tags=tags,
+            )
+            if content is not None or reasoning is not None:
+                row_data = await entry_repo.get_text(conn, cipher, entry_id)
+    except EntryNotFoundError:
+        return not_found("Entry", entry_id)
+
+    # Re-embed if text changed: encode outside any connection, then store+mark in one.
+    if row_data:
+        embed_text = (row_data[0] or "") + " " + (row_data[1] or "")
+        try:
+            embedding = await asyncio.to_thread(
+                app_ctx.embedding_service.encode, embed_text.strip()
+            )
+            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+                await app_ctx.embedding_service.save_by_vector(conn, entry_id, embedding)
+                await entry_repo.mark_indexed(conn, entry_id)
+        except Exception as exc:
+            await logger.warning(
+                "Failed to embed updated entry",
+                entry_id=entry_id,
+                error=str(exc),
+                exc_info=True,
+            )
+
+    result: dict[str, Any] = {
+        "status": "updated",
+        "entry_id": entry_id,
+        "mode": mode,
+    }
+    notes = []
+    if date and is_future_date(date, app_ctx.settings.timezone):
+        notes.append("Date is in the future")
+    if tags_dropped:
+        notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
+    if notes:
+        result["note"] = "; ".join(notes)
+    return result
+
+
+async def _journal_delete_entry(
+    app_ctx: AppContext,
+    entry_id: int,
+) -> dict[str, Any]:
+    user_id = current_user_id.get()
+    if user_id is None:
+        raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
+    try:
+        async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            # delete_entry soft-deletes the entry and removes its embedding
+            await entry_repo.delete(conn, entry_id)
+    except EntryNotFoundError:
+        return not_found("Entry", entry_id)
+
+    return {
+        "status": "deleted",
+        "entry_id": entry_id,
+    }
 
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     """Register entry tools on the MCP server."""
-
-    async def _embed_entry(
-        user_id: UUID,
-        entry_id: int,
-        content: str,
-    ) -> list[float] | None:
-        """Encode text and store embedding. Returns the embedding on success, None on failure.
-
-        Encodes outside a DB connection so the pool is free during ONNX inference.
-        """
-        try:
-            embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, content)
-            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
-            return embedding
-        except Exception as e:
-            logger.warning("Failed to embed entry %s: %s", entry_id, e, exc_info=True)
-            return None
 
     @mcp.tool(
         title="Append Entry",
@@ -69,7 +323,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_ENTRY_CREATED, target_type="entry", target_kind="entry", app_ctx=app_ctx)
+    @audited(
+        ACTION_ENTRY_CREATED, target_type="entry", target_kind=TargetKind.ENTRY, app_ctx=app_ctx
+    )
     async def journal_append_entry(
         topic: str,
         content: str,
@@ -77,9 +333,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         tags: list[str] | None = None,
         date: str | None = None,
     ) -> dict[str, Any]:
-        """Record a life event, decision, or update — "remember this",
-        "note that we decided X", or "I just did Y.". Call proactively when the
-        user shares significant news, decisions, progress, or milestones.
+        """Record a life event, decision, or update -- "remember this" / "I just did Y".
+
+        Call proactively when the user shares significant news, decisions,
+        progress, or milestones.
 
         The topic must already exist — check the briefing for recently used topics,
         journal_list_topics to see all available topics, or create one with journal_create_topic.
@@ -111,73 +368,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Returns:
             Confirmation with entry_id, topic, and date.
         """
-        try:
-            topic = validate_topic(topic)
-        except ValueError as e:
-            return invalid_topic(topic, str(e))
-        content = sanitize_freetext(content)
-        if not content.strip():
-            return validation_error("Content cannot be empty")
-        try:
-            reject_tool_call_syntax(content)
-        except ValueError as e:
-            return validation_error(str(e))
-        if reasoning:
-            reasoning = sanitize_freetext(reasoning)
-            try:
-                reject_tool_call_syntax(reasoning)
-            except ValueError as e:
-                return validation_error(str(e))
-        tags_dropped = 0
-        if tags:
-            original_tag_count = len(tags)
-            tags = [s for t in tags if (s := sanitize_label(t))]
-            tags_dropped = original_tag_count - len(tags)
-        if date:
-            try:
-                validate_date(date)
-            except ValueError:
-                return invalid_date(date)
-
-        resolved_date = date or local_today(app_ctx.settings.timezone)
-        user_id = current_user_id.get()
-        if user_id is None:
-            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
-        cipher = require_cipher(app_ctx)
-
-        try:
-            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                entry_id = await entry_repo.append(
-                    conn,
-                    cipher,
-                    topic=topic,
-                    content=content,
-                    reasoning=reasoning,
-                    tags=tags,
-                    date=resolved_date,
-                )
-        except TopicNotFoundError:
-            return not_found("Topic", topic)
-
-        # Embed after the transaction commits (embedding is best-effort)
-        if await _embed_entry(user_id, entry_id, content) is not None:
-            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                await entry_repo.mark_indexed(conn, entry_id)
-
-        result: dict[str, Any] = {
-            "status": "appended",
-            "topic": topic,
-            "date": resolved_date,
-            "entry_id": entry_id,
-        }
-        notes = []
-        if date and is_future_date(date, app_ctx.settings.timezone):
-            notes.append("Date is in the future")
-        if tags_dropped:
-            notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
-        if notes:
-            result["note"] = "; ".join(notes)
-        return result
+        return await _journal_append_entry(app_ctx, topic, content, reasoning, tags, date)
 
     @mcp.tool(
         title="Read Topic",
@@ -193,8 +384,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         date_to: str | None = None,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Read entries from a topic — "show me my notes on health" or
-        "what did I write about work?"
+        """Read entries from a topic -- "show me my notes" / "what did I write".
 
         Use when the user wants to review a specific topic's entries.
         Returns entries in chronological order with content and reasoning.
@@ -214,52 +404,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             metadata (topic info), entries (list with content and reasoning),
             total (total matching entries), limit, offset.
         """
-        try:
-            topic = validate_topic(topic)
-        except ValueError as e:
-            return invalid_topic(topic, str(e))
-        if date_from:
-            try:
-                validate_date(date_from)
-            except ValueError:
-                return invalid_date(date_from)
-        if date_to:
-            try:
-                validate_date(date_to)
-            except ValueError:
-                return invalid_date(date_to)
-        limit = max(1, min(limit, MAX_READ_ENTRIES))
-        offset = max(0, offset)
-        user_id = current_user_id.get()
-        if user_id is None:
-            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
-        cipher = require_cipher(app_ctx)
-        try:
-            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                meta, entries, total = await entry_repo.read(
-                    conn,
-                    cipher,
-                    topic,
-                    limit=limit,
-                    date_from=date_from,
-                    date_to=date_to,
-                    offset=offset,
-                )
-        except TopicNotFoundError:
-            return not_found("Topic", topic)
-
-        result = {
-            "metadata": meta.model_dump(exclude={"id", "created", "updated"}),
-            "entries": [e.model_dump() for e in entries],
-            "total": total,
-            "limit": limit,
-            "offset": offset,
-        }
-        err = _assert_response_ok(result, tool_name="journal_read_topic")
-        if err:
-            await _report_oversized("journal_read_topic", err)
-            return err
-        return result
+        return await _journal_read_topic(app_ctx, topic, limit, date_from, date_to, offset)
 
     @mcp.tool(
         title="Update Entry",
@@ -271,7 +416,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_ENTRY_UPDATED, target_type="entry", target_kind="entry", app_ctx=app_ctx)
+    @audited(
+        ACTION_ENTRY_UPDATED, target_type="entry", target_kind=TargetKind.ENTRY, app_ctx=app_ctx
+    )
     async def journal_update_entry(
         entry_id: int,
         content: str | None = None,
@@ -280,7 +427,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         date: str | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Correct or expand a journal entry — "fix that entry" or "add more detail."
+        """Correct or expand a journal entry — "fix that entry" or "add more detail.".
 
         Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
@@ -299,82 +446,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Returns:
             Confirmation with updated entry_id.
         """
-        if content is not None:
-            content = sanitize_freetext(content)
-            if not content.strip():
-                return validation_error("content cannot be empty")
-            try:
-                reject_tool_call_syntax(content)
-            except ValueError as e:
-                return validation_error(str(e))
-        if reasoning is not None:
-            reasoning = sanitize_freetext(reasoning)
-            try:
-                reject_tool_call_syntax(reasoning)
-            except ValueError as e:
-                return validation_error(str(e))
-        if date:
-            try:
-                validate_date(date)
-            except ValueError:
-                return invalid_date(date)
-        tags_dropped = 0
-        if tags:
-            original_tag_count = len(tags)
-            tags = [s for t in tags if (s := sanitize_label(t))]
-            tags_dropped = original_tag_count - len(tags)
-
-        user_id = current_user_id.get()
-        if user_id is None:
-            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
-        cipher = require_cipher(app_ctx)
-
-        # Read committed text inside the same transaction — avoids a second round-trip.
-        # Within a transaction, reads see writes from the same transaction (savepoint).
-        row_data: tuple[str, str | None] | None = None
-        try:
-            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                await entry_repo.update(
-                    conn,
-                    cipher,
-                    entry_id=entry_id,
-                    content=content,
-                    reasoning=reasoning,
-                    mode=mode,
-                    date=date,
-                    tags=tags,
-                )
-                if content is not None or reasoning is not None:
-                    row_data = await entry_repo.get_text(conn, cipher, entry_id)
-        except EntryNotFoundError:
-            return not_found("Entry", entry_id)
-
-        # Re-embed if text changed: encode outside any connection, then store+mark in one.
-        if row_data:
-            embed_text = (row_data[0] or "") + " " + (row_data[1] or "")
-            try:
-                embedding = await asyncio.to_thread(
-                    app_ctx.embedding_service.encode, embed_text.strip()
-                )
-                async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                    await app_ctx.embedding_service.store_by_vector(conn, entry_id, embedding)
-                    await entry_repo.mark_indexed(conn, entry_id)
-            except Exception as e:
-                logger.warning("Failed to embed updated entry %s: %s", entry_id, e, exc_info=True)
-
-        result: dict[str, Any] = {
-            "status": "updated",
-            "entry_id": entry_id,
-            "mode": mode,
-        }
-        notes = []
-        if date and is_future_date(date, app_ctx.settings.timezone):
-            notes.append("Date is in the future")
-        if tags_dropped:
-            notes.append(f"{tags_dropped} tag(s) dropped (contained only unsupported characters)")
-        if notes:
-            result["note"] = "; ".join(notes)
-        return result
+        return await _journal_update_entry(app_ctx, entry_id, content, reasoning, mode, date, tags)
 
     @mcp.tool(
         title="Delete Entry",
@@ -386,12 +458,15 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:write")
-    @audited(ACTION_ENTRY_DELETED, target_type="entry", target_kind="entry", app_ctx=app_ctx)
+    @audited(
+        ACTION_ENTRY_DELETED, target_type="entry", target_kind=TargetKind.ENTRY, app_ctx=app_ctx
+    )
     async def journal_delete_entry(
         entry_id: int,
     ) -> dict[str, Any]:
         """Remove a journal entry permanently — wrong data, duplicate, or mistake.
-        Trigger: 'delete that', 'forget that', 'undo that', 'scratch that', 'that was wrong.'
+
+        Trigger: 'delete that', 'forget that', 'undo that', 'scratch that', 'that was wrong.'.
 
         Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
@@ -403,17 +478,4 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Returns:
             Confirmation with deleted entry_id.
         """
-        user_id = current_user_id.get()
-        if user_id is None:
-            raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
-        try:
-            async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                # delete_entry soft-deletes the entry and removes its embedding
-                await entry_repo.delete(conn, entry_id)
-        except EntryNotFoundError:
-            return not_found("Entry", entry_id)
-
-        return {
-            "status": "deleted",
-            "entry_id": entry_id,
-        }
+        return await _journal_delete_entry(app_ctx, entry_id)

@@ -21,6 +21,7 @@ class MCPPathNormalizer:
         self.app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Rewrite /mcp to /mcp/ so FastMCP's mounted sub-app handles the request."""
         if scope["type"] == "http" and scope["path"] == "/mcp":
             scope = dict(scope)
             scope["path"] = "/mcp/"

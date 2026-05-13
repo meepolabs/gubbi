@@ -1,27 +1,26 @@
 """MCP tools: journal_briefing, journal_timeline."""
 
 import asyncio
-import logging
 import re
 from datetime import date, timedelta
 from typing import Any
 
 import asyncpg
+import structlog
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 from mcp.types import ToolAnnotations
 
-from gubbi.core.auth_context import current_user_id
-from gubbi.core.cipher_guard import require_cipher
-from gubbi.core.context import AppContext
-from gubbi.core.crypto import DecryptionError
-from gubbi.core.scope import require_scope
-from gubbi.core.validation import local_today
+from gubbi.app_context import AppContext
+from gubbi.auth.scope import require_scope
+from gubbi.auth_context import current_user_id
+from gubbi.crypto.cipher import DecryptionError
+from gubbi.crypto.guard import require_cipher
 from gubbi.storage import knowledge
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.repositories import entries as entry_repo
+from gubbi.storage.repositories import search as search_repo
 from gubbi.storage.repositories import topics as topic_repo
-from gubbi.tools._response_size import _assert_response_ok, _report_oversized
 from gubbi.tools.constants import (
     BRIEFING_KEY_FACTS_COUNT,
     BRIEFING_KEY_FACTS_QUERY,
@@ -32,8 +31,12 @@ from gubbi.tools.constants import (
     MAX_TIMELINE_ENTRIES,
 )
 from gubbi.tools.errors import validation_error
+from gubbi.tools.response_size import _report_oversized, check_response_size
+from gubbi.validation import local_today
 
-logger = logging.getLogger(__name__)
+__all__: list[str] = ["register"]
+
+logger = structlog.get_logger(__name__)
 
 
 def _month_end(year: int, month: int) -> date:
@@ -131,9 +134,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         ),
     )
     @require_scope("journal:read")
-    async def journal_briefing() -> dict:
-        """Get the user's identity, recent activity, and topic list — the complete
-        context for this person.
+    async def journal_briefing() -> dict[str, Any]:
+        """Identity, recent activity, and topic list -- complete context for this person.
 
         Call this FIRST in every new conversation before responding.
         Without calling this, you have no memory of who this person is or what they care about.
@@ -177,14 +179,14 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 app_ctx.embedding_service.encode, BRIEFING_KEY_FACTS_QUERY
             )
         except Exception:
-            logger.warning("Key facts encoding failed, continuing without", exc_info=True)
+            await logger.warning("Key facts encoding failed, continuing without", exc_info=True)
 
         user_id = current_user_id.get()
         if user_id is None:
             raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
 
         cipher = require_cipher(app_ctx)
-        key_facts: list[dict] | None = None
+        key_facts: list[dict[str, Any]] | None = None
         key_facts_status: str = "missing"
 
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
@@ -194,9 +196,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             all_topics, topic_count = await topic_repo.list_all(conn, limit=BRIEFING_MAX_TOPICS)
             stats = await entry_repo.get_stats(conn)
 
-            has_embeddings: bool = await conn.fetchval(
-                "SELECT EXISTS(SELECT 1 FROM entry_embeddings LIMIT 1)"
-            )
+            has_embeddings: bool = await search_repo.has_embeddings(conn)
 
             raw_facts: list[dict[str, Any]] = []
             if key_facts_embedding is not None:
@@ -207,15 +207,15 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         limit=BRIEFING_KEY_FACTS_COUNT,
                     )
                 except DecryptionError as exc:
-                    logger.warning(
-                        "Key facts batch decryption failed (%s)",
-                        type(exc).__name__,
+                    await logger.warning(
+                        "Key facts batch decryption failed",
+                        error_type=type(exc).__name__,
                         exc_info=True,
                     )
                 except asyncpg.PostgresError:
-                    logger.exception("Key facts batch query failed")
+                    await logger.exception("Key facts batch query failed")
                 except Exception:
-                    logger.exception("Key facts retrieval failed unexpectedly")
+                    await logger.exception("Key facts retrieval failed unexpectedly")
                     raise
 
             if raw_facts:
@@ -224,14 +224,14 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     {int(row["entry_id"]) for row in raw_facts if row.get("entry_id") is not None}
                 )
 
-                facts_list: list[dict] = []
+                facts_list: list[dict[str, Any]] = []
                 decrypted_entries: dict[int, tuple[str, str | None]] = {}
                 try:
                     decrypted_entries = await entry_repo.get_texts(conn, cipher, fact_entry_ids)
                 except asyncpg.PostgresError:
-                    logger.exception(
-                        "Key facts entry batch query failed for %d entries",
-                        len(fact_entry_ids),
+                    await logger.exception(
+                        "Key facts entry batch query failed",
+                        entry_count=len(fact_entry_ids),
                     )
 
                 for row in raw_facts:
@@ -289,7 +289,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "topic_count": topic_count,
             "stats": stats,
         }
-        err = _assert_response_ok(briefing_payload, tool_name="journal_briefing")
+        err = check_response_size(briefing_payload, tool_name="journal_briefing")
         if err:
             await _report_oversized("journal_briefing", err)
             return err
@@ -306,9 +306,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         period: str,
         limit: int = DEFAULT_TIMELINE_LIMIT,
         offset: int = 0,
-    ) -> dict:
-        """navigation index -- use to find interesting dates, then drill in via
-        journal_read_topic / journal_search for full content.
+    ) -> dict[str, Any]:
+        """Navigation index -- find interesting dates, drill in via read_topic/search.
 
         Browse what happened during a time period. Returns only IDs, dates,
         topics, and short titles (no decrypted body text). Use this to pick
@@ -356,7 +355,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "entries": entries,
             "count": len(entries),
         }
-        err = _assert_response_ok(payload, tool_name="journal_timeline")
+        err = check_response_size(payload, tool_name="journal_timeline")
         if err:
             await _report_oversized("journal_timeline", err)
             return err

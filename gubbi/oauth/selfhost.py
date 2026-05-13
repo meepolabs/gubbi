@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import logging
-import sqlite3
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
+import aiosqlite
 from fastapi import FastAPI
 from mcp.server.auth.routes import create_auth_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
@@ -23,10 +23,16 @@ from gubbi.oauth.provider import JournalOAuthProvider
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.wellknown import register as register_wellknown
 
-_logger = logging.getLogger("gubbi.oauth.selfhost")
+__all__: list[str] = ["register"]
+
+logger = logging.getLogger(__name__)
+
+ValidatorFn = Callable[[str], Awaitable[frozenset[str] | None]]
 
 
-def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], frozenset[str] | None]:
+def _make_token_validator(
+    oauth_storage: OAuthStorage,
+) -> ValidatorFn:
     """Return a closure that validates OAuth access tokens.
 
     Returns ``frozenset({"journal:read", "journal:write"})`` on success,
@@ -38,17 +44,17 @@ def _make_token_validator(oauth_storage: OAuthStorage) -> Callable[[str], frozen
         ``None`` means invalid token; a frozenset means granted scopes.
     """
 
-    def validate(token: str) -> frozenset[str] | None:
+    async def validate(token: str) -> frozenset[str] | None:
         try:
-            at = oauth_storage.get_access_token(token)
+            at = await oauth_storage.get_access_token(token)
             if at is not None and (at.expires_at is None or at.expires_at > int(time.time())):
                 return frozenset({"journal:read", "journal:write"})
             return None
-        except (sqlite3.Error, ValueError, KeyError):
-            _logger.warning("Token validation failed", exc_info=True)
+        except (aiosqlite.Error, ValueError, KeyError):
+            logger.warning("Token validation failed", exc_info=True)
             return None
         except Exception:
-            _logger.exception("Unexpected error during token validation")
+            logger.exception("Unexpected error during token validation")
             return None
 
     return validate
@@ -70,8 +76,8 @@ def _wrap_register_rate_limit(
         ip = client_ip(request)
         event_key = f"register:{ip}"
         try:
-            count = oauth_storage.count_rate_limit_events(event_key, REGISTER_WINDOW_SECS)
-        except (sqlite3.Error, ValueError):
+            count = await oauth_storage.count_rate_limit_events(event_key, REGISTER_WINDOW_SECS)
+        except (aiosqlite.Error, ValueError):
             response = JSONResponse(
                 {"error": "rate_limit_unavailable"},
                 status_code=503,
@@ -85,17 +91,17 @@ def _wrap_register_rate_limit(
             )
             await response(scope, receive, send)
             return
-        oauth_storage.record_rate_limit_event(event_key)
+        await oauth_storage.record_rate_limit_event(event_key)
         await original_app(scope, receive, send)
 
     route.app = rate_limited_app  # type: ignore[assignment]
 
 
-def register(
+async def register(
     app: FastAPI,
     storage: OAuthStorage,
     settings: Settings,
-) -> Callable[[str], frozenset[str] | None]:
+) -> ValidatorFn | None:
     """Register self-host OAuth routes and return token validator."""
     provider = JournalOAuthProvider(
         storage=storage,

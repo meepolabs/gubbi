@@ -29,7 +29,7 @@ TEST_CLIENT_ID = "test-client"
 TEST_REDIRECT_URI = "http://localhost/callback"
 
 
-def _register_test_client(storage: OAuthStorage) -> None:
+async def _register_test_client(storage: OAuthStorage) -> None:
     """Pre-register the test client so redirect_uri validation passes."""
     client = OAuthClientInformationFull(
         client_id=TEST_CLIENT_ID,
@@ -37,7 +37,7 @@ def _register_test_client(storage: OAuthStorage) -> None:
         redirect_uris=[TEST_REDIRECT_URI],  # type: ignore[arg-type]
         client_name="test-app",
     )
-    storage.save_client(client)
+    await storage.save_client(client)
 
 
 def _create_test_app(oauth_storage: OAuthStorage) -> Starlette:
@@ -197,8 +197,8 @@ class TestLoginPage:
         )
         assert response.status_code == 403
 
-    def test_login_wrong_password(self, oauth_storage: OAuthStorage) -> None:
-        _register_test_client(oauth_storage)
+    async def test_login_wrong_password(self, oauth_storage: OAuthStorage) -> None:
+        await _register_test_client(oauth_storage)
         app = _create_test_app(oauth_storage)
         client = TestClient(app)
 
@@ -219,8 +219,8 @@ class TestLoginPage:
         assert response.status_code == 200
         assert "Invalid password" in response.text
 
-    def test_login_correct_password_redirects(self, oauth_storage: OAuthStorage) -> None:
-        _register_test_client(oauth_storage)
+    async def test_login_correct_password_redirects(self, oauth_storage: OAuthStorage) -> None:
+        await _register_test_client(oauth_storage)
         app = _create_test_app(oauth_storage)
         client = TestClient(app, follow_redirects=False)
 
@@ -294,17 +294,27 @@ class TestXSSPrevention:
 class TestTokenLengthValidation:
     def test_oversized_token_rejected(self, oauth_storage: OAuthStorage) -> None:
         """Fix #9: tokens longer than 256 chars should be rejected."""
+        from uuid import UUID
+
         from starlette.applications import Starlette
         from starlette.responses import JSONResponse
         from starlette.routing import Route
 
+        from gubbi.auth.strategies import ApiKeyStrategy
         from gubbi.middleware import BearerAuthMiddleware
 
         async def echo(request: object) -> JSONResponse:  # noqa: ARG001
             return JSONResponse({"ok": True})
 
         inner = Starlette(routes=[Route("/", echo)])
-        app = BearerAuthMiddleware(inner, api_key="unused-for-oversized-check")
+        app = BearerAuthMiddleware(
+            inner,
+            strategies=[
+                ApiKeyStrategy(
+                    "unused-for-oversized-check", (), UUID("00000000-0000-0000-0000-000000000000")
+                )
+            ],
+        )
         client = TestClient(app)
 
         oversized = "x" * 300
@@ -313,7 +323,7 @@ class TestTokenLengthValidation:
 
 
 class TestFullOAuthFlow:
-    def test_register_authorize_token(self, oauth_storage: OAuthStorage) -> None:
+    async def test_register_authorize_token(self, oauth_storage: OAuthStorage) -> None:
         """Test the complete OAuth flow: register -> authorize -> login -> token."""
         app = _create_test_app(oauth_storage)
         client = TestClient(app, follow_redirects=False)
@@ -404,20 +414,20 @@ class TestFullOAuthFlow:
         assert token_data["token_type"].lower() == "bearer"
 
         # Verify the access token is in storage
-        at = oauth_storage.get_access_token(token_data["access_token"])
+        at = await oauth_storage.get_access_token(token_data["access_token"])
         assert at is not None
         assert at.client_id == client_id
 
 
 class TestRegisterRateLimit:
-    def test_register_rate_limited_per_ip(self, oauth_storage: OAuthStorage) -> None:
+    async def test_register_rate_limited_per_ip(self, oauth_storage: OAuthStorage) -> None:
         """HIGH-4: /register returns 429 after REGISTER_MAX_ATTEMPTS in window."""
         from gubbi.oauth.constants import REGISTER_MAX_ATTEMPTS
 
         # Use the real register_oauth_routes so the wrap is applied
         settings = get_settings()
         app = FastAPI()
-        register_oauth_routes(app, oauth_storage, settings)
+        await register_oauth_routes(app, oauth_storage, settings)
 
         client = TestClient(app)
         for i in range(REGISTER_MAX_ATTEMPTS):
@@ -441,21 +451,22 @@ class TestRegisterRateLimit:
 
 
 class TestLoginRateLimitSharedAcrossInstances:
-    def test_lockout_persists_when_storage_reopened(self, tmp_path: Path) -> None:
+    async def test_lockout_persists_when_storage_reopened(self, tmp_path: Path) -> None:
         """CRITICAL-2: simulate two workers by opening storage twice on same DB."""
         from gubbi.oauth.constants import LOGIN_MAX_FAILURES
 
         db_path = tmp_path / "oauth.db"
 
         storage_a = OAuthStorage(db_path)
-        _ = storage_a.conn
+        await storage_a.initialize()
         for _ in range(LOGIN_MAX_FAILURES):
-            storage_a.record_rate_limit_event("login_failure:1.2.3.4")
+            await storage_a.record_rate_limit_event("login_failure:1.2.3.4")
 
         # "Worker B" opens the same DB
         storage_b = OAuthStorage(db_path)
-        count_b = storage_b.count_rate_limit_events("login_failure:1.2.3.4", 600)
+        await storage_b.initialize()
+        count_b = await storage_b.count_rate_limit_events("login_failure:1.2.3.4", 600)
         assert count_b == LOGIN_MAX_FAILURES
 
-        storage_a.close()
-        storage_b.close()
+        await storage_a.close()
+        await storage_b.close()

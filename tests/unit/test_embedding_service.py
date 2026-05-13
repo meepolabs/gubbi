@@ -4,6 +4,7 @@ Uses direct attribute injection to mock the ONNX session and tokenizer,
 keeping tests fast and free of model download requirements.
 """
 
+import warnings
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -108,3 +109,33 @@ class TestStoreAndSearch:
         assert results[0]["entry_id"] == 1
         assert results[0]["topic"] == "work/acme"
         assert results[0]["similarity"] == 0.95
+
+
+class TestStoreByVectorDeprecation:
+    """store_by_vector is a deprecated alias for save_by_vector (CO.43)."""
+
+    async def test_store_by_vector_emits_deprecation_warning(
+        self, mock_embedding_service: Any
+    ) -> None:
+        conn = AsyncMock()
+        with pytest.warns(DeprecationWarning, match="store_by_vector is deprecated"):
+            await mock_embedding_service.store_by_vector(conn, entry_id=1, embedding=[0.0] * 384)
+        conn.execute.assert_called_once()
+
+    async def test_store_by_vector_delegates_to_save_by_vector(
+        self, mock_embedding_service: Any
+    ) -> None:
+        conn = AsyncMock()
+        with pytest.warns(DeprecationWarning):
+            await mock_embedding_service.store_by_vector(
+                conn, entry_id=42, embedding=[1.0] + [0.0] * 383
+            )
+        sql = conn.execute.call_args[0][0]
+        assert "entry_embeddings" in sql
+        assert "ON CONFLICT" in sql
+
+    async def test_save_by_vector_does_not_warn(self, mock_embedding_service: Any) -> None:
+        conn = AsyncMock()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            await mock_embedding_service.save_by_vector(conn, entry_id=1, embedding=[0.0] * 384)

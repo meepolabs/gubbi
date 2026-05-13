@@ -2,19 +2,19 @@
 
 import pytest
 
-from gubbi.tools._response_size import _assert_response_ok
+from gubbi.tools.response_size import check_response_size
 
 pytestmark = pytest.mark.unit
 
 
 def test_ok_payload_returns_none() -> None:
-    result = _assert_response_ok({"entries": [{"id": "1"}]})
+    result = check_response_size({"entries": [{"id": "1"}]})
     assert result is None
 
 
 def test_large_payload_returns_error_dict() -> None:
     huge = {"entries": [{"content": "x" * 100_000}]}
-    result = _assert_response_ok(huge)
+    result = check_response_size(huge)
     assert result is not None
     assert result["error"] == "response_too_large"
     assert "current_size_chars" in result
@@ -23,8 +23,8 @@ def test_large_payload_returns_error_dict() -> None:
 
 def test_custom_threshold() -> None:
     payload = {"x": "a" * 200}
-    assert _assert_response_ok(payload, error_threshold_chars=100) is not None
-    assert _assert_response_ok(payload, error_threshold_chars=10_000) is None
+    assert check_response_size(payload, error_threshold_chars=100) is not None
+    assert check_response_size(payload, error_threshold_chars=10_000) is None
 
 
 def test_unserializable_passes_through() -> None:
@@ -32,13 +32,13 @@ def test_unserializable_passes_through() -> None:
         pass
 
     # json.dumps raises TypeError for non-serializable objects
-    result = _assert_response_ok({"obj": NotSerializable()})
+    result = check_response_size({"obj": NotSerializable()})
     assert result is None
 
 
 def test_simple_payload_fits_threshold() -> None:
     small = {"msg": "hello", "count": 42}
-    result = _assert_response_ok(small)
+    result = check_response_size(small)
     assert result is None
 
 
@@ -62,7 +62,7 @@ def test_conversations_too_large_returns_error() -> None:
         "limit": 20,
         "offset": 0,
     }
-    result = _assert_response_ok(huge, tool_name="journal_list_conversations")
+    result = check_response_size(huge, tool_name="journal_list_conversations")
     assert result is not None
     assert result["error"] == "response_too_large"
     assert "current_size_chars" in result
@@ -76,7 +76,7 @@ def test_conversations_normal_fits() -> None:
         "limit": 20,
         "offset": 0,
     }
-    result = _assert_response_ok(small, tool_name="journal_list_conversations")
+    result = check_response_size(small, tool_name="journal_list_conversations")
     assert result is None
 
 
@@ -99,7 +99,7 @@ def test_topics_too_large_returns_error() -> None:
         "offset": 0,
         "limit": 20,
     }
-    result = _assert_response_ok(huge, tool_name="journal_list_topics")
+    result = check_response_size(huge, tool_name="journal_list_topics")
     assert result is not None
     assert result["error"] == "response_too_large"
     assert "current_size_chars" in result
@@ -113,5 +113,5 @@ def test_topics_normal_fits() -> None:
         "offset": 0,
         "limit": 20,
     }
-    result = _assert_response_ok(small, tool_name="journal_list_topics")
+    result = check_response_size(small, tool_name="journal_list_topics")
     assert result is None

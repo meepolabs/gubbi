@@ -31,7 +31,7 @@ import asyncpg
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.repositories import entries as entry_repo
 
 # Session-scoped asyncpg pools require tests to run in the pools' event loop.

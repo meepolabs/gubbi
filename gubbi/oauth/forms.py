@@ -11,14 +11,15 @@ POST compares the cookie value to the form value (timing-safe).
 
 from __future__ import annotations
 
-import ipaddress
-import logging
 import secrets
 import time
 from collections.abc import Callable, Coroutine
 from typing import Any
 
 import bcrypt
+import structlog
+from gubbi_common.http import client_ip as _client_ip
+from gubbi_common.telemetry import bound_logger
 from mcp.server.auth.provider import AuthorizationCode, construct_redirect_uri
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse, Response
@@ -32,36 +33,45 @@ from gubbi.oauth.constants import (
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.templates import render_login_page
 
+__all__: list[str] = [
+    "LoginHandler",
+    "client_ip",
+    "create_login_handler",
+]
+
 LoginHandler = Callable[[Request], Coroutine[Any, Any, Response]]
 
-logger = logging.getLogger("gubbi.oauth.forms")
+logger = structlog.get_logger(__name__)
 
 
 def client_ip(request: Request) -> str:
     """Extract client IP, optionally honouring X-Forwarded-For.
 
     Honours JOURNAL_AUTH__TRUST_FORWARDED_HEADERS (default False).  When
-    True the leftmost X-Forwarded-For value is treated as the original
-    client IP; when False only request.client.host is used so reverse-
-    proxy headers cannot forge the caller address.
+    True the RIGHTMOST X-Forwarded-For value (the trusted-proxy stamp,
+    per DEC-086 rule 4) is treated as the originating client IP; when
+    False the XFF header is ignored and only request.client.host is
+    used so reverse-proxy headers cannot forge the caller address.
 
-    Operators enabling this flag MUST ensure a trusted reverse proxy is in
-    front of gubbi and that direct access to the application is not
+    Operators enabling this flag MUST ensure a trusted reverse proxy is
+    in front of gubbi and that direct access to the application is not
     possible.  (M-9.3).
+
+    Delegates to gubbi_common.http.client_ip which is the single source
+    of truth for XFF parsing across both gubbi and gubbi-cloud (helper
+    introduced in gubbi-common 0.10.0; see DEC-086).  The helper returns
+    None when no IP is recoverable; this wrapper preserves the legacy
+    "unknown" sentinel for log-shape stability.
     """
     from gubbi.config import get_settings
 
-    if not get_settings().auth.trust_forwarded_headers:
-        return request.client.host if request.client else "unknown"
-    xff: str = request.headers.get("x-forwarded-for", "") or ""
-    if xff:
-        candidate = xff.split(",")[0].strip()
-        try:
-            ipaddress.ip_address(candidate)
-        except ValueError:
-            return request.client.host if request.client else "unknown"
-        return candidate
-    return request.client.host if request.client else "unknown"
+    return (
+        _client_ip(
+            request,
+            trust_forwarded_headers=get_settings().auth.trust_forwarded_headers,
+        )
+        or "unknown"
+    )
 
 
 def create_login_handler(
@@ -74,6 +84,7 @@ def create_login_handler(
     """Create a Starlette endpoint handler for /login."""
 
     async def login_handler(request: Request) -> Response:
+        log = bound_logger(request)
         if request.method == "GET":
             params = request.query_params
             csrf_token = secrets.token_urlsafe(32)
@@ -94,10 +105,13 @@ def create_login_handler(
 
         # POST: rate-limit check before any work
         if (
-            storage.count_rate_limit_events(event_key, LOGIN_LOCKOUT_WINDOW_SECS)
+            await storage.count_rate_limit_events(event_key, LOGIN_LOCKOUT_WINDOW_SECS)
             >= LOGIN_MAX_FAILURES
         ):
-            logger.warning("Login rate limit reached, rejecting request from %s", client_host)
+            await log.warning(
+                "Login rate limit reached, rejecting request",
+                client_host=client_host,
+            )
             return HTMLResponse("Too many failed attempts. Try again later.", status_code=429)
 
         # POST: verify CSRF token first
@@ -106,7 +120,7 @@ def create_login_handler(
         cookie_csrf = request.cookies.get(CSRF_COOKIE_NAME, "")
 
         if not form_csrf or not cookie_csrf or not secrets.compare_digest(form_csrf, cookie_csrf):
-            logger.warning("CSRF validation failed")
+            await log.warning("CSRF validation failed")
             return HTMLResponse("CSRF validation failed", status_code=403)
 
         client_id = str(form.get("client_id", ""))
@@ -117,14 +131,16 @@ def create_login_handler(
         password = str(form.get("password", ""))
 
         # Validate client exists and redirect_uri is registered before touching credentials
-        client = storage.get_client(client_id)
+        client = await storage.get_client(client_id)
         if client is None:
-            logger.warning("Unknown client_id in login form: %s", client_id)
+            await log.warning("Unknown client_id in login form", client_id=client_id)
             return HTMLResponse("Invalid client", status_code=400)
         registered_uris = [str(u) for u in (client.redirect_uris or [])]
         if redirect_uri not in registered_uris:
-            logger.warning(
-                "Unregistered redirect_uri '%s' for client '%s'", redirect_uri, client_id
+            await log.warning(
+                "Unregistered redirect_uri",
+                redirect_uri=redirect_uri,
+                client_id=client_id,
             )
             return HTMLResponse("Invalid redirect_uri", status_code=400)
 
@@ -134,8 +150,8 @@ def create_login_handler(
             password_hash.encode("utf-8"),
         ):
             # Record the failure for per-IP rate limiting (CRITICAL-2)
-            storage.record_rate_limit_event(event_key)
-            logger.warning("Failed login attempt from %s", client_host)
+            await storage.record_rate_limit_event(event_key)
+            await log.warning("Failed login attempt", client_host=client_host)
             csrf_token = secrets.token_urlsafe(32)
             return render_login_page(
                 client_id=client_id,
@@ -158,12 +174,12 @@ def create_login_handler(
             expires_at=time.time() + auth_code_ttl,
             client_id=client_id,
             code_challenge=code_challenge,
-            redirect_uri=redirect_uri,  # type: ignore[arg-type]
+            redirect_uri=redirect_uri,
             redirect_uri_provided_explicitly=True,
         )
-        storage.save_auth_code(code, auth_code)
+        await storage.save_auth_code(code, auth_code)
 
-        logger.info("Authorization code issued from %s", client_host)
+        await log.info("Authorization code issued", client_host=client_host)
 
         # Redirect back to client, clear CSRF cookie
         callback = construct_redirect_uri(

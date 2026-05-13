@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 
 from fastapi import FastAPI
 from pydantic import AnyHttpUrl
@@ -14,14 +14,16 @@ from gubbi.oauth.selfhost import register as register_selfhost
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.wellknown import register as register_wellknown
 
-_logger = logging.getLogger("gubbi.oauth.router")
+__all__: list[str] = ["register_oauth_routes"]
+
+logger = logging.getLogger(__name__)
 
 
-def register_oauth_routes(
+async def register_oauth_routes(
     app: FastAPI,
     oauth_storage: OAuthStorage,
     settings: Settings,
-) -> Callable[[str], frozenset[str] | None] | None:
+) -> Callable[[str], Awaitable[frozenset[str] | None]] | None:
     """Register OAuth endpoints on the FastAPI app if configured.
 
     Dispatches across three deploy shapes:
@@ -40,7 +42,7 @@ def register_oauth_routes(
     if settings.auth.hydra_admin_url:
         issuer_url = AnyHttpUrl(settings.auth.hydra_public_issuer_url)
         register_wellknown(app, settings, authorization_servers=[issuer_url])
-        _logger.info("Registered protected-resource routes (Mode 3: Hydra)")
+        logger.info("Registered protected-resource routes (Mode 3: Hydra)")
         return None
 
     # Mode 1: no OAuth path configured.
@@ -49,6 +51,6 @@ def register_oauth_routes(
         return None
 
     # Mode 2: self-host OAuth.
-    token_validator = register_selfhost(app, oauth_storage, settings)
-    _logger.info("Registered self-host OAuth routes (Mode 2)")
+    token_validator = await register_selfhost(app, oauth_storage, settings)
+    logger.info("Registered self-host OAuth routes (Mode 2)")
     return token_validator

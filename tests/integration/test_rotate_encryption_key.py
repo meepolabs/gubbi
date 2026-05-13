@@ -17,7 +17,7 @@ from uuid import UUID
 import asyncpg
 import pytest
 
-from gubbi.core.crypto import ContentCipher
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.scripts.rotate_encryption_key import (
     _ROTATION_SCREENS,
     _run,

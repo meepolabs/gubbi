@@ -2,7 +2,7 @@ import logging
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final, Self
+from typing import Any, Final, Literal, Self
 
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import (
@@ -11,6 +11,22 @@ from pydantic_settings import (
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
+
+__all__: list[str] = [
+    "ALLOWED_ORIGINS",
+    "AuthConfig",
+    "DbConfig",
+    "Environment",
+    "HYDRA_INTROSPECT_TIMEOUT_SECS",
+    "LLMConfig",
+    "OAUTH_ACCESS_TOKEN_TTL_SECS",
+    "OAUTH_AUTH_CODE_TTL_SECS",
+    "OAUTH_REFRESH_TOKEN_TTL_SECS",
+    "REQUIRED_OAUTH_SCOPE",
+    "ServerConfig",
+    "Settings",
+    "get_settings",
+]
 
 # Hydra admin-introspect HTTP timeout, seconds. 3s is comfortable on a local
 # docker network; it is not an operator-tunable.
@@ -39,7 +55,10 @@ OAUTH_ACCESS_TOKEN_TTL_SECS: Final[int] = 3600  # 1 hour
 OAUTH_REFRESH_TOKEN_TTL_SECS: Final[int] = 2592000  # 30 days
 OAUTH_AUTH_CODE_TTL_SECS: Final[int] = 300  # 5 minutes
 
-_config_logger = logging.getLogger("gubbi.config")
+# Stays on stdlib ``logging`` because the only emit is in a Pydantic
+# ``@model_validator(mode="after")`` which runs sync. ``structlog.AsyncBoundLogger``
+# emits return coroutines that must be awaited; sync callers cannot use it.
+logger = logging.getLogger(__name__)
 
 # Maps old flat env var names (without JOURNAL_ prefix) to new double-underscore
 # nested names that pydantic-settings v2 understands with env_nested_delimiter="__".
@@ -63,6 +82,7 @@ _FLAT_TO_NESTED_ENV: dict[str, str] = {
     "JOURNAL_TRANSPORT": "JOURNAL_SERVER__TRANSPORT",
     "JOURNAL_LLM_API_KEY": "JOURNAL_LLM__API_KEY",
     "JOURNAL_LLM_MODEL": "JOURNAL_LLM__MODEL",
+    "JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES": "JOURNAL_LLM__ORPHAN_CLEANUP_THRESHOLD_MINUTES",
 }
 
 
@@ -105,7 +125,7 @@ class AuthConfig(BaseModel):
     operator_email: str = ""
     trust_gateway: bool = False
     gateway_secret: str = ""
-    gateway_require_signature: bool = False
+    gateway_require_signature: bool = True
     api_key_scopes: list[str] = ["journal:read", "journal:write"]
     # When True, client_ip() honours the leftmost X-Forwarded-For header as
     # the original client IP.  Requires a trusted reverse-proxy in front of
@@ -115,6 +135,7 @@ class AuthConfig(BaseModel):
     @field_validator("api_key")
     @classmethod
     def validate_api_key(cls, v: str) -> str:
+        """Reject keys shorter than 32 chars (empty allowed for Mode 3)."""
         # Non-empty keys must still be strong. Length enforcement for the
         # "required vs optional" contract lives in the model validator below,
         # so Mode 3 can leave this empty without tripping the length check.
@@ -125,7 +146,7 @@ class AuthConfig(BaseModel):
     @model_validator(mode="after")
     def _warn_on_require_signature_without_secret(self) -> Self:
         if self.gateway_require_signature and not self.gateway_secret:
-            _config_logger.warning(
+            logger.warning(
                 "JOURNAL_GATEWAY_REQUIRE_SIGNATURE=true but "
                 "JOURNAL_GUBBI_GATEWAY_SECRET is empty -- set a hex-encoded "
                 "shared secret (>= 64 hex chars) before enabling this "
@@ -150,6 +171,16 @@ class LLMConfig(BaseModel):
 
     api_key: str = ""
     model: str = ""
+    # JOURNAL_LLM__BUDGET_ENABLED; gates budget delta writes from worker
+    # (hosted: True; self-host: False)
+    journal_llm_budget_enabled: bool = False
+    # JOURNAL_LLM__ORPHAN_CLEANUP_THRESHOLD_MINUTES; stale pending-job sweep.
+    orphan_cleanup_threshold_minutes: int = 30
+
+
+# Canonical Environment Literal (mirrored byte-for-byte across gubbi + gubbi-cloud).
+# See DEC-094 (canonical app_env literal); env-contract-lint enforces parity.
+Environment = Literal["dev", "ci", "staging", "production"]
 
 
 class Settings(BaseSettings):
@@ -187,6 +218,12 @@ class Settings(BaseSettings):
       health server listens on 0.0.0.0 instead of 127.0.0.1 (default
       localhost-only; M-9.7).
     """
+
+    # Deploy environment marker. Controls safe-by-default gates that should
+    # only relax in local development. Env var: JOURNAL_APP_ENV.
+    # See DEC-094 (canonical app_env literal); default stays "dev" to honour
+    # the self-host first principle.
+    app_env: Environment = "dev"
 
     db: DbConfig
     auth: AuthConfig = AuthConfig()
@@ -284,12 +321,41 @@ class Settings(BaseSettings):
             )
         return self
 
+    @model_validator(mode="after")
+    def _validate_trust_gateway_signature(self) -> "Settings":
+        """Refuse trust_gateway=True without signature enforcement in deployed envs.
+
+        Gated on ``self.is_deployed`` (True for staging+production) per
+        DEC-094. The unsafe combination is reachable in non-deployed
+        envs (``dev``, ``ci``) for local trust-gateway smoke tests and
+        the CI harness, but never in ``staging``/``production``.
+        """
+        if self.auth.trust_gateway and not self.auth.gateway_require_signature and self.is_deployed:
+            raise ValueError(
+                "auth.trust_gateway=True requires "
+                "auth.gateway_require_signature=True in deployed envs "
+                "(staging/production)"
+            )
+        return self
+
+    @property
+    def is_deployed(self) -> bool:
+        """Return True when running in a deployed environment.
+
+        Canonical predicate replacing every ``app_env != "dev"`` check across
+        both gubbi and gubbi-cloud (DEC-094). dev + ci are non-deployed
+        (developer laptop, CI runner); staging + production are deployed.
+        """
+        return self.app_env in ("staging", "production")
+
     @property
     def knowledge_dir(self) -> Path:
+        """Filesystem location of user-knowledge markdown (profile, key facts)."""
         return self.data_dir / "knowledge"
 
     @property
     def conversations_json_dir(self) -> Path:
+        """Filesystem location of archived conversation JSON blobs."""
         return self.data_dir / "conversations_json"
 
     @property
@@ -308,6 +374,7 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Inject _FlatCompatEnvSource so legacy flat env vars resolve before nested ones."""
         return (
             init_settings,
             _FlatCompatEnvSource(settings_cls),
