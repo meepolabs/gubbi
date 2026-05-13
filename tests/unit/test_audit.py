@@ -1,12 +1,18 @@
-"""Unit tests for gubbi.audit -- record_audit() helper.
+"""Unit tests for ``gubbi.audit`` -- the re-export shim.
 
-Tests use a mock asyncpg connection so no database is required.
-All 13 documented action strings are exercised.
+As of gubbi-common 0.11.0 (A3 consolidation) ``record_audit`` is a
+re-export of ``gubbi_common.audit.sql.record_audit_async``. The deep
+validation behaviour (actor_type / actor_id / target_id shape, banned-key
+metadata redaction, IP normalisation, metadata size cap, ``audit.write``
+OTel span) is exercised in
+``gubbi-common/tests/audit/test_sql.py``. These tests guard the
+re-export contract -- if a future change reintroduces a local ``record_audit``
+shim, the assertions here will surface the divergence.
 """
 
 from __future__ import annotations
 
-import json
+import inspect
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
@@ -29,298 +35,139 @@ def _make_conn() -> AsyncMock:
     return conn
 
 
-def _executed_args(conn: AsyncMock) -> tuple[object, ...]:
-    """Return the positional args from the first conn.execute() call."""
-    result: tuple[object, ...] = conn.execute.call_args[0]
-    return result
-
-
 # ---------------------------------------------------------------------------
-# Happy-path: all 13 action strings
-# ---------------------------------------------------------------------------
-
-ALL_ACTIONS = [
-    Action.IDENTITY_CREATED,
-    Action.IDENTITY_DELETED,
-    Action.IDENTITY_RESTORED,
-    Action.TENANT_PROVISIONED,
-    Action.TENANT_SUSPENDED,
-    Action.TENANT_REACTIVATED,
-    Action.LOGIN_FAILED,
-    Action.SUBSCRIPTION_CREATED,
-    Action.SUBSCRIPTION_CANCELED,
-    Action.SUBSCRIPTION_OVERRIDE,
-    Action.SECRET_ROTATED,
-    Action.ADMIN_QUERY_EXECUTED,
-    Action.ENCRYPTION_KEY_ROTATED,
-]
-
-
-@pytest.mark.parametrize("action_str", ALL_ACTIONS)
-async def test_record_audit_inserts_for_each_action(action_str: str) -> None:
-    # Arrange
-    conn = _make_conn()
-
-    # Act
-    await record_audit(
-        conn,
-        actor_type="admin",
-        actor_id="admin@example.com",
-        action=action_str,
-    )
-
-    # Assert
-    conn.execute.assert_called_once()
-    args = _executed_args(conn)
-    # args: (sql, actor_type, actor_id, action, target_type, target_id,
-    #        target_kind, reason, metadata_json, ip_address, user_agent)
-    assert args[1] == "admin"
-    assert args[2] == "admin@example.com"
-    assert args[3] == action_str
-
-
-# ---------------------------------------------------------------------------
-# actor_type validation
+# Re-export shape
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("actor_type", ["user", "admin", "system", "hydra_subject"])
-async def test_valid_actor_types_accepted(actor_type: str) -> None:
-    conn = _make_conn()
-    await record_audit(conn, actor_type=actor_type, actor_id="x", action="user.created")
-    conn.execute.assert_called_once()
+def test_record_audit_is_gubbi_common_record_audit_async() -> None:
+    """``record_audit`` MUST be the canonical gubbi-common helper.
 
-
-async def test_invalid_actor_type_raises_value_error() -> None:
-    conn = _make_conn()
-    with pytest.raises(ValueError, match="Invalid actor_type"):
-        await record_audit(conn, actor_type="hacker", actor_id="x", action="user.created")
-    conn.execute.assert_not_called()
-
-
-@pytest.mark.parametrize("bad", ["", "root", "ADMIN", "User", "superuser"])
-async def test_various_invalid_actor_types(bad: str) -> None:
-    conn = _make_conn()
-    with pytest.raises(ValueError):
-        await record_audit(conn, actor_type=bad, actor_id="x", action="user.created")
-    conn.execute.assert_not_called()
-
-
-# ---------------------------------------------------------------------------
-# target_kind validation
-# ---------------------------------------------------------------------------
-
-
-async def test_target_kind_required_when_target_id_set() -> None:
-    conn = _make_conn()
-    with pytest.raises(ValueError, match="target_kind is required when target_id is supplied"):
-        await record_audit(
-            conn,
-            actor_type="user",
-            actor_id="uuid-123",
-            action="entry.created",
-            target_id="42",
-        )
-    conn.execute.assert_not_called()
-
-
-async def test_target_kind_nullable_when_target_id_null() -> None:
-    """target_kind should be optional (None) when target_id is also None."""
-    conn = _make_conn()
-    await record_audit(conn, actor_type="user", actor_id="uuid-123", action="entry.created")
-    conn.execute.assert_called_once()
-    args = _executed_args(conn)
-    assert args[5] is None  # target_id
-    assert args[6] is None  # target_kind
-
-
-async def test_target_kind_passed_through() -> None:
-    conn = _make_conn()
-    await record_audit(
-        conn,
-        actor_type="user",
-        actor_id="uuid-123",
-        action="entry.created",
-        target_id="42",
-        target_kind="entry",
-    )
-    args = _executed_args(conn)
-    assert args[5] == "42"  # target_id
-    assert args[6] == "entry"  # target_kind
-
-
-# ---------------------------------------------------------------------------
-# metadata defaults
-# ---------------------------------------------------------------------------
-
-
-async def test_metadata_defaults_to_empty_dict() -> None:
-    # Arrange
-    conn = _make_conn()
-
-    # Act -- no metadata kwarg passed
-    await record_audit(conn, actor_type="system", actor_id="worker-1", action="secret.rotated")
-
-    # Assert
-    args = _executed_args(conn)
-    # metadata_json is the 8th positional arg after the SQL string (index 8)
-    assert json.loads(str(args[8])) == {}
-
-
-async def test_metadata_none_treated_as_empty_dict() -> None:
-    conn = _make_conn()
-    await record_audit(
-        conn, actor_type="system", actor_id="w", action="secret.rotated", metadata=None
-    )
-    args = _executed_args(conn)
-    assert json.loads(str(args[8])) == {}
-
-
-async def test_metadata_dict_is_serialized() -> None:
-    conn = _make_conn()
-    meta = {"secret": "encryption_master_key", "version": "v2"}
-    await record_audit(
-        conn, actor_type="admin", actor_id="ops", action="encryption.key_rotated", metadata=meta
-    )
-    args = _executed_args(conn)
-    assert json.loads(str(args[8])) == meta
-
-
-# ---------------------------------------------------------------------------
-# Optional fields are nullable
-# ---------------------------------------------------------------------------
-
-
-async def test_all_optional_fields_none_by_default() -> None:
-    # Arrange
-    conn = _make_conn()
-
-    # Act -- only required args
-    await record_audit(conn, actor_type="user", actor_id="uuid-123", action="user.created")
-
-    # Assert
-    args = _executed_args(conn)
-    # SQL positional: $1=actor_type $2=actor_id $3=action $4=target_type
-    #                 $5=target_id $6=target_kind $7=reason $8=metadata
-    #                 $9=ip_address $10=user_agent
-    # args[0]=sql, [1]=actor_type, [2]=actor_id, [3]=action, [4]=target_type,
-    #         [5]=target_id, [6]=target_kind, [7]=reason, [8]=metadata_json,
-    #         [9]=ip_address, [10]=user_agent
-    assert args[4] is None  # target_type
-    assert args[5] is None  # target_id
-    assert args[6] is None  # target_kind
-    assert args[7] is None  # reason
-    assert args[9] is None  # ip_address
-    assert args[10] is None  # user_agent
-
-
-async def test_optional_fields_passed_through() -> None:
-    conn = _make_conn()
-    await record_audit(
-        conn,
-        actor_type="hydra_subject",
-        actor_id="11111111-2222-3333-4444-555555555555",
-        action="auth.email_collision",
-        target_type="user",
-        target_id="uuid-abc",
-        target_kind="user",
-        reason="support investigation",
-        metadata={"ticket": "CS-9001"},
-        ip_address="203.0.113.42",
-        user_agent="Mozilla/5.0",
-    )
-    args = _executed_args(conn)
-    assert args[1] == "hydra_subject"
-    assert args[2] == "11111111-2222-3333-4444-555555555555"
-    assert args[3] == "auth.email_collision"
-    assert args[4] == "user"
-    assert args[5] == "uuid-abc"
-    assert args[6] == "user"
-    assert args[7] == "support investigation"
-    assert json.loads(str(args[8])) == {"ticket": "CS-9001"}
-    assert args[9] == "203.0.113.42"
-    assert args[10] == "Mozilla/5.0"
-
-
-# ---------------------------------------------------------------------------
-# Action constants presence check
-# ---------------------------------------------------------------------------
-
-
-def test_action_constants_count() -> None:
-    """All 13 documented actions are present in ALL_ACTIONS.
-
-    Restored to the 0012 count of 13; had dropped to 12 when
-    ``auth.founder_impersonation`` was removed along with the ``founder``
-    actor_type (single-tenant-era, zero call sites). LOGIN_FAILED added in
-    TASK-03.22a brings it back to 13.
+    Regression guard: a future change that reintroduces a local
+    ``record_audit`` (with its own validation surface or its own INSERT
+    SQL) would diverge silently from the canonical writer. The S2
+    HIGH-1 / S2 MEDIUM findings were exactly that kind of drift.
     """
-    assert len(ALL_ACTIONS) == 13
+    from gubbi_common.audit.sql import record_audit_async
+
+    assert record_audit is record_audit_async
 
 
-def test_action_constants_are_strings() -> None:
-    for action in ALL_ACTIONS:
-        assert isinstance(action, str), f"Expected str, got {type(action)} for {action!r}"
+def test_record_audit_is_keyword_only_after_conn() -> None:
+    sig = inspect.signature(record_audit)
+    params = list(sig.parameters.values())
+    assert params[0].name == "conn"
+    for p in params[1:]:
+        assert p.kind == inspect.Parameter.KEYWORD_ONLY, (
+            f"param {p.name!r} should be keyword-only -- callers in gubbi/audit "
+            "pass everything after conn by keyword"
+        )
+
+
+def test_action_enum_re_exported() -> None:
+    """``Action`` is re-exported from gubbi-common."""
+    from gubbi_common.audit.actions import Action as _UpstreamAction
+
+    assert Action is _UpstreamAction
 
 
 # ---------------------------------------------------------------------------
-# Action constant value checks
+# Smoke -- exercise the canonical INSERT through the re-export
 # ---------------------------------------------------------------------------
 
 
-def test_tenant_provisioned_value() -> None:
-    assert Action.TENANT_PROVISIONED == "tenant.provisioned"
+async def test_record_audit_writes_target_kind_via_canonical_insert() -> None:
+    """End-to-end smoke: writing through the gubbi re-export persists target_kind.
 
-
-def test_login_failed_value() -> None:
-    assert Action.LOGIN_FAILED == "login_failed"
-
-
-# ---------------------------------------------------------------------------
-# M-2.6: action parameter accepts enum or string
-# ---------------------------------------------------------------------------
-
-
-async def test_record_audit_accepts_action_enum_or_string() -> None:
-    """record_audit accepts Action enum values and raw strings for action."""
+    Closes the historical S2 MEDIUM gap where gubbi's local 10-column
+    INSERT was the only path that captured target_kind. With the
+    re-export, ``record_audit`` and ``record_audit_async`` produce the
+    same INSERT shape.
+    """
     conn = _make_conn()
-    # Act + Assert -- enum value (no exception)
     await record_audit(
         conn,
         actor_type="user",
-        actor_id="uuid-123",
+        actor_id="00000000-0000-0000-0000-000000000001",
         action=Action.IDENTITY_CREATED,
+        target_type="user",
+        target_id="00000000-0000-0000-0000-000000000042",
+        target_kind="user",
+        metadata={"via": "test"},
     )
     conn.execute.assert_called_once()
-    args = _executed_args(conn)
-    assert args[3] == Action.IDENTITY_CREATED
-    # Reset and test raw string
-    conn.execute.reset_mock()
-    # Act + Assert -- raw string (no exception)
-    await record_audit(
-        conn,
-        actor_type="user",
-        actor_id="uuid-123",
-        action="entry.created",
-    )
-    conn.execute.assert_called_once()
-    args = _executed_args(conn)
-    assert args[3] == "entry.created"
-
-
-# ---------------------------------------------------------------------------
-# M-9.6: record_audit propagates on DB error
-# ---------------------------------------------------------------------------
+    sql, *args = conn.execute.call_args[0]
+    assert "target_kind" in sql
+    # Layout: $1=actor_type $2=actor_id $3=action $4=target_type $5=target_id
+    #         $6=target_kind $7=reason $8=metadata $9=ip $10=user_agent
+    assert args[5] == "user"
 
 
 async def test_record_audit_propagates_on_db_error() -> None:
-    """record_audit re-raises DB exceptions (best-effort is the decorator's job)."""
+    """Re-exported helper propagates DB errors (best-effort is the decorator's job)."""
     conn = _make_conn()
     conn.execute.side_effect = asyncpg.PostgresError("insert failed")
     with pytest.raises(asyncpg.PostgresError):
         await record_audit(
             conn,
             actor_type="user",
-            actor_id="uuid-123",
+            actor_id="00000000-0000-0000-0000-000000000001",
             action="entry.created",
         )
+
+
+# ---------------------------------------------------------------------------
+# A3 Q1: audit.write OTel span emitted by the canonical writer
+# ---------------------------------------------------------------------------
+
+
+async def test_record_audit_emits_audit_write_span_with_gubbi_attrs() -> None:
+    """Regression: the canonical writer emits ``audit.write`` carrying the gubbi attr shape.
+
+    Per A3 Q1 the OTel span moved INTO ``record_audit_async`` in
+    gubbi-common 0.11.0. The gubbi-side allowlist for ``audit.write``
+    keys on ``{"event_type", "target_id", "actor_type", "success",
+    "latency_ms"}``; this test asserts the canonical writer sets at
+    least the three pre-execute attrs (``event_type``, ``actor_type``,
+    ``target_id``) on the started span.
+    """
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    # Swap the global tracer provider for the duration of this test;
+    # record_audit_async pulls a tracer named "gubbi_common.audit" off
+    # the global provider on each call.
+    original = trace.get_tracer_provider()
+    trace._TRACER_PROVIDER = None  # noqa: SLF001 -- test-only override
+    trace.set_tracer_provider(provider)
+    try:
+        conn = _make_conn()
+        await record_audit(
+            conn,
+            actor_type="user",
+            actor_id="00000000-0000-0000-0000-000000000001",
+            action="entry.created",
+            target_type="entry",
+            target_id="00000000-0000-0000-0000-000000000099",
+            target_kind="entry",
+        )
+
+        spans = exporter.get_finished_spans()
+        assert spans, "expected at least one finished span from record_audit_async"
+        audit_spans = [s for s in spans if s.name == "audit.write"]
+        assert audit_spans, f"expected an 'audit.write' span; got names: {[s.name for s in spans]}"
+        attrs = dict(audit_spans[0].attributes or {})
+        assert attrs.get("event_type") == "entry.created"
+        assert attrs.get("actor_type") == "user"
+        assert attrs.get("target_id") == "00000000-0000-0000-0000-000000000099"
+        # latency_ms + success are set in the finally block; they MUST be present.
+        assert "latency_ms" in attrs
+        assert attrs.get("success") is True
+    finally:
+        trace._TRACER_PROVIDER = None  # noqa: SLF001 -- test-only override
+        trace.set_tracer_provider(original)
