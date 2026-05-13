@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from fastapi import FastAPI
 
-__all__: list[str] = ["configure_otel"]
+__all__: list[str] = ["configure_otel", "rebind_metrics_after_configure"]
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,31 @@ def configure_otel(app: FastAPI) -> None:
 
     _common_configure_otel(service_name, endpoint, enabled=enabled)
     _wire_instrumentors(app)
+    rebind_metrics_after_configure()
+
+
+def rebind_metrics_after_configure() -> None:
+    """Clear and re-prime ``initialize_metrics()`` against the live provider.
+
+    CRIT-5 H-1: ``initialize_metrics()`` is ``lru_cache``-memoized so it
+    only resolves a meter once. If any helper (e.g.
+    ``record_audit_persistence_failure``) fired BEFORE ``configure_otel``
+    completed -- for example from an early ``_build_app_ctx`` failure
+    during ``scaffold_operator`` -- the cache would be sealed against the
+    NoOp provider permanently and the DEC-098 ``audit.persistence_failure``
+    alarm sensor would be dead. Clearing and re-priming here guarantees
+    the cached instruments are bound to whatever meter provider is
+    current at this call site (the SDK provider configured above in
+    production; whatever the test installed in unit tests).
+
+    Factored out of ``configure_otel`` so unit tests can exercise the
+    lifespan re-bind contract without pulling in the FastAPI /
+    instrumentor / OTLP exporter wiring.
+    """
+    from gubbi.telemetry.metrics import initialize_metrics  # noqa: PLC0415
+
+    initialize_metrics.cache_clear()
+    initialize_metrics()
 
 
 def _wire_instrumentors(app: FastAPI) -> None:
