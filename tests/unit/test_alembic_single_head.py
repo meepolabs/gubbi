@@ -24,7 +24,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0028_audit_log_cross_attribution_guard"
+_EXPECTED_HEAD = "0029_audit_log_target_kind_check"
 
 
 def _alembic_config() -> Config:
@@ -46,7 +46,7 @@ def test_alembic_has_single_head() -> None:
     assert len(heads) == 1, f"expected exactly one alembic head, got: {heads!r}"
 
 
-def test_alembic_head_is_audit_log_cross_attribution_guard() -> None:
+def test_alembic_head_is_audit_log_target_kind_check() -> None:
     # Arrange
     cfg = _alembic_config()
     script_dir = ScriptDirectory.from_config(cfg)

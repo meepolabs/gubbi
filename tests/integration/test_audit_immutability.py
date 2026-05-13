@@ -86,10 +86,11 @@ async def test_record_audit_inserts_row(admin_pool: asyncpg.Pool) -> None:
         await record_audit(
             conn,
             actor_type="admin",
-            actor_id="test-admin",
+            actor_id="system:test-admin",
             action=Action.SECRET_ROTATED,
             target_type="secret",
-            target_id="encryption_master_key",
+            target_id="00000000-0000-0000-0000-00000000c0de",
+            target_kind="secret",
             reason="scheduled rotation",
             metadata={"version": "v2"},
         )
@@ -98,13 +99,15 @@ async def test_record_audit_inserts_row(admin_pool: asyncpg.Pool) -> None:
         assert after_count == before_count + 1
 
         row = await conn.fetchrow(
-            "SELECT * FROM audit_log WHERE actor_id = 'test-admin' ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM audit_log WHERE actor_id = 'system:test-admin' "
+            "ORDER BY id DESC LIMIT 1"
         )
         assert row is not None
         assert row["actor_type"] == "admin"
         assert row["action"] == Action.SECRET_ROTATED
         assert row["target_type"] == "secret"
-        assert row["target_id"] == "encryption_master_key"
+        assert row["target_id"] == "00000000-0000-0000-0000-00000000c0de"
+        assert row["target_kind"] == "secret"
         assert row["reason"] == "scheduled rotation"
 
 
@@ -146,7 +149,7 @@ async def test_record_audit_then_update_raises(admin_pool: asyncpg.Pool) -> None
         await record_audit(
             conn,
             actor_type="system",
-            actor_id="test-fix-worker",
+            actor_id="system:test-fix-worker",
             action=Action.ADMIN_QUERY_EXECUTED,
         )
 

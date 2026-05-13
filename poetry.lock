@@ -1090,7 +1090,7 @@ protobuf = ["grpcio-tools (>=1.80.0)"]
 
 [[package]]
 name = "gubbi-common"
-version = "0.10.0"
+version = "0.11.0"
 description = "Shared contracts (audit, auth, telemetry) for Gubbi packages"
 optional = false
 python-versions = "^3.11"
@@ -1112,8 +1112,8 @@ db = ["asyncpg (>=0.29,<0.31)"]
 [package.source]
 type = "git"
 url = "ssh://git@github.com/meepolabs/gubbi-common.git"
-reference = "362d49c213e643fe4e587344e328b5828c0281b6"
-resolved_reference = "362d49c213e643fe4e587344e328b5828c0281b6"
+reference = "e10133a72ab8aceaeb723913113993b32daa956a"
+resolved_reference = "e10133a72ab8aceaeb723913113993b32daa956a"
 
 [[package]]
 name = "gunicorn"
@@ -3863,4 +3863,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "84fb4a5544b1264ed944e25d41aa6fa3cdb20d0626d544ded7368cb71a38f238"
+content-hash = "717f4a2bdc74c26381bebb7fe059c617299fb4f99ac0f53d1d1f8d308cc0894b"
