@@ -268,8 +268,24 @@ async def update(
         mode: 'replace' overwrites content; 'append' adds to it.
         date: New date string YYYY-MM-DD (None = leave unchanged).
         tags: New tags list (None = leave unchanged).
+
+    SET clause is built dynamically:
+      * content changed       -> writes ciphertext + nonce + search_vector
+                                 + indexed_at=NULL (re-embed needed).
+      * reasoning changed     -> writes reasoning ciphertext + nonce
+                                 + indexed_at=NULL (re-embed needed).
+      * date / tags only      -> writes the changed column only.
+                                 Does NOT null indexed_at, does NOT re-encrypt
+                                 -- embedding is a function of content/reasoning
+                                 text, so date/tag-only edits leave the
+                                 semantic index intact and skip wasted
+                                 encrypt cycles + WAL amplification.
+      * updated_at + topic    -> always written.
     """
     assert conn.is_in_transaction(), "entries.update: caller must wrap in conn.transaction()"  # noqa: S101
+    # FOR UPDATE locks the row; mode='append' needs the existing content to
+    # concatenate against, so we still SELECT the row even when not all
+    # ciphertext columns are about to change.
     row = await conn.fetchrow(
         "SELECT id, content_encrypted, content_nonce,"
         " reasoning_encrypted, reasoning_nonce, topic_id, date, tags"
@@ -280,72 +296,99 @@ async def update(
         msg = f"Entry id {entry_id} not found"
         raise EntryNotFoundError(msg)
 
-    old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
-    old_reasoning = _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce")
-    if old_content is None:
-        raise RuntimeError(
-            f"Entry {entry_id}: content decrypted to None; schema invariant violated"
-        )
+    # Track which fields changed so we can build the SET clause + decide
+    # whether to re-encrypt and whether to null indexed_at.
+    content_changed = content is not None
+    reasoning_changed = reasoning is not None
+    date_changed = date is not None
+    tags_changed = tags is not None
 
-    new_content: str
-    new_reasoning: str | None
-    if content is not None:
-        if mode == "replace":
-            new_content = content
-        elif mode == "append":
+    # mode='append' needs the existing plaintext to concatenate; decrypt only
+    # when needed.
+    new_content: str | None = None
+    new_reasoning: str | None = None
+    if content_changed:
+        if mode == "append":
+            old_content = _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce")
+            if old_content is None:
+                raise RuntimeError(
+                    f"Entry {entry_id}: content decrypted to None; schema invariant violated"
+                )
             new_content = f"{old_content}\n\n{content}".strip()
+        elif mode == "replace":
+            new_content = content
         else:
             msg = f"Invalid mode '{mode}'. Use 'replace' or 'append'."
             raise ValueError(msg)
-    else:
-        new_content = old_content
-
-    if reasoning is not None:
-        if mode == "append" and old_reasoning:
-            new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
+    if reasoning_changed:
+        if mode == "append":
+            old_reasoning = _decrypt_content_field(
+                cipher, row, "reasoning_encrypted", "reasoning_nonce"
+            )
+            if old_reasoning:
+                new_reasoning = f"{old_reasoning}\n\n{reasoning}".strip()
+            else:
+                new_reasoning = reasoning
         else:
             new_reasoning = reasoning
-    else:
-        new_reasoning = old_reasoning
 
-    new_date: date_cls = date_cls.fromisoformat(date) if date else row["date"]
-    new_tags: Sequence[str] = tags if tags is not None else list(row["tags"] or [])
     now = datetime_cls.now(UTC)
 
-    # Encrypt new content and reasoning (if not None); else None pair for reasoning.
-    new_content_ct, new_content_nonce = cipher.encrypt(new_content)
-    if new_reasoning is not None:
-        new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
-    else:
-        new_reasoning_ct = None
-        new_reasoning_nonce = None
+    # Build SET clause + parameter list dynamically.  Skip ciphertext columns
+    # and indexed_at=NULL entirely when only date/tags changed so the row
+    # stays in the indexed pool and we avoid a useless encrypt round-trip.
+    set_parts: list[str] = ["updated_at = $1"]
+    params: list[Any] = [now]
+
+    if content_changed:
+        assert new_content is not None  # noqa: S101 - narrowed by content_changed branch above
+        new_content_ct, new_content_nonce = cipher.encrypt(new_content)
+        set_parts.append(f"content_encrypted = ${len(params) + 1}")
+        params.append(new_content_ct)
+        set_parts.append(f"content_nonce = ${len(params) + 1}")
+        params.append(new_content_nonce)
+        set_parts.append(f"search_vector = to_tsvector('english', ${len(params) + 1})")
+        params.append(new_content)
+    if reasoning_changed:
+        if new_reasoning is not None:
+            new_reasoning_ct, new_reasoning_nonce = cipher.encrypt(new_reasoning)
+        else:
+            new_reasoning_ct = None
+            new_reasoning_nonce = None
+        set_parts.append(f"reasoning_encrypted = ${len(params) + 1}")
+        params.append(new_reasoning_ct)
+        set_parts.append(f"reasoning_nonce = ${len(params) + 1}")
+        params.append(new_reasoning_nonce)
+    if date_changed:
+        assert date is not None  # noqa: S101 - narrowed by date_changed
+        set_parts.append(f"date = ${len(params) + 1}")
+        params.append(date_cls.fromisoformat(date))
+    if tags_changed:
+        set_parts.append(f"tags = ${len(params) + 1}")
+        params.append(list(tags) if tags is not None else [])
+    # indexed_at = NULL only when the embedded text actually changed.
+    # date/tag-only updates leave indexed_at intact so the reindex worker
+    # does not pick up rows whose embedding is still correct.
+    if content_changed or reasoning_changed:
+        set_parts.append("indexed_at = NULL")
+
+    set_clause = ", ".join(set_parts)
+    entry_param = f"${len(params) + 1}"
+    params.append(entry_id)
 
     # CTE: update entry + update topic timestamp in one round-trip.
-    # indexed_at = NULL signals the embedding needs regenerating.
     await conn.execute(
-        """
+        f"""
         WITH updated AS (
             UPDATE entries
-            SET date=$1, tags=$2,
-                updated_at=$3, indexed_at=NULL,
-                content_encrypted=$4, content_nonce=$5,
-                reasoning_encrypted=$6, reasoning_nonce=$7,
-                search_vector=to_tsvector('english', $8)
-            WHERE id=$9
+            SET {set_clause}
+            WHERE id = {entry_param}
             RETURNING topic_id
         )
-        UPDATE topics SET updated_at=$3
+        UPDATE topics SET updated_at = $1
         FROM updated WHERE topics.id = updated.topic_id
-        """,
-        new_date,
-        new_tags,
-        now,
-        new_content_ct,
-        new_content_nonce,
-        new_reasoning_ct,
-        new_reasoning_nonce,
-        new_content,
-        entry_id,
+        """,  # noqa: S608 - set_clause built from literal column names + numbered params
+        *params,
     )
 
 
