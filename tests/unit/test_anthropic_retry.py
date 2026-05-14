@@ -1,4 +1,11 @@
-"""Test AnthropicProvider only retries on RateLimitError (M-9.12)."""
+"""Test AnthropicProvider only retries on transient errors (M-9.12, B2).
+
+After B2: retries are gated by LLMTransientError (the provider-agnostic
+hierarchy in gubbi.extraction.llm.provider), and vendor exceptions are
+translated at the boundary. These tests assert the post-translation
+behavior: vendor exceptions get retried when transient, surface as LLM*
+when permanent or budget-exhausted.
+"""
 
 from __future__ import annotations
 
@@ -16,6 +23,11 @@ from anthropic import (
 )
 from anthropic._exceptions import RateLimitError
 from anthropic.types import Message, Usage
+
+from gubbi.extraction.llm.provider import (
+    LLMPermanentError,
+    LLMRateLimitError,
+)
 
 
 @pytest.mark.asyncio
@@ -58,8 +70,8 @@ async def test_anthropic_retry_only_on_rate_limit_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_anthropic_non_rate_limit_raises_immediately() -> None:
-    """Non-rate-limit exceptions should NOT be retried -- they propagate at once."""
+async def test_anthropic_unrecognized_exception_translated_to_permanent() -> None:
+    """An unknown exception type should translate to LLMPermanentError and not be retried."""
     from gubbi.config import LLMConfig
     from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 
@@ -72,7 +84,7 @@ async def test_anthropic_non_rate_limit_raises_immediately() -> None:
     with patch.object(provider._client.messages, "create", new_callable=AsyncMock) as mock_create:
         mock_create.side_effect = MyAPIError("something broke")
 
-        with pytest.raises(MyAPIError):
+        with pytest.raises(LLMPermanentError):
             await provider._call_with_retry({})
 
     # Should have been called exactly once -- no retry.
@@ -204,7 +216,7 @@ async def test_anthropic_retries_on_broadened_transient_errors(
 
 @pytest.mark.asyncio
 async def test_anthropic_does_not_retry_api_status_client_error() -> None:
-    """APIStatusError 4xx should propagate immediately instead of retrying."""
+    """APIStatusError 4xx should propagate as LLMPermanentError without retry."""
     from gubbi.config import LLMConfig
     from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 
@@ -222,7 +234,39 @@ async def test_anthropic_does_not_retry_api_status_client_error() -> None:
     with patch.object(provider._client.messages, "create", new_callable=AsyncMock) as mock_create:
         mock_create.side_effect = bad_request
 
-        with pytest.raises(APIStatusError):
+        with pytest.raises(LLMPermanentError):
             await provider._call_with_retry({})
 
     assert mock_create.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_anthropic_rate_limit_exhaustion_surfaces_as_llm_rate_limit() -> None:
+    """When the retry budget is exhausted on rate limits, callers see LLMRateLimitError."""
+    from gubbi.config import LLMConfig
+    from gubbi.constants import ANTHROPIC_MAX_RETRIES
+    from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
+
+    config = LLMConfig(api_key="test-key", model="claude-haiku-4-5-20251001")
+    provider = AnthropicProvider(config)
+
+    async def no_sleep(_d: float) -> None:
+        return None
+
+    with (
+        patch.object(provider._client.messages, "create", new_callable=AsyncMock) as mock_create,
+        patch("asyncio.sleep", new=no_sleep),
+    ):
+        mock_create.side_effect = [
+            RateLimitError(
+                message="Rate limit",
+                response=MagicMock(status_code=429),
+                body=None,
+            )
+            for _ in range(ANTHROPIC_MAX_RETRIES)
+        ]
+
+        with pytest.raises(LLMRateLimitError):
+            await provider._call_with_retry({})
+
+    assert mock_create.call_count == ANTHROPIC_MAX_RETRIES

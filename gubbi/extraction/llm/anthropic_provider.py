@@ -3,46 +3,63 @@ import random
 from collections.abc import Mapping
 from typing import Any
 
+import structlog
 from anthropic import (
     APIConnectionError,
     APIStatusError,
-    APITimeoutError,
     AsyncAnthropic,
-    InternalServerError,
     RateLimitError,
 )
+from opentelemetry import metrics
 
 from gubbi.config import LLMConfig
 from gubbi.constants import ANTHROPIC_MAX_RETRIES, ANTHROPIC_REQUEST_TIMEOUT_SECS
-from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
+from gubbi.extraction.llm.provider import (
+    LLMMessage,
+    LLMPermanentError,
+    LLMProvider,
+    LLMProviderError,
+    LLMRateLimitError,
+    LLMResponse,
+    LLMTransientError,
+)
 
-# Retryable Anthropic SDK exception classes. Transient network/server-side failures
-# get backoff + retry; client errors (auth, validation, etc.) propagate immediately.
-# Note: anthropic 0.49.x does not export OverloadedError or ServiceUnavailableError
-# at the top level. Their wire surface (HTTP 503/529/etc.) arrives as APIStatusError
-# with a 5xx status_code -- _is_retryable_anthropic_error filters to that subset.
-# Revisit this list on the next anthropic SDK upgrade.
-_RETRYABLE_ANTHROPIC_ERRORS: tuple[type[Exception], ...] = (
-    RateLimitError,
-    APIConnectionError,
-    APITimeoutError,
-    InternalServerError,
-    APIStatusError,
+logger = structlog.get_logger(__name__)
+
+# Retry observability counter. Emitted per retry attempt with an attribute
+# describing whether the attempt was followed by another retry or marked the
+# end of the budget.
+_meter = metrics.get_meter("gubbi")
+ANTHROPIC_RETRY_COUNT = _meter.create_counter(
+    name="anthropic.retry_count_total",
+    description="Anthropic provider retry attempts, partitioned by result and error_class",
+    unit="1",
 )
 
 
-def _is_retryable_anthropic_error(exc: Exception) -> bool:
+def _translate_anthropic_error(exc: Exception) -> LLMProviderError:
+    """Translate an anthropic SDK exception to the provider-agnostic hierarchy.
+
+    Mapping (locked in B2):
+      RateLimitError                          -> LLMRateLimitError
+      APIConnectionError (incl APITimeoutError) -> LLMTransientError
+      APIStatusError with status_code >= 500
+        (incl InternalServerError)             -> LLMTransientError
+      Anything else (auth, validation, 4xx)    -> LLMPermanentError
+    """
     if isinstance(exc, RateLimitError):
-        return True
+        return LLMRateLimitError(str(exc))
     if isinstance(exc, APIConnectionError):
-        return True
+        # APITimeoutError is a subclass of APIConnectionError; covered here.
+        return LLMTransientError(str(exc))
     if isinstance(exc, APIStatusError):
-        # isinstance narrows exc to APIStatusError; the surrounding cast(APIStatusError, exc)
-        # that used to live here was redundant. But APIStatusError.status_code is typed Any
-        # in the anthropic SDK stubs, so the int() coercion is still needed to keep this
-        # function's bool return type honest under mypy --strict.
-        return int(exc.status_code) >= 500
-    return False
+        # APIStatusError.status_code is typed Any in the anthropic SDK stubs;
+        # int() coercion keeps the comparison honest under mypy --strict.
+        # InternalServerError is APIStatusError(status_code=500), also covered.
+        if int(exc.status_code) >= 500:
+            return LLMTransientError(str(exc))
+        return LLMPermanentError(str(exc))
+    return LLMPermanentError(str(exc))
 
 
 # Model pricing in $USD per million tokens (input, output).
@@ -126,22 +143,59 @@ class AnthropicProvider(LLMProvider):
         )
 
     async def _call_with_retry(self, kwargs: dict[str, Any]) -> Any:
+        """Invoke the Anthropic SDK with retry/backoff on transient errors.
+
+        Retry policy:
+          * Vendor exceptions are translated to LLM* at the boundary.
+          * LLMTransientError (incl. LLMRateLimitError) -> retry with backoff.
+          * LLMPermanentError -> raise immediately.
+
+        Observability:
+          * Per-retry INFO log `anthropic_retry_attempt` with attempt + delay
+            + error_class.
+          * On exhaustion INFO log `anthropic_retry_exhausted` with attempt
+            + error_class.
+          * Counter `anthropic.retry_count_total` with
+            ``{result: retried|exhausted, error_class: <name>}``.
+        """
         max_retries = ANTHROPIC_MAX_RETRIES
         base_delay = 1.0
         for attempt in range(max_retries):
             try:
                 return await self._client.messages.create(**kwargs)
-            except _RETRYABLE_ANTHROPIC_ERRORS as exc:
-                if not _is_retryable_anthropic_error(exc):
-                    raise
+            except Exception as exc:
+                translated = _translate_anthropic_error(exc)
+                error_class = type(translated).__name__
+                if not isinstance(translated, LLMTransientError):
+                    raise translated from exc
                 if attempt < max_retries - 1:
                     base = base_delay * (2**attempt)
                     # Not cryptographic -- simple jitter to prevent thundering herd.
                     jitter = random.uniform(0, base * 0.1)  # noqa: S311
                     delay = base + jitter
+                    await logger.info(
+                        "anthropic_retry_attempt",
+                        attempt=attempt + 1,
+                        delay_seconds=delay,
+                        error_class=error_class,
+                        exhausted=False,
+                    )
+                    ANTHROPIC_RETRY_COUNT.add(
+                        1,
+                        attributes={"result": "retried", "error_class": error_class},
+                    )
                     await asyncio.sleep(delay)
                     continue
-                raise
+                await logger.info(
+                    "anthropic_retry_exhausted",
+                    attempt=attempt + 1,
+                    error_class=error_class,
+                )
+                ANTHROPIC_RETRY_COUNT.add(
+                    1,
+                    attributes={"result": "exhausted", "error_class": error_class},
+                )
+                raise translated from exc
         raise RuntimeError("Retry loop exited unexpectedly")
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
@@ -150,3 +204,9 @@ class AnthropicProvider(LLMProvider):
         input_cost = (input_tokens / 1_000_000) * pricing[0] * 100
         output_cost = (output_tokens / 1_000_000) * pricing[1] * 100
         return round(input_cost + output_cost, 6)
+
+
+__all__: list[str] = [
+    "ANTHROPIC_RETRY_COUNT",
+    "AnthropicProvider",
+]
