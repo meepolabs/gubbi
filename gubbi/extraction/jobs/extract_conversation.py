@@ -20,7 +20,6 @@ from datetime import date
 from typing import Any, cast
 from uuid import UUID, uuid4
 
-import anthropic
 import asyncpg
 import structlog
 from gubbi_common.audit.actions import Action
@@ -31,7 +30,11 @@ from gubbi_common.db.user_scoped import user_scoped_connection
 from gubbi.audit import record_audit
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.context import ExtractionContext
-from gubbi.extraction.llm.provider import LLMMessage
+from gubbi.extraction.llm.provider import (
+    LLMMessage,
+    LLMProviderError,
+    LLMRateLimitError,
+)
 from gubbi.extraction.service import (
     CategorizationResult,
     ExtractedEntry,
@@ -190,11 +193,13 @@ async def _mark_skipped_no_topic(
 def _classify_error(exc: BaseException) -> str:
     """Map an exception to a short error_code string for extraction_jobs.error_code.
 
-    Uses raw string values (no typed enum). Expand as new exception types surface.
+    Uses the provider-agnostic LLM* hierarchy so this layer does not import
+    vendor SDKs. Anthropic-specific exceptions are translated to LLM* at the
+    AnthropicProvider boundary (see gubbi.extraction.llm.anthropic_provider).
     """
-    if isinstance(exc, anthropic.RateLimitError):
+    if isinstance(exc, LLMRateLimitError):
         return "llm_rate_limited"
-    if isinstance(exc, anthropic.APIError):
+    if isinstance(exc, LLMProviderError):
         return "llm_provider_error"
     return "internal_error"
 
@@ -457,6 +462,12 @@ async def extract_conversation(
     )
     user_uuid = user_id if isinstance(user_id, UUID) else UUID(user_id)
 
+    # Pre-bind effective_period_start so the outer except block's refund call
+    # always has a defined value, even when an exception raises before the
+    # job-row lookup completes (e.g. asyncpg connection failure during conn1).
+    # Phase 1 may overwrite this with the job row's period_start once known.
+    effective_period_start: date = current_period_start()
+
     try:
         # ------------------------------------------------------------------
         # Phase 1 -- conn1: read-only load + early idempotency check.
@@ -492,7 +503,7 @@ async def extract_conversation(
         # conn1 released here -- pool slot returned before LLM calls.
 
         # Resolve period_start: prefer the DB value; fall back to runtime.
-        effective_period_start: date = job_period_start or current_period_start()
+        effective_period_start = job_period_start or effective_period_start
 
         # ------------------------------------------------------------------
         # Phase 2 -- LLM phase: no database connection held.
@@ -598,6 +609,22 @@ async def extract_conversation(
     except Exception as exc:
         # SAVEPOINT is already poisoned (rolled back). Open a FRESH connection
         # to record the failure terminal state -- do NOT reuse conn1 or conn2.
+        # Pre-charge refund first: actual=0 against the original PRE_CHARGE_CENTS
+        # estimate produces a negative delta, returning the budget the worker
+        # never spent. Best-effort: a Redis failure here must not block the
+        # extraction_jobs row update that follows. The two side effects are
+        # independent so the operator never loses one because the other failed.
+        helper = ctx.get("budget_helper")
+        if helper is not None:
+            try:
+                await helper.record_actual_cost(
+                    user_id=user_uuid,
+                    period_start=effective_period_start,
+                    actual_cents=0,
+                    estimated_cents=PRE_CHARGE_CENTS,
+                )
+            except Exception:  # broad: redis errors come in many shapes
+                await log.warning("budget_refund_failed", exc_info=True)
         if job_id != "unknown":
             error_code = _classify_error(exc)
             await _mark_job_failed(pool, user_uuid, job_id, conversation_id, error_code)

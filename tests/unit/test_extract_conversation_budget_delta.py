@@ -245,3 +245,195 @@ async def test_budget_delta_skipped_when_helper_is_none() -> None:
 
     # No exception, skipped=False, no helper to assert against.
     assert result["skipped"] is False
+
+
+# ---------------------------------------------------------------------------
+# Pre-charge refund on worker failure (B2 / Q2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pre_charge_refund_called_before_mark_failed_on_worker_exception() -> None:
+    """When the worker raises in Phase 2/3, the pre-charge is refunded before mark_failed.
+
+    Sequencing matters: a refund-failure must NOT block the row update, and
+    the row update is what gives orphan_cleanup something to reason about.
+    Both ops run independently (each in their own try/except in the worker).
+    """
+    from gubbi_common.budget import PRE_CHARGE_CENTS
+
+    redis = AsyncMock()
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    call_log: list[str] = []
+
+    async def _record_cost(**_kw: Any) -> None:
+        call_log.append("refund")
+
+    async def _mark_failed(*_a: Any, **_kw: Any) -> None:
+        call_log.append("mark_failed")
+
+    helper.record_actual_cost.side_effect = _record_cost
+
+    async def _categorize_raises(*_a: Any, **_kw: Any) -> Any:
+        # Force a worker failure inside the try block.
+        raise RuntimeError("LLM hard failure")
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            side_effect=_categorize_raises,
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_job_failed",
+            new=AsyncMock(side_effect=_mark_failed),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        with pytest.raises(RuntimeError, match="LLM hard failure"):
+            await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
+
+    helper.record_actual_cost.assert_called_once()
+    kwargs = helper.record_actual_cost.call_args.kwargs
+    assert kwargs["actual_cents"] == 0
+    assert kwargs["estimated_cents"] == PRE_CHARGE_CENTS
+
+    # Refund happened BEFORE mark_failed (Q2 sequencing).
+    assert call_log == ["refund", "mark_failed"]
+
+
+@pytest.mark.asyncio
+async def test_pre_charge_refund_failure_does_not_block_mark_failed() -> None:
+    """A Redis failure during refund must NOT prevent the extraction_jobs row from being marked failed."""
+    redis = AsyncMock()
+    helper = MagicMock()
+
+    async def _refund_redis_down(**_kw: Any) -> None:
+        raise ConnectionError("redis is down")
+
+    helper.record_actual_cost = AsyncMock(side_effect=_refund_redis_down)
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    mark_failed_called = False
+
+    async def _mark_failed(*_a: Any, **_kw: Any) -> None:
+        nonlocal mark_failed_called
+        mark_failed_called = True
+
+    async def _categorize_raises(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("LLM hard failure")
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            side_effect=_categorize_raises,
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_job_failed",
+            new=AsyncMock(side_effect=_mark_failed),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        with pytest.raises(RuntimeError, match="LLM hard failure"):
+            await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
+
+    helper.record_actual_cost.assert_called_once()
+    assert mark_failed_called, "mark_failed must run even when refund fails"
+
+
+@pytest.mark.asyncio
+async def test_no_refund_when_helper_is_none() -> None:
+    """Self-host (helper=None) takes the same exception path with no refund call."""
+    redis = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=None)
+
+    async def _categorize_raises(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("LLM hard failure")
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            side_effect=_categorize_raises,
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_job_failed",
+            new=AsyncMock(),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        with pytest.raises(RuntimeError, match="LLM hard failure"):
+            await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
