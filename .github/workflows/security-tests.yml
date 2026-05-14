@@ -43,7 +43,12 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install pyyaml
-      - run: python tools/check_env_contract.py
+      # gubbi-cloud is private; checking it out from this public-repo workflow
+      # would require a PAT. Skip the DEC-094 cross-repo Environment Literal
+      # parity check here -- it runs in gubbi-cloud's CI (which can check out
+      # public gubbi), so DEC-094 drift is still caught on PRs that touch
+      # either side of the parity contract.
+      - run: python tools/check_env_contract.py --cloud-config ""
 
   security-tests:
     name: Security invariants (RLS + encryption + unit)
