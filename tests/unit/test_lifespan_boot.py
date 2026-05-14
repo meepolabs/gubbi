@@ -189,6 +189,10 @@ def _patch_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
     redis_pool_stub.aclose = AsyncMock()
     redis_client_stub = MagicMock()
     redis_client_stub.aclose = AsyncMock()
+    # The lifespan PINGs Redis after client creation as a fail-fast probe.
+    # Default the stub to "PONG"; tests that exercise the PING-failure
+    # path override this attribute on the returned handle.
+    redis_client_stub.ping = AsyncMock(return_value=b"PONG")
 
     monkeypatch.setattr(
         "redis.asyncio.ConnectionPool.from_url",
@@ -236,6 +240,7 @@ def _patch_lifespan_dependencies(monkeypatch: pytest.MonkeyPatch) -> dict[str, A
         "redis_pool": redis_pool_stub,
         "redis_client": redis_client_stub,
         "arq_pool": arq_pool_stub,
+        "arq_create_pool": arq_create_pool_mock,
         "oauth_storage": oauth_storage_stub,
         "build_app_ctx": build_app_ctx_mock,
     }
@@ -380,3 +385,59 @@ async def test_post_shutdown_request_is_not_500(
             assert (
                 response.status_code != 500
             ), f"Post-shutdown request returned 500: body={response.text!r}"
+
+
+# ---------------------------------------------------------------------------
+# Case D: lifespan PINGs Redis and aborts startup on PING failure.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_lifespan_aborts_when_redis_ping_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Redis PING failure during lifespan startup must propagate.
+
+    Without this, gubbi would yield a half-open service whose first SSE,
+    arq, or budget call discovers Redis is down at request time. The
+    DEC-098 fail-open audit fallback also depends on Redis-backed
+    components; a silent boot against a dead Redis would erase that
+    contract too.
+
+    The fail-fast contract is: ``redis_client.ping()`` is called after
+    ``aioredis.Redis(...)`` and BEFORE any router uses Redis. Any
+    exception from ``ping()`` aborts the lifespan -- LifespanManager
+    surfaces it as the underlying connection error.
+    """
+    import redis.exceptions as redis_exc
+
+    _drop_optional_env(monkeypatch)
+    handles = _patch_lifespan_dependencies(monkeypatch)
+    # Override the default PONG stub: simulate Redis unreachable. The
+    # message string is intentionally distinctive so the assertion below
+    # can pin the exact propagation chain (no swallowing, no rewrap into
+    # a generic RuntimeError).
+    handles["redis_client"].ping = AsyncMock(
+        side_effect=redis_exc.ConnectionError("simulated_redis_unreachable")
+    )
+
+    app = FastAPI(lifespan=gubbi.main.lifespan)
+
+    with pytest.raises(redis_exc.ConnectionError, match="simulated_redis_unreachable"):
+        async with LifespanManager(app):
+            pass
+
+    # PING was attempted exactly once.
+    handles["redis_client"].ping.assert_awaited_once()
+    # arq pool creation must not have run -- it sits AFTER the PING.
+    # Asserting the patched factory was never awaited (rather than reading
+    # the stub's close-await count) is the tight contract: the stub exists
+    # before the lifespan body runs, so its own close-count is not a sound
+    # proxy for "arq init never happened".
+    handles["arq_create_pool"].assert_not_awaited()
+    # The on-failure cleanup must close the resources opened pre-PING:
+    # OAuth storage, Redis client (with pool), and the DB pool. These
+    # are the "resource leak guard" the surrounding try/except provides.
+    handles["oauth_storage"].close.assert_awaited_once()
+    handles["redis_client"].aclose.assert_awaited_once()
+    handles["pool"].close.assert_awaited_once()
