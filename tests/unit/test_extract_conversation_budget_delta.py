@@ -437,3 +437,155 @@ async def test_no_refund_when_helper_is_none() -> None:
         _setup_conn_mock(mock_conn_cm)
         with pytest.raises(RuntimeError, match="LLM hard failure"):
             await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
+
+
+# ---------------------------------------------------------------------------
+# Refund period-bucket safety (R1 / MEDIUM-2)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_refund_skipped_with_metric_when_period_unknown() -> None:
+    """When the worker fails BEFORE Phase 1's period_start lookup, refund is skipped.
+
+    Simulates the dangerous window of R1 / MEDIUM-2:
+      * pre-charge has already been debited at ingest (period X = 2026-05-01)
+      * period boundary is crossed BEFORE the worker runs
+        (current_period_start() now returns 2026-06-01)
+      * worker fails inside Phase 1 BEFORE extraction_jobs.get_period_start
+        completes (e.g. asyncpg connection failure on _check_idempotent)
+
+    Without the gate, the refund would land in bucket Y (2026-06-01) instead
+    of bucket X -- giving the user a credit they shouldn't have AND leaving a
+    phantom debit in the original period. The fix skips the refund and emits
+    `extraction.refund_skipped_total{reason=unknown_period}` so an operator
+    can manually reconcile.
+    """
+    from gubbi.extraction.jobs.extract_conversation import EXTRACTION_REFUND_SKIPPED
+
+    redis = AsyncMock()
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    async def _idempotent_raises(*_a: Any, **_kw: Any) -> bool:
+        # Failure BEFORE mark_running / get_period_start runs.
+        raise ConnectionError("asyncpg lost connection")
+
+    add_calls: list[tuple[int, dict[str, str]]] = []
+
+    def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
+        add_calls.append((amount, attributes or {}))
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._check_idempotent",
+            side_effect=_idempotent_raises,
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_job_failed",
+            new=AsyncMock(),
+        ),
+        # current_period_start NOW (worker time) is the wrong bucket -- the
+        # ingest pre-charge debited 2026-05-01, but a boundary has been
+        # crossed since.
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 6, 1),
+        ),
+        # get_period_start patched but should not be reached (idempotent_raises
+        # fires first); patched defensively so a regression that calls it does
+        # not silently hit the real DB-shaped function on the AsyncMock conn.
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+        patch.object(EXTRACTION_REFUND_SKIPPED, "add", side_effect=_capture_add),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        with pytest.raises(ConnectionError, match="asyncpg lost connection"):
+            await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
+
+    # Refund MUST NOT be issued: the period was unknown.
+    helper.record_actual_cost.assert_not_called()
+
+    # Metric MUST be emitted with reason=unknown_period.
+    unknown_period_calls = [c for c in add_calls if c[1].get("reason") == "unknown_period"]
+    assert len(unknown_period_calls) == 1, (
+        f"expected one extraction.refund_skipped_total{{reason=unknown_period}} "
+        f"emission, got {add_calls!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_refund_uses_pre_charge_period() -> None:
+    """When Phase 1's period_start lookup succeeds, refund uses THAT period (not runtime).
+
+    Companion to the unknown_period skip case: confirms the happy path still
+    routes the refund into the bucket that ingest pre-charged, even when the
+    runtime current_period_start() has advanced past a boundary.
+    """
+    redis = AsyncMock()
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    async def _categorize_raises(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("LLM hard failure")
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            side_effect=_categorize_raises,
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_job_failed",
+            new=AsyncMock(),
+        ),
+        # Runtime period (worker time) has advanced past the original bucket.
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 6, 1),
+        ),
+        # Job row records the original pre-charge bucket.
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        with pytest.raises(RuntimeError, match="LLM hard failure"):
+            await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
+
+    helper.record_actual_cost.assert_called_once()
+    kwargs = helper.record_actual_cost.call_args.kwargs
+    assert kwargs["period_start"] == date(2026, 5, 1), (
+        "Refund must use the pre-charge bucket (2026-05-01) loaded from the "
+        "job row, not the runtime period (2026-06-01)."
+    )

@@ -26,6 +26,7 @@ from gubbi_common.audit.actions import Action
 from gubbi_common.audit.targets import TargetKind
 from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.db.user_scoped import user_scoped_connection
+from opentelemetry import metrics
 
 from gubbi.audit import record_audit
 from gubbi.crypto.cipher import ContentCipher
@@ -48,9 +49,24 @@ from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.validation import harden_llm_topic_path
 
-__all__: list[str] = ["extract_conversation"]
+__all__: list[str] = ["EXTRACTION_REFUND_SKIPPED", "extract_conversation"]
 
 logger = structlog.get_logger(__name__)
+
+# Counter incremented when the worker fails BEFORE the period_start lookup
+# completes. In that window we cannot guarantee the runtime period equals the
+# bucket the pre-charge debited (a period boundary may have been crossed since
+# ingest), so the refund is skipped. Manual reconcile signal -- see backlog
+# item from R1 / MEDIUM-2.
+_meter = metrics.get_meter("gubbi")
+EXTRACTION_REFUND_SKIPPED = _meter.create_counter(
+    name="extraction.refund_skipped_total",
+    description=(
+        "Pre-charge refund skipped because the worker failed before the "
+        "pre-charge period was known; partitioned by reason."
+    ),
+    unit="1",
+)
 
 
 # ---------------------------------------------------------------------------
@@ -466,7 +482,16 @@ async def extract_conversation(
     # always has a defined value, even when an exception raises before the
     # job-row lookup completes (e.g. asyncpg connection failure during conn1).
     # Phase 1 may overwrite this with the job row's period_start once known.
+    #
+    # _period_start_known gates the outer-except refund (R1 / MEDIUM-2):
+    # only after the job row's period_start has been read (or there is no
+    # real pre-charge to reconcile, i.e. job_id == "unknown") may the refund
+    # be issued. Otherwise we cannot guarantee the runtime period matches
+    # the bucket that ingest debited; a period boundary crossed mid-job
+    # would refund the wrong bucket. Skipping (with a metric) is safer than
+    # mis-bucketing.
     effective_period_start: date = current_period_start()
+    _period_start_known: bool = job_id == "unknown"
 
     try:
         # ------------------------------------------------------------------
@@ -496,6 +521,12 @@ async def extract_conversation(
                 job_period_start = await extraction_jobs.get_period_start(
                     conn1, job_uuid_for_phase1
                 )
+                # Mark the period_start authoritative for refund routing.
+                # We've successfully reached the DB and read the row; whether
+                # job_period_start is None (row missing under RLS) or a date,
+                # the runtime fallback below is now the best we can do AND
+                # we know it lines up with reality at THIS moment.
+                _period_start_known = True
 
             _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
                 conn1, cipher, conversation_id, user_id, log
@@ -614,17 +645,38 @@ async def extract_conversation(
         # never spent. Best-effort: a Redis failure here must not block the
         # extraction_jobs row update that follows. The two side effects are
         # independent so the operator never loses one because the other failed.
+        #
+        # Refund is GATED by _period_start_known (R1 / MEDIUM-2): if the
+        # worker failed before the job row's period_start was read, we cannot
+        # guarantee the runtime period matches the bucket the pre-charge
+        # debited (a period boundary may have been crossed). In that window
+        # the refund is skipped and a metric is emitted so an operator can
+        # manually reconcile. Refunding into the wrong bucket is worse than
+        # not refunding -- the user gets a credit they shouldn't AND has a
+        # phantom debit in the original period.
         helper = ctx.get("budget_helper")
         if helper is not None:
-            try:
-                await helper.record_actual_cost(
-                    user_id=user_uuid,
-                    period_start=effective_period_start,
-                    actual_cents=0,
-                    estimated_cents=PRE_CHARGE_CENTS,
+            if not _period_start_known:
+                await logger.warning(
+                    "extraction.refund_skipped_unknown_period",
+                    user_id=str(user_uuid),
+                    conversation_id=conversation_id,
+                    job_id=job_id,
                 )
-            except Exception:  # broad: redis errors come in many shapes
-                await log.warning("budget_refund_failed", exc_info=True)
+                EXTRACTION_REFUND_SKIPPED.add(
+                    1,
+                    attributes={"reason": "unknown_period"},
+                )
+            else:
+                try:
+                    await helper.record_actual_cost(
+                        user_id=user_uuid,
+                        period_start=effective_period_start,
+                        actual_cents=0,
+                        estimated_cents=PRE_CHARGE_CENTS,
+                    )
+                except Exception:  # broad: redis errors come in many shapes
+                    await log.warning("budget_refund_failed", exc_info=True)
         if job_id != "unknown":
             error_code = _classify_error(exc)
             await _mark_job_failed(pool, user_uuid, job_id, conversation_id, error_code)
