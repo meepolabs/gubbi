@@ -398,6 +398,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             run_orphan_cleanup(
                 admin_pool,
                 threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
+                budget_helper=app.state.budget_helper,
             ),
         )
         app.state.background_tasks.add(cron_task)

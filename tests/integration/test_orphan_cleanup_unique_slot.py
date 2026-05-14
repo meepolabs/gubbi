@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -128,3 +128,115 @@ async def test_unique_slot_freed_after_cleanup(admin_pool: asyncpg.Pool) -> None
     )
     assert row is not None
     assert row["status"] == "pending"
+
+
+# ---------------------------------------------------------------------------
+# Stuck-running reaper (B2 / Q3)
+# ---------------------------------------------------------------------------
+
+
+async def _seed_running_row(
+    conn: asyncpg.Connection,
+    *,
+    conversation_id: int,
+    user_id: UUID,
+    started_at: datetime,
+) -> UUID:
+    """Insert a 'running' extraction_jobs row with a specific started_at."""
+    job_id = uuid4()
+    await conn.execute(
+        """
+        INSERT INTO extraction_jobs
+            (id, user_id, conversation_id, source, status, period_start,
+             created_at, updated_at, started_at)
+        VALUES ($1, $2, $3, 'test', 'running', '2026-05-01'::date, $4, $4, $4)
+        """,
+        job_id,
+        user_id,
+        conversation_id,
+        started_at,
+    )
+    return job_id
+
+
+@pytest.mark.skip(reason="Requires live DB with extraction_jobs table")
+async def test_stuck_running_row_flipped_to_worker_lost(admin_pool: asyncpg.Pool) -> None:
+    """Orphan cleanup flips 'running' rows older than 2 * ARQ_JOB_TIMEOUT_SECS to 'failed'/worker_lost."""
+    from unittest.mock import MagicMock
+
+    conversation_id = await admin_pool.fetchval("SELECT nextval('conversations_id_seq')")
+    # 25 minutes ago is well past the 20-minute reaper threshold.
+    stuck_time = datetime.now(UTC) - timedelta(minutes=25)
+
+    async with admin_pool.acquire() as conn:
+        job_id = await _seed_running_row(
+            conn,
+            conversation_id=conversation_id,
+            user_id=_USER_UUID,
+            started_at=stuck_time,
+        )
+
+    # Stub a budget helper -- the reaper should call record_actual_cost once
+    # per swept row with actual_cents=0.
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+
+    async def _single_cycle(seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_single_cycle):
+        task = asyncio.create_task(
+            run_orphan_cleanup(
+                admin_pool,
+                threshold_minutes=30,
+                sleep_seconds=1,
+                budget_helper=helper,
+            )
+        )
+        with suppress(asyncio.CancelledError):
+            await task
+
+    row = await admin_pool.fetchrow(
+        "SELECT status, error_code FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    assert row is not None
+    assert row["status"] == "failed"
+    assert row["error_code"] == "worker_lost"
+
+    # Refund attempted with actual=0 against PRE_CHARGE_CENTS estimate.
+    helper.record_actual_cost.assert_awaited_once()
+    kwargs = helper.record_actual_cost.await_args.kwargs
+    assert kwargs["actual_cents"] == 0
+
+
+@pytest.mark.skip(reason="Requires live DB with extraction_jobs table")
+async def test_recent_running_row_untouched(admin_pool: asyncpg.Pool) -> None:
+    """Running rows newer than the 20-minute threshold remain unchanged."""
+    conversation_id = await admin_pool.fetchval("SELECT nextval('conversations_id_seq')")
+    recent_time = datetime.now(UTC) - timedelta(minutes=5)
+
+    async with admin_pool.acquire() as conn:
+        job_id = await _seed_running_row(
+            conn,
+            conversation_id=conversation_id,
+            user_id=_USER_UUID,
+            started_at=recent_time,
+        )
+
+    async def _single_cycle(seconds: float) -> None:
+        raise asyncio.CancelledError
+
+    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_single_cycle):
+        task = asyncio.create_task(
+            run_orphan_cleanup(admin_pool, threshold_minutes=30, sleep_seconds=1)
+        )
+        with suppress(asyncio.CancelledError):
+            await task
+
+    row = await admin_pool.fetchrow(
+        "SELECT status FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    assert row is not None
+    assert row["status"] == "running"
