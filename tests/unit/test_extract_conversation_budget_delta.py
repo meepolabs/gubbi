@@ -589,3 +589,71 @@ async def test_refund_uses_pre_charge_period() -> None:
         "Refund must use the pre-charge bucket (2026-05-01) loaded from the "
         "job row, not the runtime period (2026-06-01)."
     )
+
+
+@pytest.mark.asyncio
+async def test_refund_skipped_with_metric_when_job_period_lookup_returns_none() -> None:
+    """Missing job-row period_start must stay on the skip path.
+
+    A successful call to get_period_start() is not enough if it returns None:
+    the worker still does not know which bucket ingest pre-charged. Refunding
+    against the runtime period would mis-bucket across a month boundary.
+    """
+    from gubbi.extraction.jobs.extract_conversation import EXTRACTION_REFUND_SKIPPED
+
+    redis = AsyncMock()
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    async def _categorize_raises(*_a: Any, **_kw: Any) -> Any:
+        raise RuntimeError("LLM hard failure")
+
+    add_calls: list[tuple[int, dict[str, str]]] = []
+
+    def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
+        add_calls.append((amount, attributes or {}))
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            side_effect=_categorize_raises,
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_job_failed",
+            new=AsyncMock(),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 6, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=None),
+        ),
+        patch.object(EXTRACTION_REFUND_SKIPPED, "add", side_effect=_capture_add),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+        patches[7],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        with pytest.raises(RuntimeError, match="LLM hard failure"):
+            await extract_conversation(ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID)
+
+    helper.record_actual_cost.assert_not_called()
+    unknown_period_calls = [c for c in add_calls if c[1].get("reason") == "unknown_period"]
+    assert len(unknown_period_calls) == 1

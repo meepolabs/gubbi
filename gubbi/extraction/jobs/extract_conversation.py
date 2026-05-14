@@ -521,12 +521,12 @@ async def extract_conversation(
                 job_period_start = await extraction_jobs.get_period_start(
                     conn1, job_uuid_for_phase1
                 )
-                # Mark the period_start authoritative for refund routing.
-                # We've successfully reached the DB and read the row; whether
-                # job_period_start is None (row missing under RLS) or a date,
-                # the runtime fallback below is now the best we can do AND
-                # we know it lines up with reality at THIS moment.
-                _period_start_known = True
+                # Mark the period_start authoritative for refund routing only
+                # when the job row actually yielded a bucket. If the row is
+                # missing under RLS / invalid job_id and get_period_start()
+                # returns None, refunding against the runtime period would
+                # re-introduce the wrong-bucket bug across a month boundary.
+                _period_start_known = job_period_start is not None
 
             _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
                 conn1, cipher, conversation_id, user_id, log
