@@ -64,8 +64,8 @@ pre-commit = "^3.5.0"
 # Caret on a 0.x already means <0.9; do not relax without a coordinated reformat commit.
 ruff = "^0.8.0"
 mypy = "^1.13.0"
-types-requests = ">=2.32,<3"
-types-pyyaml = "^6.0.12.20260408"
+types-requests = "==2.33.0.20260402"
+types-pyyaml = "==6.0.12.20260408"
 hypothesis = "^6.152.1"
 asgi-lifespan = "^2.1.0"
 
