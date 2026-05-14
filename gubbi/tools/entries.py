@@ -22,7 +22,12 @@ from gubbi.auth_context import current_user_id
 from gubbi.crypto.guard import require_cipher
 from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
 from gubbi.storage.repositories import entries as entry_repo
-from gubbi.tools.constants import DEFAULT_ENTRIES_LIMIT, MAX_READ_ENTRIES
+from gubbi.tools.constants import (
+    DEFAULT_ENTRIES_LIMIT,
+    MAX_ENTRY_CONTENT_CHARS,
+    MAX_ENTRY_REASONING_CHARS,
+    MAX_READ_ENTRIES,
+)
 from gubbi.tools.errors import invalid_date, invalid_topic, not_found, validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
 from gubbi.validation import (
@@ -77,9 +82,17 @@ async def _journal_append_entry(
         topic = validate_topic(topic)
     except ValueError as e:
         return invalid_topic(topic, str(e))
+    # Caps applied pre-sanitization so the error reports the real input size,
+    # not the post-strip size.  An oversized blob must be rejected at the tool
+    # boundary before encryption + insert -- check_response_size only fires on
+    # output, by which point the data is already encrypted and stored.
+    if len(content) > MAX_ENTRY_CONTENT_CHARS:
+        return validation_error(f"content exceeds {MAX_ENTRY_CONTENT_CHARS} characters")
+    if reasoning is not None and len(reasoning) > MAX_ENTRY_REASONING_CHARS:
+        return validation_error(f"reasoning exceeds {MAX_ENTRY_REASONING_CHARS} characters")
     content = sanitize_freetext(content)
     if not content.strip():
-        return validation_error("Content cannot be empty")
+        return validation_error("content cannot be empty")
     try:
         reject_tool_call_syntax(content)
     except ValueError as e:
@@ -207,20 +220,51 @@ async def _journal_update_entry(
     date: str | None = None,
     tags: list[str] | None = None,
 ) -> dict[str, Any]:
+    # Two-stage validation:
+    #   (1) sanitize + normalize "no real intent" cases to None
+    #   (2) re-check the no-op condition
+    #
+    # Stage (1) catches inputs that LOOK like a partial update but, after
+    # sanitization, carry no actual change.  Without this, ``reasoning=""``
+    # or ``reasoning="\x00"`` would pass the all-None guard (it's not None),
+    # sanitize to an empty string, and flow into ``entry_repo.update`` which
+    # treats ``reasoning is not None`` as "reasoning changed" -- re-encrypting
+    # the empty value, nulling ``indexed_at`` (triggering reindex), and
+    # writing an audit row.  Normalize empty-after-sanitize back to None so
+    # stage (2) can short-circuit.
     if content is not None:
+        # Cap pre-sanitization so the error reports real input size.
+        if len(content) > MAX_ENTRY_CONTENT_CHARS:
+            return validation_error(f"content exceeds {MAX_ENTRY_CONTENT_CHARS} characters")
         content = sanitize_freetext(content)
         if not content.strip():
+            # NOTE: append-mode empty-content is locked as a distinct
+            # user-facing error (A4 Q4) -- "content cannot be empty" rather
+            # than the no-op message -- so we MUST keep the explicit
+            # validation_error here for content, even though reasoning takes
+            # the silent normalize path.  The asymmetry is deliberate:
+            # content is required, reasoning is optional.
             return validation_error("content cannot be empty")
         try:
             reject_tool_call_syntax(content)
         except ValueError as e:
             return validation_error(str(e))
     if reasoning is not None:
+        if len(reasoning) > MAX_ENTRY_REASONING_CHARS:
+            return validation_error(f"reasoning exceeds {MAX_ENTRY_REASONING_CHARS} characters")
         reasoning = sanitize_freetext(reasoning)
         try:
             reject_tool_call_syntax(reasoning)
         except ValueError as e:
             return validation_error(str(e))
+        # Stage (1) normalization: empty/whitespace-only reasoning is not a
+        # "clear reasoning" intent -- treat it as "didn't really want to
+        # update reasoning" and drop it so the no-op guard below can fire.
+        # ``\x00``-only inputs sanitize to "" here; whitespace-only stays
+        # whitespace (sanitize_freetext preserves whitespace) so we use
+        # .strip() for the check.
+        if not reasoning.strip():
+            reasoning = None
     if date:
         try:
             validate_date(date)
@@ -231,6 +275,19 @@ async def _journal_update_entry(
         original_tag_count = len(tags)
         tags = [s for t in tags if (s := sanitize_label(t))]
         tags_dropped = original_tag_count - len(tags)
+    # tags=[] as an input remains intentional ("clear all tags") and is NOT
+    # normalized to None.  The all-dropped case (every sanitize_label
+    # returned empty) collapses to tags=[] here too; that ambiguity is
+    # preserved deliberately -- callers that need stricter semantics should
+    # validate tags upstream.
+
+    # Stage (2) no-op guard: if no field has a real value after normalization,
+    # reject at the tool boundary so @audited does NOT fire and no ghost
+    # audit row is written.  Runs AFTER stage (1) so empty-reasoning paths
+    # that normalize to None are caught here rather than slipping through
+    # to the repo.
+    if content is None and reasoning is None and date is None and tags is None:
+        return validation_error("No fields to update")
 
     user_id = current_user_id.get()
     if user_id is None:
