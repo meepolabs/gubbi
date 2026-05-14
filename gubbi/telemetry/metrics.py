@@ -22,9 +22,10 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from gubbi_common.telemetry.allowlist import is_banned_key
 from opentelemetry import metrics
 
-from gubbi.telemetry.attrs import BANNED_KEYS, MetricNames
+from gubbi.telemetry.attrs import MetricNames
 
 __all__: list[str] = [
     "AUDIT_PERSISTENCE_FAILURE",
@@ -82,22 +83,18 @@ AUDIT_PERSISTENCE_FAILURE = _get_meter().create_counter(
 def _validate_metric_attrs(attrs: dict[str, str]) -> dict[str, str]:
     """Strip banned keys from metric attributes.
 
-    Same privacy rules as span attributes: no content, email, etc.
-    Returns a new dict with only allowed keys.
+    Delegates to :func:`gubbi_common.telemetry.allowlist.is_banned_key`, the
+    canonical single source of truth used by ``safe_set_attributes`` on the
+    span path. This honours ``DERIVATIVE_MODIFIERS`` (so keys like
+    ``user_agent_hash`` or ``text_hash`` survive) and ``NEVER_EXEMPT_BASES``
+    (so credential-shaped keys like ``password_hash`` are still dropped).
     """
     cleaned: dict[str, str] = {}
     for key, value in attrs.items():
-        if key in BANNED_KEYS:
+        if is_banned_key(key):
             logger.warning("Dropping banned metric attribute %r", key)
             continue
-        skip = False
-        for banned in BANNED_KEYS:
-            if banned in key:
-                logger.warning("Dropping metric attribute %r (contains banned key %r)", key, banned)
-                skip = True
-                break
-        if not skip:
-            cleaned[key] = value
+        cleaned[key] = value
     return cleaned
 
 
