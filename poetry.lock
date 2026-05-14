@@ -1111,7 +1111,7 @@ db = ["asyncpg (>=0.29,<0.31)"]
 
 [package.source]
 type = "git"
-url = "ssh://git@github.com/meepolabs/gubbi-common.git"
+url = "https://github.com/meepolabs/gubbi-common.git"
 reference = "e10133a72ab8aceaeb723913113993b32daa956a"
 resolved_reference = "e10133a72ab8aceaeb723913113993b32daa956a"
 
@@ -3863,4 +3863,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "717f4a2bdc74c26381bebb7fe059c617299fb4f99ac0f53d1d1f8d308cc0894b"
+content-hash = "cb3cbbda8976b71d8e5e4bf25da3200a0c474724b41867590a728f8c1f8f5ce7"
