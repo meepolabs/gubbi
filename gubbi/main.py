@@ -337,6 +337,35 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     redis_client = aioredis.Redis(connection_pool=redis_pool)
     app.state.redis_client = redis_client
 
+    # Fail-fast PING: a Redis that is unreachable at startup must abort the
+    # lifespan rather than yield a half-open service whose first request
+    # discovers the failure. Without this, gubbi would start "successfully"
+    # against a dead Redis and then surface ConnectionError on every
+    # SSE / arq / budget call (post-DEC-098 alarm channel goes silent on
+    # whatever subset of those use Redis).
+    #
+    # On PING failure: close every pre-yield resource opened so far so the
+    # process does not leak DB connections, OAuth storage, the Hydra HTTP
+    # client, or the Redis pool when supervisor (uvicorn / kamal / k8s)
+    # restarts. Mirrors the same pattern as `_build_app_ctx`'s on-failure
+    # close block above and gubbi-cloud's PING-on-test-cleanup branch.
+    try:
+        await redis_client.ping()
+    except BaseException:
+        with suppress(Exception, asyncio.CancelledError):
+            await redis_client.aclose(close_connection_pool=True)
+        with suppress(Exception, asyncio.CancelledError):
+            await oauth_storage.close()
+        if hydra_http_client is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await hydra_http_client.aclose()
+        with suppress(Exception, asyncio.CancelledError):
+            await pool.close()
+        if admin_pool is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await admin_pool.close()
+        raise
+
     # Arq pool for background job enqueue (separate from the SSE aioredis client).
     arq_pool = await arq_create_pool(ArqRedisSettings.from_dsn(str(settings.redis_url)))
     app.state.arq_pool = arq_pool
