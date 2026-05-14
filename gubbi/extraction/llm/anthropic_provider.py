@@ -1,7 +1,7 @@
 import asyncio
 import random
 from collections.abc import Mapping
-from typing import Any, cast
+from typing import Any
 
 from anthropic import (
     APIConnectionError,
@@ -37,8 +37,11 @@ def _is_retryable_anthropic_error(exc: Exception) -> bool:
     if isinstance(exc, APIConnectionError):
         return True
     if isinstance(exc, APIStatusError):
-        status_error = cast(APIStatusError, exc)
-        return cast(int, status_error.status_code) >= 500
+        # isinstance narrows exc to APIStatusError; the surrounding cast(APIStatusError, exc)
+        # that used to live here was redundant. But APIStatusError.status_code is typed Any
+        # in the anthropic SDK stubs, so the int() coercion is still needed to keep this
+        # function's bool return type honest under mypy --strict.
+        return int(exc.status_code) >= 500
     return False
 
 
