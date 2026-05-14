@@ -11,9 +11,12 @@ The current API surface is one context manager:
 which is used by ``CREATE INDEX CONCURRENTLY`` migrations to step out of
 Alembic's wrapping transaction safely.
 
-Pinned to psycopg 3.x semantics: ``conn.connection.autocommit = True/False``.
-If the pyproject psycopg pin moves to 4.x, audit this contract -- 4.x may
-switch to ``set_autocommit()`` method form or context-manager-only.
+Pinned to psycopg 3.x semantics: the underlying psycopg connection exposes
+``autocommit`` as a settable property. The fix-pass that introduced
+``driver_connection`` resolution removed the proxy-vs-driver coupling, but
+the contract still depends on psycopg's ``autocommit`` property setter -- a
+psycopg 4.0 bump may switch to ``set_autocommit()`` method form or
+context-manager-only, which would require updating this helper.
 """
 
 from collections.abc import Iterator
@@ -44,19 +47,50 @@ def autocommit_block(conn: Any) -> Iterator[Any]:
     obvious in diff and easier to spot if a future psycopg version
     changes the underlying mechanism.
 
-    Pinned to psycopg 3.x semantics: ``conn.connection.autocommit = True/False``.
+    Why ``driver_connection`` is required (R1 fix):
+        ``op.get_bind()`` returns a SQLAlchemy ``Connection`` whose
+        ``.connection`` attribute is a ``_ConnectionFairy``
+        (PoolProxiedConnection), NOT the raw psycopg connection. The
+        fairy does not define ``__setattr__`` to forward writes -- so
+        ``proxy.autocommit = True`` lands on the proxy instance and the
+        underlying psycopg connection's ``autocommit`` stays at its prior
+        value (typically False). The result: ``CREATE INDEX CONCURRENTLY``
+        can fail mid-migration because Alembic's transaction is still
+        open on the real connection.
+
+        SQLAlchemy 2.0's canonical accessor for the underlying DB-API
+        connection on a proxy is ``driver_connection``;
+        ``dbapi_connection`` is the SQLAlchemy 1.x alias and is kept here
+        as a fallback. The final ``or proxy`` fallback covers tests that
+        pass a raw psycopg-shaped fake (no proxy wrapper).
+
+    Pinned to psycopg 3.x semantics: ``raw.autocommit = True/False``.
     If the pyproject psycopg pin moves to 4.x, audit this contract -- 4.x
     may switch to ``set_autocommit()`` method form or context-manager-only.
 
     Args:
         conn: SQLAlchemy connection from ``op.get_bind()``. Its
-            ``.connection`` attribute is the raw psycopg connection.
+            ``.connection`` attribute is a PoolProxiedConnection
+            (``_ConnectionFairy``) whose ``.driver_connection`` exposes
+            the raw psycopg connection.
 
     Yields:
         The raw psycopg connection (autocommit=True) for direct
         ``.execute(...)`` calls.
     """
-    raw = conn.connection  # psycopg.Connection
+    proxy = conn.connection
+    # SQLAlchemy 2.0 PoolProxiedConnection: ``driver_connection`` is the
+    # canonical accessor for the underlying psycopg connection. The fairy
+    # does not forward attribute writes via ``__setattr__``, so writing
+    # ``autocommit`` on the proxy itself silently stays on the proxy and
+    # never reaches psycopg. ``dbapi_connection`` is the SQLAlchemy 1.x
+    # alias. The final ``or proxy`` fallback covers tests that pass a raw
+    # psycopg-shaped fake.
+    raw = (
+        getattr(proxy, "driver_connection", None)
+        or getattr(proxy, "dbapi_connection", None)
+        or proxy
+    )
     prev = getattr(raw, "autocommit", False)
     raw.autocommit = True
     try:
