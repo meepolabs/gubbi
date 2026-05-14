@@ -42,15 +42,33 @@ def configure_otel(app: FastAPI) -> None:
     Call during app lifespan startup, before any request handling.
     Idempotent: safe to call multiple times (subsequent calls no-op).
 
+    Resource attributes (S8 M-1) are populated from in-process defaults:
+
+    * ``service.version`` -- ``gubbi.__version__`` (mirrors pyproject).
+    * ``deployment.environment`` -- ``settings.app_env``.
+
+    ``OTEL_RESOURCE_ATTRIBUTES`` env var entries OVERLAY these defaults
+    (per OTel spec); a deploy-time override always wins.
+
     Args:
         app: The FastAPI application instance.
     """
+    from gubbi import __version__ as _gubbi_version  # noqa: PLC0415
+    from gubbi.config import get_settings  # noqa: PLC0415
+
     service_name = os.environ.get(_OTEL_SERVICE_NAME_ENV, "gubbi")
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     enabled = _is_otel_enabled()
+    settings = get_settings()
     from gubbi_common.telemetry.otel import configure_otel as _common_configure_otel
 
-    _common_configure_otel(service_name, endpoint, enabled=enabled)
+    _common_configure_otel(
+        service_name,
+        endpoint,
+        enabled=enabled,
+        service_version=_gubbi_version,
+        deployment_environment=settings.app_env,
+    )
     _wire_instrumentors(app)
     rebind_metrics_after_configure()
 
