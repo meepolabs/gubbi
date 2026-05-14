@@ -718,18 +718,35 @@ class TestExtractConversationJob:
 
 
 class TestClassifyError:
-    """Unit tests for the _classify_error private helper."""
+    """Unit tests for the _classify_error private helper.
+
+    After B2 the worker reads the provider-agnostic LLM* hierarchy from
+    gubbi.extraction.llm.provider; vendor SDK types are translated at the
+    AnthropicProvider boundary, never imported here.
+    """
 
     def test_rate_limit_error(self) -> None:
-        import anthropic
+        from gubbi.extraction.llm.provider import LLMRateLimitError
 
-        exc = anthropic.RateLimitError.__new__(anthropic.RateLimitError)
+        exc = LLMRateLimitError("rate limited")
         assert _classify_error(exc) == "llm_rate_limited"
 
     def test_api_error(self) -> None:
-        import anthropic
+        from gubbi.extraction.llm.provider import LLMProviderError
 
-        exc = anthropic.APIError.__new__(anthropic.APIError)
+        exc = LLMProviderError("provider error")
+        assert _classify_error(exc) == "llm_provider_error"
+
+    def test_permanent_error_classified_as_provider_error(self) -> None:
+        from gubbi.extraction.llm.provider import LLMPermanentError
+
+        exc = LLMPermanentError("auth failed")
+        assert _classify_error(exc) == "llm_provider_error"
+
+    def test_transient_error_classified_as_provider_error(self) -> None:
+        from gubbi.extraction.llm.provider import LLMTransientError
+
+        exc = LLMTransientError("connection reset")
         assert _classify_error(exc) == "llm_provider_error"
 
     def test_runtime_error_falls_back_to_internal(self) -> None:
