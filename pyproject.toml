@@ -117,6 +117,10 @@ known-first-party = ["gubbi"]
 # `disable_error_code = "import-untyped"` covers vendor libs without py.typed
 # markers (asyncpg, mcp, opentelemetry-instrumentation-*, onnxruntime, etc.)
 # without needing a per-module `[[tool.mypy.overrides]]` block per dep.
+# Convergence target for B4 Q1=A: this set is the strictest of the three
+# Python repos. Sibling pyprojects (gubbi-common, gubbi-cloud) now mirror
+# this list. Drift detection lives in tools/check_env_contract.py-style
+# audits at the workspace level.
 python_version = "3.12"
 warn_return_any = true
 warn_unused_configs = true
