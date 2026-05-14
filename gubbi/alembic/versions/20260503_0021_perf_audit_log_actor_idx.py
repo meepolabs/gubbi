@@ -13,9 +13,9 @@ during deployment.  The DROP runs before the CREATE -- this is safe because
 the old index has no dependents (it was created alone).
 """
 
-from typing import Any
-
 from alembic import op
+
+from gubbi.alembic._helpers import autocommit_block
 
 revision = "0021_perf_audit_log_actor_idx"
 down_revision = "0020_audit_log_target_kind"
@@ -28,17 +28,13 @@ def upgrade() -> None:
     op.execute("COMMIT")
 
     conn = op.get_bind()
-    raw: Any = conn.connection
-    raw.autocommit = True
-    try:
+    with autocommit_block(conn) as raw:
         # Drop the bare index concurrently to reduce deploy-time lock pressure.
         raw.execute("DROP INDEX CONCURRENTLY IF EXISTS idx_audit_log_actor_id")
         raw.execute(
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_actor_id "
             "ON audit_log (actor_id, occurred_at DESC)"
         )
-    finally:
-        raw.autocommit = False
 
 
 def downgrade() -> None:

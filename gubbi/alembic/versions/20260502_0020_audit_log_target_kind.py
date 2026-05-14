@@ -16,9 +16,9 @@ to avoid blocking concurrent audit writes during deployment; the ALTER TABLE
 runs inside Alembic's transaction but the index builds run outside it.
 """
 
-from typing import Any
-
 from alembic import op
+
+from gubbi.alembic._helpers import autocommit_block
 
 revision = "0020_audit_log_target_kind"
 down_revision = "0019_rls_users"
@@ -39,9 +39,7 @@ def upgrade() -> None:
     op.execute("COMMIT")
 
     conn = op.get_bind()
-    raw: Any = conn.connection  # psycopg.Connection
-    raw.autocommit = True
-    try:
+    with autocommit_block(conn) as raw:
         # ------------------------------------------------------------------
         # Step 2: Rebuild the dedup index with target_kind to prevent
         #         cross-namespace false unique-violations (H-3 follow-up).
@@ -60,8 +58,6 @@ def upgrade() -> None:
             "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_audit_log_target_kind_target_id "
             "ON audit_log (target_kind, target_id)"
         )
-    finally:
-        raw.autocommit = False
 
 
 def downgrade() -> None:
