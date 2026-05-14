@@ -75,7 +75,7 @@ async def scaffold_operator(
                     await record_audit(
                         conn,
                         actor_type="system",
-                        actor_id="scaffold_operator",
+                        actor_id="system:scaffold_operator",
                         action=Action.IDENTITY_CREATED,
                         target_type="user",
                         target_id=str(inserted_id),

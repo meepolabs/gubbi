@@ -34,7 +34,7 @@ async def test_record_audit_with_target_kind_roundtrip(
             actor_id="11111111-2222-3333-4444-555555555555",
             action="conversation.extracted",
             target_type="conversation",
-            target_id="42",
+            target_id="00000000-0000-0000-0000-000000000042",
             target_kind="conversation",
             reason="integration test",
             metadata={"via": "test"},
@@ -44,12 +44,13 @@ async def test_record_audit_with_target_kind_roundtrip(
         assert after_count == before_count + 1
 
         row = await conn.fetchrow(
-            "SELECT * FROM audit_log WHERE target_id = '42' ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM audit_log WHERE target_id = '00000000-0000-0000-0000-000000000042' "
+            "ORDER BY id DESC LIMIT 1"
         )
         assert row is not None
         assert row["target_kind"] == "conversation"
         assert row["target_type"] == "conversation"
-        assert row["target_id"] == "42"
+        assert row["target_id"] == "00000000-0000-0000-0000-000000000042"
         assert row["action"] == "conversation.extracted"
         assert row["actor_type"] == "user"
 
@@ -64,7 +65,7 @@ async def test_record_audit_without_target_kind_still_works(
         await record_audit(
             conn,
             actor_type="system",
-            actor_id="test-worker",
+            actor_id="system:test-worker",
             action=Action.SECRET_ROTATED,
         )
 
@@ -72,7 +73,8 @@ async def test_record_audit_without_target_kind_still_works(
         assert after_count == before_count + 1
 
         row = await conn.fetchrow(
-            "SELECT * FROM audit_log WHERE actor_id = 'test-worker' ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM audit_log WHERE actor_id = 'system:test-worker' "
+            "ORDER BY id DESC LIMIT 1"
         )
         assert row is not None
         assert row["target_kind"] is None
@@ -81,30 +83,32 @@ async def test_record_audit_without_target_kind_still_works(
 
 async def test_target_kind_index_works(clean_rls_db: asyncpg.Pool) -> None:
     """The idx_audit_log_target_kind_target_id index should not reject inserts."""
+    shared_target = "00000000-0000-0000-0000-000000000042"
     async with clean_rls_db.acquire() as conn:
         # Insert two rows with same target_id but different target_kind
         await record_audit(
             conn,
             actor_type="user",
-            actor_id="a",
+            actor_id="00000000-0000-0000-0000-0000000000aa",
             action="entry.created",
-            target_id="42",
+            target_id=shared_target,
             target_kind="entry",
             metadata={"test": "a"},
         )
         await record_audit(
             conn,
             actor_type="user",
-            actor_id="b",
+            actor_id="00000000-0000-0000-0000-0000000000bb",
             action="topic.created",
-            target_id="42",
+            target_id=shared_target,
             target_kind="topic",
             metadata={"test": "b"},
         )
 
         rows = await conn.fetch(
             "SELECT target_kind, target_id, actor_id FROM audit_log "
-            "WHERE target_id = '42' ORDER BY id"
+            "WHERE target_id = $1 ORDER BY id",
+            shared_target,
         )
         assert len(rows) == 2
         assert rows[0]["target_kind"] == "entry"
