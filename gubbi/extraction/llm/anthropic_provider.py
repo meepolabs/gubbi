@@ -6,9 +6,16 @@ from typing import Any
 import structlog
 from anthropic import (
     APIConnectionError,
+    APIResponseValidationError,
     APIStatusError,
     AsyncAnthropic,
+    AuthenticationError,
+    BadRequestError,
+    ConflictError,
+    NotFoundError,
+    PermissionDeniedError,
     RateLimitError,
+    UnprocessableEntityError,
 )
 from opentelemetry import metrics
 
@@ -40,17 +47,27 @@ ANTHROPIC_RETRY_COUNT = _meter.create_counter(
 def _translate_anthropic_error(exc: Exception) -> LLMProviderError:
     """Translate an anthropic SDK exception to the provider-agnostic hierarchy.
 
-    Mapping (locked in B2):
-      RateLimitError                          -> LLMRateLimitError
+    Mapping (locked in B2 + R1):
+      RateLimitError                            -> LLMRateLimitError
       APIConnectionError (incl APITimeoutError) -> LLMTransientError
+      APIResponseValidationError                -> LLMTransientError
+        (response-shape failures often correlate with upstream flakes; retry)
       APIStatusError with status_code >= 500
-        (incl InternalServerError)             -> LLMTransientError
-      Anything else (auth, validation, 4xx)    -> LLMPermanentError
+        (incl InternalServerError)              -> LLMTransientError
+      4xx APIStatusError subclasses             -> LLMPermanentError
+        (BadRequestError, AuthenticationError, PermissionDeniedError,
+         NotFoundError, UnprocessableEntityError, ConflictError)
+      Anything else                             -> LLMPermanentError
     """
     if isinstance(exc, RateLimitError):
         return LLMRateLimitError(str(exc))
     if isinstance(exc, APIConnectionError):
         # APITimeoutError is a subclass of APIConnectionError; covered here.
+        return LLMTransientError(str(exc))
+    if isinstance(exc, APIResponseValidationError):
+        # Response-shape validation failures often correlate with upstream
+        # flakes (truncated/garbled responses). Treat as transient so retries
+        # kick in.
         return LLMTransientError(str(exc))
     if isinstance(exc, APIStatusError):
         # APIStatusError.status_code is typed Any in the anthropic SDK stubs;
@@ -58,6 +75,20 @@ def _translate_anthropic_error(exc: Exception) -> LLMProviderError:
         # InternalServerError is APIStatusError(status_code=500), also covered.
         if int(exc.status_code) >= 500:
             return LLMTransientError(str(exc))
+        # 4xx subclasses (BadRequest/Auth/Permission/NotFound/Unprocessable/
+        # Conflict) all fall through here. Explicit isinstance branches are
+        # listed for clarity even though the >= 500 / else split already
+        # routes them correctly.
+        if isinstance(
+            exc,
+            BadRequestError
+            | AuthenticationError
+            | PermissionDeniedError
+            | NotFoundError
+            | UnprocessableEntityError
+            | ConflictError,
+        ):
+            return LLMPermanentError(str(exc))
         return LLMPermanentError(str(exc))
     return LLMPermanentError(str(exc))
 
