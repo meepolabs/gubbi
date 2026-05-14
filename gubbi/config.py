@@ -127,8 +127,9 @@ class AuthConfig(BaseModel):
     gateway_secret: str = ""
     gateway_require_signature: bool = True
     api_key_scopes: list[str] = ["journal:read", "journal:write"]
-    # When True, client_ip() honours the leftmost X-Forwarded-For header as
-    # the original client IP.  Requires a trusted reverse-proxy in front of
+    # When True, client_ip() honours the rightmost X-Forwarded-For entry --
+    # the IP added by the trusted edge proxy -- as the original client IP
+    # (DEC-086 rule 4). Requires a trusted reverse-proxy in front of
     # gubbi; default False for direct-to-container deploys (M-9.3).
     trust_forwarded_headers: bool = False
 
@@ -213,7 +214,8 @@ class Settings(BaseSettings):
 
     Additional hardening flags (M-9 cluster):
     - JOURNAL_AUTH__TRUST_FORWARDED_HEADERS: When True, client_ip() honours
-      the leftmost X-Forwarded-For header (default False; M-9.3).
+      the rightmost X-Forwarded-For entry -- the trusted-proxy stamp per
+      DEC-086 rule 4 -- (default False; M-9.3).
     - JOURNAL_HEALTH_BIND_PUBLIC: When set and "true", the extraction
       health server listens on 0.0.0.0 instead of 127.0.0.1 (default
       localhost-only; M-9.7).
