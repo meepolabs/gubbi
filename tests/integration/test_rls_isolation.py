@@ -441,3 +441,67 @@ async def test_messages_visible_only_to_owner(
         ids = {r["id"] for r in await conn.fetch("SELECT id FROM messages")}
     assert ids == set(seeded_a.message_ids)
     assert ids.isdisjoint(set(seeded_b.message_ids))
+
+
+# ---------------------------------------------------------------------------
+# SECTION 8 - PER-USER TOPIC UNIQUENESS (regression guard for migration 0030)
+# ---------------------------------------------------------------------------
+#
+# Migration 0030 replaced the global UNIQUE(path) on topics with the
+# composite UNIQUE(user_id, path) so two tenants can each own a topic
+# at the same path without leaking cross-tenant existence via the
+# ALREADY_EXISTS envelope. The earlier sections cover cross-tenant
+# READ visibility; this section asserts the WRITE-side invariant.
+# See gubbi/alembic/versions/20260516_0030_topics_user_path_unique.py.
+
+
+async def test_topic_create_same_path_for_two_users_succeeds(
+    app_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    tenant_b: UUID,
+) -> None:
+    """User A and user B can each create a topic at path 'work' independently.
+
+    Pre-migration-0030 the second user's INSERT would have raised a
+    UniqueViolation against topics_path_key UNIQUE(path), surfacing as
+    ALREADY_EXISTS to a user who has no such topic -- the cross-tenant
+    leak this migration closes.
+    """
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+        topic_id_a = await topic_repo.create(conn, topic="work", title="Work")
+    assert topic_id_a > 0
+
+    async with user_scoped_connection(app_pool, user_id=tenant_b) as conn:
+        topic_id_b = await topic_repo.create(conn, topic="work", title="Work")
+    assert topic_id_b > 0
+    assert topic_id_b != topic_id_a, "B's topic must be a distinct row from A's"
+
+    # Each user sees exactly their own 'work' topic (one row, the right one).
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+        a_topics, a_total = await topic_repo.list_all(conn)
+    assert a_total == 1
+    assert a_topics[0].topic == "work"
+    assert a_topics[0].id == topic_id_a
+
+    async with user_scoped_connection(app_pool, user_id=tenant_b) as conn:
+        b_topics, b_total = await topic_repo.list_all(conn)
+    assert b_total == 1
+    assert b_topics[0].topic == "work"
+    assert b_topics[0].id == topic_id_b
+
+
+async def test_topic_create_same_path_same_user_raises_already_exists(
+    app_pool: asyncpg.Pool,
+    tenant_a: UUID,
+) -> None:
+    """A second create for the SAME (user, path) raises TopicAlreadyExists.
+
+    The composite UNIQUE(user_id, path) enforces per-user uniqueness; the
+    repo translates the asyncpg.UniqueViolationError into the typed
+    TopicAlreadyExists subclass of ValueError so callers can match
+    structurally instead of grepping the message.
+    """
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+        await topic_repo.create(conn, topic="work", title="Work")
+        with pytest.raises(topic_repo.TopicAlreadyExists, match="already exists"):
+            await topic_repo.create(conn, topic="work", title="Work duplicate")
