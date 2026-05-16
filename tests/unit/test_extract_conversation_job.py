@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -18,7 +19,7 @@ from gubbi.storage.exceptions import TopicNotFoundError
 
 
 @pytest.fixture
-def mock_ctx() -> dict:
+def mock_ctx() -> Any:
     """Build a minimal Arq worker context with mocked dependencies."""
     extraction_service = AsyncMock()
     extraction_service._llm = None
@@ -27,6 +28,7 @@ def mock_ctx() -> dict:
         "cipher": MagicMock(),
         "extraction_service": extraction_service,
         "redis": AsyncMock(),
+        "redis_pool": MagicMock(),
     }
 
 
@@ -107,7 +109,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_extract_conversation_calls_service_in_order(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -291,7 +293,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_extract_conversation_idempotent_skip(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """When processed_at is already set on conn1 check, the job returns early with
@@ -339,7 +341,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_extract_conversation_publishes_redis_event(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -429,7 +431,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_two_user_scoped_connection_calls_on_happy_path(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -466,7 +468,7 @@ class TestExtractConversationJob:
                 confidence=0.9,
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
-                [ExtractedEntry(content="c", reasoning=None, tags=[], entry_date="2026-01-01")]
+                [ExtractedEntry(content="c", reasoning="", tags=[], entry_date="2026-01-01")]
             )
 
             result = await extract_conversation(mock_ctx, conversation_id, user_id)
@@ -477,7 +479,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_llm_failure_releases_conn1_before_raise(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """When categorize_conversation raises, conn1 has already been released
@@ -524,7 +526,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_extract_entries_failure_releases_conn1_no_conn2(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """When extract_entries raises (Phase 2), conn1 has already been released
@@ -578,7 +580,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_persistence_failure_rolls_back_entries(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -618,8 +620,8 @@ class TestExtractConversationJob:
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
                 [
-                    ExtractedEntry(content="e1", reasoning=None, tags=[], entry_date="2026-01-01"),
-                    ExtractedEntry(content="e2", reasoning=None, tags=[], entry_date="2026-01-02"),
+                    ExtractedEntry(content="e1", reasoning="", tags=[], entry_date="2026-01-01"),
+                    ExtractedEntry(content="e2", reasoning="", tags=[], entry_date="2026-01-02"),
                 ]
             )
 
@@ -639,7 +641,7 @@ class TestExtractConversationJob:
     @pytest.mark.asyncio
     async def test_skipped_no_topic_uses_dedicated_short_conn(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """When topic_path is None (hardening rejected LLM output), the job
@@ -774,7 +776,7 @@ class TestLifecycleUpdates:
     @pytest.mark.asyncio
     async def test_mark_running_called_after_idempotency_check(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -816,7 +818,7 @@ class TestLifecycleUpdates:
                 confidence=0.9,
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
-                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+                [ExtractedEntry(content="e", reasoning="", tags=[], entry_date="2026-01-01")]
             )
 
             await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
@@ -830,7 +832,7 @@ class TestLifecycleUpdates:
     @pytest.mark.asyncio
     async def test_mark_failed_called_on_llm_error_with_job_id(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """When extract_entries raises and job_id is given, mark_failed is
@@ -887,7 +889,7 @@ class TestLifecycleUpdates:
     @pytest.mark.asyncio
     async def test_original_exception_propagates_when_mark_failed_connection_fails(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """Secondary failure in _mark_job_failed must not mask the original error."""
@@ -935,7 +937,7 @@ class TestLifecycleUpdates:
     @pytest.mark.asyncio
     async def test_mark_failed_not_called_without_job_id(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """When no job_id is provided (default 'unknown'), mark_failed is
@@ -975,7 +977,7 @@ class TestLifecycleUpdates:
     @pytest.mark.asyncio
     async def test_result_includes_cents_spent(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -1022,7 +1024,7 @@ class TestLifecycleUpdates:
                 output_tokens=50,
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
-                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")],
+                [ExtractedEntry(content="e", reasoning="", tags=[], entry_date="2026-01-01")],
                 input_tokens=200,
                 output_tokens=80,
             )
@@ -1060,7 +1062,7 @@ class TestExtractConversationFSMTransitions:
     @pytest.mark.asyncio
     async def test_mark_running_called_with_uuid_when_job_id_not_unknown(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -1103,7 +1105,7 @@ class TestExtractConversationFSMTransitions:
                 confidence=0.9,
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
-                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+                [ExtractedEntry(content="e", reasoning="", tags=[], entry_date="2026-01-01")]
             )
 
             await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
@@ -1122,7 +1124,7 @@ class TestExtractConversationFSMTransitions:
     @pytest.mark.asyncio
     async def test_mark_completed_called_with_uuid_on_success(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -1166,7 +1168,7 @@ class TestExtractConversationFSMTransitions:
                 confidence=0.9,
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
-                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+                [ExtractedEntry(content="e", reasoning="", tags=[], entry_date="2026-01-01")]
             )
 
             await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
@@ -1186,7 +1188,7 @@ class TestExtractConversationFSMTransitions:
     @pytest.mark.asyncio
     async def test_mark_failed_called_with_uuid_on_extraction_error(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
     ) -> None:
         """On an extraction error, mark_failed receives ``UUID(job_id)`` on a fresh connection."""
@@ -1247,7 +1249,7 @@ class TestExtractConversationFSMTransitions:
     @pytest.mark.asyncio
     async def test_no_fsm_transition_when_job_id_is_unknown(
         self,
-        mock_ctx: dict,
+        mock_ctx: Any,
         conn1: AsyncMock,
         conn2: AsyncMock,
     ) -> None:
@@ -1295,7 +1297,7 @@ class TestExtractConversationFSMTransitions:
                 confidence=0.9,
             )
             mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
-                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+                [ExtractedEntry(content="e", reasoning="", tags=[], entry_date="2026-01-01")]
             )
 
             # Call WITHOUT job_id -- defaults to "unknown".

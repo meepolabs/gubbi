@@ -19,6 +19,7 @@ Run:
 
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ from httpx import ASGITransport, AsyncClient
 
 from gubbi.api.v1.ingest import router as ingest_router
 from gubbi.app_context import AppContext
+from gubbi.auth.strategies import TrustGatewayStrategy
 from gubbi.config import Settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.embedding_service import EmbeddingService
@@ -77,7 +79,10 @@ async def mock_arq_pool() -> AsyncMock:
 
 
 @pytest_asyncio.fixture
-async def test_user(pool: asyncpg.Pool) -> UUID:
+async def test_user(
+    pool: asyncpg.Pool,
+    clean_rls_db: asyncpg.Pool,  # noqa: ARG001 -- ensures audit_log cleanup
+) -> AsyncGenerator[UUID, None]:
     """Ensure TEST_USER_ID exists in users table; tear down after test."""
     async with pool.acquire() as conn:
         await conn.execute(
@@ -91,16 +96,18 @@ async def test_user(pool: asyncpg.Pool) -> UUID:
     yield TEST_USER_ID
     async with pool.acquire() as conn:
         await conn.execute("DELETE FROM extraction_jobs WHERE user_id = $1", TEST_USER_ID)
+        await conn.execute("DELETE FROM entries WHERE user_id = $1", TEST_USER_ID)
         await conn.execute("DELETE FROM conversations WHERE user_id = $1", TEST_USER_ID)
         await conn.execute("DELETE FROM topics WHERE user_id = $1", TEST_USER_ID)
-        await conn.execute("DELETE FROM audit_log WHERE actor_id = $1", str(TEST_USER_ID))
+        # audit_log is append-only at the DB layer (immutability trigger);
+        # clean_rls_db's per-test TRUNCATE handles audit_log cleanup via
+        # journal_admin (BYPASSRLS) -- see tests/conftest.py:463.
         await conn.execute("DELETE FROM users WHERE id = $1", TEST_USER_ID)
 
 
 @pytest_asyncio.fixture
 async def app_with_arq(
     pool: asyncpg.Pool,
-    clean_pool: asyncpg.Pool,  # noqa: ARG001 -- ensures clean tables
     tmp_path: Path,
     mock_arq_pool: AsyncMock,
     test_user: UUID,  # noqa: ARG001 -- ensures user exists
@@ -131,6 +138,9 @@ async def app_with_arq(
     app = FastAPI()
     app.state.app_ctx = app_ctx
     app.state.arq_pool = mock_arq_pool
+    app.state.auth_strategies = [
+        TrustGatewayStrategy(gateway_secret=None, gateway_require_signature=False),
+    ]
     app.include_router(ingest_router, prefix=API_PREFIX)
 
     @app.exception_handler(Exception)
@@ -141,7 +151,7 @@ async def app_with_arq(
 
 
 @pytest_asyncio.fixture
-async def client(app_with_arq: FastAPI) -> AsyncClient:
+async def client(app_with_arq: FastAPI) -> AsyncGenerator[AsyncClient, None]:
     transport = ASGITransport(app=app_with_arq)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
