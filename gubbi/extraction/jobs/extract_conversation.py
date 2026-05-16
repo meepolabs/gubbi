@@ -452,15 +452,28 @@ async def extract_conversation(
         user_id: UUID string of the owning user (used for RLS scoping and
             pub/sub channel).
         job_id: UUID string of the extraction_jobs row created by ingest.
-            Arq passes the value set via _job_id at enqueue time.  Defaults
-            to "unknown" so the function remains callable from tests that
-            pre-date the Part 3 signature change.
+            Passed as the 4th positional argument by the ingest enqueue
+            (``arq_pool.enqueue_job("extract_conversation", conv_id,
+            user_id, job_id, _job_id=job_id)`` at gubbi/api/v1/ingest.py).
+            ``_job_id=`` is arq-internal (queue + result key, used for
+            dedup) and is NOT forwarded to this function -- the
+            positional arg is the only path. Defaults to "unknown" so
+            the function remains callable from tests that pre-date the
+            Part 3 signature change; the ``mark_completed`` /
+            ``mark_failed`` paths gate on this sentinel and skip when
+            it is "unknown".
 
     Returns:
         Summary dict with topic_path, entries_created, input_tokens,
         output_tokens, cents_spent, and skipped (bool, True if idempotency
         check short-circuited).
     """
+    # Note: arq injects ctx["job_id"] (its internal queue/result key) into
+    # ctx at dispatch time -- this is NOT the FSM extraction_jobs row id.
+    # Read the FSM row id from the `job_id` POSITIONAL parameter only. Both
+    # happen to hold the same UUID today (ingest.py passes the same value
+    # to both arg slots), but they are semantically distinct: ctx["job_id"]
+    # is the arq dedup key, the parameter is the DB row id.
     pool = ctx["pool"]
     cipher = cast(ContentCipher, ctx["cipher"])
     extraction_service = ctx["extraction_service"]

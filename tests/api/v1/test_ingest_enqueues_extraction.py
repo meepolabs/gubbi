@@ -212,10 +212,29 @@ class TestIngestEnqueuesExtraction:
         assert mock_arq.enqueue_job.call_count == 1
         call_args = mock_arq.enqueue_job.call_args
         assert call_args[0][0] == "extract_conversation"
-        # _job_id kwarg must be present and be a valid UUID string.
-        job_id_str = call_args[1].get("_job_id")
-        assert job_id_str is not None
-        UUID(job_id_str)  # raises if not a valid UUID
+        # ``_job_id=`` is the arq-internal tracking id (queue + result
+        # key, used for dedup); it is NOT forwarded to the worker
+        # function. The worker function reads ``job_id`` only from its
+        # 4th positional argument. A regression that drops the 4th arg
+        # makes the worker run with the default sentinel ``job_id="unknown"``
+        # and silently skips ``mark_running`` / ``mark_completed`` /
+        # ``mark_failed``, leaving ``extraction_jobs.status`` stuck at
+        # ``'pending'``. Lock both slots independently so future drift
+        # in either path surfaces here.
+        assert len(call_args[0]) == 4, (  # noqa: PLR2004
+            f"expected 4 positional args (function_name, conversation_id, "
+            f"user_id, job_id); got {len(call_args[0])}: {call_args[0]!r}"
+        )
+        positional_job_id = call_args[0][3]
+        kwarg_job_id = call_args[1].get("_job_id")
+        assert kwarg_job_id is not None
+        UUID(kwarg_job_id)  # raises if not a valid UUID
+        UUID(positional_job_id)  # raises if not a valid UUID
+        assert positional_job_id == kwarg_job_id, (
+            "4th positional ``job_id`` must equal ``_job_id`` kwarg so "
+            "the FSM row updated by the worker is the same row arq is "
+            "tracking for dedup + result lookup"
+        )
 
         # Verify it matches the DB row.
         async with pool.acquire() as conn:
@@ -224,7 +243,7 @@ class TestIngestEnqueuesExtraction:
                 TEST_USER_ID,
             )
         assert row is not None
-        assert str(row["id"]) == job_id_str
+        assert str(row["id"]) == kwarg_job_id
 
     async def test_skipped_conversation_produces_no_row_no_enqueue(
         self,
@@ -702,8 +721,17 @@ class TestIngestEnqueuesExtraction:
         helper_mock.record_actual_cost.assert_not_called()
         # arq.enqueue_job called with the existing_job_id (reuse semantics).
         mock_arq.enqueue_job.assert_called_once()
-        call_kwargs = mock_arq.enqueue_job.call_args
-        assert str(existing_job_id) in str(call_kwargs)
+        call_args = mock_arq.enqueue_job.call_args
+        # Structured check matching test_enqueue_job_called_per_saved_conversation:
+        # 4th positional must be the existing_job_id string, _job_id kwarg too.
+        assert call_args[0][3] == str(existing_job_id), (
+            f"expected positional job_id arg to be the existing in-flight UUID; "
+            f"got {call_args[0][3]!r}"
+        )
+        assert call_args[1]["_job_id"] == str(existing_job_id), (
+            f"expected _job_id kwarg to be the existing in-flight UUID; "
+            f"got {call_args[1]['_job_id']!r}"
+        )
 
         # Cleanup
         app_with_arq.state.app_ctx.budget_helper = None

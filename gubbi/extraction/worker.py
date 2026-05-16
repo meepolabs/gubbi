@@ -10,6 +10,7 @@ import asyncio
 import logging
 import os
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 
 import redis.asyncio as aioredis
@@ -18,13 +19,15 @@ from arq.connections import RedisSettings
 from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
-from gubbi.config import get_settings
+from gubbi.config import Settings, get_settings
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
+from gubbi.extraction.llm.fake_provider import FakeLLMProvider
+from gubbi.extraction.llm.provider import LLMProvider
 from gubbi.extraction.service import ExtractionService
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry.logger import initialize_logger
@@ -35,6 +38,21 @@ from gubbi.telemetry.logger import initialize_logger
 # emits return coroutines that cannot be used from sync callers.
 logger = structlog.get_logger(__name__)
 _sync_log = logging.getLogger(__name__)
+
+
+# Registry mapping ``JOURNAL_LLM_PROVIDER`` env values to provider
+# factories. Each factory takes the resolved Settings and returns an
+# LLMProvider implementation. Open/closed: append a new (name, factory)
+# pair to register a new provider; the worker switch logic itself does
+# not change.
+#
+# Default key is ``"anthropic"`` so an unset env var in prod yields the
+# real provider. Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER:
+# fake`` to opt into the in-process stub.
+_PROVIDER_FACTORIES: dict[str, Callable[[Settings], LLMProvider]] = {
+    "anthropic": lambda s: AnthropicProvider(s.llm),
+    "fake": lambda _s: FakeLLMProvider(),
+}
 
 
 def _redis_url() -> str:
@@ -115,7 +133,23 @@ async def startup(ctx: ExtractionContext) -> None:
     ctx["cipher"] = cipher
 
     # Extraction service.
-    extraction_service = ExtractionService(AnthropicProvider(settings.llm))
+    # The LLM provider is selected by the ``JOURNAL_LLM_PROVIDER`` env
+    # var (default ``anthropic`` so a missing env in prod stays safe).
+    # Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER=fake`` so the
+    # worker boots against the in-process FakeLLMProvider stub instead
+    # of dialling api.anthropic.com -- keeps D-tier hermetic and avoids
+    # accidental spend if a leaked ANTHROPIC_API_KEY is in scope.
+    # PRD: llm_context/tasks/milestone-04.5-verification-suite.md TASK-04.5.07.
+    # Adding a new provider is a one-line append to ``_PROVIDER_FACTORIES``.
+    provider_name = os.environ.get("JOURNAL_LLM_PROVIDER", "anthropic").lower()
+    factory = _PROVIDER_FACTORIES.get(provider_name)
+    if factory is None:
+        raise ValueError(
+            f"Unknown JOURNAL_LLM_PROVIDER={provider_name!r}; expected "
+            f"one of {sorted(_PROVIDER_FACTORIES)}"
+        )
+    llm_provider: LLMProvider = factory(settings)
+    extraction_service = ExtractionService(llm_provider)
     ctx["extraction_service"] = extraction_service
 
     # Redis pub/sub client.
