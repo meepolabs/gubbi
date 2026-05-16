@@ -152,7 +152,7 @@ async def ingest_conversations(
     extractions_skipped_error = 0
     budget_exhausted = False
     superseded_json_paths: list[str] = []
-    enqueue_tasks: list[tuple[UUID, int, str]] = []
+    enqueue_tasks: list[tuple[UUID, int]] = []
 
     async with safe_acquire(app_ctx.pool) as conn:
         # Ensure inbox topic exists -- run in its own txn so failure does not
@@ -327,17 +327,30 @@ async def ingest_conversations(
 
             # TXN 2 committed.  Collect for post-commit arq enqueue.
             assert job_uuid is not None  # noqa: S101  -- mypy; TXN 2 sets this
-            enqueue_tasks.append((job_uuid, save_result.conversation_id, conv.platform))
+            enqueue_tasks.append((job_uuid, save_result.conversation_id))
 
     # Outside the connection.  Post-commit: enqueue arq jobs AFTER the DB
     # transactions have committed so the worker cannot race ahead of the rows.
+    #
+    # ``str(job_uuid)`` is passed BOTH as the 4th positional arg AND as the
+    # ``_job_id=`` kwarg. They serve different roles -- arq does not bridge
+    # them. ``_job_id=`` is arq-internal: it becomes the queue key + result
+    # key (used for dedup + result lookup) and is NOT forwarded to the
+    # worker function. The 4th positional is what the worker function
+    # receives as its ``job_id`` parameter -- it is the one
+    # ``extract_conversation`` reads to gate ``mark_running`` /
+    # ``mark_completed`` / ``mark_failed`` and route the audit ``target_id``.
+    # Dropping the positional makes the worker run with the
+    # ``job_id="unknown"`` default and silently skips every FSM transition,
+    # leaving ``extraction_jobs.status`` stuck at ``'pending'``.
     arq_pool = get_optional_arq_pool(request)
     if arq_pool is not None:
-        for job_uuid, conversation_id, _source in enqueue_tasks:
+        for job_uuid, conversation_id in enqueue_tasks:
             await arq_pool.enqueue_job(
                 "extract_conversation",
                 conversation_id,
                 str(user_id),
+                str(job_uuid),
                 _job_id=str(job_uuid),
             )
 

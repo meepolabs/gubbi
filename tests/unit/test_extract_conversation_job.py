@@ -1034,3 +1034,276 @@ class TestLifecycleUpdates:
             assert result["cents_spent"] == 5
             assert result["input_tokens"] == 300
             assert result["output_tokens"] == 130
+
+
+# ---------------------------------------------------------------------------
+# FSM-transition gate tests (Part 3 / HIGH-1)
+# ---------------------------------------------------------------------------
+
+
+class TestExtractConversationFSMTransitions:
+    """Lock the worker-side FSM-transition gate.
+
+    The ingest path passes ``str(job_uuid)`` as the 4th positional arg
+    to extract_conversation; the worker reads it and calls
+    mark_running / mark_completed / mark_failed only when job_id != "unknown".
+    These tests assert that gate by calling extract_conversation
+    directly with a real UUID and verifying each FSM call lands with the
+    UUID-typed argument (not the raw string), AND that the negative case
+    (job_id == "unknown") skips the FSM transitions entirely.
+
+    A regression that reverts the gate would surface here even though
+    the call-site assertions in test_ingest_enqueues_extraction.py
+    would still pass (mocked arq never runs the worker).
+    """
+
+    @pytest.mark.asyncio
+    async def test_mark_running_called_with_uuid_when_job_id_not_unknown(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+        conn2: AsyncMock,
+    ) -> None:
+        """mark_running receives ``UUID(job_id)`` (not the raw string) on conn1."""
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        conversation_id = 301
+        user_id = "00000000-0000-0000-0000-000000000301"
+        job_id = "11111111-2222-3333-4444-555555555555"
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock(return_value=True)
+        mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.conversations.mark_processed"),
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.storage.repositories.topics.get_id") as mock_gti,
+            patch("gubbi.storage.repositories.entries.append"),
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1, conn2)
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+            mock_gti.return_value = 1
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/fsm",
+                topic_title="FSM",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+            )
+
+            await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
+
+            # mark_running was called with conn1 and the parsed UUID (not raw string).
+            mock_jobs.mark_running.assert_awaited_once()
+            call_args = mock_jobs.mark_running.await_args
+            assert call_args is not None
+            assert call_args.args[0] is conn1
+            assert call_args.args[1] == _UUID(job_id), (
+                "mark_running must receive UUID(job_id), not the raw string -- "
+                f"got {call_args.args[1]!r}"
+            )
+            assert isinstance(call_args.args[1], _UUID)
+
+    @pytest.mark.asyncio
+    async def test_mark_completed_called_with_uuid_on_success(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+        conn2: AsyncMock,
+    ) -> None:
+        """On successful extraction, mark_completed is called on conn2 with ``UUID(job_id)``."""
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        conversation_id = 302
+        user_id = "00000000-0000-0000-0000-000000000302"
+        job_id = "22222222-3333-4444-5555-666666666666"
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock(return_value=True)
+        mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.conversations.mark_processed"),
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.storage.repositories.topics.get_id") as mock_gti,
+            patch("gubbi.storage.repositories.entries.append"),
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+            patch("gubbi.extraction.jobs.extract_conversation.record_audit", new=AsyncMock()),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1, conn2)
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+            mock_gti.return_value = 1
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/fsm-completed",
+                topic_title="FSM completed",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+            )
+
+            await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
+
+            # mark_completed received conn2 + UUID(job_id), not the raw string.
+            mock_jobs.mark_completed.assert_awaited_once()
+            call_args = mock_jobs.mark_completed.await_args
+            assert call_args is not None
+            # Signature: mark_completed(conn, UUID, topics_created=, entries_created=, cents_spent=)
+            assert call_args.args[0] is conn2
+            assert call_args.args[1] == _UUID(job_id), (
+                "mark_completed must receive UUID(job_id), not the raw string -- "
+                f"got {call_args.args[1]!r}"
+            )
+            assert isinstance(call_args.args[1], _UUID)
+
+    @pytest.mark.asyncio
+    async def test_mark_failed_called_with_uuid_on_extraction_error(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+    ) -> None:
+        """On an extraction error, mark_failed receives ``UUID(job_id)`` on a fresh connection."""
+        from uuid import UUID as _UUID  # noqa: PLC0415
+
+        conversation_id = 303
+        user_id = "00000000-0000-0000-0000-000000000303"
+        job_id = "33333333-4444-5555-6666-777777777777"
+
+        failure_conn = AsyncMock()
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_failed = AsyncMock(return_value=True)
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+            patch("gubbi.extraction.jobs.extract_conversation.record_audit", new=AsyncMock()),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1, failure_conn)
+
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/fsm-failed",
+                topic_title="FSM failed",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.side_effect = RuntimeError("LLM down")
+
+            with pytest.raises(RuntimeError, match="LLM down"):
+                await extract_conversation(mock_ctx, conversation_id, user_id, job_id)
+
+            # mark_failed called on the fresh failure connection with the
+            # parsed UUID (not raw string).
+            mock_jobs.mark_failed.assert_awaited_once()
+            call_args = mock_jobs.mark_failed.await_args
+            assert call_args is not None
+            assert call_args.args[0] is failure_conn
+            assert call_args.args[1] == _UUID(job_id), (
+                "mark_failed must receive UUID(job_id), not the raw string -- "
+                f"got {call_args.args[1]!r}"
+            )
+            assert isinstance(call_args.args[1], _UUID)
+
+    @pytest.mark.asyncio
+    async def test_no_fsm_transition_when_job_id_is_unknown(
+        self,
+        mock_ctx: dict,
+        conn1: AsyncMock,
+        conn2: AsyncMock,
+    ) -> None:
+        """When job_id == "unknown" (default sentinel), NO FSM transitions fire.
+
+        This is the negative case for the worker-side ``job_id != "unknown"``
+        gate. A regression that drops the guard would call mark_running /
+        mark_completed with the literal string "unknown" -- ``UUID("unknown")``
+        would raise ValueError, breaking production but escaping every
+        test that mocks arq at the call-site.
+        """
+        conversation_id = 304
+        user_id = "00000000-0000-0000-0000-000000000304"
+
+        mock_jobs = MagicMock()
+        mock_jobs.mark_running = AsyncMock()
+        mock_jobs.mark_completed = AsyncMock(return_value=True)
+        mock_jobs.mark_failed = AsyncMock()
+        mock_jobs.get_period_start = AsyncMock(return_value=None)
+
+        with (
+            patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection") as mock_usc,
+            patch("gubbi.storage.repositories.conversations.read_conversation_by_id") as mock_rcbi,
+            patch("gubbi.storage.repositories.conversations.get_processed_at") as mock_gpa,
+            patch("gubbi.storage.repositories.conversations.mark_processed"),
+            patch("gubbi.storage.repositories.topics.list_all") as mock_la,
+            patch("gubbi.storage.repositories.topics.get_id") as mock_gti,
+            patch("gubbi.storage.repositories.entries.append"),
+            patch("gubbi.extraction.jobs.extract_conversation.extraction_jobs", mock_jobs),
+            patch("gubbi.extraction.jobs.extract_conversation.record_audit", new=AsyncMock()),
+        ):
+            mock_gpa.return_value = None
+            mock_usc.side_effect = _make_usc_side_effect(conn1, conn2)
+            fake_meta = MagicMock()
+            fake_messages = [MagicMock(role="user", content="msg")]
+            mock_rcbi.return_value = (fake_meta, fake_messages, 1)
+            mock_la.return_value = ([], 0)
+            mock_gti.return_value = 1
+            mock_ctx[
+                "extraction_service"
+            ].categorize_conversation.return_value = CategorizationResult(
+                topic_path="test/fsm-unknown",
+                topic_title="FSM unknown",
+                summary="s",
+                confidence=0.9,
+            )
+            mock_ctx["extraction_service"].extract_entries.return_value = _make_entries_result(
+                [ExtractedEntry(content="e", reasoning=None, tags=[], entry_date="2026-01-01")]
+            )
+
+            # Call WITHOUT job_id -- defaults to "unknown".
+            await extract_conversation(mock_ctx, conversation_id, user_id)
+
+            # NO FSM transitions fired.
+            mock_jobs.mark_running.assert_not_called()
+            mock_jobs.mark_completed.assert_not_called()
+            mock_jobs.mark_failed.assert_not_called()
+            # And get_period_start (also gated on job_id != "unknown") not called.
+            mock_jobs.get_period_start.assert_not_called()
