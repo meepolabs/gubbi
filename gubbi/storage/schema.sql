@@ -4,6 +4,12 @@
 CREATE EXTENSION IF NOT EXISTS vector;
 
 -- ── Topics ──────────────────────────────────────────────────────────────────
+-- Schema baseline (applied verbatim by migration 0001_baseline). The
+-- ``path TEXT NOT NULL UNIQUE`` here is the pre-migration shape; migrations
+-- 0004 (add user_id) and 0030 (replace UNIQUE(path) with the composite
+-- UNIQUE(user_id, path)) layer per-user uniqueness on top so two users can
+-- each own a topic at the same path without leaking existence cross-tenant.
+-- See gubbi/alembic/versions/20260516_0030_topics_user_path_unique.py.
 CREATE TABLE IF NOT EXISTS topics (
     id          INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     path        TEXT NOT NULL UNIQUE,

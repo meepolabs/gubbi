@@ -304,12 +304,9 @@ async def _persist_extraction(
         topic_created = True
         try:
             await topic_repo.create(conn, topic_path, title=categorization.topic_title)
-        except ValueError as exc:
-            if "already exists" in str(exc):
-                topic_created = False
-                await log.debug("Topic race on create, proceeding", error=str(exc))
-            else:
-                raise
+        except topic_repo.TopicAlreadyExists as exc:
+            topic_created = False
+            await log.debug("Topic race on create, proceeding", error=str(exc))
 
     # Persist entries (append loop -- no LLM calls here).
     entries_created = 0

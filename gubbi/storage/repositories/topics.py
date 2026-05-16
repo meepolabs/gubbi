@@ -14,12 +14,22 @@ from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.validation import validate_topic
 
 __all__: list[str] = [
+    "TopicAlreadyExists",
     "count",
     "create",
     "get",
     "get_id",
     "list_all",
 ]
+
+
+class TopicAlreadyExists(ValueError):
+    """Raised by ``create`` when a topic path already exists for the user.
+
+    Subclasses ``ValueError`` so existing ``except ValueError`` callers
+    keep working; new callers should catch this typed class instead of
+    string-matching the message.
+    """
 
 
 def _row_to_topic_meta(row: asyncpg.Record) -> TopicMeta:
@@ -69,7 +79,7 @@ async def create(
     description: str = "",
     created_at: datetime_cls | None = None,
 ) -> int:
-    """Create a new topic. Returns topic_id. Raises ValueError if duplicate."""
+    """Create a new topic. Returns topic_id. Raises TopicAlreadyExists if duplicate."""
     topic = validate_topic(topic)
     now = datetime_cls.now(UTC)
     created = created_at or now
@@ -95,7 +105,7 @@ async def create(
         return int(row["id"])
     except asyncpg.UniqueViolationError as e:
         msg = f"Topic '{topic}' already exists"
-        raise ValueError(msg) from e
+        raise TopicAlreadyExists(msg) from e
 
 
 async def list_all(

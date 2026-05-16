@@ -138,7 +138,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                     title=title,
                     description=description,
                 )
-        except ValueError:
+        except topic_repo.TopicAlreadyExists:
             return already_exists(topic)
         result: dict[str, Any] = {
             "status": "created",

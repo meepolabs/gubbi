@@ -7,6 +7,7 @@ No LLM calls. Pure data ingest.
 
 from __future__ import annotations
 
+import contextlib
 from datetime import datetime
 from typing import Annotated, Literal
 from uuid import UUID
@@ -30,6 +31,7 @@ from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
+from gubbi.storage.repositories.topics import TopicAlreadyExists
 from gubbi.storage.repositories.topics import create as create_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_title
@@ -165,7 +167,13 @@ async def ingest_conversations(
             try:
                 await get_topic_id(conn, DEFAULT_INBOX_TOPIC)
             except TopicNotFoundError:
-                await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
+                # Concurrent ingest race: another request for the same user
+                # may have created the inbox between our get and create.
+                # TopicAlreadyExists is the same-user-duplicate signal post-
+                # migration 0030 (topics_user_path_key UNIQUE (user_id, path));
+                # treat as a no-op since the topic now exists.
+                with contextlib.suppress(TopicAlreadyExists):
+                    await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
 
         for conv in body.conversations:
             # Dedupe pre-check: read-only, no explicit txn needed; the UNIQUE
