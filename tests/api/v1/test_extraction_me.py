@@ -29,6 +29,7 @@ from httpx import ASGITransport, AsyncClient
 
 from gubbi.api.v1.extraction import router as extraction_router
 from gubbi.app_context import AppContext
+from gubbi.auth.strategies import TrustGatewayStrategy
 from gubbi.config import Settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.embedding_service import EmbeddingService
@@ -77,6 +78,9 @@ def _make_app(pool: asyncpg.Pool, *, auth_user_id: UUID | None = None) -> FastAP
     )
     app = FastAPI()
     app.state.app_ctx = app_ctx
+    app.state.auth_strategies = [
+        TrustGatewayStrategy(gateway_secret=None, gateway_require_signature=False),
+    ]
     app.include_router(extraction_router, prefix=API_PREFIX)
 
     @app.exception_handler(Exception)
@@ -226,6 +230,9 @@ class TestExtractionMeAuth:
         )
         restricted_app = FastAPI()
         restricted_app.state.app_ctx = app_ctx
+        restricted_app.state.auth_strategies = [
+            TrustGatewayStrategy(gateway_secret=None, gateway_require_signature=False),
+        ]
         restricted_app.include_router(extraction_router, prefix=API_PREFIX)
 
         transport = ASGITransport(app=restricted_app)
