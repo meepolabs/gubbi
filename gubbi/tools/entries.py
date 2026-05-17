@@ -322,13 +322,31 @@ async def _journal_update_entry(
                 app_ctx.embedding_service.encode, embed_text.strip()
             )
             async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-                await app_ctx.embedding_service.save_by_vector(conn, entry_id, embedding)
-                await entry_repo.mark_indexed(conn, entry_id)
+                current_row_data = await entry_repo.get_text(conn, cipher, entry_id)
+                if current_row_data != row_data:
+                    current_state = "deleted" if current_row_data is None else "updated_again"
+                    await logger.warning(
+                        "entry.embedding_update_skipped_stale",
+                        entry_id=entry_id,
+                        user_id=str(user_id),
+                        current_state=current_state,
+                    )
+                else:
+                    await app_ctx.embedding_service.save_by_vector(conn, entry_id, embedding)
+                    await entry_repo.mark_indexed(conn, entry_id)
         except Exception as exc:
-            await logger.warning(
-                "Failed to embed updated entry",
+            # Best-effort: the atomic DELETE inside entry_repo.update has
+            # already removed the stale entry_embeddings row, so failure
+            # here leaves the entry semantic-blind (FTS-only) -- never
+            # findable by old-content keywords. Log at error level so a
+            # sustained rate is visible to the operator; a real reindex
+            # path is the durable fix when one is wired.
+            await logger.error(
+                "entry.embedding_update_failed",
                 entry_id=entry_id,
+                user_id=str(user_id),
                 error=str(exc),
+                error_type=type(exc).__name__,
                 exc_info=True,
             )
 

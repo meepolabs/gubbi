@@ -391,6 +391,25 @@ async def update(
         *params,
     )
 
+    # When content or reasoning changed, search_vector was rewritten and
+    # indexed_at cleared above -- but the existing entry_embeddings row
+    # still reflects the OLD content. journal_search merges FTS + semantic
+    # (gubbi/tools/search.py:69-105) and FTS now misses the old tokens, but
+    # the stale vector would still surface the row to a query for the old
+    # content. DELETE atomically (caller wraps in conn.transaction()) so no
+    # reader can observe the (new content + stale embedding) state.
+    #
+    # The tool layer (gubbi/tools/entries.py) attempts a best-effort
+    # re-embed after this UPDATE commits. If that step fails, the entry
+    # stays semantic-blind (FTS-only) until a future reindex heals it --
+    # preferable to a stale match that silently leaks old-content keywords
+    # to a search-only-permissioned reader.
+    if content_changed or reasoning_changed:
+        await conn.execute(
+            "DELETE FROM entry_embeddings WHERE entry_id = $1",
+            entry_id,
+        )
+
 
 async def delete(conn: asyncpg.Connection, entry_id: int) -> int:
     """Soft-delete an entry. Returns the topic_id.

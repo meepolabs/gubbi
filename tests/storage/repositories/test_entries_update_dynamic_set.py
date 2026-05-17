@@ -101,8 +101,10 @@ async def test_update_content_nulls_indexed_at() -> None:
 
     await entry_repo.update(conn, cipher, entry_id=1, content="new text")
 
-    conn.execute.assert_awaited_once()
-    sql = conn.execute.await_args.args[0]
+    # First execute is the UPDATE entries CTE; the second is the DELETE
+    # FROM entry_embeddings (added when content/reasoning change to keep
+    # the semantic-search side from surfacing stale-content matches).
+    sql = conn.execute.await_args_list[0].args[0]
     assert "indexed_at = NULL" in sql, "content change must null indexed_at; SQL was: " + sql
 
 
@@ -113,8 +115,7 @@ async def test_update_reasoning_nulls_indexed_at() -> None:
 
     await entry_repo.update(conn, cipher, entry_id=1, reasoning="new reasoning")
 
-    conn.execute.assert_awaited_once()
-    sql = conn.execute.await_args.args[0]
+    sql = conn.execute.await_args_list[0].args[0]
     assert "indexed_at = NULL" in sql, "reasoning change must null indexed_at; SQL was: " + sql
 
 
@@ -152,7 +153,7 @@ async def test_update_content_re_encrypts() -> None:
     await entry_repo.update(conn, cipher, entry_id=1, content="new text")
 
     cipher.encrypt.assert_called_once_with("new text")
-    sql = conn.execute.await_args.args[0]
+    sql = conn.execute.await_args_list[0].args[0]
     assert "content_encrypted" in sql
     assert "content_nonce" in sql
 
@@ -165,7 +166,7 @@ async def test_update_reasoning_re_encrypts() -> None:
     await entry_repo.update(conn, cipher, entry_id=1, reasoning="new reasoning")
 
     cipher.encrypt.assert_called_once_with("new reasoning")
-    sql = conn.execute.await_args.args[0]
+    sql = conn.execute.await_args_list[0].args[0]
     assert "reasoning_encrypted" in sql
     assert "reasoning_nonce" in sql
 
@@ -256,9 +257,9 @@ async def test_update_content_append_mode_concats_old_and_new() -> None:
 
     # The bound search_vector parameter (the plaintext passed to to_tsvector)
     # should be the concatenated text.
-    sql = conn.execute.await_args.args[0]
+    sql = conn.execute.await_args_list[0].args[0]
     assert "to_tsvector" in sql
-    bound_args = conn.execute.await_args.args[1:]
+    bound_args = conn.execute.await_args_list[0].args[1:]
     assert any(
         isinstance(a, str) and "old content" in a and "addendum" in a for a in bound_args
     ), f"expected concatenated plaintext bound to to_tsvector; got args: {bound_args!r}"
@@ -277,3 +278,78 @@ async def test_update_invalid_mode_raises_value_error() -> None:
 
     with pytest.raises(ValueError, match="Invalid mode"):
         await entry_repo.update(conn, cipher, entry_id=1, content="new text", mode="bogus")
+
+
+# ---------------------------------------------------------------------------
+# Stale embedding cleanup -- content/reasoning change must DELETE the existing
+# entry_embeddings row inside the same transaction. Without this, journal_search's
+# semantic side surfaces the row by old-content keywords because the inline
+# re-embed in tools/entries.py runs in a separate transaction (best-effort) and
+# can silently fail.
+# ---------------------------------------------------------------------------
+
+
+async def test_update_content_change_deletes_entry_embedding() -> None:
+    """Content change MUST DELETE FROM entry_embeddings inside the same txn."""
+    conn, _row = _make_conn_and_row()
+    cipher = _make_cipher()
+
+    await entry_repo.update(conn, cipher, entry_id=1, content="new text")
+
+    # Two executes: the UPDATE entries CTE and the DELETE FROM entry_embeddings.
+    assert (
+        conn.execute.await_count == 2
+    ), f"expected 2 executes (UPDATE + DELETE), got {conn.execute.await_count}"
+    delete_sql = conn.execute.await_args_list[1].args[0]
+    delete_args = conn.execute.await_args_list[1].args[1:]
+    assert (
+        "DELETE FROM entry_embeddings" in delete_sql
+    ), f"second execute must DELETE the stale embedding row; SQL was: {delete_sql}"
+    assert delete_args == (1,), f"DELETE must bind entry_id=1 only; got args: {delete_args!r}"
+
+
+async def test_update_reasoning_change_deletes_entry_embedding() -> None:
+    """Reasoning change MUST DELETE FROM entry_embeddings inside the same txn."""
+    conn, _row = _make_conn_and_row()
+    cipher = _make_cipher()
+
+    await entry_repo.update(conn, cipher, entry_id=1, reasoning="new reasoning")
+
+    assert (
+        conn.execute.await_count == 2
+    ), f"expected 2 executes (UPDATE + DELETE), got {conn.execute.await_count}"
+    delete_sql = conn.execute.await_args_list[1].args[0]
+    assert (
+        "DELETE FROM entry_embeddings" in delete_sql
+    ), f"second execute must DELETE the stale embedding row; SQL was: {delete_sql}"
+
+
+async def test_update_date_only_does_not_delete_entry_embedding() -> None:
+    """Date-only update must NOT touch entry_embeddings -- the stored vector
+    still reflects the current text."""
+    conn, _row = _make_conn_and_row()
+    cipher = _make_cipher()
+
+    await entry_repo.update(conn, cipher, entry_id=1, date="2026-06-01")
+
+    assert conn.execute.await_count == 1, (
+        f"date-only update must run a single execute (UPDATE); "
+        f"got {conn.execute.await_count} -- did the embedding-delete fire on a "
+        f"non-text edit?"
+    )
+    sql = conn.execute.await_args_list[0].args[0]
+    assert "DELETE FROM entry_embeddings" not in sql
+
+
+async def test_update_tags_only_does_not_delete_entry_embedding() -> None:
+    """Tags-only update must NOT touch entry_embeddings -- same reason as date-only."""
+    conn, _row = _make_conn_and_row()
+    cipher = _make_cipher()
+
+    await entry_repo.update(conn, cipher, entry_id=1, tags=["new"])
+
+    assert conn.execute.await_count == 1, (
+        f"tags-only update must run a single execute (UPDATE); " f"got {conn.execute.await_count}"
+    )
+    sql = conn.execute.await_args_list[0].args[0]
+    assert "DELETE FROM entry_embeddings" not in sql
