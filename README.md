@@ -101,21 +101,7 @@ See [docs/architecture.md](docs/architecture.md) for the full system design.
 
 ## Project structure
 
-```
-gubbi/
-├── gubbi/                # Python package
-│   ├── main.py                #   FastAPI app, MCP mount, OAuth wiring
-│   ├── config.py              #   Pydantic settings (JOURNAL_* env vars)
-│   ├── core/                  #   AppContext, structlog, validation
-│   ├── middleware/            #   ASGI auth + path normalization
-│   ├── storage/               #   asyncpg pool + pgvector EmbeddingService
-│   │   └── repositories/      #     topics, entries, conversations, search
-│   ├── models/                #   Pydantic models
-│   ├── tools/                 # 12 MCP tool implementations
-│   └── oauth/                 #   OAuth 2.1 + DCR provider for browser clients (self-host)
-├── tests/                     # pytest-asyncio, session-scoped PG pool fixture
-└── deployment/                # Dockerfile, entrypoint.sh, nginx.conf
-```
+See [CODEMAP.md](./CODEMAP.md) for the per-module breakdown.
 
 ## Key design decisions
 
