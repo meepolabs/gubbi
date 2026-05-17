@@ -53,6 +53,7 @@ from gubbi.config import (
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
+from gubbi.mcp_validation import JournalFastMCP
 from gubbi.middleware import (
     CorrelationIDMiddleware,
     MCPPathNormalizer,
@@ -154,7 +155,7 @@ async def _resolve_operator_user_id(
 
 def create_mcp_server(app_ctx: AppContext) -> FastMCP:
     """Create and configure the MCP server with all tools."""
-    mcp = FastMCP(
+    mcp = JournalFastMCP(
         "Personal Journal & Lifelong Memory",
         instructions=textwrap.dedent("""\
             Journal is the user's persistent memory layer across conversations.
