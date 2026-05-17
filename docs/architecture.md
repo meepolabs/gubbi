@@ -82,7 +82,7 @@ The five tenant tables (`topics`, `entries`, `conversations`, `messages`, `entry
 - `journal_app` -- runtime role, no `BYPASSRLS`. The application pool connects as this role; every query is RLS-scoped.
 - `journal_admin` -- privileged role, `BYPASSRLS`. Used by alembic migrations and the optional admin pool for cross-tenant maintenance.
 
-Inside each request, the tool layer opens a connection via `core.db_context.user_scoped_connection(pool)` which begins a transaction and runs `SELECT set_config('app.current_user_id', $1, true)`. The RLS policies read `app.current_user_id` from the GUC, so the same connection bound to user X cannot see user Y's rows. The helper also raises `hnsw.ef_search` to 100 for that transaction so HNSW recall survives the post-index RLS filter.
+Inside each request, the tool layer opens a connection via `gubbi_common.db.user_scoped.user_scoped_connection(pool, user_id=...)` which begins a transaction and runs `SELECT set_config('app.current_user_id', $1, true)`. The RLS policies read `app.current_user_id` from the GUC, so the same connection bound to user X cannot see user Y's rows. The helper also raises `hnsw.ef_search` to 100 for that transaction so HNSW recall survives the post-index RLS filter.
 
 ### Other schema decisions
 

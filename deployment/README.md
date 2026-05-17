@@ -1,6 +1,6 @@
 # Deployment
 
-## OpenTelemetry (TASK-03.19)
+## OpenTelemetry
 
 gubbi uses OpenTelemetry for distributed tracing, metrics, and
 structured logging. All instrumentation is behind the `OTEL_ENABLED`
