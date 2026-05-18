@@ -26,9 +26,34 @@ depends_on = None
 
 
 def upgrade() -> None:
-    op.execute("GRANT journal_app TO journal_admin WITH ADMIN OPTION")
+    # PG16+ rejects re-granting ADMIN OPTION back to the original grantor.
+    # If the bootstrap already set up this grant (e.g. testbench init.sh as
+    # superuser), skip the no-op the docstring promised was safe.
+    op.execute(
+        """
+        DO $do$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_auth_members am
+                JOIN pg_roles r1 ON am.member = r1.oid
+                JOIN pg_roles r2 ON am.roleid = r2.oid
+                WHERE r1.rolname = 'journal_admin'
+                  AND r2.rolname = 'journal_app'
+                  AND am.admin_option = true
+            ) THEN
+                GRANT journal_app TO journal_admin WITH ADMIN OPTION;
+            END IF;
+        END
+        $do$;
+        """
+    )
 
 
 def downgrade() -> None:
+    # Match the docstring contract: this migration only ever ADDS the
+    # admin option on an existing or pre-seeded grant; it does not add the
+    # underlying membership. Revoking the membership here would orphan
+    # any pre-seeded grant (e.g. the testbench init.sh `GRANT journal_app
+    # TO journal_admin WITH ADMIN OPTION`) and leave journal_admin unable
+    # to rotate journal_app's password from a downgrade'd state.
     op.execute("REVOKE ADMIN OPTION FOR journal_app FROM journal_admin")
-    op.execute("REVOKE journal_app FROM journal_admin")
