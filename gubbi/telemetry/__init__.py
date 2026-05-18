@@ -24,7 +24,12 @@ if TYPE_CHECKING:
 
 __all__: list[str] = ["configure_otel", "rebind_metrics_after_configure"]
 
-logger = logging.getLogger(__name__)
+# Renamed from bare `logger` because Python binds the sibling submodule
+# `gubbi.telemetry.logger` onto this package's namespace as soon as
+# anything (e.g. gubbi/main.py) imports it -- silently overwriting this
+# module-level Logger instance and turning `logger.warning(...)` calls
+# below into AttributeErrors against the submodule object.
+_logger = logging.getLogger(__name__)
 
 _OTEL_ENABLED_ENV = "OTEL_ENABLED"
 _OTEL_SERVICE_NAME_ENV = "OTEL_SERVICE_NAME"
@@ -107,9 +112,9 @@ def _wire_instrumentors(app: FastAPI) -> None:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # noqa: PLC0415
 
         FastAPIInstrumentor.instrument_app(app)
-        logger.debug("FastAPI auto-instrumentation wired")
+        _logger.debug("FastAPI auto-instrumentation wired")
     except Exception as exc:
-        logger.warning("FastAPIInstrumentor failed: %s", exc)
+        _logger.warning("FastAPIInstrumentor failed: %s", exc)
 
     try:
         from opentelemetry.instrumentation.httpx import (  # noqa: PLC0415
@@ -117,22 +122,22 @@ def _wire_instrumentors(app: FastAPI) -> None:
         )
 
         HTTPXClientInstrumentor().instrument()
-        logger.debug("httpx auto-instrumentation wired")
+        _logger.debug("httpx auto-instrumentation wired")
     except Exception as exc:
-        logger.warning("HTTPXClientInstrumentor failed: %s", exc)
+        _logger.warning("HTTPXClientInstrumentor failed: %s", exc)
 
     try:
         from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor  # noqa: PLC0415
 
         AsyncPGInstrumentor().instrument()  # type: ignore[no-untyped-call]  # opentelemetry-instrumentation-asyncpg ships no py.typed marker
-        logger.debug("asyncpg auto-instrumentation wired")
+        _logger.debug("asyncpg auto-instrumentation wired")
     except Exception as exc:
-        logger.warning("AsyncPGInstrumentor failed: %s", exc)
+        _logger.warning("AsyncPGInstrumentor failed: %s", exc)
 
     try:
         from opentelemetry.instrumentation.redis import RedisInstrumentor  # noqa: PLC0415
 
         RedisInstrumentor().instrument()
-        logger.debug("redis auto-instrumentation wired")
+        _logger.debug("redis auto-instrumentation wired")
     except Exception as exc:
-        logger.warning("RedisInstrumentor failed: %s", exc)
+        _logger.warning("RedisInstrumentor failed: %s", exc)
