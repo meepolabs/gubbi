@@ -39,10 +39,15 @@ def upgrade() -> None:
 
     # Steps 2-4: Compute next id and re-add as IDENTITY.
     # We must use a PL/pgSQL DO block because RESTART cannot take a subquery.
+    # PG syntax: convert a non-identity column to IDENTITY uses ADD, not SET.
+    # SET GENERATED { ALWAYS | BY DEFAULT } only applies to already-identity
+    # columns. The bare-SET form parses but errors at runtime on the AS
+    # IDENTITY tail. After DROP DEFAULT above, the column is non-identity
+    # again, so ADD is correct.
     do_sql = (
         "DO $$ DECLARE nxt BIGINT; BEGIN SELECT COALESCE(MAX(id), 0) + 1 INTO nxt "  # noqa: E501, S608
         "FROM audit_log; EXECUTE format("
-        "'ALTER TABLE audit_log ALTER COLUMN id SET GENERATED ALWAYS AS IDENTITY "
+        "'ALTER TABLE audit_log ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY "
         "(RESTART WITH %s)', nxt); DROP SEQUENCE IF EXISTS audit_log_id_seq; END $$;"  # noqa: E501, S608
     )
     conn.connection.execute(do_sql)
