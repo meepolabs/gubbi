@@ -1,0 +1,46 @@
+# gitleaks config -- adopted from meepo-conventions baseline.
+#
+# Inherits the default ruleset and adds project-specific allowlist
+# patterns for files that legitimately contain hex/base64-looking
+# strings (lockfiles, generated types, content snapshots).
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Build outputs, lockfiles, and generated types -- not source"
+
+# Anchor patterns to repo root with `^` so a stray nested path
+# (e.g. submodule, backup dir) with the same name doesn't auto-bypass
+# scanning. EVERY directory pattern below MUST be anchored.
+paths = [
+  # Lockfiles
+  '''poetry\.lock''',
+  '''package-lock\.json''',
+  '''pnpm-lock\.yaml''',
+  '''yarn\.lock''',
+  '''uv\.lock''',
+  '''Cargo\.lock''',
+
+  # Python build / cache artifacts -- ANCHORED
+  '''^__pycache__/''',
+  '''^\.mypy_cache/''',
+  '''^\.pytest_cache/''',
+  '''^\.ruff_cache/''',
+  '''^dist/''',
+  '''^\.eggs/''',
+
+  # Node generated artifacts -- ANCHORED
+  '''^node_modules/''',
+  '''^build/''',
+]
+
+# .env.example by name -- it's a template; should never contain real
+# values. Same discipline applies to .env.test: even test-scoped
+# credentials are credentials. Use clearly fake placeholder values
+# (e.g. `test-key-not-real`) in BOTH files. If a real value ever
+# appears, that's the bug we want to surface, not allow.
+files = [
+  '''^\.env\.example$''',
+  '''^\.env\.test$''',
+]

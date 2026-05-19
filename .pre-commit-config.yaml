@@ -1,6 +1,6 @@
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v4.5.0
+    rev: v5.0.0
     hooks:
       - id: trailing-whitespace
       - id: end-of-file-fixer
@@ -28,6 +28,14 @@ repos:
           - pydantic-settings==2.13.1
           - types-PyYAML==6.0.12.20260408
         exclude: ^(tests/)
+
+  # Secret scanning at commit time. The CI gitleaks workflow is the
+  # second line of defense; this hook catches leaks before they reach
+  # the remote.
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
 
   - repo: local
     hooks:
