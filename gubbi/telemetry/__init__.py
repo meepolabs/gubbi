@@ -65,6 +65,9 @@ def configure_otel(app: FastAPI) -> None:
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     enabled = _is_otel_enabled()
     settings = get_settings()
+    from gubbi_common.telemetry.correlation_processor import (  # noqa: PLC0415
+        CorrelationSpanProcessor,
+    )
     from gubbi_common.telemetry.otel import configure_otel as _common_configure_otel
 
     _common_configure_otel(
@@ -73,6 +76,11 @@ def configure_otel(app: FastAPI) -> None:
         enabled=enabled,
         service_version=_gubbi_version,
         deployment_environment=settings.app_env,
+        # Auto-inject correlation_id on every span at on_start (reads
+        # the request-scoped ContextVar populated by CorrelationIDMiddleware).
+        # Background spans without a request scope are left untagged --
+        # see CorrelationSpanProcessor docstring for rationale.
+        extra_processors=[CorrelationSpanProcessor()],
     )
     _wire_instrumentors(app)
     rebind_metrics_after_configure()
