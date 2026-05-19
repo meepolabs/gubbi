@@ -83,6 +83,7 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "tool.name",
             "size_chars",
             "error_threshold_hit",
+            "correlation_id",
         }
     ),
     SpanNames.CIPHER_ENCRYPT: frozenset(
@@ -91,6 +92,7 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "field_kind",
             "bytes_processed",
             "latency_ms",
+            "correlation_id",
         }
     ),
     SpanNames.CIPHER_DECRYPT: frozenset(
@@ -99,6 +101,7 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "field_kind",
             "bytes_processed",
             "latency_ms",
+            "correlation_id",
         }
     ),
     SpanNames.AUDIT_WRITE: frozenset(
@@ -108,6 +111,7 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "actor_type",
             "success",
             "latency_ms",
+            "correlation_id",
         }
     ),
     SpanNames.EMBEDDING_ENCODE: frozenset(
@@ -115,6 +119,7 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "text_hash",
             "text_len",
             "latency_ms",
+            "correlation_id",
         }
     ),
     SpanNames.HTTP_REQUEST: frozenset(
