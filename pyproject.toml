@@ -48,7 +48,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "089ce58", extras = ["db"] }  # 0.13.0 + audit-dedup fix (84af459) + CorrelationSpanProcessor (d8b23ab) + root-span cid tag (089ce58) -- HTTPS so CI runners (no SSH key) and dev boxes both resolve. Repo is PUBLIC, no token required.
+gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "58a9fe4", extras = ["db"] }  # 0.13.0 baseline + shared-baseline / py312 / docstring convergence.
 
 # LLM extraction — Arq worker + Anthropic API
 arq = "^0.26.0"

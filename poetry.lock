@@ -1112,8 +1112,8 @@ db = ["asyncpg (>=0.29,<0.31)"]
 [package.source]
 type = "git"
 url = "https://github.com/meepolabs/gubbi-common.git"
-reference = "089ce58"
-resolved_reference = "089ce58fcdd89948e94fb476058dd2d3fd75be86"
+reference = "58a9fe4"
+resolved_reference = "58a9fe4b6a54111574baed73eb1d6f8d04b1f32d"
 
 [[package]]
 name = "gunicorn"
@@ -3863,4 +3863,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11"
-content-hash = "92d566dd0fb163439947b209337652509741cfeb8aa267220790bf5d2a0e20c3"
+content-hash = "44df2d6bb37ce692636a04d160e4d584b394e25e60624d10167463d2f0d05d52"
