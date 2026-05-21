@@ -7,6 +7,7 @@ from collections.abc import Sequence
 from urllib.parse import urlparse
 
 from fastapi import FastAPI
+from gubbi_common import RESOURCE_DOCUMENTATION_URL
 from mcp.server.auth.routes import create_protected_resource_routes
 from pydantic import AnyHttpUrl
 
@@ -32,11 +33,7 @@ TLS_OR_LOOPBACK_PREFIXES: tuple[str, ...] = (
     "http://[::1]",
 )
 
-# Public documentation URL emitted in /.well-known/oauth-protected-resource/mcp
-# under ``resource_documentation``. Module-level so the TLS validator can audit
-# it alongside ``authorization_servers``, and so tests can patch it without
-# threading an extra parameter through ``register``.
-RESOURCE_DOCUMENTATION_URL: str = "https://gubbi.ai/docs/mcp"
+_LOOPBACK_HOSTS: frozenset[str] = frozenset({"localhost", "127.0.0.1", "::1"})
 
 
 def _is_https(url: str) -> bool:
@@ -46,8 +43,25 @@ def _is_https(url: str) -> bool:
     the check tolerates Pydantic's ``AnyHttpUrl`` normalisation: scheme
     case (``urlparse`` lowercases the scheme; ``startswith("https://")``
     is case-sensitive) and the trailing slash appended to bare origins.
+
+    See ``gubbi_cloud.config._is_absolute_https_url`` for the sibling
+    helper that audits raw env-var strings -- the input shape differs
+    (no ``AnyHttpUrl`` normalisation upstream), so the cloud helper also
+    rejects empty authority and leading/trailing whitespace.
     """
     return urlparse(url).scheme == "https"
+
+
+def _is_loopback_host(url: str) -> bool:
+    """Return True iff ``url`` resolves to a loopback hostname.
+
+    Used by the deployed Mode-3 TLS validator to reject ``https://localhost``
+    forms that ``_is_https`` would otherwise pass -- a deployed hosted
+    Mode-3 deploy never legitimately points credential-bearing URLs at
+    the local interface.
+    """
+    parsed = urlparse(url)
+    return (parsed.hostname or "").lower() in _LOOPBACK_HOSTS
 
 
 def _validate_tls_for_deployed_hosted(
@@ -88,35 +102,38 @@ def _validate_tls_for_deployed_hosted(
 
     for idx, server in enumerate(authorization_servers):
         server_str = str(server)
-        if not _is_https(server_str):
+        if not _is_https(server_str) or _is_loopback_host(server_str):
             raise ValueError(
                 f"authorization_servers[{idx}]={server_str!r} is non-https "
-                "in deployed Mode-3 hosted. https:// is required -- a non-TLS "
-                "or loopback authorization server in a hosted Mode-3 deploy "
-                "is a downgrade vector (credentials discovered from this "
-                "metadata document would transit cleartext, or be routed "
-                "through a local interceptor in the loopback case). "
-                "Loopback is intentionally rejected here even though it is "
-                "kernel-loopback safe -- legitimate hosted Mode-3 never "
-                "points authorization_servers at a loopback address."
+                "or loopback in deployed Mode-3 hosted. https:// to a "
+                "non-loopback host is required -- a non-TLS or loopback "
+                "authorization server in a hosted Mode-3 deploy is a "
+                "downgrade vector (credentials discovered from this metadata "
+                "document would transit cleartext, or be routed through a "
+                "local interceptor in the loopback case). Loopback is "
+                "rejected even when wrapped in https:// because legitimate "
+                "hosted Mode-3 never points authorization_servers at a "
+                "loopback address."
             )
 
-    if not _is_https(resource_url):
+    if not _is_https(resource_url) or _is_loopback_host(resource_url):
         raise ValueError(
-            f"resource_url={resource_url!r} is non-https in deployed Mode-3 "
-            "hosted. https:// is required -- a non-TLS resource URL is the "
-            "audience MCP clients present bearer tokens to, so a cleartext "
-            "advertisement here is a downgrade vector for the bearer-token "
-            "presentation step. Set JOURNAL_SERVER_URL to the https origin."
+            f"resource_url={resource_url!r} is non-https or loopback in "
+            "deployed Mode-3 hosted. https:// to a non-loopback host is "
+            "required -- a non-TLS or loopback resource URL is the audience "
+            "MCP clients present bearer tokens to, so a cleartext or "
+            "interceptable advertisement here is a downgrade vector for the "
+            "bearer-token presentation step. Set JOURNAL_SERVER_URL to the "
+            "https origin."
         )
 
-    if not _is_https(resource_documentation_url):
+    if not _is_https(resource_documentation_url) or _is_loopback_host(resource_documentation_url):
         raise ValueError(
             f"resource_documentation={resource_documentation_url!r} is "
-            "non-https in deployed Mode-3 hosted. https:// is required -- a "
-            "non-TLS doc URL could host malicious content under a "
-            "phishing-friendly hostname that clients reach from the "
-            "published metadata."
+            "non-https or loopback in deployed Mode-3 hosted. https:// to a "
+            "non-loopback host is required -- a non-TLS or loopback doc URL "
+            "could host malicious content under a phishing-friendly hostname "
+            "that clients reach from the published metadata."
         )
 
 

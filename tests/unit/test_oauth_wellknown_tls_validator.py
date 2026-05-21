@@ -122,6 +122,57 @@ class TestModeThreeDeployedRejectsNonHttps:
             register(app, settings, [AnyHttpUrl("http://localhost:4444")])
         assert not _wellknown_route_present(app)
 
+    def test_https_loopback_authorization_server_raises(self) -> None:
+        """Mode 3 + production + https://localhost -> ValueError.
+
+        Closes the gap where the validator's error message advertised
+        loopback rejection but ``_is_https`` alone admitted any
+        ``https://localhost*`` URL. A hosted Mode-3 deploy that publishes
+        an https-wrapped loopback authorization server is still routing
+        credential traffic through the local interface -- exactly the
+        downgrade vector the gate exists to block.
+        """
+        # Arrange
+        settings = _make_settings()
+        app = FastAPI()
+
+        # Act + Assert
+        with pytest.raises(ValueError, match="loopback"):
+            register(app, settings, [AnyHttpUrl("https://localhost:4444")])
+        assert not _wellknown_route_present(app)
+
+    def test_https_loopback_127_0_0_1_raises(self) -> None:
+        """Mode 3 + production + https://127.0.0.1 -> ValueError.
+
+        IPv4 loopback companion to ``test_https_loopback_authorization_server_raises``;
+        pins that the loopback rejection covers the dotted-quad form as
+        well as the ``localhost`` hostname.
+        """
+        # Arrange
+        settings = _make_settings()
+        app = FastAPI()
+
+        # Act + Assert
+        with pytest.raises(ValueError, match="loopback"):
+            register(app, settings, [AnyHttpUrl("https://127.0.0.1:4444")])
+        assert not _wellknown_route_present(app)
+
+    def test_https_loopback_ipv6_raises(self) -> None:
+        """Mode 3 + production + https://[::1] -> ValueError.
+
+        IPv6 loopback companion; pins that ``_is_loopback_host``
+        recognises the bracketed-IPv6 form that ``urlparse`` exposes via
+        ``parsed.hostname == "::1"``.
+        """
+        # Arrange
+        settings = _make_settings()
+        app = FastAPI()
+
+        # Act + Assert
+        with pytest.raises(ValueError, match="loopback"):
+            register(app, settings, [AnyHttpUrl("https://[::1]:4444")])
+        assert not _wellknown_route_present(app)
+
     def test_https_authorization_server_passes(self) -> None:
         """Mode 3 + production + https authorization server -> registers."""
         # Arrange
