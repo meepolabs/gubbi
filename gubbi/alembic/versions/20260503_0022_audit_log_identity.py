@@ -64,7 +64,10 @@ def downgrade() -> None:
     downgrade_sql = (
         "DO $$ DECLARE nxt BIGINT; BEGIN CREATE SEQUENCE audit_log_id_seq OWNED BY audit_log.id; "
         "SELECT COALESCE(MAX(id), 0) + 1 INTO nxt FROM audit_log; "
-        "ALTER SEQUENCE audit_log_id_seq RESTART WITH nxt; "
+        # RESTART value must be substituted via format() -- ALTER SEQUENCE is
+        # parsed through SPI, which treats a bare ``nxt`` as a literal token
+        # rather than the PL/pgSQL variable (mirrors the upgrade path above).
+        "EXECUTE format('ALTER SEQUENCE audit_log_id_seq RESTART WITH %s', nxt); "
         """EXECUTE format('ALTER TABLE audit_log ALTER COLUMN id SET DEFAULT nextval(''audit_log_id_seq''));"""  # noqa: E501
         " END $$;"
     )
