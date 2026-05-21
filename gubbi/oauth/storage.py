@@ -130,6 +130,15 @@ class OAuthStorage:
 
     @asynccontextmanager
     async def _atomic(self) -> AsyncIterator[aiosqlite.Connection]:
+        """Yield a connection inside ``BEGIN IMMEDIATE`` -> commit/rollback.
+
+        Non-reentrancy invariant: callers MUST NOT, while inside the yield,
+        call back into any storage method that re-acquires ``self._lock``
+        (notably ``_get_conn`` and ``close``). ``asyncio.Lock`` is not
+        reentrant, so a same-task re-acquire would deadlock. ``close()``
+        also takes this lock, so a self-call from inside ``_atomic`` would
+        hang shutdown indefinitely. Today no caller violates this.
+        """
         conn = await self._get_conn()
         async with self._lock:
             await conn.execute("BEGIN IMMEDIATE")
@@ -137,14 +146,33 @@ class OAuthStorage:
                 yield conn
                 await conn.commit()
             except BaseException:
+                # NOTE: body exceptions raised inside _atomic are logged via
+                # rollback_err.__context__ on the rollback-failure path below
+                # (and propagated to the caller normally). Callers MUST NOT
+                # raise exceptions whose __repr__ embeds token material or
+                # other secrets -- aiosqlite/sqlite3 exceptions are safe today
+                # (CPython strips parameter values), but custom exception
+                # types added to this surface should respect the same rule.
                 try:
                     await conn.rollback()
                 except BaseException as rollback_err:
+                    # rollback_err.__context__ is the original body exception
+                    # (Python's exception-chaining sets it automatically when
+                    # one exception is raised during handling of another).
+                    # Capture it explicitly in the message text -- gubbi's
+                    # production JSON logger does not walk __context__ chains
+                    # by default, so the original auth-context (e.g. "invalid
+                    # client_secret") would be lost from operator logs without
+                    # this. exc_info=True still gives chain-walking formatters
+                    # (stdlib, structlog with format_exc_info) the full trace.
+                    original = rollback_err.__context__
                     logger.warning(
-                        "OAuth storage rollback failed (%s); SQLite will discard "
-                        "uncommitted state on connection close. Original exception "
-                        "preserved.",
+                        "OAuth storage rollback failed (%s); original body "
+                        "exception: %r. SQLite will discard uncommitted state "
+                        "on connection close.",
                         rollback_err,
+                        original,
+                        exc_info=True,
                     )
                 raise
 
@@ -210,11 +238,24 @@ class OAuthStorage:
             await self._conn.commit()
 
     async def close(self) -> None:
-        """Release the SQLite connection and the rate-limit storage handle."""
-        if self._conn:
-            await self._conn.close()
-            self._conn = None
-        self._initialized = False
+        """Release the SQLite connection and the rate-limit storage handle.
+
+        Acquires self._lock so any in-flight _atomic block can finish
+        (commit or rollback) before the connection is torn down. Without
+        the lock, a lifespan teardown racing an active transaction could
+        close the connection out from under the open _atomic context.
+
+        Non-reentrancy invariant: must NOT be called from inside an
+        ``_atomic`` block on the same task (asyncio.Lock is not reentrant
+        -- self-acquire would deadlock). Today every call site is the
+        lifespan teardown handler, which never enters from inside a
+        transaction.
+        """
+        async with self._lock:
+            if self._conn:
+                await self._conn.close()
+                self._conn = None
+            self._initialized = False
         if self._rl is not None:
             await self._rl.aclose()
 

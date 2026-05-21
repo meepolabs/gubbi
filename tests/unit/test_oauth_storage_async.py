@@ -12,6 +12,7 @@ Covers three scenarios that only manifest under asyncio concurrency:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from pathlib import Path
 
@@ -161,6 +162,84 @@ class TestLazyInitRace:
                 await conn.rollback()
         finally:
             await storage.close()
+
+    async def test_atomic_preserves_original_exception_when_rollback_fails(
+        self,
+        storage: OAuthStorage,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Body exception must propagate even when conn.rollback() also fails.
+
+        Pins the contract that _atomic's inner try/except around rollback
+        preserves the caller's original exception (rather than masking it
+        with the rollback failure) and logs the rollback failure at WARNING
+        with the original body exception captured both in the message text
+        AND via exc_info -- the message text is the load-bearing surface
+        because gubbi's production JSON logger does not walk __context__
+        chains.
+        """
+
+        class _RollbackBoom(Exception):
+            pass
+
+        class _BodyBoom(Exception):
+            pass
+
+        conn = await storage._get_conn()
+
+        rollback_call_count = 0
+
+        async def _failing_rollback() -> None:
+            nonlocal rollback_call_count
+            rollback_call_count += 1
+            raise _RollbackBoom("simulated rollback failure")
+
+        monkeypatch.setattr(conn, "rollback", _failing_rollback)
+
+        with (
+            caplog.at_level(logging.WARNING, logger="gubbi.oauth.storage"),
+            pytest.raises(_BodyBoom, match="body-failed"),
+        ):
+            async with storage._atomic():
+                raise _BodyBoom("body-failed")
+
+        # Self-validation: the monkeypatched rollback must have actually fired.
+        # Without this assert, a future refactor of _atomic that bypasses
+        # rollback would silently pass the test.
+        assert (
+            rollback_call_count == 1
+        ), f"conn.rollback must be called exactly once; got {rollback_call_count}"
+
+        rollback_records = [
+            r for r in caplog.records if "rollback failed" in r.getMessage().lower()
+        ]
+        assert rollback_records, "rollback failure must be logged at WARNING"
+
+        # exc_info=True must populate the log record's exc_info tuple so
+        # chain-walking formatters (stdlib, structlog with format_exc_info)
+        # render both the rollback failure and the original via __context__.
+        record = rollback_records[0]
+        assert record.exc_info is not None, (
+            "rollback WARNING must carry exc_info so chain-walking formatters "
+            "render the original exception via __context__"
+        )
+
+        # Load-bearing assertion under the production JSON logger (which does
+        # NOT walk __context__ chains): the original body exception must
+        # appear in the rendered message text. Without this, an operator
+        # reading JSON logs sees only "rollback failed" and loses the
+        # original auth-context.
+        message = record.getMessage()
+        assert "_BodyBoom" in message, (
+            "rollback WARNING message text must include the original body "
+            "exception's repr (gubbi's production JSON logger does not walk "
+            f"__context__ chains). Got message: {message!r}"
+        )
+        assert "body-failed" in message, (
+            "rollback WARNING message text must include the original "
+            f"exception's args. Got message: {message!r}"
+        )
 
 
 class TestAtomicRotationInterleave:
