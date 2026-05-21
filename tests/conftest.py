@@ -19,8 +19,9 @@ import os
 import subprocess
 import sys
 import tempfile
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Generator, Iterator
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlparse, urlunparse
 
 import asyncpg
@@ -29,6 +30,10 @@ import pytest
 import pytest_asyncio
 import structlog
 from gubbi_common.telemetry import initialize_logger
+from opentelemetry import trace
+from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.util._once import Once
 
 from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
@@ -468,3 +473,67 @@ async def clean_rls_db(admin_pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Pool]:
     yield admin_pool
     async with admin_pool.acquire() as conn:
         await conn.execute(truncate_sql)
+
+
+# ---------------------------------------------------------------------------
+# OpenTelemetry in-memory tracer fixture
+# ---------------------------------------------------------------------------
+#
+# Validated against opentelemetry-api 1.41.1. The reset poke at
+# ``trace._TRACER_PROVIDER_SET_ONCE`` reaches into a private module
+# attribute; an OTel version bump may rename or relocate it. If the
+# import of ``Once`` at the top of this file breaks, that is the loud
+# failure point -- update the import and re-validate before bumping the
+# version comment.
+
+
+class InMemoryExporter(SpanExporter):
+    """Stores exported spans in a list for test assertions."""
+
+    def __init__(self) -> None:
+        self.spans: list[ReadableSpan] = []
+
+    def export(self, spans: list[ReadableSpan]) -> SpanExportResult:  # type: ignore[override]
+        self.spans.extend(spans)
+        return SpanExportResult.SUCCESS
+
+    def shutdown(self) -> None:
+        self.spans.clear()
+
+
+def _reset_global_tracer_provider() -> None:
+    """Reset BOTH the global TracerProvider slot AND the SET_ONCE guard.
+
+    OpenTelemetry's ``set_tracer_provider`` is gated by a one-shot
+    ``Once`` instance (``_TRACER_PROVIDER_SET_ONCE``). Once any test has
+    called ``set_tracer_provider`` the guard latches and every
+    subsequent call becomes a silent no-op, even after manually clearing
+    ``_TRACER_PROVIDER``. Resetting both lets the next test install its
+    own provider cleanly.
+
+    Validated against opentelemetry-api 1.41.1.
+    """
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = Once()
+
+
+@pytest.fixture
+def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
+    """Yield (tracer, exporter) with the global TracerProvider swapped to in-memory export.
+
+    Both ``_TRACER_PROVIDER`` and ``_TRACER_PROVIDER_SET_ONCE`` are reset
+    on setup AND on teardown so the next test inherits a clean global
+    state regardless of what this one (or any prior test) installed.
+
+    Validated against opentelemetry-api 1.41.1.
+    """
+    exporter = InMemoryExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    tracer = provider.get_tracer("test")
+    _reset_global_tracer_provider()
+    trace.set_tracer_provider(provider)
+    try:
+        yield tracer, exporter
+    finally:
+        _reset_global_tracer_provider()

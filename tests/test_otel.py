@@ -10,13 +10,9 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Generator
 from typing import Any
 
 import pytest
-from opentelemetry import trace
-from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 
 from gubbi.telemetry.attrs import (
     BANNED_KEYS,
@@ -24,42 +20,9 @@ from gubbi.telemetry.attrs import (
     SpanNames,
     safe_set_attributes,
 )
+from tests.conftest import InMemoryExporter
 
 pytestmark = pytest.mark.unit
-
-
-# ---------------------------------------------------------------------------
-# In-memory span exporter for test assertions
-# ---------------------------------------------------------------------------
-
-
-class InMemoryExporter(SpanExporter):
-    """Stores exported spans in a list for test assertions."""
-
-    def __init__(self) -> None:
-        self.spans: list[ReadableSpan] = []
-
-    def export(self, spans: list[ReadableSpan]) -> SpanExportResult:  # type: ignore[override]
-        self.spans.extend(spans)
-        return SpanExportResult.SUCCESS
-
-    def shutdown(self) -> None:
-        self.spans.clear()
-
-
-@pytest.fixture
-def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
-    """Yield (tracer, exporter) with in-memory span export."""
-    exporter = InMemoryExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    tracer = provider.get_tracer("test")
-    old_provider = trace.get_tracer_provider()
-    trace.set_tracer_provider(provider)
-    try:
-        yield tracer, exporter
-    finally:
-        trace.set_tracer_provider(old_provider)
 
 
 # ---------------------------------------------------------------------------

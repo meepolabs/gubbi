@@ -13,12 +13,14 @@ shim, the assertions here will surface the divergence.
 from __future__ import annotations
 
 import inspect
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import asyncpg
 import pytest
 
 from gubbi.audit import Action, record_audit
+from tests.conftest import InMemoryExporter
 
 pytestmark = pytest.mark.unit
 
@@ -121,7 +123,9 @@ async def test_record_audit_propagates_on_db_error() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_record_audit_emits_audit_write_span_with_gubbi_attrs() -> None:
+async def test_record_audit_emits_audit_write_span_with_gubbi_attrs(
+    in_memory_tracer: tuple[Any, InMemoryExporter],
+) -> None:
     """Regression: the canonical writer emits ``audit.write`` carrying the gubbi attr shape.
 
     Per A3 Q1 the OTel span moved INTO ``record_audit_async`` in
@@ -130,44 +134,35 @@ async def test_record_audit_emits_audit_write_span_with_gubbi_attrs() -> None:
     "latency_ms"}``; this test asserts the canonical writer sets at
     least the three pre-execute attrs (``event_type``, ``actor_type``,
     ``target_id``) on the started span.
+
+    The ``in_memory_tracer`` fixture (tests/conftest.py) swaps the global
+    TracerProvider with an in-memory exporter and resets the OTel
+    ``_TRACER_PROVIDER_SET_ONCE`` guard so this test passes both in
+    isolation and in the full suite. ``record_audit_async`` pulls a
+    tracer named "gubbi_common.audit" off the global provider on each
+    call, so the swap must be global, not local.
     """
-    from opentelemetry import trace
-    from opentelemetry.sdk.trace import TracerProvider
-    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
-    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+    _, exporter = in_memory_tracer
 
-    exporter = InMemorySpanExporter()
-    provider = TracerProvider()
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    # Swap the global tracer provider for the duration of this test;
-    # record_audit_async pulls a tracer named "gubbi_common.audit" off
-    # the global provider on each call.
-    original = trace.get_tracer_provider()
-    trace._TRACER_PROVIDER = None
-    trace.set_tracer_provider(provider)
-    try:
-        conn = _make_conn()
-        await record_audit(
-            conn,
-            actor_type="user",
-            actor_id="00000000-0000-0000-0000-000000000001",
-            action="entry.created",
-            target_type="entry",
-            target_id="00000000-0000-0000-0000-000000000099",
-            target_kind="entry",
-        )
+    conn = _make_conn()
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id="00000000-0000-0000-0000-000000000001",
+        action="entry.created",
+        target_type="entry",
+        target_id="00000000-0000-0000-0000-000000000099",
+        target_kind="entry",
+    )
 
-        spans = exporter.get_finished_spans()
-        assert spans, "expected at least one finished span from record_audit_async"
-        audit_spans = [s for s in spans if s.name == "audit.write"]
-        assert audit_spans, f"expected an 'audit.write' span; got names: {[s.name for s in spans]}"
-        attrs = dict(audit_spans[0].attributes or {})
-        assert attrs.get("event_type") == "entry.created"
-        assert attrs.get("actor_type") == "user"
-        assert attrs.get("target_id") == "00000000-0000-0000-0000-000000000099"
-        # latency_ms + success are set in the finally block; they MUST be present.
-        assert "latency_ms" in attrs
-        assert attrs.get("success") is True
-    finally:
-        trace._TRACER_PROVIDER = None
-        trace.set_tracer_provider(original)
+    spans = exporter.spans
+    assert spans, "expected at least one finished span from record_audit_async"
+    audit_spans = [s for s in spans if s.name == "audit.write"]
+    assert audit_spans, f"expected an 'audit.write' span; got names: {[s.name for s in spans]}"
+    attrs = dict(audit_spans[0].attributes or {})
+    assert attrs.get("event_type") == "entry.created"
+    assert attrs.get("actor_type") == "user"
+    assert attrs.get("target_id") == "00000000-0000-0000-0000-000000000099"
+    # latency_ms + success are set in the finally block; they MUST be present.
+    assert "latency_ms" in attrs
+    assert attrs.get("success") is True

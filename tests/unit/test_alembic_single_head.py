@@ -24,7 +24,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0029_audit_log_target_kind_check"
+_EXPECTED_HEAD = "0031_audit_log_dedup_actor_scope"
 
 
 def _alembic_config() -> Config:
