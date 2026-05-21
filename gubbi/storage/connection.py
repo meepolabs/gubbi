@@ -10,6 +10,7 @@ app boundary handler can map it to HTTP 503 instead of leaking a raw 500.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from uuid import UUID
@@ -22,10 +23,17 @@ from gubbi_common.db.user_scoped import (
 
 from gubbi.storage.exceptions import DatabaseUnavailable
 
-_TRANSIENT_ERRORS = (
+# Transient errors that map to HTTP 503 (DatabaseUnavailable) at the API boundary.
+# ``asyncio.TimeoutError`` covers pool-acquire budget exhaustion: gubbi-common
+# 0.13.1 calls ``pool.acquire(timeout=5.0)``, and asyncpg raises
+# ``asyncio.TimeoutError`` (not ``asyncpg.PostgresConnectionError``) when the
+# acquire budget expires. Translating it here gives callers a clean
+# ``DatabaseUnavailable`` instead of an unhandled ``TimeoutError``.
+_TRANSIENT_ERRORS: tuple[type[Exception], ...] = (
     asyncpg.PostgresConnectionError,
     asyncpg.CannotConnectNowError,
     OSError,
+    asyncio.TimeoutError,
 )
 
 
