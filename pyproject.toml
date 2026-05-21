@@ -48,7 +48,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "58a9fe4", extras = ["db"] }  # 0.13.0 baseline + shared-baseline / py312 / docstring convergence.
+gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "7e95046", extras = ["db"] }  # 0.13.1: pool_acquire timeout (5s default) + asyncio fixture loop scope.
 
 # LLM extraction — Arq worker + Anthropic API
 arq = "^0.26.0"

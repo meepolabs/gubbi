@@ -67,6 +67,19 @@ class TestSafeAcquire:
             async with safe_acquire(mock_pool):  # noqa: SLF001
                 pass  # pragma: no cover
 
+    async def test_safe_acquire_translates_asyncio_timeout(self) -> None:
+        """pool.acquire raising asyncio.TimeoutError (acquire budget exhausted) becomes DatabaseUnavailable."""
+        # gubbi-common 0.13.1 invokes ``pool.acquire(timeout=5.0)``; asyncpg
+        # raises ``asyncio.TimeoutError`` when that budget expires.
+        error = TimeoutError("acquire timed out")
+        mock_pool = AsyncMock(spec=asyncpg.Pool)
+        mock_pool.acquire.return_value.__aenter__.side_effect = error
+        mock_pool.acquire.return_value.__aexit__.return_value = False
+
+        with pytest.raises(DatabaseUnavailable, match="acquire timed out"):
+            async with safe_acquire(mock_pool):  # noqa: SLF001
+                pass  # pragma: no cover
+
     async def test_safe_acquire_does_not_translate_other_errors(
         self,
     ) -> None:
