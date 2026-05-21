@@ -31,6 +31,8 @@ import pytest_asyncio
 import structlog
 from gubbi_common.telemetry import initialize_logger
 from opentelemetry import trace
+from opentelemetry._logs import _internal as _otel_logs_internal
+from opentelemetry.metrics import _internal as _otel_metrics_internal
 from opentelemetry.sdk.trace import ReadableSpan, TracerProvider
 from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
 from opentelemetry.util._once import Once
@@ -498,42 +500,88 @@ class InMemoryExporter(SpanExporter):
         return SpanExportResult.SUCCESS
 
     def shutdown(self) -> None:
-        self.spans.clear()
+        """No-op shutdown.
+
+        ``SpanExporter.shutdown()`` is the SDK hook for flushing buffers and
+        releasing resources -- NOT for resetting accumulated test state. If a
+        test triggers ``provider.shutdown()`` (which cascades to processors and
+        exporters), clearing ``self.spans`` here would silently empty the list
+        before any subsequent assertions ran. Test-state cleanup lives in the
+        ``in_memory_tracer`` fixture teardown chain; this method intentionally
+        does nothing.
+        """
 
 
-def _reset_global_tracer_provider() -> None:
-    """Reset BOTH the global TracerProvider slot AND the SET_ONCE guard.
+def _snapshot_otel_globals() -> dict[str, Any]:
+    """Snapshot all three OTel signal-provider globals + their SET_ONCE guards.
 
-    OpenTelemetry's ``set_tracer_provider`` is gated by a one-shot
-    ``Once`` instance (``_TRACER_PROVIDER_SET_ONCE``). Once any test has
-    called ``set_tracer_provider`` the guard latches and every
-    subsequent call becomes a silent no-op, even after manually clearing
-    ``_TRACER_PROVIDER``. Resetting both lets the next test install its
-    own provider cleanly.
+    OpenTelemetry's ``set_*_provider`` calls are each gated by a one-shot
+    ``Once`` latch (``_TRACER_PROVIDER_SET_ONCE``, ``_LOGGER_PROVIDER_SET_ONCE``,
+    ``_METER_PROVIDER_SET_ONCE``). Once any test latches one of these guards
+    every subsequent call becomes a silent no-op, even after manually clearing
+    the corresponding ``_*_PROVIDER`` slot.
+
+    Snapshotting both slots per signal lets the fixture restore whatever the
+    process had installed BEFORE the test ran (which may be ``None`` and a
+    fresh ``Once``, or a real provider installed by a session-scoped
+    initializer). Resetting to ``None`` unconditionally would break any
+    consumer that depends on a pre-existing provider surviving a test.
+
+    Tracing is the only signal currently wired through this fixture; logger
+    and meter globals are snapshotted defensively so that as M5/M6 wire up
+    ``LoggerProvider`` / ``MeterProvider`` they automatically inherit
+    snapshot-restore isolation without further fixture surgery.
 
     Validated against opentelemetry-api 1.41.1.
     """
-    trace._TRACER_PROVIDER = None
-    trace._TRACER_PROVIDER_SET_ONCE = Once()
+    return {
+        "tracer_provider": trace._TRACER_PROVIDER,
+        "tracer_set_once": trace._TRACER_PROVIDER_SET_ONCE,
+        "logger_provider": _otel_logs_internal._LOGGER_PROVIDER,
+        "logger_set_once": _otel_logs_internal._LOGGER_PROVIDER_SET_ONCE,
+        "meter_provider": _otel_metrics_internal._METER_PROVIDER,
+        "meter_set_once": _otel_metrics_internal._METER_PROVIDER_SET_ONCE,
+    }
+
+
+def _restore_otel_globals(saved: dict[str, Any]) -> None:
+    """Restore the three signal-provider globals from a prior snapshot."""
+    trace._TRACER_PROVIDER = saved["tracer_provider"]
+    trace._TRACER_PROVIDER_SET_ONCE = saved["tracer_set_once"]
+    _otel_logs_internal._LOGGER_PROVIDER = saved["logger_provider"]
+    _otel_logs_internal._LOGGER_PROVIDER_SET_ONCE = saved["logger_set_once"]
+    _otel_metrics_internal._METER_PROVIDER = saved["meter_provider"]
+    _otel_metrics_internal._METER_PROVIDER_SET_ONCE = saved["meter_set_once"]
 
 
 @pytest.fixture
 def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
     """Yield (tracer, exporter) with the global TracerProvider swapped to in-memory export.
 
-    Both ``_TRACER_PROVIDER`` and ``_TRACER_PROVIDER_SET_ONCE`` are reset
-    on setup AND on teardown so the next test inherits a clean global
-    state regardless of what this one (or any prior test) installed.
+    Snapshots ALL three OTel signal-provider globals (tracer, logger, meter)
+    along with their ``Once`` latches on setup, swaps in a fresh in-memory
+    tracer provider, and restores the original snapshot on teardown. Tests
+    that ran before this fixture observed provider X; tests that run after
+    this fixture observe provider X again -- not ``None``.
+
+    Logger and meter snapshots are taken defensively even though only the
+    tracer is mutated today, so that M5/M6 wiring of ``LoggerProvider`` and
+    ``MeterProvider`` inherits the same isolation guarantee for free.
 
     Validated against opentelemetry-api 1.41.1.
     """
+    saved = _snapshot_otel_globals()
     exporter = InMemoryExporter()
     provider = TracerProvider()
     provider.add_span_processor(SimpleSpanProcessor(exporter))
     tracer = provider.get_tracer("test")
-    _reset_global_tracer_provider()
+    # Reset the tracer slot + latch before installing our test provider, then
+    # delegate to the public ``set_tracer_provider`` API so any future-state
+    # hooks (proxy propagation, etc.) fire normally.
+    trace._TRACER_PROVIDER = None
+    trace._TRACER_PROVIDER_SET_ONCE = Once()
     trace.set_tracer_provider(provider)
     try:
         yield tracer, exporter
     finally:
-        _reset_global_tracer_provider()
+        _restore_otel_globals(saved)
