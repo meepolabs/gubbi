@@ -80,6 +80,17 @@ class TestSafeAcquire:
             async with safe_acquire(mock_pool):  # noqa: SLF001
                 pass  # pragma: no cover
 
+    async def test_safe_acquire_falls_back_to_class_name_on_bare_exception(self) -> None:
+        """Bare ``TimeoutError()`` produces non-empty DatabaseUnavailable message."""
+        error = TimeoutError()
+        mock_pool = AsyncMock(spec=asyncpg.Pool)
+        mock_pool.acquire.return_value.__aenter__.side_effect = error
+        mock_pool.acquire.return_value.__aexit__.return_value = False
+
+        with pytest.raises(DatabaseUnavailable, match="TimeoutError"):
+            async with safe_acquire(mock_pool):  # noqa: SLF001
+                pass  # pragma: no cover
+
     async def test_safe_acquire_does_not_translate_other_errors(
         self,
     ) -> None:
