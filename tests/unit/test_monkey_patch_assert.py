@@ -17,8 +17,8 @@ def test_monkey_patch_assert_at_startup() -> None:
 
     # Check the wrapper chain: __wrapped__ must exist on the bound method.
     wrapped = getattr(tm.call_tool, "__wrapped__", None)
-    assert wrapped is not None  # noqa: PT018
-    assert hasattr(wrapped, "__func__")  # noqa: PT018
+    assert wrapped is not None
+    assert hasattr(wrapped, "__func__")
 
     # The patched call must still be callable.
     assert callable(tm.call_tool)

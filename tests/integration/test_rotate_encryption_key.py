@@ -60,7 +60,7 @@ async def _seed_v1_rows(
             INSERT INTO topics (path, title, description, user_id, created_at, updated_at)
             VALUES ('rotate-test', 'Rotation test', '', $1, $2, $2)
             RETURNING id
-            """,  # noqa: S608
+            """,
             user_id,
             now,
         )
@@ -84,7 +84,7 @@ async def _seed_v1_rows(
                      search_vector, tags, created_at, updated_at)
                 VALUES ($1, $2, $3, $4, $5, $6, $7, to_tsvector('english', $8), $9, $10, $10)
                 RETURNING id
-                """,  # noqa: S608
+                """,
                 topic_id,
                 user_id,
                 today - timedelta(days=i),
@@ -116,7 +116,7 @@ async def _seed_v1_rows(
             VALUES ($1, $2, $3, $4, $5, 'rotate-test', $6, $7, $8,
                     $9, 0, $10, $10, '/tmp/rot.json', to_tsvector('english',''))
             RETURNING id
-            """,  # noqa: S608
+            """,
             topic_id,
             user_id,
             conv_title_ct,
@@ -137,7 +137,7 @@ async def _seed_v1_rows(
                     (conversation_id, user_id, role,
                      content_encrypted, content_nonce, search_vector, position)
                 VALUES ($1, $2, $3, $4, $5, to_tsvector('english', $6), $7)
-                """,  # noqa: S608
+                """,
                 conv_id,
                 user_id,
                 "user",
@@ -168,7 +168,7 @@ async def _count_rows_at_version(
     ``_ROTATION_SCREENS``, not user input — safe for parameterized queries.
     """
     hex_prefix = f"{version:02x}"
-    return int(  # noqa: S608 -- identifiers from constant tuple
+    return int(
         await pool.fetchval(
             f"""
             SELECT COUNT(*) FROM {table}
@@ -188,9 +188,9 @@ async def _verify_all_at_version(
 ) -> None:
     """Decrypt every encrypted row under a V2-only cipher to confirm migration."""
     for table, col_enc, col_nonce in _ROTATION_SCREENS:
-        rows = await pool.fetch(  # noqa: S608 -- identifiers from constant
+        rows = await pool.fetch(
             f"SELECT id, {col_enc} AS ct, {col_nonce} AS nc "  # noqa: S608
-            f"FROM {table} WHERE {col_enc} IS NOT NULL",  # noqa: S608
+            f"FROM {table} WHERE {col_enc} IS NOT NULL",
         )
         for row in rows:
             nonce = bytes(row["nc"])
@@ -282,9 +282,9 @@ async def test_decrypt_with_v1_only_cipher_after_rotation_raises(
     # A V1-only cipher cannot decrypt rows that carry nonce[0]==V2.
     cipher_v1_only = ContentCipher({1: _V1_KEY})
     for table, col_enc, col_nonce in _ROTATION_SCREENS:
-        rows = await admin_pool.fetch(  # noqa: S608 -- identifiers from constant
+        rows = await admin_pool.fetch(
             f"SELECT {col_enc} AS ct, {col_nonce} AS nc "  # noqa: S608
-            f"FROM {table} WHERE {col_enc} IS NOT NULL LIMIT 1",  # noqa: S608
+            f"FROM {table} WHERE {col_enc} IS NOT NULL LIMIT 1",
         )
         for row in rows:
             # Decrypting V2-encrypted ciphertext with V1-only cipher raises
@@ -328,7 +328,7 @@ async def test_rotate_skips_rows_already_at_target_version(
                         to_tsvector('english', 'v2-marker'), '{}',
                         now(), now())
                 RETURNING id
-                """,  # noqa: S608
+                """,
                 topic_id,
                 tenant_a,
                 ct,

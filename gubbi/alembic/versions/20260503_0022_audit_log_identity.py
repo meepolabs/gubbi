@@ -45,10 +45,10 @@ def upgrade() -> None:
     # IDENTITY tail. After DROP DEFAULT above, the column is non-identity
     # again, so ADD is correct.
     do_sql = (
-        "DO $$ DECLARE nxt BIGINT; BEGIN SELECT COALESCE(MAX(id), 0) + 1 INTO nxt "  # noqa: E501, S608
+        "DO $$ DECLARE nxt BIGINT; BEGIN SELECT COALESCE(MAX(id), 0) + 1 INTO nxt "
         "FROM audit_log; EXECUTE format("
         "'ALTER TABLE audit_log ALTER COLUMN id ADD GENERATED ALWAYS AS IDENTITY "
-        "(RESTART WITH %s)', nxt); DROP SEQUENCE IF EXISTS audit_log_id_seq; END $$;"  # noqa: E501, S608
+        "(RESTART WITH %s)', nxt); DROP SEQUENCE IF EXISTS audit_log_id_seq; END $$;"
     )
     conn.connection.execute(do_sql)
 
@@ -62,10 +62,10 @@ def downgrade() -> None:
     # Steps 2-3: Recreate sequence as BIGSERIAL-style and wire it back as default.
     # Use PL/pgSQL so the RESTART value is self-computed from existing data.
     downgrade_sql = (
-        "DO $$ DECLARE nxt BIGINT; BEGIN CREATE SEQUENCE audit_log_id_seq OWNED BY audit_log.id; "  # noqa: E501, S608
+        "DO $$ DECLARE nxt BIGINT; BEGIN CREATE SEQUENCE audit_log_id_seq OWNED BY audit_log.id; "
         "SELECT COALESCE(MAX(id), 0) + 1 INTO nxt FROM audit_log; "
         "ALTER SEQUENCE audit_log_id_seq RESTART WITH nxt; "
-        """EXECUTE format('ALTER TABLE audit_log ALTER COLUMN id SET DEFAULT nextval(''audit_log_id_seq''));"""  # noqa: E501, S608
+        """EXECUTE format('ALTER TABLE audit_log ALTER COLUMN id SET DEFAULT nextval(''audit_log_id_seq''));"""  # noqa: E501
         " END $$;"
     )
     conn.connection.execute(downgrade_sql)

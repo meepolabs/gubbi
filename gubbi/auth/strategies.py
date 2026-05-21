@@ -31,9 +31,8 @@ Deployment posture (D3 from Task CO.17a -- locked by Lead):
 from __future__ import annotations
 
 import secrets
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 from uuid import UUID
 
 import structlog
@@ -43,10 +42,14 @@ from gubbi_common.auth.gateway_signature import (
     verify_signature,
 )
 from gubbi_common.telemetry import bound_logger
-from starlette.requests import Request
 
 from gubbi.auth.hydra import HydraIntrospector, HydraInvalidToken, HydraUnreachable
 from gubbi.oauth.constants import MAX_BEARER_TOKEN_LEN
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from starlette.requests import Request
 
 __all__: list[str] = [
     "ApiKeyStrategy",

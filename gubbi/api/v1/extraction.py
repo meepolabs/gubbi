@@ -14,24 +14,32 @@ last_sync_at) from extraction_jobs via the repository layer.
 
 from __future__ import annotations
 
-from collections.abc import AsyncGenerator
-from datetime import datetime
-from typing import Annotated
-from uuid import UUID
+# datetime is a Pydantic field type on MeResponse.last_sync_at; UUID is a
+# FastAPI Depends() Annotated type. Both are resolved at runtime
+# (validator-build / route-registration), so they must stay runtime imports
+# despite `from __future__ import annotations` -- ruff TC would otherwise
+# push them under TYPE_CHECKING and break Pydantic model_rebuild().
+from datetime import datetime  # noqa: TC003
+from typing import TYPE_CHECKING, Annotated
+from uuid import UUID  # noqa: TC003
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
-from redis.asyncio import Redis as RedisClient
 
 from gubbi.api.v1.auth import require_scope
 from gubbi.app_state import require_app_ctx, require_redis_client
 from gubbi.storage.connection import safe_user_scoped_connection
 from gubbi.storage.repositories import extraction_jobs
 
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    from redis.asyncio import Redis as RedisClient
+
 __all__: list[str] = [
-    "MeResponse",
     "SSE_PER_USER_CAP",
+    "MeResponse",
     "extraction_me",
     "extraction_progress",
     "router",

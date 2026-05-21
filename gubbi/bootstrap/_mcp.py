@@ -9,14 +9,18 @@ Builds the ASGI middleware chain that protects the MCP endpoint:
 
 from __future__ import annotations
 
-from starlette.types import ASGIApp
+from typing import TYPE_CHECKING
 
-from gubbi.auth.strategies import AuthStrategy
 from gubbi.config import REQUIRED_OAUTH_SCOPE
 from gubbi.middleware import (
     BearerAuthMiddleware,
     OriginValidationMiddleware,
 )
+
+if TYPE_CHECKING:
+    from starlette.types import ASGIApp
+
+    from gubbi.auth.strategies import AuthStrategy
 
 
 def build_mcp_middleware(

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping, Sequence
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
-import asyncpg
 import structlog
 
 from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
@@ -20,6 +18,11 @@ from gubbi.storage.repositories.base import _add_param
 from gubbi.storage.repositories.topics import get as get_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_date as _validate_date
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    import asyncpg
 
 __all__: list[str] = [
     "append",

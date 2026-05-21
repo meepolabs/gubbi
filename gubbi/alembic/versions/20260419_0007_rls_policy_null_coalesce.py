@@ -62,7 +62,7 @@ _POLICY_COMMENT = (
 def upgrade() -> None:
     """Replace each tenant_isolation policy with a NULLIF-safe version."""
     for table in _TENANT_TABLES:
-        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")  # noqa: S608
+        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
         op.execute(
             f"""
             CREATE POLICY tenant_isolation ON {table}
@@ -73,10 +73,10 @@ def upgrade() -> None:
                 WITH CHECK (user_id = (
                     SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid
                 ))
-            """  # noqa: S608
+            """
         )
         op.execute(
-            f"COMMENT ON POLICY tenant_isolation ON {table} IS "  # noqa: S608
+            f"COMMENT ON POLICY tenant_isolation ON {table} IS "
             f"$policy${_POLICY_COMMENT}$policy$"
         )
 
@@ -91,16 +91,15 @@ def downgrade() -> None:
         "this policy entirely and see every row."
     )
     for table in _TENANT_TABLES:
-        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")  # noqa: S608
+        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
         op.execute(
             f"""
             CREATE POLICY tenant_isolation ON {table}
                 FOR ALL TO journal_app
                 USING (user_id = (SELECT current_setting('app.current_user_id', true)::uuid))
                 WITH CHECK (user_id = (SELECT current_setting('app.current_user_id', true)::uuid))
-            """  # noqa: S608
+            """
         )
         op.execute(
-            f"COMMENT ON POLICY tenant_isolation ON {table} IS "  # noqa: S608
-            f"$policy${old_comment}$policy$"
+            f"COMMENT ON POLICY tenant_isolation ON {table} IS " f"$policy${old_comment}$policy$"
         )

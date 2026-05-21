@@ -154,7 +154,7 @@ async def test_downgrade_removes_policy_and_trigger(
     Restores via ``alembic upgrade head`` so the session-scoped DB is
     left at head for any subsequent tests in this run.
     """
-    from tests.conftest import RLS_BOOTSTRAP_URL  # noqa: PLC0415 -- lazy to avoid cycles
+    from tests.conftest import RLS_BOOTSTRAP_URL
 
     # Sanity: precondition is at-head.
     async with admin_pool.acquire() as conn:

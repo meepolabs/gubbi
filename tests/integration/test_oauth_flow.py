@@ -33,7 +33,7 @@ async def _register_test_client(storage: OAuthStorage) -> None:
     """Pre-register the test client so redirect_uri validation passes."""
     client = OAuthClientInformationFull(
         client_id=TEST_CLIENT_ID,
-        client_secret="test-secret",  # noqa: S106
+        client_secret="test-secret",
         redirect_uris=[TEST_REDIRECT_URI],  # type: ignore[arg-type]
         client_name="test-app",
     )
@@ -303,7 +303,7 @@ class TestTokenLengthValidation:
         from gubbi.auth.strategies import ApiKeyStrategy
         from gubbi.middleware import BearerAuthMiddleware
 
-        async def echo(request: object) -> JSONResponse:  # noqa: ARG001
+        async def echo(request: object) -> JSONResponse:
             return JSONResponse({"ok": True})
 
         inner = Starlette(routes=[Route("/", echo)])

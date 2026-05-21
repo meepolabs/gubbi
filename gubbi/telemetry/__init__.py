@@ -58,14 +58,14 @@ def configure_otel(app: FastAPI) -> None:
     Args:
         app: The FastAPI application instance.
     """
-    from gubbi import __version__ as _gubbi_version  # noqa: PLC0415
-    from gubbi.config import get_settings  # noqa: PLC0415
+    from gubbi import __version__ as _gubbi_version
+    from gubbi.config import get_settings
 
     service_name = os.environ.get(_OTEL_SERVICE_NAME_ENV, "gubbi")
     endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317")
     enabled = _is_otel_enabled()
     settings = get_settings()
-    from gubbi_common.telemetry.correlation_processor import (  # noqa: PLC0415
+    from gubbi_common.telemetry.correlation_processor import (
         CorrelationSpanProcessor,
     )
     from gubbi_common.telemetry.otel import configure_otel as _common_configure_otel
@@ -104,7 +104,7 @@ def rebind_metrics_after_configure() -> None:
     lifespan re-bind contract without pulling in the FastAPI /
     instrumentor / OTLP exporter wiring.
     """
-    from gubbi.telemetry.metrics import initialize_metrics  # noqa: PLC0415
+    from gubbi.telemetry.metrics import initialize_metrics
 
     initialize_metrics.cache_clear()
     initialize_metrics()
@@ -117,7 +117,7 @@ def _wire_instrumentors(app: FastAPI) -> None:
     use whatever tracer/meter provider is currently set.
     """
     try:
-        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor  # noqa: PLC0415
+        from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
         FastAPIInstrumentor.instrument_app(app)
         _logger.debug("FastAPI auto-instrumentation wired")
@@ -125,7 +125,7 @@ def _wire_instrumentors(app: FastAPI) -> None:
         _logger.warning("FastAPIInstrumentor failed: %s", exc)
 
     try:
-        from opentelemetry.instrumentation.httpx import (  # noqa: PLC0415
+        from opentelemetry.instrumentation.httpx import (
             HTTPXClientInstrumentor,
         )
 
@@ -135,7 +135,7 @@ def _wire_instrumentors(app: FastAPI) -> None:
         _logger.warning("HTTPXClientInstrumentor failed: %s", exc)
 
     try:
-        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor  # noqa: PLC0415
+        from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
 
         AsyncPGInstrumentor().instrument()  # type: ignore[no-untyped-call]  # opentelemetry-instrumentation-asyncpg ships no py.typed marker
         _logger.debug("asyncpg auto-instrumentation wired")
@@ -143,7 +143,7 @@ def _wire_instrumentors(app: FastAPI) -> None:
         _logger.warning("AsyncPGInstrumentor failed: %s", exc)
 
     try:
-        from opentelemetry.instrumentation.redis import RedisInstrumentor  # noqa: PLC0415
+        from opentelemetry.instrumentation.redis import RedisInstrumentor
 
         RedisInstrumentor().instrument()
         _logger.debug("redis auto-instrumentation wired")

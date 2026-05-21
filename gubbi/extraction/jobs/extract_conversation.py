@@ -16,11 +16,9 @@ max_jobs concurrent workers are all mid-LLM.
 from __future__ import annotations
 
 import json
-from datetime import date
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
-import asyncpg
 import structlog
 from gubbi_common.audit.actions import Action
 from gubbi_common.audit.targets import TargetKind
@@ -30,17 +28,10 @@ from opentelemetry import metrics
 
 from gubbi.audit import record_audit
 from gubbi.crypto.cipher import ContentCipher
-from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.llm.provider import (
     LLMMessage,
     LLMProviderError,
     LLMRateLimitError,
-)
-from gubbi.extraction.service import (
-    CategorizationResult,
-    ExtractedEntry,
-    ExtractionEntriesResult,
-    ExtractionService,
 )
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
@@ -48,6 +39,19 @@ from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.validation import harden_llm_topic_path
+
+if TYPE_CHECKING:
+    from datetime import date
+
+    import asyncpg
+
+    from gubbi.extraction.context import ExtractionContext
+    from gubbi.extraction.service import (
+        CategorizationResult,
+        ExtractedEntry,
+        ExtractionEntriesResult,
+        ExtractionService,
+    )
 
 __all__: list[str] = ["EXTRACTION_REFUND_SKIPPED", "extract_conversation"]
 
@@ -251,7 +255,7 @@ async def _mark_job_failed(
                     target_id=str(job_id),
                     metadata={"error_code": error_code, "conversation_id": conversation_id},
                 )
-    except Exception:  # noqa: BLE001
+    except Exception:
         # Swallow secondary failure -- the original exception is what Arq needs.
         # The job row may remain in 'running' and will be cleaned up by a
         # future monitor / TTL sweep.
@@ -593,7 +597,7 @@ async def extract_conversation(
                 # Guard against async mock returning a coroutine in tests.
                 if isinstance(raw_cost, int | float):
                     cents_spent = int(round(raw_cost))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 await log.warning("cost_estimation_failed", exc_info=True)
                 cents_spent = 0
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import time
+from typing import TYPE_CHECKING
 
 import structlog
 from mcp.server.auth.provider import (
@@ -24,7 +25,9 @@ from mcp.server.auth.provider import (
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
 from gubbi.config import OAUTH_ACCESS_TOKEN_TTL_SECS, OAUTH_REFRESH_TOKEN_TTL_SECS
-from gubbi.oauth.storage import OAuthStorage
+
+if TYPE_CHECKING:
+    from gubbi.oauth.storage import OAuthStorage
 
 __all__: list[str] = ["JournalOAuthProvider"]
 

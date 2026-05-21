@@ -5,11 +5,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 from uuid import UUID
 
 import httpx
-import structlog
 from cachetools import TTLCache
 from gubbi_common.auth.hydra import (
     HydraError,
@@ -18,14 +17,17 @@ from gubbi_common.auth.hydra import (
     TokenClaims,
 )
 
+if TYPE_CHECKING:
+    import structlog
+
 __all__ = [
-    "TokenClaims",
-    "HydraError",
-    "HydraUnreachable",
-    "HydraInvalidToken",
     "HydraCache",
+    "HydraError",
     "HydraIntrospector",
+    "HydraInvalidToken",
+    "HydraUnreachable",
     "InMemoryHydraCache",
+    "TokenClaims",
 ]
 
 

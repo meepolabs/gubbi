@@ -85,7 +85,7 @@ async def test_append_entry_accepts_max_length_content() -> None:
     ):
         mock_conn_ctx.side_effect = RuntimeError("reached DB layer")
         mock_user_id.get.return_value = None  # tool will raise MissingUserIdError
-        with pytest.raises(Exception) as exc_info:  # noqa: BLE001 - marker check below
+        with pytest.raises(Exception) as exc_info:
             await _journal_append_entry(app_ctx, topic="work", content=at_cap)
     # Sanity: this MUST not be a validation_error -- if the cap guard fired,
     # we would have gotten a dict back, not an exception.
@@ -307,7 +307,7 @@ async def test_update_entry_real_reasoning_still_passes_noop_guard() -> None:
             result: Any = await _journal_update_entry(
                 app_ctx, entry_id=1, reasoning="real reasoning text"
             )
-        except Exception:  # noqa: BLE001 - any exception means the guard let it through
+        except Exception:
             result = None
     if isinstance(result, dict):
         assert result.get("error") != "No fields to update"
@@ -341,7 +341,7 @@ async def test_update_entry_date_only_passes_noop_guard() -> None:
         mock_user_id.get.return_value = None
         try:
             result: Any = await _journal_update_entry(app_ctx, entry_id=1, date="2026-01-01")
-        except Exception:  # noqa: BLE001 - any exception means the guard let it through
+        except Exception:
             result = None
     if isinstance(result, dict):
         assert result.get("error") != "No fields to update"

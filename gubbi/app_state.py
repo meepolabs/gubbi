@@ -32,13 +32,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from fastapi import Request
-
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from uuid import UUID
 
     from arq.connections import ArqRedis
+    from fastapi import Request
     from redis.asyncio import Redis as RedisClient
 
     from gubbi.app_context import AppContext

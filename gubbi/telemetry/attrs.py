@@ -10,7 +10,6 @@ existing call sites do not need to change.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Final
 
 from gubbi_common.telemetry.allowlist import (
@@ -21,6 +20,8 @@ from gubbi_common.telemetry.allowlist import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from opentelemetry.trace import Span
 
 # ---------------------------------------------------------------------------
@@ -176,10 +177,10 @@ __all__ = [
     "BANNED_KEYS",
     "GUBBI_SPAN_ALLOWLIST",
     "MCP_TOOL_CALL_ATTRS",
-    "MetricNames",
-    "SpanNames",
     "_NS_PER_MS",
     "_TRACER_NAME",
+    "MetricNames",
+    "SpanNames",
     "get_allowlisted_attrs",
     "safe_set_attributes",
 ]

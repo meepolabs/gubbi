@@ -39,8 +39,7 @@ what the production AnthropicProvider would report -- a regression in
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from gubbi.extraction.llm.provider import (
     LLMMessage,
@@ -49,6 +48,9 @@ from gubbi.extraction.llm.provider import (
     LLMResponse,
     LLMTransientError,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__: list[str] = [
     "FakeLLMProvider",

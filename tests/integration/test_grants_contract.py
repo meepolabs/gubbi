@@ -12,7 +12,7 @@ The test uses the journal_rls_test DB provisioned by ``_rls_provisioned``
 from __future__ import annotations
 
 import asyncpg
-import pytest  # noqa: F401
+import pytest
 
 # ---------------------------------------------------------------------------
 # Canonical privilege expectations -- mirrors deployment/scripts/grants.sql exactly.

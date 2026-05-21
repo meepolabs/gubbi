@@ -19,15 +19,17 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from opentelemetry import trace
 
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__: list[str] = [
     "ContentCipher",

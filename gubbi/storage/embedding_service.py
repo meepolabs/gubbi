@@ -7,7 +7,6 @@ import hashlib
 import logging
 import time
 import warnings
-from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,6 +14,8 @@ import numpy as np
 from opentelemetry import trace
 
 if TYPE_CHECKING:
+    from datetime import date
+
     import asyncpg
 
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
@@ -39,7 +40,7 @@ _MODEL_URL_FALLBACK = f"{_HF_BASE}/onnx/model_O1.onnx"
 
 def _download_file(url: str, dest: Path) -> bool:
     """Download url to dest.  Returns True on success."""
-    import requests  # noqa: PLC0415  # type: ignore[import-untyped]
+    import requests  # type: ignore[import-untyped]
 
     try:
         response = requests.get(url, timeout=120, stream=True)
@@ -61,7 +62,7 @@ def _locate_or_download(cache_dir: Path = _CACHE_DIR) -> tuple[Path, Path]:
 
     # Look for cached model files (any .onnx file + tokenizer.json)
     model_candidates = list(base.glob("*.onnx")) + list(base.glob("**/*.onnx"))
-    tokenizer_candidates = [base / "tokenizer.json"] + list(base.glob("**/tokenizer.json"))
+    tokenizer_candidates = [base / "tokenizer.json", *list(base.glob("**/tokenizer.json"))]
     tokenizer_candidates = [p for p in tokenizer_candidates if p.exists()]
 
     model_path = next((p for p in model_candidates if p.exists()), None)
@@ -96,8 +97,8 @@ class EmbeddingService:
     """
 
     def __init__(self, model_cache_dir: Path | None = None) -> None:
-        import onnxruntime as ort  # noqa: PLC0415
-        from tokenizers import Tokenizer  # noqa: PLC0415
+        import onnxruntime as ort
+        from tokenizers import Tokenizer
 
         cache_dir = model_cache_dir if model_cache_dir is not None else _CACHE_DIR
         model_path, tokenizer_path = _locate_or_download(cache_dir)

@@ -5,10 +5,9 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiosqlite
-from fastapi import FastAPI
 from mcp.server.auth.routes import create_auth_routes
 from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from pydantic import AnyHttpUrl
@@ -20,8 +19,12 @@ from gubbi.config import OAUTH_AUTH_CODE_TTL_SECS, Settings
 from gubbi.oauth.constants import REGISTER_MAX_ATTEMPTS, REGISTER_WINDOW_SECS
 from gubbi.oauth.forms import client_ip, create_login_handler
 from gubbi.oauth.provider import JournalOAuthProvider
-from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.wellknown import register as register_wellknown
+
+if TYPE_CHECKING:
+    from fastapi import FastAPI
+
+    from gubbi.oauth.storage import OAuthStorage
 
 __all__: list[str] = ["register"]
 

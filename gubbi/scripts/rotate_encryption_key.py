@@ -32,13 +32,14 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Any, Final
-
-import asyncpg
+from typing import TYPE_CHECKING, Any, Final
 
 from gubbi.audit import Action, record_audit
 from gubbi.crypto.cipher import ContentCipher, DecryptionError, load_master_keys_from_env
 from gubbi.storage.pg_setup import init_pool
+
+if TYPE_CHECKING:
+    import asyncpg
 
 logger = logging.getLogger("rotate.encryption.key")
 
@@ -63,7 +64,7 @@ def _resolve_admin_dsn() -> str:
     if dsn:
         return dsn
     try:
-        from gubbi.config import get_settings  # noqa: PLC0415
+        from gubbi.config import get_settings
 
         settings = get_settings()
         if settings.db.admin_url:
@@ -82,13 +83,13 @@ async def _collect_dry_run_counts(pool: asyncpg.Pool, source_version: int) -> li
     reports: list[dict[str, Any]] = []
     hex_pfx = f"{source_version:02x}"
 
-    for table, col_enc, col_nonce in _ROTATION_SCREENS:  # noqa: S608
+    for table, col_enc, col_nonce in _ROTATION_SCREENS:
         where_clause = (
             f"{col_enc} IS NOT NULL AND {col_nonce} IS NOT NULL "
             f"AND encode({col_nonce}, 'hex') LIKE '{hex_pfx}%'"
         )
         count: int = int(
-            await pool.fetchval(  # noqa: S608 -- identifiers from constant tuple
+            await pool.fetchval(
                 f"SELECT COUNT(*) FROM {table} WHERE {where_clause}",  # noqa: S608
             )
             or 0,
@@ -214,7 +215,7 @@ async def _rotate_table(
                     )
                     continue
 
-                if not dry_run:  # noqa: SIM108 -- combined with next block
+                if not dry_run:
                     await conn.execute(
                         f"UPDATE {table} SET "  # noqa: S608
                         f"{col_encrypted} = $1, {col_nonce} = $2 WHERE id = $3",
@@ -256,7 +257,7 @@ async def _rotate_table(
     return rows_updated, audit_rows_written
 
 
-async def _verify(pool: asyncpg.Pool, cipher: ContentCipher, to_version: int) -> None:  # noqa: S608 -- identifiers from const
+async def _verify(pool: asyncpg.Pool, cipher: ContentCipher, to_version: int) -> None:
     """Re-fetch a ~1% sample per table and round-trip decrypt under target."""
 
     total_sampled = 0
@@ -276,8 +277,8 @@ async def _verify(pool: asyncpg.Pool, cipher: ContentCipher, to_version: int) ->
         # IDENTITY sequences (deletions, failed inserts, sequence cache gaps).
         rows = await pool.fetch(
             f"SELECT id, {col_enc} AS ct, {col_nonce} AS nc "  # noqa: S608
-            f"FROM {table} WHERE {col_enc} IS NOT NULL "  # noqa: S608
-            f"ORDER BY random() LIMIT $1",  # noqa: S608
+            f"FROM {table} WHERE {col_enc} IS NOT NULL "
+            f"ORDER BY random() LIMIT $1",
             sample_size,
         )
 
@@ -307,7 +308,7 @@ async def _verify(pool: asyncpg.Pool, cipher: ContentCipher, to_version: int) ->
     )
 
 
-async def _run(pool: asyncpg.Pool, cipher: ContentCipher, args: argparse.Namespace) -> None:  # noqa: S608
+async def _run(pool: asyncpg.Pool, cipher: ContentCipher, args: argparse.Namespace) -> None:
     """Execute the rotation (or dry-run) against all five column-pairs."""
     src_ver = args.from_version
     tgt_ver = args.to_version

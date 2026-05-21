@@ -25,17 +25,13 @@ from __future__ import annotations
 import functools
 import logging
 import time
-from collections.abc import Collection
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.tools import ToolManager
-from mcp.types import Tool as MCPTool
 
 # Imported for type info when available; but we monkey-patch via ToolManager
 from opentelemetry import trace
 
-from gubbi.app_context import AppContext
 from gubbi.auth.scope import SCOPE_GRANTS
 from gubbi.auth_context import current_token_scopes
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
@@ -46,6 +42,14 @@ from gubbi.tools import (
     search,
     topics,
 )
+
+if TYPE_CHECKING:
+    from collections.abc import Collection
+
+    from mcp.server.fastmcp import FastMCP
+    from mcp.types import Tool as MCPTool
+
+    from gubbi.app_context import AppContext
 
 __all__: list[str] = [
     "ALL_TOOLS",
@@ -149,7 +153,7 @@ def patch_tool_manager(tm: ToolManager) -> None:
     async def patched_call_tool(
         self: ToolManager,
         name: str,
-        arguments: dict[str, Any] = None,  # type: ignore[assignment]
+        arguments: dict[str, Any] | None = None,  # type: ignore[assignment]
         **kwargs: Any,
     ) -> Any:
         span_name = SpanNames.MCP_TOOL_CALL

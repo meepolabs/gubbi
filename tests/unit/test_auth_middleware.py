@@ -87,7 +87,7 @@ def _build_test_strategies(
     gateway_secret: bytes | None = None,
     gateway_require_signature: bool = False,
 ) -> list:  # -- AuthStrategy -- avoids forward ref issues
-    from gubbi.auth.strategies import (  # noqa: PLC0415
+    from gubbi.auth.strategies import (
         ApiKeyStrategy,
         SelfHostStrategy,
         TrustGatewayStrategy,
@@ -694,7 +694,7 @@ class TestWWWAuthenticateHeader:
 class TestTrustGateway:
     """JOURNAL_TRUST_GATEWAY mode: skip all auth and trust X-Auth-User-Id header."""
 
-    from gubbi.auth.strategies import TrustGatewayStrategy  # noqa: PLC0415
+    from gubbi.auth.strategies import TrustGatewayStrategy
 
     TEST_USER_UUID = UUID("11111111-2222-3333-4444-555555555555")
 

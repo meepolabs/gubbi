@@ -108,7 +108,7 @@ def _resolve_period(period: str, today: date) -> tuple[str, str, str]:
     if "-w" in period:
         # ISO week: YYYY-WNN (already lowercased by _normalize_period)
         parts = period.split("-w")
-        if len(parts) == 2 and parts[0] and parts[1].isdigit():  # noqa: SIM102
+        if len(parts) == 2 and parts[0] and parts[1].isdigit():
             try:
                 year, week = int(parts[0]), int(parts[1])
                 start = date.fromisocalendar(year, week, 1)

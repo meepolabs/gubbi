@@ -81,7 +81,7 @@ async def mock_arq_pool() -> AsyncMock:
 @pytest_asyncio.fixture
 async def test_user(
     pool: asyncpg.Pool,
-    clean_rls_db: asyncpg.Pool,  # noqa: ARG001 -- ensures audit_log cleanup
+    clean_rls_db: asyncpg.Pool,
 ) -> AsyncGenerator[UUID, None]:
     """Ensure TEST_USER_ID exists in users table; tear down after test."""
     async with pool.acquire() as conn:
@@ -110,7 +110,7 @@ async def app_with_arq(
     pool: asyncpg.Pool,
     tmp_path: Path,
     mock_arq_pool: AsyncMock,
-    test_user: UUID,  # noqa: ARG001 -- ensures user exists
+    test_user: UUID,
 ) -> FastAPI:
     """Minimal FastAPI with an AppContext backed by the test pool and mock arq."""
     settings = Settings(
@@ -193,7 +193,7 @@ class TestIngestEnqueuesExtraction:
                 "SELECT status FROM extraction_jobs WHERE user_id = $1 ORDER BY created_at",
                 TEST_USER_ID,
             )
-        assert len(rows) == 2  # noqa: PLR2004
+        assert len(rows) == 2
         assert all(r["status"] == "pending" for r in rows)
 
     async def test_enqueue_job_called_per_saved_conversation(
@@ -231,7 +231,7 @@ class TestIngestEnqueuesExtraction:
         # ``mark_failed``, leaving ``extraction_jobs.status`` stuck at
         # ``'pending'``. Lock both slots independently so future drift
         # in either path surfaces here.
-        assert len(call_args[0]) == 4, (  # noqa: PLR2004
+        assert len(call_args[0]) == 4, (
             f"expected 4 positional args (function_name, conversation_id, "
             f"user_id, job_id); got {len(call_args[0])}: {call_args[0]!r}"
         )
@@ -490,7 +490,7 @@ class TestIngestEnqueuesExtraction:
         - conversations_saved == 1 (TXN 1 committed independently).
         - Refund is called with actual_cents=0, estimated_cents=PRE_CHARGE_CENTS.
         """
-        from gubbi_common.budget import PRE_CHARGE_CENTS  # noqa: PLC0415
+        from gubbi_common.budget import PRE_CHARGE_CENTS
 
         helper_mock = MagicMock()
         helper_mock.pre_charge = AsyncMock(return_value=True)

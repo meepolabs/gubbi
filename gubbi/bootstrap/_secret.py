@@ -6,7 +6,10 @@ warnings as the original lifespan body, verbatim.
 
 from __future__ import annotations
 
-import structlog.stdlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import structlog.stdlib
 
 __all__ = ["decode_gateway_secret"]
 

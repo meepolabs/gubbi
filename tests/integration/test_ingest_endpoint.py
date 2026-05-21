@@ -58,7 +58,7 @@ def _build_conv_payload(
 @pytest_asyncio.fixture
 async def test_app(
     pool: asyncpg.Pool,
-    clean_pool: asyncpg.Pool,  # noqa: ARG001 -- ensures clean tables
+    clean_pool: asyncpg.Pool,
     tmp_path: Path,
 ) -> FastAPI:
     """Create a minimal FastAPI app with AppContext backed by the test pool."""
@@ -213,4 +213,4 @@ class TestIngestEndpoint:
             json=payload,
             headers={"X-Auth-User-Id": str(TEST_USER_ID)},
         )
-        assert resp.status_code == 422  # noqa: PLR2004
+        assert resp.status_code == 422

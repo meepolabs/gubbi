@@ -10,8 +10,8 @@ import asyncio
 import logging
 import os
 import threading
-from collections.abc import Callable
 from contextlib import suppress
+from typing import TYPE_CHECKING
 
 import redis.asyncio as aioredis
 import structlog
@@ -22,15 +22,19 @@ from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from gubbi.config import Settings, get_settings
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
-from gubbi.extraction.context import ExtractionContext
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
-from gubbi.extraction.llm.provider import LLMProvider
 from gubbi.extraction.service import ExtractionService
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry.logger import initialize_logger
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from gubbi.extraction.context import ExtractionContext
+    from gubbi.extraction.llm.provider import LLMProvider
 
 # ``logger`` is the canonical async-context logger (used inside the
 # async ``startup`` / ``shutdown`` Arq hooks). ``_sync_log`` covers the
@@ -196,7 +200,7 @@ async def shutdown(ctx: ExtractionContext) -> None:
 
 
 def _run_health_server() -> None:
-    import uvicorn  # noqa: PLC0415
+    import uvicorn
 
     public = os.environ.get("JOURNAL_EXTRACTION_HEALTH_BIND_PUBLIC", "").lower() == "true"
     host = "0.0.0.0" if public else "127.0.0.1"  # noqa: S104
@@ -205,7 +209,10 @@ def _run_health_server() -> None:
 
 class WorkerSettings:
     redis_settings = _build_redis_settings()
-    functions = [extract_conversation]
+    # arq reads this attribute on the class (never instantiates WorkerSettings),
+    # so the list is functionally a configuration constant, not a mutable
+    # instance attribute. Annotating with ClassVar is overkill here.
+    functions = [extract_conversation]  # noqa: RUF012
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10

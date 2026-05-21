@@ -234,8 +234,8 @@ def cipher() -> ContentCipher:
 _DEFAULT_RLS_DB = "postgresql://journal:testpass@localhost:5433/journal_rls_test"
 RLS_BOOTSTRAP_URL = os.environ.get("TEST_DATABASE_URL_RLS", _DEFAULT_RLS_DB)
 
-_RLS_APP_PASSWORD = "testpass_app"  # noqa: S105 -- test-only credential
-_RLS_ADMIN_PASSWORD = "testpass_admin"  # noqa: S105 -- test-only credential
+_RLS_APP_PASSWORD = "testpass_app"
+_RLS_ADMIN_PASSWORD = "testpass_admin"
 _RLS_OPERATOR_EMAIL = "operator@test.local"
 
 

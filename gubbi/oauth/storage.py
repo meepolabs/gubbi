@@ -15,9 +15,8 @@ import json
 import logging
 import sqlite3  # Imported for exception type only; no sync sqlite3 usage.
 import time
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import aiosqlite
 from mcp.server.auth.provider import AccessToken, AuthorizationCode, RefreshToken
@@ -27,7 +26,11 @@ from gubbi.oauth._rate_limit import RateLimitStorage
 from gubbi.oauth.constants import RATE_LIMIT_EVENT_RETENTION_SECS
 from gubbi.storage.constants import DB_BUSY_TIMEOUT_MS
 
-__all__: list[str] = ["OAuthStorage", "SCHEMA"]
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+__all__: list[str] = ["SCHEMA", "OAuthStorage"]
 
 # structlog.AsyncBoundLogger emits return coroutines that must be awaited;
 # this module's public API is fully async, but stdlib logging is kept for

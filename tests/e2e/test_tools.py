@@ -197,7 +197,8 @@ class TestConversationFlow:
             {"role": "user", "content": "V1 question"},
             {"role": "assistant", "content": "V1 answer"},
         ]
-        msgs_v2 = msgs_v1 + [
+        msgs_v2 = [
+            *msgs_v1,
             {"role": "user", "content": "V2 followup"},
             {"role": "assistant", "content": "V2 answer"},
         ]

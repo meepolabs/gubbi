@@ -11,9 +11,8 @@ app boundary handler can map it to HTTP 503 instead of leaking a raw 500.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 import asyncpg
 from gubbi_common.db.user_scoped import (
@@ -22,6 +21,10 @@ from gubbi_common.db.user_scoped import (
 )
 
 from gubbi.storage.exceptions import DatabaseUnavailable
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from uuid import UUID
 
 # Transient errors that map to HTTP 503 (DatabaseUnavailable) at the API boundary.
 # ``asyncio.TimeoutError`` covers pool-acquire budget exhaustion: gubbi-common

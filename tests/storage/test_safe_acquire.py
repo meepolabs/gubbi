@@ -25,7 +25,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         with pytest.raises(DatabaseUnavailable, match="connection refused"):
-            async with safe_acquire(mock_pool):  # noqa: SLF001
+            async with safe_acquire(mock_pool):
                 pass  # pragma: no cover
 
     async def test_safe_acquire_success_path(self) -> None:
@@ -36,7 +36,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         yielded: object | None = None
-        async with safe_acquire(mock_pool) as conn:  # noqa: SLF001
+        async with safe_acquire(mock_pool) as conn:
             yielded = conn
 
         assert yielded is mock_conn
@@ -53,7 +53,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         with pytest.raises(DatabaseUnavailable, match="starting up"):
-            async with safe_acquire(mock_pool):  # noqa: SLF001
+            async with safe_acquire(mock_pool):
                 pass  # pragma: no cover
 
     async def test_safe_acquire_translates_os_error(self) -> None:
@@ -64,7 +64,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         with pytest.raises(DatabaseUnavailable, match="network down"):
-            async with safe_acquire(mock_pool):  # noqa: SLF001
+            async with safe_acquire(mock_pool):
                 pass  # pragma: no cover
 
     async def test_safe_acquire_translates_asyncio_timeout(self) -> None:
@@ -77,7 +77,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         with pytest.raises(DatabaseUnavailable, match="acquire timed out"):
-            async with safe_acquire(mock_pool):  # noqa: SLF001
+            async with safe_acquire(mock_pool):
                 pass  # pragma: no cover
 
     async def test_safe_acquire_falls_back_to_class_name_on_bare_exception(self) -> None:
@@ -88,7 +88,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         with pytest.raises(DatabaseUnavailable, match="TimeoutError"):
-            async with safe_acquire(mock_pool):  # noqa: SLF001
+            async with safe_acquire(mock_pool):
                 pass  # pragma: no cover
 
     async def test_safe_acquire_does_not_translate_other_errors(
@@ -101,7 +101,7 @@ class TestSafeAcquire:
         mock_pool.acquire.return_value.__aexit__.return_value = False
 
         with pytest.raises(asyncpg.UniqueViolationError, match="duplicate key"):
-            async with safe_acquire(mock_pool):  # noqa: SLF001
+            async with safe_acquire(mock_pool):
                 pass  # pragma: no cover
 
 

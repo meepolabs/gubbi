@@ -102,7 +102,7 @@ def __getattr__(name: str) -> Any:
         DeprecationWarning,
         stacklevel=2,
     )
-    import importlib  # noqa: PLC0415
+    import importlib
 
     mod = importlib.import_module(target_module)
     return getattr(mod, name)
