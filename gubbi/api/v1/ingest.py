@@ -8,9 +8,15 @@ No LLM calls. Pure data ingest.
 from __future__ import annotations
 
 import contextlib
-from datetime import datetime
-from typing import Annotated, Literal
-from uuid import UUID
+
+# datetime is a Pydantic field type on MessagePayload / ConversationPayload;
+# UUID is a FastAPI Depends() Annotated type. Both are resolved at runtime
+# (validator-build / route-registration), so they must stay runtime imports
+# despite `from __future__ import annotations` -- ruff TC would otherwise
+# push them under TYPE_CHECKING and break Pydantic model_rebuild().
+from datetime import datetime  # noqa: TC003
+from typing import TYPE_CHECKING, Annotated, Literal
+from uuid import UUID  # noqa: TC003
 
 import asyncpg
 import structlog
@@ -21,7 +27,6 @@ from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
-from gubbi.app_context import AppContext
 from gubbi.app_state import get_optional_arq_pool, require_app_ctx
 from gubbi.audit.sql import record_audit
 from gubbi.crypto.guard import require_cipher
@@ -36,12 +41,15 @@ from gubbi.storage.repositories.topics import create as create_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_title
 
+if TYPE_CHECKING:
+    from gubbi.app_context import AppContext
+
 __all__: list[str] = [
-    "ConversationPayload",
     "DEFAULT_INBOX_TOPIC",
+    "MAX_CONVERSATIONS_PER_REQUEST",
+    "ConversationPayload",
     "IngestConversationRequest",
     "IngestConversationResponse",
-    "MAX_CONVERSATIONS_PER_REQUEST",
     "MessagePayload",
     "ingest_conversations",
     "router",
@@ -318,7 +326,7 @@ async def ingest_conversations(
                             actual_cents=0,
                             estimated_cents=PRE_CHARGE_CENTS,
                         )
-                    except Exception:  # noqa: BLE001
+                    except Exception:
                         await log.warning(
                             "pre_charge_refund_failed",
                             user_id=str(user_id),

@@ -13,7 +13,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit import audited  # noqa: PLC0415
+        from gubbi.audit import audited
 
         return audited
     if name == "ACTION_ENTRY_CREATED":
@@ -22,7 +22,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import ACTION_ENTRY_CREATED  # noqa: PLC0415
+        from gubbi.audit.decorator import ACTION_ENTRY_CREATED
 
         return ACTION_ENTRY_CREATED
     if name == "ACTION_ENTRY_UPDATED":
@@ -31,7 +31,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import ACTION_ENTRY_UPDATED  # noqa: PLC0415
+        from gubbi.audit.decorator import ACTION_ENTRY_UPDATED
 
         return ACTION_ENTRY_UPDATED
     if name == "ACTION_ENTRY_DELETED":
@@ -40,7 +40,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import ACTION_ENTRY_DELETED  # noqa: PLC0415
+        from gubbi.audit.decorator import ACTION_ENTRY_DELETED
 
         return ACTION_ENTRY_DELETED
     if name == "ACTION_TOPIC_CREATED":
@@ -49,7 +49,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import ACTION_TOPIC_CREATED  # noqa: PLC0415
+        from gubbi.audit.decorator import ACTION_TOPIC_CREATED
 
         return ACTION_TOPIC_CREATED
     if name == "ACTION_CONVERSATION_SAVED":
@@ -58,7 +58,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import ACTION_CONVERSATION_SAVED  # noqa: PLC0415
+        from gubbi.audit.decorator import ACTION_CONVERSATION_SAVED
 
         return ACTION_CONVERSATION_SAVED
     if name == "_extract_target_id":
@@ -67,7 +67,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import _extract_target_id  # noqa: PLC0415
+        from gubbi.audit.decorator import _extract_target_id
 
         return _extract_target_id
     if name == "_result_is_success":
@@ -76,7 +76,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import _result_is_success  # noqa: PLC0415
+        from gubbi.audit.decorator import _result_is_success
 
         return _result_is_success
     if name == "_TARGET_KEYS":
@@ -85,7 +85,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.audit.decorator import _TARGET_KEYS  # noqa: PLC0415
+        from gubbi.audit.decorator import _TARGET_KEYS
 
         return _TARGET_KEYS
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

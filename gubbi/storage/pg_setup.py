@@ -23,7 +23,7 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
     `register_vector(conn)` only applies to that one connection object,
     not to others in the pool.
     """
-    from pgvector.asyncpg import register_vector  # noqa: PLC0415
+    from pgvector.asyncpg import register_vector
 
     await register_vector(conn)
 

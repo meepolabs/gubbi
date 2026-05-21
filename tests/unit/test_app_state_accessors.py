@@ -88,8 +88,8 @@ def _make_request(state: State | None = None) -> Request:
 )
 def test_require_raises_when_state_is_empty(
     require_fn: Any,
-    get_optional_fn: Any,  # noqa: ARG001 -- bundled tuple, only require_fn used here
-    field: str,  # noqa: ARG001
+    get_optional_fn: Any,
+    field: str,
     error_fragment: str,
 ) -> None:
     """``require_*`` raises RuntimeError when the field is absent."""
@@ -104,10 +104,10 @@ def test_require_raises_when_state_is_empty(
     _RAISE_WHEN_NONE_FIELDS,
 )
 def test_get_optional_returns_none_when_state_is_empty(
-    require_fn: Any,  # noqa: ARG001
+    require_fn: Any,
     get_optional_fn: Any,
-    field: str,  # noqa: ARG001
-    error_fragment: str,  # noqa: ARG001
+    field: str,
+    error_fragment: str,
 ) -> None:
     """``get_optional_*`` returns None when the field is absent."""
     request = _make_request()
@@ -121,7 +121,7 @@ def test_get_optional_returns_none_when_state_is_empty(
 )
 def test_require_raises_when_value_is_none(
     require_fn: Any,
-    get_optional_fn: Any,  # noqa: ARG001
+    get_optional_fn: Any,
     field: str,
     error_fragment: str,
 ) -> None:
@@ -142,7 +142,7 @@ def test_accessors_return_value_when_present(
     require_fn: Any,
     get_optional_fn: Any,
     field: str,
-    error_fragment: str,  # noqa: ARG001
+    error_fragment: str,
 ) -> None:
     """Both accessors return the stored value when the field is set."""
     sentinel = object()

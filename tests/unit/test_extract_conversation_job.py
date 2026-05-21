@@ -1067,7 +1067,7 @@ class TestExtractConversationFSMTransitions:
         conn2: AsyncMock,
     ) -> None:
         """mark_running receives ``UUID(job_id)`` (not the raw string) on conn1."""
-        from uuid import UUID as _UUID  # noqa: PLC0415
+        from uuid import UUID as _UUID
 
         conversation_id = 301
         user_id = "00000000-0000-0000-0000-000000000301"
@@ -1129,7 +1129,7 @@ class TestExtractConversationFSMTransitions:
         conn2: AsyncMock,
     ) -> None:
         """On successful extraction, mark_completed is called on conn2 with ``UUID(job_id)``."""
-        from uuid import UUID as _UUID  # noqa: PLC0415
+        from uuid import UUID as _UUID
 
         conversation_id = 302
         user_id = "00000000-0000-0000-0000-000000000302"
@@ -1192,7 +1192,7 @@ class TestExtractConversationFSMTransitions:
         conn1: AsyncMock,
     ) -> None:
         """On an extraction error, mark_failed receives ``UUID(job_id)`` on a fresh connection."""
-        from uuid import UUID as _UUID  # noqa: PLC0415
+        from uuid import UUID as _UUID
 
         conversation_id = 303
         user_id = "00000000-0000-0000-0000-000000000303"

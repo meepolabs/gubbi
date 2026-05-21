@@ -8,14 +8,18 @@ required by MCP's streamable HTTP transport.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from gubbi_common.auth.bearer_challenge import build_bearer_challenge as _build_bearer_challenge
 from starlette.requests import Request
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
 
 from gubbi.auth.scope import SCOPE_GRANTS, check_scope
 from gubbi.auth.strategies import AuthRejected, AuthResult, AuthStrategy
 from gubbi.auth_context import current_token_scopes, current_user_id
+
+if TYPE_CHECKING:
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
 __all__: list[str] = ["BearerAuthMiddleware"]
 

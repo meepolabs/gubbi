@@ -175,8 +175,8 @@ async def user_b(admin_pool: asyncpg.Pool) -> UUID:
 @pytest_asyncio.fixture
 async def client_a(
     app_pool: asyncpg.Pool,
-    clean_rls_db: asyncpg.Pool,  # noqa: ARG001 -- ensures clean tables
-    user_a: UUID,  # noqa: ARG001 -- ensures user exists
+    clean_rls_db: asyncpg.Pool,
+    user_a: UUID,
 ) -> AsyncClient:
     """AsyncClient authenticated as user A."""
     app = _make_app(app_pool, auth_user_id=_USER_A)
@@ -188,7 +188,7 @@ async def client_a(
 @pytest_asyncio.fixture
 async def client_b(
     app_pool: asyncpg.Pool,
-    user_b: UUID,  # noqa: ARG001 -- ensures user exists
+    user_b: UUID,
 ) -> AsyncClient:
     """AsyncClient authenticated as user B (no clean_rls_db -- shares user_a's data)."""
     app = _make_app(app_pool, auth_user_id=_USER_B)
@@ -325,7 +325,7 @@ class TestExtractionMeMixedStatuses:
         self,
         client_a: AsyncClient,
         admin_pool: asyncpg.Pool,
-        user_a: UUID,  # noqa: ARG001 -- ensures user exists
+        user_a: UUID,
     ) -> None:
         """2 pending + 3 running + 5 completed + 1 failed -> in_flight=5, synced=5."""
         # Seed conversations (one per job to avoid partial-unique index conflicts)
@@ -370,9 +370,9 @@ class TestExtractionMeMixedStatuses:
         data = resp.json()
 
         # 2 pending + 3 running = 5 in-flight
-        assert data["in_flight_count"] == 5  # noqa: PLR2004
+        assert data["in_flight_count"] == 5
         # 5 completed (4 earlier + 1 latest); failed does NOT count
-        assert data["synced_count"] == 5  # noqa: PLR2004
+        assert data["synced_count"] == 5
         # last_sync_at = the latest completed_at
         assert data["last_sync_at"] is not None
         # Parse the returned ISO timestamp and verify it matches latest_completed_at
@@ -402,8 +402,8 @@ class TestExtractionMeRLS:
         client_a: AsyncClient,
         client_b: AsyncClient,
         admin_pool: asyncpg.Pool,
-        user_a: UUID,  # noqa: ARG001 -- ensures user exists
-        user_b: UUID,  # noqa: ARG001 -- ensures user exists
+        user_a: UUID,
+        user_b: UUID,
     ) -> None:
         """Populate user A's jobs; hit /me as user B; assert all zeros."""
         # Seed a completed job for user A

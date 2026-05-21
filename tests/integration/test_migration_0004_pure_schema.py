@@ -29,7 +29,7 @@ _MIGRATION_FILE = (
     / "alembic"
     / "versions"
     / "20260419_0004_add_user_id_to_tenants.py"
-)  # noqa: E501
+)
 
 
 def test_migration_0004_has_no_user_mutations() -> None:

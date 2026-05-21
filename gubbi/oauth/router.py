@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
-from fastapi import FastAPI
 from pydantic import AnyHttpUrl
 
-from gubbi.config import Settings
 from gubbi.oauth.disabled import register as register_disabled
 from gubbi.oauth.selfhost import register as register_selfhost
-from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.wellknown import register as register_wellknown
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from fastapi import FastAPI
+
+    from gubbi.config import Settings
+    from gubbi.oauth.storage import OAuthStorage
 
 __all__: list[str] = ["register_oauth_routes"]
 

@@ -512,7 +512,7 @@ server.include_router(extraction_router, prefix="/api/v1")
 @server.exception_handler(DatabaseUnavailable)
 async def database_unavailable_handler(
     request: Request,
-    exc: DatabaseUnavailable,  # noqa: ARG001
+    exc: DatabaseUnavailable,
 ) -> JSONResponse:
     """Map transient DB errors to HTTP 503 with Retry-After header."""
     return JSONResponse(
@@ -575,7 +575,7 @@ def main() -> None:
 
         asyncio.run(_run_stdio())
     else:
-        import uvicorn  # noqa: PLC0415
+        import uvicorn
 
         uvicorn.run(
             "gubbi.main:server",

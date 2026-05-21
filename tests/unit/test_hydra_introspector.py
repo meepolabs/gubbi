@@ -228,7 +228,7 @@ class TestIntrospectBasic:
         mock_logger.info.assert_called_once()
         log_call = mock_logger.info.call_args[1]
         # Verify raw token does not appear in any log argument
-        for _k, value in log_call.items():
+        for value in log_call.values():
             assert FAKE_TOKEN not in str(value)
         assert log_call["token_fp"] == FAKE_TOKEN_FINGERPRINT
 

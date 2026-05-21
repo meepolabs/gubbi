@@ -35,7 +35,7 @@ from gubbi.storage.repositories import topics as topic_repo
 # TenantSeed) come from tests/integration/conftest.py — pytest auto-discovers
 # them by name so they must NOT be imported at module scope here (that would
 # shadow the fixture function with the same name and break resolution).
-from tests.fixtures.tenants import TenantSeed, seed_for  # noqa: F401 — type hint + helper call
+from tests.fixtures.tenants import TenantSeed, seed_for
 
 # Integration tests share session-scoped asyncpg pools (admin_pool, app_pool).
 # Pin the test loop scope to "session" so tests run in the same event loop the
@@ -211,7 +211,7 @@ async def test_insert_into_entries_with_foreign_user_id_rejected(
     # Encrypted shape post-0008; plaintext "cross-tenant pwn attempt" is encrypted
     # with the seed cipher so the row is syntactically valid -- the RLS WITH CHECK
     # clause is what should reject it, not a missing-column error.
-    from tests.fixtures.tenants import _SEED_CIPHER  # noqa: PLC0415
+    from tests.fixtures.tenants import _SEED_CIPHER
 
     ct, nonce = _SEED_CIPHER.encrypt("cross-tenant pwn attempt")
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
@@ -350,8 +350,8 @@ async def test_admin_pool_sees_everything(
     async with admin_pool.acquire() as conn:
         entry_count = await conn.fetchval("SELECT COUNT(*) FROM entries")
         topic_count = await conn.fetchval("SELECT COUNT(*) FROM topics")
-    assert entry_count == 6  # noqa: PLR2004 — 3 entries per tenant x 2 tenants
-    assert topic_count == 2  # noqa: PLR2004
+    assert entry_count == 6
+    assert topic_count == 2
 
 
 # ---------------------------------------------------------------------------

@@ -14,7 +14,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.crypto.cipher import ContentCipher  # noqa: PLC0415
+        from gubbi.crypto.cipher import ContentCipher
 
         return ContentCipher
     if name == "load_master_keys_from_env":
@@ -24,7 +24,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.crypto.cipher import load_master_keys_from_env  # noqa: PLC0415
+        from gubbi.crypto.cipher import load_master_keys_from_env
 
         return load_master_keys_from_env
     if name == "DecryptionError":
@@ -34,7 +34,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.crypto.cipher import DecryptionError  # noqa: PLC0415
+        from gubbi.crypto.cipher import DecryptionError
 
         return DecryptionError
     if name == "decrypt_or_raise":
@@ -44,7 +44,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.crypto.cipher import decrypt_or_raise  # noqa: PLC0415
+        from gubbi.crypto.cipher import decrypt_or_raise
 
         return decrypt_or_raise
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -14,7 +14,7 @@ from __future__ import annotations
 import secrets
 import time
 from collections.abc import Callable, Coroutine
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import bcrypt
 import structlog
@@ -30,8 +30,10 @@ from gubbi.oauth.constants import (
     LOGIN_LOCKOUT_WINDOW_SECS,
     LOGIN_MAX_FAILURES,
 )
-from gubbi.oauth.storage import OAuthStorage
 from gubbi.oauth.templates import render_login_page
+
+if TYPE_CHECKING:
+    from gubbi.oauth.storage import OAuthStorage
 
 __all__: list[str] = [
     "LoginHandler",

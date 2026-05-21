@@ -143,7 +143,7 @@ async def test_record_audit_emits_audit_write_span_with_gubbi_attrs() -> None:
     # record_audit_async pulls a tracer named "gubbi_common.audit" off
     # the global provider on each call.
     original = trace.get_tracer_provider()
-    trace._TRACER_PROVIDER = None  # noqa: SLF001 -- test-only override
+    trace._TRACER_PROVIDER = None
     trace.set_tracer_provider(provider)
     try:
         conn = _make_conn()
@@ -169,5 +169,5 @@ async def test_record_audit_emits_audit_write_span_with_gubbi_attrs() -> None:
         assert "latency_ms" in attrs
         assert attrs.get("success") is True
     finally:
-        trace._TRACER_PROVIDER = None  # noqa: SLF001 -- test-only override
+        trace._TRACER_PROVIDER = None
         trace.set_tracer_provider(original)

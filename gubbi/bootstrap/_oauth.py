@@ -8,13 +8,17 @@ storage handle so that the lifespan's ``finally:`` block can close it.
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from typing import TYPE_CHECKING
 
-from fastapi import FastAPI
-
-from gubbi.config import Settings
 from gubbi.oauth.router import register_oauth_routes
 from gubbi.oauth.storage import OAuthStorage
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
+    from fastapi import FastAPI
+
+    from gubbi.config import Settings
 
 logger = logging.getLogger(__name__)
 

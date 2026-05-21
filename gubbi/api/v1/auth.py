@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
-from uuid import UUID
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
 
 from gubbi.app_state import require_auth_strategies
 from gubbi.auth.scope import SCOPE_GRANTS, check_scope
 from gubbi.auth.strategies import AuthRejected, AuthResult
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from uuid import UUID
 
 __all__: list[str] = [
     "INVALID_TOKEN_MESSAGE",

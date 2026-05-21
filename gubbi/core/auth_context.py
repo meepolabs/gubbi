@@ -13,7 +13,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.auth_context import current_user_id  # noqa: PLC0415
+        from gubbi.auth_context import current_user_id
 
         return current_user_id
     if name == "current_token_scopes":
@@ -22,7 +22,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.auth_context import current_token_scopes  # noqa: PLC0415
+        from gubbi.auth_context import current_token_scopes
 
         return current_token_scopes
     if name == "get_current_user_id":
@@ -31,7 +31,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.auth_context import get_current_user_id  # noqa: PLC0415
+        from gubbi.auth_context import get_current_user_id
 
         return get_current_user_id
     if name == "AuthenticationError":
@@ -40,7 +40,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.auth_context import AuthenticationError  # noqa: PLC0415
+        from gubbi.auth_context import AuthenticationError
 
         return AuthenticationError
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

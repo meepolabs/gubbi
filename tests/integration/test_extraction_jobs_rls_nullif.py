@@ -50,7 +50,7 @@ pytestmark = pytest.mark.asyncio(loop_scope="session")
 @pytest.mark.integration
 async def test_empty_string_guc_returns_zero_rows_not_cast_error(
     app_pool: asyncpg.Pool,
-    clean_rls_db: asyncpg.Pool,  # noqa: ARG001 -- side effect: TRUNCATE before/after
+    clean_rls_db: asyncpg.Pool,
 ) -> None:
     """Empty-string ``app.current_user_id`` must return zero rows, not raise.
 

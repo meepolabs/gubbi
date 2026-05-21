@@ -13,7 +13,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.app_context import AppContext  # noqa: PLC0415
+        from gubbi.app_context import AppContext
 
         return AppContext
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

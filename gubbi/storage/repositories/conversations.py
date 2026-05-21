@@ -8,15 +8,13 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
 from pathlib import Path
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 from uuid import UUID, uuid4
 
-import asyncpg
 import structlog
 
 from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
@@ -25,6 +23,11 @@ from gubbi.storage.exceptions import ConversationNotFoundError
 from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import slugify, validate_title, validate_topic
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    import asyncpg
 
 __all__: list[str] = [
     "SaveConversationResult",
@@ -695,7 +698,7 @@ async def read_conversation_by_id_paginated(
     meta = _row_to_meta(cipher, row)
     total_messages = int(row["message_count"]) if row["message_count"] is not None else 0
 
-    msg_rows = await conn.fetch(  # noqa: S608
+    msg_rows = await conn.fetch(
         "SELECT role, content_encrypted, content_nonce, timestamp FROM messages"
         " WHERE conversation_id = $1 ORDER BY position ASC"
         " LIMIT $2 OFFSET $3",

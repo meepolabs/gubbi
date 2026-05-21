@@ -20,12 +20,14 @@ caller assembling the envelope.
 from __future__ import annotations
 
 import functools
-from collections.abc import Callable, Collection
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from mcp.types import CallToolResult, TextContent
 
 from gubbi.auth_context import current_token_scopes
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Collection
 
 __all__: list[str] = [
     "SCOPE_DESCRIPTIONS",

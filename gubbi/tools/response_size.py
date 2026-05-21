@@ -18,7 +18,7 @@ _SUGGESTED_LIMIT_HEADROOM_FACTOR: float = 0.5
 
 
 def check_response_size(
-    payload: Any,  # noqa: ANN401
+    payload: Any,
     *,
     tool_name: str | None = None,
     error_threshold_chars: int = _ERROR_THRESHOLD_CHARS,
@@ -68,7 +68,7 @@ async def _report_oversized(tool_name: str, err: dict[str, Any]) -> None:
     so they never block the error response.
     """
     try:
-        from gubbi.telemetry.spans import record_mcp_tool_response_size_check  # noqa: PLC0415
+        from gubbi.telemetry.spans import record_mcp_tool_response_size_check
 
         async with record_mcp_tool_response_size_check(
             tool_name,
@@ -76,11 +76,11 @@ async def _report_oversized(tool_name: str, err: dict[str, Any]) -> None:
             error_threshold_hit=True,
         ):
             pass
-    except Exception:  # noqa: BLE001, S110
+    except Exception:  # noqa: S110
         pass
 
 
-def _estimate_record_count(payload: Any) -> int:  # noqa: ANN401
+def _estimate_record_count(payload: Any) -> int:
     """Best-effort count of records in the payload for suggested_max_limit heuristic."""
     if isinstance(payload, dict):
         for key in ("entries", "results", "conversations", "messages", "timeline"):

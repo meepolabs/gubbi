@@ -35,7 +35,7 @@ from gubbi.auth_context import current_user_id
 from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.tools.registry import register_tools
-from tests.fixtures.tenants import TenantSeed, seed_for  # noqa: F401 -- pytest discovery
+from tests.fixtures.tenants import TenantSeed, seed_for
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 

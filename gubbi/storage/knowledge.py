@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 from gubbi.storage.constants import MAX_KNOWLEDGE_FILE_SIZE
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 _KNOWLEDGE_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 

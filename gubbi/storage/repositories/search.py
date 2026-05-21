@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import date as date_cls
-from typing import Any
-
-import asyncpg
+from typing import TYPE_CHECKING, Any
 
 from gubbi.models.search import SearchResult
 from gubbi.storage.repositories.base import _add_param, _escape_like
+
+if TYPE_CHECKING:
+    import asyncpg
 
 
 async def get_topic_ids_by_prefix(

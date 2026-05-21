@@ -49,7 +49,8 @@ async def test_upsert_is_update_tracking(
         )
         assert first.is_update is False, "first save should report is_update=False"
 
-        messages_v2 = messages + [
+        messages_v2 = [
+            *messages,
             Message(role="user", content="Follow up", timestamp=None),
             Message(role="assistant", content="Sure thing", timestamp=None),
         ]

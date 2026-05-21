@@ -93,12 +93,8 @@ def upgrade() -> None:
     for table in _TENANT_TABLES:
         # Table name from identifier-validated _TENANT_TABLES tuple — DDL only,
         # never user input.
-        op.execute(
-            f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"  # noqa: S608
-        )
-        op.execute(
-            f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY"  # noqa: S608
-        )
+        op.execute(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        op.execute(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
         # USING governs SELECT/UPDATE/DELETE visibility.
         # WITH CHECK governs INSERT/UPDATE writes. Deliberately identical —
         # a user may only read and write their own rows. Keep the two in
@@ -109,10 +105,10 @@ def upgrade() -> None:
                 FOR ALL TO journal_app
                 USING (user_id = (SELECT current_setting('app.current_user_id', true)::uuid))
                 WITH CHECK (user_id = (SELECT current_setting('app.current_user_id', true)::uuid))
-            """  # noqa: S608
+            """
         )
         op.execute(
-            f"COMMENT ON POLICY tenant_isolation ON {table} IS "  # noqa: S608
+            f"COMMENT ON POLICY tenant_isolation ON {table} IS "
             f"$policy${_POLICY_COMMENT}$policy$"
         )
 
@@ -120,12 +116,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     """Drop policies and disable RLS (+ clear FORCE) on every tenant table."""
     for table in _TENANT_TABLES:
-        op.execute(
-            f"DROP POLICY IF EXISTS tenant_isolation ON {table}"  # noqa: S608
-        )
-        op.execute(
-            f"ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY"  # noqa: S608
-        )
-        op.execute(
-            f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY"  # noqa: S608
-        )
+        op.execute(f"DROP POLICY IF EXISTS tenant_isolation ON {table}")
+        op.execute(f"ALTER TABLE {table} NO FORCE ROW LEVEL SECURITY")
+        op.execute(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")

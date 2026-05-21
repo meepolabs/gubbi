@@ -372,7 +372,7 @@ async def test_post_shutdown_request_is_not_500(
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         try:
             response = await client.get("/late")
-        except Exception as exc:  # noqa: BLE001 -- intentionally broad; shutdown can raise many shapes
+        except Exception as exc:
             # PT017 would prefer pytest.raises(), but the test contract
             # accepts EITHER an exception OR a non-500 response. The
             # `assert ... not in` guards the failure-mode invariant

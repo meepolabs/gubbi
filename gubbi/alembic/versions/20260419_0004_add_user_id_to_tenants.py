@@ -93,7 +93,7 @@ def upgrade() -> None:
             ALTER TABLE {table}
             ADD COLUMN IF NOT EXISTS user_id UUID
             REFERENCES users (id) ON DELETE CASCADE
-            """  # noqa: S608 -- table from identifier-validated tuple
+            """
         )
 
     # Pre-Phase-5 guard: fail early if any tenant rows have NULL user_id.
@@ -114,9 +114,7 @@ def upgrade() -> None:
 
     # Phase 5 -- promote user_id to NOT NULL now that column is present on all rows
     for table in _TENANT_TABLES:
-        op.execute(
-            f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL"  # noqa: S608
-        )
+        op.execute(f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL")
 
     # Phase 6 -- composite indexes for the hot-path queries under RLS
     op.execute("CREATE INDEX IF NOT EXISTS idx_topics_user " "ON topics (user_id)")

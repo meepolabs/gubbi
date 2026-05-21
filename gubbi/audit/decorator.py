@@ -44,16 +44,19 @@ from __future__ import annotations
 import functools
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from typing import Any, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
 import structlog
-from gubbi_common.audit.targets import TargetKind
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from gubbi.app_context import AppContext
 from gubbi.audit.sql import record_audit
 from gubbi.auth_context import current_user_id
 from gubbi.telemetry.metrics import record_audit_persistence_failure
+
+if TYPE_CHECKING:
+    from gubbi_common.audit.targets import TargetKind
+
+    from gubbi.app_context import AppContext
 
 # ``logger`` is the canonical async-context logger (used inside the
 # ``wrapper`` coroutine). ``_sync_log`` is reserved for the sync
@@ -68,9 +71,9 @@ __all__: list[str] = [
     "ACTION_ENTRY_DELETED",
     "ACTION_ENTRY_UPDATED",
     "ACTION_TOPIC_CREATED",
-    "audited",
     "_extract_target_id",
     "_result_is_success",
+    "audited",
 ]
 
 P = ParamSpec("P")

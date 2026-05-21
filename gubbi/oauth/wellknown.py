@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from fastapi import FastAPI
 from gubbi_common import RESOURCE_DOCUMENTATION_URL
 from mcp.server.auth.routes import create_protected_resource_routes
 from pydantic import AnyHttpUrl
 
-from gubbi.config import Settings
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from fastapi import FastAPI
+
+    from gubbi.config import Settings
 
 # Stays on stdlib ``logging`` because ``register`` runs sync at lifespan
 # setup. ``structlog.AsyncBoundLogger`` emits return coroutines that must

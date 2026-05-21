@@ -14,7 +14,7 @@ def __getattr__(name: str) -> Any:
             DeprecationWarning,
             stacklevel=2,
         )
-        from gubbi.crypto.guard import require_cipher  # noqa: PLC0415
+        from gubbi.crypto.guard import require_cipher
 
         return require_cipher
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

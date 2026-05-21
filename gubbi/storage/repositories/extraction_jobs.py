@@ -333,7 +333,7 @@ async def get_status_counts(conn: asyncpg.Connection) -> StatusCounts:
             COUNT(*) FILTER (WHERE status = 'completed')              AS synced_count,
             MAX(completed_at) FILTER (WHERE status = 'completed')     AS last_sync_at
         FROM extraction_jobs
-        """  # noqa: S608
+        """
     )
     if row is None:
         return StatusCounts(in_flight_count=0, synced_count=0, last_sync_at=None)

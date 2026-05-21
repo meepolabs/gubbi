@@ -18,8 +18,12 @@ Only requests that carry an ``Origin`` header are validated.
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+
+if TYPE_CHECKING:
+    from starlette.types import ASGIApp, Receive, Scope, Send
 
 __all__: list[str] = ["OriginValidationMiddleware"]
 
