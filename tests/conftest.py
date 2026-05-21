@@ -13,6 +13,7 @@ Set TEST_DATABASE_URL to point at it, or run:
 Then run: pytest tests/
 """
 
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -564,6 +565,13 @@ def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
     that ran before this fixture observed provider X; tests that run after
     this fixture observe provider X again -- not ``None``.
 
+    Logger and meter providers are snapshotted but not replaced; only their
+    state is preserved against accidental cross-test mutation.
+
+    Assumes the OTel signal globals are only mutated through this fixture;
+    tests that call set_tracer_provider directly will leave residual state
+    after teardown.
+
     Logger and meter snapshots are taken defensively even though only the
     tracer is mutated today, so that M5/M6 wiring of ``LoggerProvider`` and
     ``MeterProvider`` inherits the same isolation guarantee for free.
@@ -584,4 +592,6 @@ def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
     try:
         yield tracer, exporter
     finally:
+        with contextlib.suppress(Exception):
+            provider.shutdown()
         _restore_otel_globals(saved)
