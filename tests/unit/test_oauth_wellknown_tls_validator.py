@@ -157,6 +157,27 @@ class TestModeThreeDeployedRejectsNonHttps:
             register(app, settings, [AnyHttpUrl("https://auth.example.com")])
         assert not _wellknown_route_present(app)
 
+    def test_non_https_resource_url_raises(self) -> None:
+        """Mode 3 + production + http server_url -> ValueError.
+
+        ``resource_url`` is constructed at lifespan setup from
+        ``settings.server.url`` (the ``JOURNAL_SERVER_URL`` env var) and
+        is the third credential-bearing URL the metadata document
+        advertises -- it is the audience MCP clients present bearer
+        tokens to. The validator must reject a non-TLS server_url in
+        deployed Mode-3 hosted so a misconfigured ``JOURNAL_SERVER_URL``
+        is caught loudly at startup rather than producing a silent
+        downgrade vector at the bearer-presentation step.
+        """
+        # Arrange
+        settings = _make_settings(server_url="http://mcp.example.com")
+        app = FastAPI()
+
+        # Act + Assert
+        with pytest.raises(ValueError, match="non-https"):
+            register(app, settings, [AnyHttpUrl("https://auth.example.com")])
+        assert not _wellknown_route_present(app)
+
 
 class TestValidatorBypass:
     """Self-host + non-deployed envs bypass the validator and register normally.

@@ -42,11 +42,10 @@ RESOURCE_DOCUMENTATION_URL: str = "https://gubbi.ai/docs/mcp"
 def _is_https(url: str) -> bool:
     """Return True iff ``url`` parses with the ``https`` scheme.
 
-    Uses :func:`urllib.parse.urlparse` rather than ``str.startswith`` so the
-    check is robust against Pydantic's ``AnyHttpUrl`` normalisation
-    (which appends a trailing slash to bare origins) and against any
-    future scheme-prefix coincidence (e.g. a hostname literally beginning
-    with ``https``-like text).
+    Uses :func:`urllib.parse.urlparse` rather than ``str.startswith`` so
+    the check tolerates Pydantic's ``AnyHttpUrl`` normalisation: scheme
+    case (``urlparse`` lowercases the scheme; ``startswith("https://")``
+    is case-sensitive) and the trailing slash appended to bare origins.
     """
     return urlparse(url).scheme == "https"
 
@@ -54,6 +53,7 @@ def _is_https(url: str) -> bool:
 def _validate_tls_for_deployed_hosted(
     settings: Settings,
     authorization_servers: Sequence[AnyHttpUrl],
+    resource_url: str,
     resource_documentation_url: str,
 ) -> None:
     """Reject non-TLS credential-bearing URLs in deployed Mode-3 hosted setups.
@@ -101,6 +101,15 @@ def _validate_tls_for_deployed_hosted(
                 "points authorization_servers at a loopback address."
             )
 
+    if not _is_https(resource_url):
+        raise ValueError(
+            f"resource_url={resource_url!r} is non-https in deployed Mode-3 "
+            "hosted. https:// is required -- a non-TLS resource URL is the "
+            "audience MCP clients present bearer tokens to, so a cleartext "
+            "advertisement here is a downgrade vector for the bearer-token "
+            "presentation step. Set JOURNAL_SERVER_URL to the https origin."
+        )
+
     if not _is_https(resource_documentation_url):
         raise ValueError(
             f"resource_documentation={resource_documentation_url!r} is "
@@ -117,13 +126,16 @@ def register(
     authorization_servers: Sequence[AnyHttpUrl],
 ) -> None:
     """Register the /.well-known/oauth-protected-resource/mcp route."""
+    resource_url = f"{settings.server.url.rstrip('/')}/mcp"
     pr_routes = create_protected_resource_routes(
-        resource_url=AnyHttpUrl(f"{settings.server.url.rstrip('/')}/mcp"),
+        resource_url=AnyHttpUrl(resource_url),
         authorization_servers=list(authorization_servers),
         scopes_supported=["journal", "offline_access", "openid", "email"],
         resource_documentation=AnyHttpUrl(RESOURCE_DOCUMENTATION_URL),
     )
-    _validate_tls_for_deployed_hosted(settings, authorization_servers, RESOURCE_DOCUMENTATION_URL)
+    _validate_tls_for_deployed_hosted(
+        settings, authorization_servers, resource_url, RESOURCE_DOCUMENTATION_URL
+    )
     for route in pr_routes:
         app.routes.insert(0, route)
     logger.info("Registered protected-resource routes")

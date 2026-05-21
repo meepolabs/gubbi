@@ -44,7 +44,7 @@ async def safe_acquire(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Connection]:
         async with pool.acquire() as conn:
             yield conn
     except _TRANSIENT_ERRORS as exc:
-        raise DatabaseUnavailable(str(exc)) from exc
+        raise DatabaseUnavailable(str(exc) or type(exc).__name__) from exc
 
 
 @asynccontextmanager
@@ -64,4 +64,4 @@ async def safe_user_scoped_connection(
         async with user_scoped_connection(pool, user_id, hnsw_ef_search=hnsw_ef_search) as conn:
             yield conn
     except _TRANSIENT_ERRORS as exc:
-        raise DatabaseUnavailable(str(exc)) from exc
+        raise DatabaseUnavailable(str(exc) or type(exc).__name__) from exc
