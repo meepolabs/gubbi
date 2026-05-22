@@ -317,12 +317,10 @@ def test_gubbi_main_server_shape_pins_outer_wrap() -> None:
     assert isinstance(inner, FastAPI), (
         f"gubbi.main.server.app should be the inner FastAPI; got " f"{type(inner).__name__}"
     )
-    # The exposed _inner_fastapi_app symbol must point at the same
-    # FastAPI instance the wrap holds. A drift here means callers using
-    # _inner_fastapi_app for state probes would inspect a stale clone.
-    assert (
-        inner is gm._inner_fastapi_app
-    ), "gubbi.main._inner_fastapi_app must alias gubbi.main.server.app"
+    # The exposed `app` symbol must point at the same FastAPI instance
+    # the wrap holds. A drift here means callers using `app` for state
+    # probes would inspect a stale clone.
+    assert inner is gm.app, "gubbi.main.app must alias gubbi.main.server.app"
 
     # ``Middleware.cls`` is typed by Starlette as a generic
     # ``_MiddlewareFactory[P]`` (a Protocol that accepts the first arg

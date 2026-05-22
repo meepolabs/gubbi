@@ -140,15 +140,15 @@ def test_module_import_has_no_side_effects_with_minimal_env(
     # ContextVar must populate BEFORE the FastAPIInstrumentor's
     # OpenTelemetryMiddleware opens its span -- see the rationale block at
     # the bottom of gubbi.main). The inner FastAPI is exposed as
-    # ``_inner_fastapi_app`` for tests / introspection that need the
-    # FastAPI surface (state, routes, decorators).
+    # ``app`` for tests / introspection that need the FastAPI surface
+    # (state, routes, decorators).
     assert isinstance(
-        reloaded._inner_fastapi_app, FastAPI
-    ), "Reloaded gubbi.main must expose a FastAPI app via the ``_inner_fastapi_app`` symbol."
+        reloaded.app, FastAPI
+    ), "Reloaded gubbi.main must expose a FastAPI app via the ``app`` symbol."
     # ``app_ctx`` is written by lifespan startup; it must NOT be set after
     # mere import. Test asserts the field is absent or None.
     assert (
-        getattr(reloaded._inner_fastapi_app.state, "app_ctx", None) is None
+        getattr(reloaded.app.state, "app_ctx", None) is None
     ), "app.state.app_ctx must be unset after import alone -- lifespan has not run."
 
 
