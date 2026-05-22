@@ -25,7 +25,11 @@ async def test_cron_task_in_background_tasks() -> None:
     """app.state.background_tasks includes the orphan cleanup task after startup."""
     from fastapi.testclient import TestClient
 
-    from gubbi.main import server
+    # `gubbi.main.server` post-rebind is a CorrelationIDMiddleware ASGI
+    # wrapper -- it has no `.state`. Drive the lifespan through the
+    # outer wrap (so the wrap is exercised end-to-end) but read state
+    # off the inner FastAPI instance.
+    from gubbi.main import _inner_fastapi_app, server
 
     with (
         patch("gubbi.main._build_app_ctx") as mock_build,
@@ -47,7 +51,7 @@ async def test_cron_task_in_background_tasks() -> None:
         mock_arq.return_value = AsyncMock()
 
         with TestClient(server):
-            tasks = server.state.background_tasks
+            tasks = _inner_fastapi_app.state.background_tasks
             assert any(t for t in tasks if not t.done())
 
 
