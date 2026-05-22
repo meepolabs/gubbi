@@ -13,7 +13,7 @@ import asyncio
 import os
 import textwrap
 from contextlib import asynccontextmanager, suppress
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import httpx
@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from gubbi_common.auth.prm import build_prm_metadata_url
 from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
-from starlette.middleware import Middleware
+from starlette.types import ASGIApp  # noqa: TC002 (used in runtime variable annotation)
 
 from gubbi.app_context import AppContext
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
@@ -582,52 +582,39 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await arq_pool.close()
 
 
-# Create FastAPI app
+# Construct the FastAPI app. Two-tier middleware model:
 #
-# CorrelationIDMiddleware is intentionally NOT in this constructor's
-# middleware list. It is wrapped OUTSIDE the FastAPI app at module
-# level (see ``server = ...`` below) so the request-scoped
-# correlation_id ContextVar is populated BEFORE any OTel server span
-# opens. Inside the FastAPI middleware chain, OpenTelemetryMiddleware
-# (added by ``FastAPIInstrumentor.instrument_app(app)`` during the
-# lifespan via ``configure_otel(app)``) wraps the entire user
-# middleware stack -- it would land outermost relative to anything
-# listed here, opening the server span before the ContextVar is
-# populated and leaving ``CorrelationSpanProcessor.on_start`` with no
-# id to stamp (silent drop). MCPPathNormalizer stays here because it
-# does not depend on the OTel context and only rewrites the path
-# before downstream routing.
-_inner_fastapi_app = FastAPI(
+#   Tier 1 (INSIDE the OTel server span -- attached via app.add_middleware
+#   below): middleware that does not need to populate state visible to
+#   the OTel layer. Path rewriters, body validators, anything HTTP-
+#   semantic. FastAPIInstrumentor wraps these with OpenTelemetryMiddleware
+#   at request time, which is the right shape for them.
+#
+#   Tier 2 (OUTSIDE the OTel server span -- composed at module level
+#   below): middleware that MUST run before any OTel layer because a
+#   SpanProcessor reads state it sets (e.g., CorrelationIDMiddleware ->
+#   CorrelationSpanProcessor.on_start). These cannot live in
+#   user_middleware -- FastAPIInstrumentor's build_middleware_stack patch
+#   would put them inside the OTel wrap and the server span would open
+#   before they ran. See gubbi-common's CorrelationIDMiddleware docstring.
+app: FastAPI = FastAPI(
     title="gubbi",
     description="Personal journal MCP server",
     version="0.2.0",
     lifespan=lifespan,
-    middleware=[
-        Middleware(MCPPathNormalizer),
-    ],
 )
-# All route decorators, router includes, and exception handlers below
-# attach to this FastAPI object. At end-of-module ``server`` is rebound
-# to a CorrelationIDMiddleware wrapping this app (see the ``server = cast``
-# block below). Use ``_inner_fastapi_app`` whenever you need the FastAPI
-# surface for state inspection, route introspection, or lifespan probes.
-# The ``: FastAPI`` annotation here is what mypy uses for the symbol's
-# declared type; the cast at end-of-module preserves that type for
-# uvicorn / gunicorn references at the cost of one accepted runtime
-# lie (the rebound object is the ASGI wrap, not a FastAPI). Splitting
-# the annotation across the rebind triggers ``[no-redef]``.
-server: FastAPI = _inner_fastapi_app
+app.add_middleware(MCPPathNormalizer)
 
 
 # Register REST API routers
 from gubbi.api.v1.extraction import router as extraction_router  # noqa: E402
 from gubbi.api.v1.ingest import router as ingest_router  # noqa: E402
 
-server.include_router(ingest_router, prefix="/api/v1")
-server.include_router(extraction_router, prefix="/api/v1")
+app.include_router(ingest_router, prefix="/api/v1")
+app.include_router(extraction_router, prefix="/api/v1")
 
 
-@server.exception_handler(DatabaseUnavailable)
+@app.exception_handler(DatabaseUnavailable)
 async def database_unavailable_handler(
     request: Request,
     exc: DatabaseUnavailable,
@@ -640,7 +627,7 @@ async def database_unavailable_handler(
     )
 
 
-@server.exception_handler(Exception)
+@app.exception_handler(Exception)
 async def general_exception_handler(
     request: Request,
     exc: Exception,
@@ -659,11 +646,11 @@ async def general_exception_handler(
     )
 
 
-@server.get("/health")
+@app.get("/health")
 async def mcp_health() -> dict[str, Any]:
     """Liveness probe for Docker health checks.
 
-    NOTE: do NOT add @server.get("/mcp/") here -- it shadows the
+    NOTE: do NOT add @app.get("/mcp/") here -- it shadows the
     FastMCP streamable-http app mounted at /mcp via app.mount(...).
     Claude.ai opens a GET to /mcp/ to start the SSE handshake; if
     this route intercepts it, the client receives application/json
@@ -674,31 +661,15 @@ async def mcp_health() -> dict[str, Any]:
     return {"status": "ok"}
 
 
-# Wrap the FastAPI app with CorrelationIDMiddleware as the OUTERMOST
-# ASGI layer. This is the pure-ASGI shape mirroring cloud-api's
-# pattern (gubbi-cloud/gubbi_cloud/api/main.py:1192-1238).
-#
-# Why outside the FastAPI middleware list (instead of in the
-# constructor's ``middleware=[...]``): ``FastAPIInstrumentor.instrument_app``
-# (called via ``configure_otel(app)`` in the lifespan) wraps the entire
-# user middleware stack with OpenTelemetryMiddleware at request time.
-# Anything in ``user_middleware`` lands INSIDE that OTel wrap. The OTel
-# server span therefore opens BEFORE the inner ASGI chain runs, and
-# ``CorrelationSpanProcessor.on_start`` reads the request-scoped
-# ContextVar at that moment -- if CorrelationIDMiddleware has not yet
-# populated it, the processor returns silently and every span emitted
-# during that request lacks the ``correlation_id`` attribute. The
-# 401-in-single-user-dev codepath is the canonical reproducer because
-# no inner spans fire to mask the un-stamped server span.
-#
-# Wrapping CorrelationIDMiddleware OUTSIDE the FastAPI app puts the
-# ContextVar set BEFORE any OTel middleware runs, so every span (server
-# span, asyncpg, httpx, redis, manual tool spans) sees the populated
-# id. The cast keeps the public ``server`` symbol typed as FastAPI for
-# uvicorn / gunicorn references and import-time consumers; the runtime
-# object is the wrapping ASGI callable. Tests that need the inner
-# FastAPI for state inspection use ``_inner_fastapi_app`` instead.
-server = cast(FastAPI, CorrelationIDMiddleware(server))
+# Tier-2 ASGI composition: CorrelationIDMiddleware MUST run before any
+# OTel layer because CorrelationSpanProcessor.on_start reads the request-
+# scoped ContextVar this middleware sets. FastAPIInstrumentor patches
+# build_middleware_stack so OpenTelemetryMiddleware lands OUTSIDE
+# anything in user_middleware -- the only place state-setting middleware
+# can live is OUTSIDE the FastAPI app at the ASGI layer. The deployment
+# target (uvicorn / gunicorn / `gubbi.main:server`) is this wrapper;
+# `app` remains the FastAPI handle for routes, decorators, and tests.
+server: ASGIApp = CorrelationIDMiddleware(app)
 
 
 def main() -> None:
