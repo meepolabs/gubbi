@@ -128,12 +128,14 @@ async def test_record_audit_emits_audit_write_span_with_gubbi_attrs(
 ) -> None:
     """Regression: the canonical writer emits ``audit.write`` carrying the gubbi attr shape.
 
-    Per A3 Q1 the OTel span moved INTO ``record_audit_async`` in
-    gubbi-common 0.11.0. The gubbi-side allowlist for ``audit.write``
-    keys on ``{"event_type", "target_id", "actor_type", "success",
-    "latency_ms"}``; this test asserts the canonical writer sets at
-    least the three pre-execute attrs (``event_type``, ``actor_type``,
-    ``target_id``) on the started span.
+    The OTel span lives inside ``record_audit_async`` (gubbi-common
+    0.13.x). gubbi-common's ``_AUDIT_WRITE_ALLOWLIST`` deliberately
+    excludes ``actor_id``, ``target_id``, and ``target_kind`` -- those
+    remain durable in the audit_log row's columns; the span attribute
+    projection drops them so external IDs (e.g. payment-provider
+    subscription identifiers in target_id) do not reach the OTel
+    trace pipeline. This test asserts the surviving attrs land on the
+    span AND that the dropped keys do NOT.
 
     The ``in_memory_tracer`` fixture (tests/conftest.py) swaps the global
     TracerProvider with an in-memory exporter and resets the OTel
@@ -162,7 +164,11 @@ async def test_record_audit_emits_audit_write_span_with_gubbi_attrs(
     attrs = dict(audit_spans[0].attributes or {})
     assert attrs.get("event_type") == "entry.created"
     assert attrs.get("actor_type") == "user"
-    assert attrs.get("target_id") == "00000000-0000-0000-0000-000000000099"
     # latency_ms + success are set in the finally block; they MUST be present.
     assert "latency_ms" in attrs
     assert attrs.get("success") is True
+    # actor_id / target_id / target_kind are intentionally excluded from
+    # the span allowlist (they remain durable in the audit_log columns).
+    assert "actor_id" not in attrs
+    assert "target_id" not in attrs
+    assert "target_kind" not in attrs
