@@ -48,6 +48,7 @@ from gubbi.telemetry.attrs import MetricNames
 __all__: list[str] = [
     "initialize_metrics",
     "record_audit_persistence_failure",
+    "record_replica_count_warning",
     "record_tool_call",
     "record_tool_response_size",
 ]
@@ -86,6 +87,22 @@ def initialize_metrics() -> dict[str, object]:
     inst[MetricNames.AUDIT_PERSISTENCE_FAILURE] = meter.create_counter(
         name=MetricNames.AUDIT_PERSISTENCE_FAILURE,
         description="Audit log persistence failure count by event type",
+        unit="1",
+    )
+    inst[MetricNames.REPLICA_COUNT_WARNING] = meter.create_counter(
+        name=MetricNames.REPLICA_COUNT_WARNING,
+        description=(
+            "Incremented once at lifespan/worker startup when "
+            "JOURNAL_REPLICA_COUNT > 1. gubbi's per-pod resources (DB "
+            "connection pool; worker extraction-budget logic) are "
+            "in-process, so the effective per-pod cap becomes cap * "
+            "REPLICA_COUNT. Counter is the alertable counterpart to the "
+            "structured WARNING log events (db_pool_over_provisioned for "
+            "gubbi; extraction_worker_replica_policy_violation for the "
+            "worker). Emitters are distinguished by the service.name "
+            "RESOURCE attribute set at OTel init (the canonical OTel "
+            "cross-service identifier), not by a metric attribute."
+        ),
         unit="1",
     )
     return inst
@@ -153,3 +170,41 @@ def record_audit_persistence_failure(event_type: str) -> None:
     attrs = _validate_metric_attrs({"event_type": event_type})
     inst = initialize_metrics()
     cast(Counter, inst[MetricNames.AUDIT_PERSISTENCE_FAILURE]).add(1, attributes=attrs)
+
+
+def record_replica_count_warning(*, replica_count: int) -> None:
+    """Increment the gateway.replica_count_warning counter at startup.
+
+    M4 #138: emitted once per process startup when
+    ``JOURNAL_REPLICA_COUNT > 1`` -- from the FastAPI lifespan and from
+    the Arq extraction worker's startup hook. Pairs with the structured
+    ``db_pool_over_provisioned`` (gubbi) /
+    ``extraction_worker_replica_policy_violation`` (worker) WARNING so
+    HyperDX (or any backend reading the OTel metric) has an alertable
+    signal even when log-stream sampling drops the WARNING line.
+
+    Emitter distinction is via the ``service.name`` RESOURCE attribute
+    (gubbi-common's ``configure_otel`` sets it from its ``service_name``
+    arg: ``"gubbi"`` for the HTTP service, ``"gubbi-extraction-worker"``
+    for the Arq worker). That is the canonical OTel cross-service
+    identifier and is what alert rules in HyperDX should split / group
+    by; this helper deliberately does NOT emit a redundant ``service``
+    METRIC attribute (cloud-api's helper has the same shape, so a
+    cross-service alert rule that grouped by metric attribute would
+    silently miss cloud-api).
+
+    Unlike the other ``record_*`` helpers in this module, this one guards
+    against a missing instrument with ``.get()`` rather than letting a
+    KeyError surface: the worker does not run the FastAPI lifespan and may
+    not have wired the OTel meter when this fires, so a missing instrument
+    must degrade to a no-op startup-time signal -- never crash worker
+    boot. ``initialize_metrics()`` always populates the key, so on the
+    HTTP path the lookup succeeds; on an unwired worker meter the counter
+    is a NoOp and the ``.add`` is silently dropped (the paired WARNING log
+    still fires). Label cardinality is bounded by the small integer range
+    of plausible replica counts.
+    """
+    inst = initialize_metrics()
+    raw = inst.get(MetricNames.REPLICA_COUNT_WARNING)
+    if raw is not None:
+        cast(Counter, raw).add(1, {"replica_count": str(replica_count)})

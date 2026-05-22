@@ -200,6 +200,132 @@ def test_record_audit_persistence_failure_increments_counter() -> None:
         gubbi_metrics.initialize_metrics.cache_clear()
 
 
+def test_record_replica_count_warning_smoke() -> None:
+    """``record_replica_count_warning`` does not raise on a real provider."""
+    gubbi_metrics.initialize_metrics.cache_clear()
+    reader = InMemoryMetricReader()
+    real_provider = MeterProvider(metric_readers=[reader])
+    _set_provider(real_provider)
+
+    try:
+        gubbi_metrics.record_replica_count_warning(replica_count=2)
+        gubbi_metrics.record_replica_count_warning(replica_count=3)
+    finally:
+        gubbi_metrics.initialize_metrics.cache_clear()
+
+
+def test_record_replica_count_warning_is_noop_safe_when_instrument_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A missing instrument must degrade to a no-op, not raise.
+
+    Unlike the other ``record_*`` helpers (direct ``inst[key]`` access),
+    this helper guards with ``.get()`` because the Arq worker may call it
+    before the OTel meter is wired. Simulate the missing-instrument shape
+    by clearing the cache and monkeypatching ``initialize_metrics`` to
+    return a dict WITHOUT the replica-count key -- the call must stay
+    silent rather than KeyError out and crash worker boot.
+    """
+    gubbi_metrics.initialize_metrics.cache_clear()
+
+    # ``record_replica_count_warning`` calls ``initialize_metrics()`` then
+    # ``.get(...)``; an empty dict exercises the missing-instrument guard.
+    # ``monkeypatch.setattr`` restores the original at teardown automatically;
+    # the autouse ``_restore_otel_globals`` fixture then runs cache_clear()
+    # on the restored real ``initialize_metrics``.
+    monkeypatch.setattr(gubbi_metrics, "initialize_metrics", lambda: {})
+    # Must not raise.
+    gubbi_metrics.record_replica_count_warning(replica_count=2)
+
+
+def test_record_replica_count_warning_increments_with_attributes() -> None:
+    """Counter sum + attributes are exported correctly.
+
+    Walks the ``InMemoryMetricReader``'s captured data and asserts:
+      * the ``gateway.replica_count_warning`` counter exists,
+      * total sum equals the number of record calls,
+      * each data point carries the ``replica_count`` attribute the
+        alerting rule splits on.
+
+    The instrument name is REUSED from cloud-api on purpose so a single
+    HyperDX rule aggregates across cloud-api + gubbi + worker; emitter
+    distinction is via the ``service.name`` RESOURCE attribute (set at
+    OTel init, the canonical cross-service identifier), not a metric
+    attribute -- the helper deliberately does not emit a redundant
+    ``service`` metric attribute (cloud-api's helper does not either,
+    so a metric-attribute group-by rule would silently miss it).
+    """
+    gubbi_metrics.initialize_metrics.cache_clear()
+    reader = InMemoryMetricReader()
+    real_provider = MeterProvider(metric_readers=[reader])
+    _set_provider(real_provider)
+
+    try:
+        gubbi_metrics.record_replica_count_warning(replica_count=2)
+        gubbi_metrics.record_replica_count_warning(replica_count=4)
+
+        metrics_data = reader.get_metrics_data()
+        assert metrics_data is not None, "reader returned no metrics data"
+
+        total = 0
+        found = False
+        seen_replica_counts: set[str] = set()
+        seen_attribute_keys: set[str] = set()
+        for resource_metrics in metrics_data.resource_metrics:
+            for scope_metrics in resource_metrics.scope_metrics:
+                for metric in scope_metrics.metrics:
+                    if metric.name != MetricNames.REPLICA_COUNT_WARNING:
+                        continue
+                    found = True
+                    for point in metric.data.data_points:
+                        total += int(point.value)
+                        seen_replica_counts.add(str(point.attributes.get("replica_count")))
+                        seen_attribute_keys.update(point.attributes.keys())
+
+        assert found, (
+            f"counter {MetricNames.REPLICA_COUNT_WARNING!r} not found in exported "
+            "metrics data -- helper bound to wrong instrument or failed to register"
+        )
+        assert total == 2, f"expected counter sum == 2 after two record calls, got {total}"
+        # replica_count is stringified on the attribute (label cardinality).
+        assert seen_replica_counts == {
+            "2",
+            "4",
+        }, f"replica_count attribute must carry the value as a string; got {seen_replica_counts}"
+        # No ``service`` metric attribute: emitters are distinguished by
+        # the service.name RESOURCE attribute, matching cloud-api's helper.
+        # A regression that re-introduced a service metric attribute would
+        # silently break cross-service aggregation; pin it here.
+        assert "service" not in seen_attribute_keys, (
+            "record_replica_count_warning must NOT emit a 'service' metric "
+            "attribute -- emitter distinction is via the service.name RESOURCE "
+            "attribute set at OTel init, mirroring cloud-api's helper. "
+            f"got attribute keys: {seen_attribute_keys}"
+        )
+    finally:
+        gubbi_metrics.initialize_metrics.cache_clear()
+
+
+def test_replica_count_warning_instrument_registered() -> None:
+    """``initialize_metrics`` always registers the replica-count counter.
+
+    Mirrors the contract the other instruments rely on: the key is always
+    present after ``initialize_metrics()``, so the HTTP-path ``inst.get``
+    lookup succeeds and the counter exports.
+    """
+    gubbi_metrics.initialize_metrics.cache_clear()
+    reader = InMemoryMetricReader()
+    real_provider = MeterProvider(metric_readers=[reader])
+    _set_provider(real_provider)
+
+    try:
+        inst = gubbi_metrics.initialize_metrics()
+        assert MetricNames.REPLICA_COUNT_WARNING in inst
+        assert isinstance(inst[MetricNames.REPLICA_COUNT_WARNING], Counter)
+    finally:
+        gubbi_metrics.initialize_metrics.cache_clear()
+
+
 def test_record_tool_call_and_response_size_smoke() -> None:
     """Convenience helpers do not raise on a real provider."""
     gubbi_metrics.initialize_metrics.cache_clear()
