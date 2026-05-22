@@ -54,8 +54,9 @@ def _restore_otel_globals() -> Iterator[None]:
 
     This autouse fixture snapshots both slots before the test runs and
     restores them in ``finally`` regardless of test outcome. It also
-    clears the gubbi ``initialize_metrics`` lru_cache so the next test
-    starts from a clean cache state.
+    clears the gubbi ``initialize_metrics`` lru_cache and the three
+    B5 orphan-counter factories so the next test starts from a clean
+    cache state.
     """
     saved_provider = otel_metrics_internal._METER_PROVIDER  # type: ignore[attr-defined]
     saved_once = otel_metrics_internal._METER_PROVIDER_SET_ONCE  # type: ignore[attr-defined]
@@ -65,6 +66,25 @@ def _restore_otel_globals() -> Iterator[None]:
         otel_metrics_internal._METER_PROVIDER = saved_provider  # type: ignore[attr-defined]
         otel_metrics_internal._METER_PROVIDER_SET_ONCE = saved_once  # type: ignore[attr-defined]
         gubbi_metrics.initialize_metrics.cache_clear()
+        # B5: clear the three orphan-counter factory caches so each test
+        # observes a fresh meter resolution rather than the last test's
+        # cached counter object.
+        #
+        # CONVENTION: this list MUST stay in sync with the rebind hook
+        # at ``gubbi.telemetry.rebind_metrics_after_configure``. When
+        # adding a new ``@lru_cache``-deferred metric factory, add a
+        # ``cache_clear()`` here AND in the rebind hook. Drift between
+        # the two means tests will leak state across the suite OR
+        # production will leak state across lifespan re-runs.
+        from gubbi.extraction.jobs.extract_conversation import (
+            _get_extraction_refund_skipped_counter,
+        )
+        from gubbi.extraction.llm.anthropic_provider import _get_anthropic_retry_counter
+        from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
+
+        _get_orphan_cleanup_swept_counter.cache_clear()
+        _get_extraction_refund_skipped_counter.cache_clear()
+        _get_anthropic_retry_counter.cache_clear()
 
 
 def _set_provider(provider: object) -> None:
@@ -485,3 +505,215 @@ def test_validate_metric_attrs_logs_warning_on_drop(
 def test_validate_metric_attrs_empty_input() -> None:
     """Empty input maps to empty output without raising."""
     assert _validate_metric_attrs({}) == {}
+
+
+# ---------------------------------------------------------------------------
+# B5 (2026-05-22): orphan counter rebind regression tests
+# ---------------------------------------------------------------------------
+#
+# Three counters in gubbi previously created their meter instruments at
+# module import time, well before ``configure_otel`` ran during the FastAPI
+# lifespan. They permanently bound to the NoOp meter provider and silently
+# discarded every ``.add(...)`` -- the exact CRIT-5 H-1 shape that the
+# canonical ``initialize_metrics`` rebind already addressed for the
+# audit/MCP/replica counters but had NOT been propagated to:
+#
+#   1. extraction_jobs.orphan_cleanup_swept_total
+#   2. extraction.refund_skipped_total
+#   3. anthropic.retry_count_total
+#
+# Each test below pins the contract: after ``configure_otel`` runs (modeled
+# here by a ``_set_provider`` swap + ``rebind_metrics_after_configure``
+# call), the counter is bound to the SDK provider and a ``.add(1)`` lands
+# in the in-memory metric reader's exported data. A regression that drops
+# any factory from the rebind hook -- or re-introduces a module-scope
+# ``meter.create_counter`` import-time emit -- fails this test loud.
+
+
+def _walk_counter_total(reader: InMemoryMetricReader, metric_name: str) -> tuple[bool, int]:
+    """Walk reader's ResourceMetrics tree and sum data points for ``metric_name``.
+
+    Returns ``(found, total)``. Mirrors the walk in
+    ``test_record_audit_persistence_failure_increments_counter`` so the
+    regression tests below stay close to the existing pattern.
+    """
+    metrics_data = reader.get_metrics_data()
+    assert metrics_data is not None, "reader returned no metrics data"
+    total = 0
+    found = False
+    for resource_metrics in metrics_data.resource_metrics:
+        for scope_metrics in resource_metrics.scope_metrics:
+            for metric in scope_metrics.metrics:
+                if metric.name != metric_name:
+                    continue
+                found = True
+                for point in metric.data.data_points:
+                    # Counter metrics export NumberDataPoint with .value;
+                    # the union also includes Histogram* points (no .value).
+                    # The metric_name filter above guarantees Counter shape.
+                    total += int(point.value)  # type: ignore[union-attr]
+    return found, total
+
+
+def test_orphan_cleanup_swept_counter_rebinds_to_real_provider() -> None:
+    """``extraction_jobs.orphan_cleanup_swept_total`` lands in real reader after rebind.
+
+    B5: the previous module-scope ``ORPHAN_CLEANUP_SWEPT = _meter.create_counter(...)``
+    bound at import time and silently dropped every ``.add(...)`` because
+    ``configure_otel`` had not run yet. Pin the rebind contract: after
+    ``rebind_metrics_after_configure`` clears + re-primes the lru_cache
+    factory, the counter binds to the SDK provider and the increment
+    actually exports.
+    """
+    from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
+    from gubbi.telemetry import rebind_metrics_after_configure
+
+    # 1. Seal cache against NoOp provider (mirrors module import time).
+    _set_provider(NoOpMeterProvider())
+    _get_orphan_cleanup_swept_counter.cache_clear()
+    _get_orphan_cleanup_swept_counter().add(1, attributes={"result": "swept", "state": "pending"})
+    sealed = _get_orphan_cleanup_swept_counter()
+    assert type(sealed).__name__.startswith(
+        "NoOp"
+    ), "precondition: factory must be sealed against NoOp"
+
+    # 2. Configure a real SDK provider (mirror of what configure_otel does).
+    reader = InMemoryMetricReader()
+    real_provider = MeterProvider(metric_readers=[reader])
+    _set_provider(real_provider)
+
+    # 3. Re-bind via the production hook -- NOT cache_clear directly.
+    rebind_metrics_after_configure()
+
+    # 4. Increment now lands in the SDK reader.
+    _get_orphan_cleanup_swept_counter().add(1, attributes={"result": "swept", "state": "running"})
+    found, total = _walk_counter_total(reader, "extraction_jobs.orphan_cleanup_swept_total")
+
+    assert found, (
+        "extraction_jobs.orphan_cleanup_swept_total not found in exported metrics -- "
+        "factory still bound to NoOp; rebind hook is not wiring this counter"
+    )
+    assert total == 1, f"expected counter sum == 1 after rebind+add, got {total}"
+    # Verify it is a real SDK counter, not a NoOp shell.
+    rebound = _get_orphan_cleanup_swept_counter()
+    assert isinstance(rebound, Counter)
+    assert not type(rebound).__name__.startswith("NoOp")
+    # Cleanup runs in the autouse ``_restore_otel_globals`` fixture --
+    # no need for a manual try/finally here.
+
+
+def test_extraction_refund_skipped_counter_rebinds_to_real_provider() -> None:
+    """``extraction.refund_skipped_total`` lands in real reader after rebind.
+
+    B5: protects the refund-path observability for the worker. Without
+    this, a refund-skipped event during a worker crash would be invisible
+    at HyperDX even though the structured WARNING fires.
+    """
+    from gubbi.extraction.jobs.extract_conversation import (
+        _get_extraction_refund_skipped_counter,
+    )
+    from gubbi.telemetry import rebind_metrics_after_configure
+
+    _set_provider(NoOpMeterProvider())
+    _get_extraction_refund_skipped_counter.cache_clear()
+    _get_extraction_refund_skipped_counter().add(1, attributes={"reason": "unknown_period"})
+    sealed = _get_extraction_refund_skipped_counter()
+    assert type(sealed).__name__.startswith(
+        "NoOp"
+    ), "precondition: factory must be sealed against NoOp"
+
+    reader = InMemoryMetricReader()
+    real_provider = MeterProvider(metric_readers=[reader])
+    _set_provider(real_provider)
+
+    rebind_metrics_after_configure()
+
+    _get_extraction_refund_skipped_counter().add(1, attributes={"reason": "unknown_period"})
+    found, total = _walk_counter_total(reader, "extraction.refund_skipped_total")
+
+    assert found, (
+        "extraction.refund_skipped_total not found in exported metrics -- "
+        "factory still bound to NoOp; rebind hook is not wiring this counter"
+    )
+    assert total == 1, f"expected counter sum == 1 after rebind+add, got {total}"
+    rebound = _get_extraction_refund_skipped_counter()
+    assert isinstance(rebound, Counter)
+    assert not type(rebound).__name__.startswith("NoOp")
+    # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
+
+
+def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
+    """``anthropic.retry_count_total`` lands in real reader after rebind.
+
+    B5: most beta-relevant of the three -- LLM retry storms are invisible
+    at HyperDX without this rebind. The Anthropic provider is on the hot
+    path of every extraction job; a rate-limit cascade would drive the
+    counter but the alarm rule would never fire.
+    """
+    from gubbi.extraction.llm.anthropic_provider import _get_anthropic_retry_counter
+    from gubbi.telemetry import rebind_metrics_after_configure
+
+    _set_provider(NoOpMeterProvider())
+    _get_anthropic_retry_counter.cache_clear()
+    _get_anthropic_retry_counter().add(
+        1, attributes={"result": "retried", "error_class": "LLMTransientError"}
+    )
+    sealed = _get_anthropic_retry_counter()
+    assert type(sealed).__name__.startswith(
+        "NoOp"
+    ), "precondition: factory must be sealed against NoOp"
+
+    reader = InMemoryMetricReader()
+    real_provider = MeterProvider(metric_readers=[reader])
+    _set_provider(real_provider)
+
+    rebind_metrics_after_configure()
+
+    _get_anthropic_retry_counter().add(
+        1, attributes={"result": "exhausted", "error_class": "LLMTransientError"}
+    )
+    found, total = _walk_counter_total(reader, "anthropic.retry_count_total")
+
+    assert found, (
+        "anthropic.retry_count_total not found in exported metrics -- "
+        "factory still bound to NoOp; rebind hook is not wiring this counter"
+    )
+    assert total == 1, f"expected counter sum == 1 after rebind+add, got {total}"
+    rebound = _get_anthropic_retry_counter()
+    assert isinstance(rebound, Counter)
+    assert not type(rebound).__name__.startswith("NoOp")
+    # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
+
+
+def test_b5_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
+    """Pin: B5 orphan-counter modules expose factories, NOT module-scope counters.
+
+    A regression that re-introduces ``COUNTER_NAME = _meter.create_counter(...)``
+    at module scope -- the original B5 bug shape -- would leave the factory
+    rebind path silently parallel to a stale module-scope reference: any
+    caller that imports the old name binds to the import-time NoOp meter
+    permanently. The `_get_*_counter()` factory tests above only catch
+    the factory-path regression; this test catches the module-scope-shape
+    regression.
+
+    Add new entries here when adding a new orphan-counter factory.
+    """
+    from gubbi.extraction import orphan_cleanup
+    from gubbi.extraction.jobs import extract_conversation
+    from gubbi.extraction.llm import anthropic_provider
+
+    assert not hasattr(orphan_cleanup, "ORPHAN_CLEANUP_SWEPT"), (
+        "orphan_cleanup.ORPHAN_CLEANUP_SWEPT was re-introduced as a "
+        "module-scope counter; it must live behind "
+        "_get_orphan_cleanup_swept_counter() so the rebind hook can re-prime it"
+    )
+    assert not hasattr(extract_conversation, "EXTRACTION_REFUND_SKIPPED"), (
+        "extract_conversation.EXTRACTION_REFUND_SKIPPED was re-introduced as a "
+        "module-scope counter; it must live behind "
+        "_get_extraction_refund_skipped_counter()"
+    )
+    assert not hasattr(anthropic_provider, "ANTHROPIC_RETRY_COUNT"), (
+        "anthropic_provider.ANTHROPIC_RETRY_COUNT was re-introduced as a "
+        "module-scope counter; it must live behind "
+        "_get_anthropic_retry_counter()"
+    )

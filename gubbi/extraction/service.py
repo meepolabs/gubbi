@@ -157,7 +157,14 @@ class ExtractionService:
         try:
             return cast(dict[str, Any], json.loads(content))
         except json.JSONDecodeError as e:
-            raise ValueError(f"LLM response content is not valid JSON: {content!r}") from e
+            # Do NOT interpolate the raw content into the exception
+            # message: this exception's str() flows through OTel's
+            # ``record_exception`` (as ``exception.message`` span event)
+            # and into HyperDX, leaking the unparsed LLM response.
+            # Operators who need the raw content for triage should fetch
+            # it from the per-job audit row or the structured log line
+            # captured at the call site.
+            raise ValueError("LLM response content is not valid JSON") from e
 
     def _read_prompt(self, filename: str) -> str:
         path = self._prompts_dir / filename

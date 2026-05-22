@@ -22,12 +22,13 @@ sweep; the running-sweep threshold is fixed at 2 * ARQ_JOB_TIMEOUT_SECS).
 from __future__ import annotations
 
 import asyncio
+import functools
 from typing import Any
 
 import asyncpg
 import structlog
 from gubbi_common.budget import PRE_CHARGE_CENTS
-from opentelemetry import metrics
+from opentelemetry.metrics import Counter, get_meter
 
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 
@@ -35,12 +36,24 @@ __all__: list[str] = ["run_orphan_cleanup"]
 
 logger = structlog.get_logger(__name__)
 
-_meter = metrics.get_meter("gubbi")
-ORPHAN_CLEANUP_SWEPT = _meter.create_counter(
-    name="extraction_jobs.orphan_cleanup_swept_total",
-    description="Count of orphan extraction_jobs sweep cycles, partitioned by state",
-    unit="1",
-)
+
+@functools.lru_cache(maxsize=1)
+def _get_orphan_cleanup_swept_counter() -> Counter:
+    """Lazily create the orphan-cleanup swept counter against the live meter.
+
+    CRIT-5 B5 (2026-05-22): the previous module-scope ``_meter.create_counter``
+    bound at import time, well before ``configure_otel`` ran during the
+    FastAPI lifespan -- so the counter held a NoOp instrument and silently
+    discarded every ``.add(...)``. Deferring creation to first call (and
+    re-priming via ``rebind_metrics_after_configure``) ensures the counter
+    binds to the SDK provider configured at lifespan time. Mirrors the
+    canonical pattern in ``gubbi.telemetry.metrics.initialize_metrics``.
+    """
+    return get_meter("gubbi").create_counter(
+        name="extraction_jobs.orphan_cleanup_swept_total",
+        description="Count of orphan extraction_jobs sweep cycles, partitioned by state",
+        unit="1",
+    )
 
 
 # Stuck-running threshold: any row still 'running' beyond this is presumed
@@ -115,11 +128,13 @@ async def run_orphan_cleanup(
             swept_pending = int(result or 0)
             if swept_pending > 0:
                 await log.info("orphan_cleanup_swept", swept=swept_pending, state="pending")
-                ORPHAN_CLEANUP_SWEPT.add(
+                _get_orphan_cleanup_swept_counter().add(
                     swept_pending, attributes={"result": "swept", "state": "pending"}
                 )
             else:
-                ORPHAN_CLEANUP_SWEPT.add(1, attributes={"result": "none", "state": "pending"})
+                _get_orphan_cleanup_swept_counter().add(
+                    1, attributes={"result": "none", "state": "pending"}
+                )
 
             # ---- running sweep (worker_lost) --------------------------------
             running_rows = await admin_pool.fetch(
@@ -137,7 +152,7 @@ async def run_orphan_cleanup(
             swept_running = len(running_rows)
             if swept_running > 0:
                 await log.info("orphan_cleanup_swept", swept=swept_running, state="running")
-                ORPHAN_CLEANUP_SWEPT.add(
+                _get_orphan_cleanup_swept_counter().add(
                     swept_running, attributes={"result": "swept", "state": "running"}
                 )
                 # Best-effort refund per swept row -- logged + swallowed on failure.
@@ -150,7 +165,9 @@ async def run_orphan_cleanup(
                             log,
                         )
             else:
-                ORPHAN_CLEANUP_SWEPT.add(1, attributes={"result": "none", "state": "running"})
+                _get_orphan_cleanup_swept_counter().add(
+                    1, attributes={"result": "none", "state": "running"}
+                )
         except (asyncpg.PostgresError, OSError):
             await log.warning("orphan_cleanup_failed", exc_info=True)
             continue

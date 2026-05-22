@@ -326,7 +326,7 @@ async def test_worker_telemetry_wiring_is_one_shot_across_two_startups(
     # threads or providers in the test process. The test does NOT assert on
     # the call count of these stubs; the flag transitions are the contract.
     monkeypatch.setattr("gubbi_common.telemetry.otel.configure_otel", MagicMock())
-    monkeypatch.setattr(worker_module, "initialize_metrics", MagicMock())
+    monkeypatch.setattr(worker_module, "rebind_metrics_after_configure", MagicMock())
 
     ctx: dict[str, Any] = {}
     assert worker_module._WORKER_TELEMETRY_CONFIGURED is False, (
@@ -376,7 +376,7 @@ async def test_worker_telemetry_guard_unlatched_on_configure_failure(
         "gubbi_common.telemetry.otel.configure_otel",
         MagicMock(side_effect=RuntimeError("boom")),
     )
-    monkeypatch.setattr(worker_module, "initialize_metrics", MagicMock())
+    monkeypatch.setattr(worker_module, "rebind_metrics_after_configure", MagicMock())
 
     ctx: dict[str, Any] = {}
     # First startup: failure is swallowed (best-effort), flag stays False.

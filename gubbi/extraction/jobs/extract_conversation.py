@@ -15,7 +15,9 @@ max_jobs concurrent workers are all mid-LLM.
 
 from __future__ import annotations
 
+import functools
 import json
+import time
 from typing import TYPE_CHECKING, Any, cast
 from uuid import UUID, uuid4
 
@@ -24,7 +26,9 @@ from gubbi_common.audit.actions import Action
 from gubbi_common.audit.targets import TargetKind
 from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.db.user_scoped import user_scoped_connection
-from opentelemetry import metrics
+from opentelemetry import trace
+from opentelemetry.metrics import Counter, get_meter
+from opentelemetry.trace import Status, StatusCode
 
 from gubbi.audit import record_audit
 from gubbi.crypto.cipher import ContentCipher
@@ -38,6 +42,12 @@ from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import topics as topic_repo
+from gubbi.telemetry.attrs import (
+    _NS_PER_MS,
+    _TRACER_NAME,
+    SpanNames,
+    safe_set_attributes,
+)
 from gubbi.validation import harden_llm_topic_path
 
 if TYPE_CHECKING:
@@ -53,29 +63,58 @@ if TYPE_CHECKING:
         ExtractionService,
     )
 
-__all__: list[str] = ["EXTRACTION_REFUND_SKIPPED", "extract_conversation"]
+__all__: list[str] = ["extract_conversation"]
 
 logger = structlog.get_logger(__name__)
+
 
 # Counter incremented when the worker fails BEFORE the period_start lookup
 # completes. In that window we cannot guarantee the runtime period equals the
 # bucket the pre-charge debited (a period boundary may have been crossed since
 # ingest), so the refund is skipped. Manual reconcile signal -- see backlog
 # item from R1 / MEDIUM-2.
-_meter = metrics.get_meter("gubbi")
-EXTRACTION_REFUND_SKIPPED = _meter.create_counter(
-    name="extraction.refund_skipped_total",
-    description=(
-        "Pre-charge refund skipped because the worker failed before the "
-        "pre-charge period was known; partitioned by reason."
-    ),
-    unit="1",
-)
+@functools.lru_cache(maxsize=1)
+def _get_extraction_refund_skipped_counter() -> Counter:
+    """Lazily create the refund-skipped counter against the live meter.
+
+    CRIT-5 B5 (2026-05-22): the previous module-scope ``_meter.create_counter``
+    bound at import time, well before ``configure_otel`` ran during the
+    FastAPI lifespan -- so the counter held a NoOp instrument and silently
+    discarded every ``.add(...)``. Deferring creation to first call (and
+    re-priming via ``rebind_metrics_after_configure``) ensures the counter
+    binds to the SDK provider configured at lifespan time. Mirrors the
+    canonical pattern in ``gubbi.telemetry.metrics.initialize_metrics``.
+    """
+    return get_meter("gubbi").create_counter(
+        name="extraction.refund_skipped_total",
+        description=(
+            "Pre-charge refund skipped because the worker failed before the "
+            "pre-charge period was known; partitioned by reason."
+        ),
+        unit="1",
+    )
 
 
 # ---------------------------------------------------------------------------
 # Private helpers
 # ---------------------------------------------------------------------------
+
+
+def _resolve_provider_attrs(extraction_service: ExtractionService) -> tuple[str, str]:
+    """Resolve LLM ``provider_name`` and ``model_name`` for OTel span attrs.
+
+    Both names default to ``"unknown"`` when the provider has not been
+    wired yet (e.g., dependency-injection bug) or when the provider
+    object does not expose ``_model`` (e.g., a fake test provider).
+    Returns ``(provider_name, model_name)``.
+
+    Centralised so the categorize + extract span-emission sites in this
+    module do not drift in their attribute resolution.
+    """
+    llm = getattr(extraction_service, "_llm", None)
+    provider_name = type(llm).__name__ if llm is not None else "unknown"
+    model_name = (getattr(llm, "_model", None) if llm is not None else None) or "unknown"
+    return provider_name, model_name
 
 
 async def _check_idempotent(
@@ -151,18 +190,59 @@ async def _categorize_and_resolve_topic(
 
     On categorization failure logs an error with extras and re-raises.
     """
-    try:
-        categorization = await extraction_service.categorize_conversation(
-            message_dicts, existing_topics
+    llm_span_name = SpanNames.EXTRACTION_LLM_CALL
+    llm_start_ns = time.monotonic_ns()
+    provider_name, model_name = _resolve_provider_attrs(extraction_service)
+
+    with trace.get_tracer(_TRACER_NAME).start_as_current_span(llm_span_name) as llm_span:
+        safe_set_attributes(
+            llm_span_name,
+            llm_span,
+            {
+                "provider_name": provider_name,
+                "model_name": model_name,
+            },
         )
-    except Exception:
-        await log.error(
-            "Categorization failed",
-            user_id=user_id,
-            conversation_id=conversation_id,
-            exc_info=True,
+        try:
+            categorization = await extraction_service.categorize_conversation(
+                message_dicts, existing_topics
+            )
+        except Exception as exc:
+            llm_span.record_exception(exc)
+            # No ``description=`` on set_status: the canonical pattern in
+            # ``gubbi-common/audit/sql.py`` keeps span status descriptions
+            # empty so the un-sanitized exception message (which can carry
+            # LLM response content -- see ``service.py``'s ``_parse_content``)
+            # does not surface as the span's status_description in HyperDX.
+            # ``record_exception`` itself emits ``exception.message`` as a
+            # span event; we rely on the upstream sanitization
+            # (``service.py:_parse_content`` raises a content-free message)
+            # plus this canonical no-description pattern as defense in
+            # depth.
+            llm_span.set_status(Status(StatusCode.ERROR))
+            await log.error(
+                "Categorization failed",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                exc_info=True,
+            )
+            raise
+        latency_ms = (time.monotonic_ns() - llm_start_ns) / _NS_PER_MS
+        safe_set_attributes(
+            llm_span_name,
+            llm_span,
+            {
+                # Token counts are recorded as ``*_size`` (size in tokens):
+                # the gubbi-common allowlist (NEVER_EXEMPT_BASES) bans any
+                # key containing ``token`` as substring, so the natural
+                # ``prompt_token_count`` name is filtered. The ``_size``
+                # derivative suffix is exempt; the unit is implicit from
+                # the LLM call span context.
+                "prompt_size": int(categorization.input_tokens),
+                "completion_size": int(categorization.output_tokens),
+                "latency_ms": round(latency_ms, 2),
+            },
         )
-        raise
 
     raw_topic_path: str | None = categorization.topic_path
     topic_path: str | None = harden_llm_topic_path(raw_topic_path)
@@ -507,215 +587,300 @@ async def extract_conversation(
     effective_period_start: date = current_period_start()
     _period_start_known: bool = job_id == "unknown"
 
-    try:
-        # ------------------------------------------------------------------
-        # Phase 1 -- conn1: read-only load + early idempotency check.
-        # conn1 is released before any LLM call.
-        # ------------------------------------------------------------------
-        # period_start loaded from the job row so the budget delta in Phase 3
-        # lands in the same billing bucket that ingest pre-charged (B3-H2).
-        # Falls back to current_period_start() when job_id is 'unknown' (tests)
-        # or the row is not visible under RLS.
-        job_period_start: date | None = None
-        async with user_scoped_connection(pool, user_id=user_uuid) as conn1:
-            if await _check_idempotent(conn1, conversation_id, user_id, log):
-                return {
-                    "topic_path": None,
-                    "entries_created": 0,
-                    "input_tokens": 0,
-                    "output_tokens": 0,
-                    "cents_spent": 0,
-                    "skipped": True,
-                }
+    span_name = SpanNames.EXTRACTION_JOB
+    span_start_ns = time.monotonic_ns()
+    success = True
+    failure_reason: str | None = None
 
-            # Lifecycle: transition pending -> running.
-            if job_id != "unknown":
-                job_uuid_for_phase1 = UUID(job_id)
-                await extraction_jobs.mark_running(conn1, job_uuid_for_phase1)
-                job_period_start = await extraction_jobs.get_period_start(
-                    conn1, job_uuid_for_phase1
-                )
-                # Mark the period_start authoritative for refund routing only
-                # when the job row actually yielded a bucket. If the row is
-                # missing under RLS / invalid job_id and get_period_start()
-                # returns None, refunding against the runtime period would
-                # re-introduce the wrong-bucket bug across a month boundary.
-                _period_start_known = job_period_start is not None
-
-            _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
-                conn1, cipher, conversation_id, user_id, log
-            )
-        # conn1 released here -- pool slot returned before LLM calls.
-
-        # Resolve period_start: prefer the DB value; fall back to runtime.
-        effective_period_start = job_period_start or effective_period_start
-
-        # ------------------------------------------------------------------
-        # Phase 2 -- LLM phase: no database connection held.
-        # ------------------------------------------------------------------
-        categorization, topic_path = await _categorize_and_resolve_topic(
-            extraction_service, message_dicts, existing_topics, user_id, conversation_id, log
+    with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as job_span:
+        safe_set_attributes(
+            span_name,
+            job_span,
+            {
+                "job_id": str(job_id),
+                "user_id": str(user_id),
+                "conversation_id": int(conversation_id),
+            },
         )
-
-        if topic_path is None:
-            # No usable topic -- mark processed via a short dedicated connection.
-            await _mark_skipped_no_topic(pool, user_uuid, conversation_id, job_id)
-            return {
-                "topic_path": None,
-                "entries_created": 0,
-                "input_tokens": categorization.input_tokens,
-                "output_tokens": categorization.output_tokens,
-                "cents_spent": 0,
-                "skipped": True,
-            }
-
-        # Extract entries while no DB connection is held.
-        extraction_result: ExtractionEntriesResult
         try:
-            extraction_result = await extraction_service.extract_entries(message_dicts, topic_path)
-        except Exception:
-            await log.error(
-                "Entry extraction failed",
-                user_id=user_id,
-                conversation_id=conversation_id,
-                exc_info=True,
-            )
-            raise
-
-        extracted_entries = extraction_result.entries
-
-        # Accumulate token counts across both LLM calls and compute cost.
-        total_input_tokens = categorization.input_tokens + extraction_result.input_tokens
-        total_output_tokens = categorization.output_tokens + extraction_result.output_tokens
-        llm_provider = getattr(extraction_service, "_llm", None)
-        cents_spent = 0
-        if llm_provider is not None and callable(
-            getattr(llm_provider, "estimate_cost_cents", None)
-        ):
             try:
-                raw_cost = llm_provider.estimate_cost_cents(total_input_tokens, total_output_tokens)
-                # Guard against async mock returning a coroutine in tests.
-                if isinstance(raw_cost, int | float):
-                    cents_spent = int(round(raw_cost))
-            except Exception:
-                await log.warning("cost_estimation_failed", exc_info=True)
-                cents_spent = 0
+                # ------------------------------------------------------------------
+                # Phase 1 -- conn1: read-only load + early idempotency check.
+                # conn1 is released before any LLM call.
+                # ------------------------------------------------------------------
+                # period_start loaded from the job row so the budget delta in Phase 3
+                # lands in the same billing bucket that ingest pre-charged (B3-H2).
+                # Falls back to current_period_start() when job_id is 'unknown' (tests)
+                # or the row is not visible under RLS.
+                job_period_start: date | None = None
+                async with user_scoped_connection(pool, user_id=user_uuid) as conn1:
+                    if await _check_idempotent(conn1, conversation_id, user_id, log):
+                        return {
+                            "topic_path": None,
+                            "entries_created": 0,
+                            "input_tokens": 0,
+                            "output_tokens": 0,
+                            "cents_spent": 0,
+                            "skipped": True,
+                        }
 
-        # ------------------------------------------------------------------
-        # Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
-        # Second idempotency check here guards against a concurrent worker
-        # that raced through Phase 2 while we were doing LLM calls.
-        # ------------------------------------------------------------------
-        async with user_scoped_connection(pool, user_id=user_uuid) as conn2:  # noqa: SIM117
-            async with conn2.transaction():  # nested SAVEPOINT inside user_scoped_connection
-                # Last-write-wins guard: if another worker committed first, bail.
-                if await _check_idempotent(conn2, conversation_id, user_id, log):
-                    return {
-                        "topic_path": None,
-                        "entries_created": 0,
-                        "input_tokens": total_input_tokens,
-                        "output_tokens": total_output_tokens,
-                        "cents_spent": cents_spent,
-                        "skipped": True,
-                    }
+                    # Lifecycle: transition pending -> running.
+                    if job_id != "unknown":
+                        job_uuid_for_phase1 = UUID(job_id)
+                        await extraction_jobs.mark_running(conn1, job_uuid_for_phase1)
+                        job_period_start = await extraction_jobs.get_period_start(
+                            conn1, job_uuid_for_phase1
+                        )
+                        # Mark the period_start authoritative for refund routing only
+                        # when the job row actually yielded a bucket. If the row is
+                        # missing under RLS / invalid job_id and get_period_start()
+                        # returns None, refunding against the runtime period would
+                        # re-introduce the wrong-bucket bug across a month boundary.
+                        _period_start_known = job_period_start is not None
 
-                entries_created = await _persist_extraction(
-                    conn2,
-                    cipher,
-                    user_uuid,
+                    _meta, message_dicts, existing_topics = await _load_conversation_for_extraction(
+                        conn1, cipher, conversation_id, user_id, log
+                    )
+                # conn1 released here -- pool slot returned before LLM calls.
+
+                # Resolve period_start: prefer the DB value; fall back to runtime.
+                effective_period_start = job_period_start or effective_period_start
+
+                # ------------------------------------------------------------------
+                # Phase 2 -- LLM phase: no database connection held.
+                # ------------------------------------------------------------------
+                categorization, topic_path = await _categorize_and_resolve_topic(
+                    extraction_service,
+                    message_dicts,
+                    existing_topics,
+                    user_id,
                     conversation_id,
-                    topic_path,
-                    categorization,
-                    extracted_entries,
-                    extraction_attempt_id,
-                    job_id,
-                    cents_spent,
                     log,
                 )
 
-                # Best-effort budget delta write. Must NOT affect the SAVEPOINT:
-                # extraction succeeded and the row is committed; the pre-charge
-                # already protected the cap. Log + continue on any Redis failure.
-                # Uses effective_period_start (loaded from job row in Phase 1)
-                # to ensure the delta lands in the same bucket as the pre-charge.
+                if topic_path is None:
+                    # No usable topic -- mark processed via a short dedicated connection.
+                    await _mark_skipped_no_topic(pool, user_uuid, conversation_id, job_id)
+                    return {
+                        "topic_path": None,
+                        "entries_created": 0,
+                        "input_tokens": categorization.input_tokens,
+                        "output_tokens": categorization.output_tokens,
+                        "cents_spent": 0,
+                        "skipped": True,
+                    }
+
+                # Extract entries while no DB connection is held.
+                extraction_result: ExtractionEntriesResult
+                extract_llm_span_name = SpanNames.EXTRACTION_LLM_CALL
+                extract_llm_start_ns = time.monotonic_ns()
+                extract_provider_name, extract_model_name = _resolve_provider_attrs(
+                    extraction_service
+                )
+
+                with trace.get_tracer(_TRACER_NAME).start_as_current_span(
+                    extract_llm_span_name
+                ) as extract_llm_span:
+                    safe_set_attributes(
+                        extract_llm_span_name,
+                        extract_llm_span,
+                        {
+                            "provider_name": extract_provider_name,
+                            "model_name": extract_model_name,
+                        },
+                    )
+                    try:
+                        extraction_result = await extraction_service.extract_entries(
+                            message_dicts, topic_path
+                        )
+                    except Exception as exc:
+                        extract_llm_span.record_exception(exc)
+                        # No ``description=``: see comment on the
+                        # categorize llm_span above. Same rationale --
+                        # avoid surfacing un-sanitized exception messages
+                        # (potentially LLM content) as the span's
+                        # status_description.
+                        extract_llm_span.set_status(Status(StatusCode.ERROR))
+                        await log.error(
+                            "Entry extraction failed",
+                            user_id=user_id,
+                            conversation_id=conversation_id,
+                            exc_info=True,
+                        )
+                        raise
+                    extract_latency_ms = (time.monotonic_ns() - extract_llm_start_ns) / _NS_PER_MS
+                    safe_set_attributes(
+                        extract_llm_span_name,
+                        extract_llm_span,
+                        {
+                            # See note on ``_size`` naming in
+                            # ``_categorize_and_resolve_topic``: the
+                            # gubbi-common allowlist bans the ``token``
+                            # substring, so token counts ride the
+                            # ``*_size`` derivative.
+                            "prompt_size": int(extraction_result.input_tokens),
+                            "completion_size": int(extraction_result.output_tokens),
+                            "latency_ms": round(extract_latency_ms, 2),
+                        },
+                    )
+
+                extracted_entries = extraction_result.entries
+
+                # Accumulate token counts across both LLM calls and compute cost.
+                total_input_tokens = categorization.input_tokens + extraction_result.input_tokens
+                total_output_tokens = categorization.output_tokens + extraction_result.output_tokens
+                llm_provider = getattr(extraction_service, "_llm", None)
+                cents_spent = 0
+                if llm_provider is not None and callable(
+                    getattr(llm_provider, "estimate_cost_cents", None)
+                ):
+                    try:
+                        raw_cost = llm_provider.estimate_cost_cents(
+                            total_input_tokens, total_output_tokens
+                        )
+                        # Guard against async mock returning a coroutine in tests.
+                        if isinstance(raw_cost, int | float):
+                            cents_spent = int(round(raw_cost))
+                    except Exception:
+                        await log.warning("cost_estimation_failed", exc_info=True)
+                        cents_spent = 0
+
+                # ------------------------------------------------------------------
+                # Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
+                # Second idempotency check here guards against a concurrent worker
+                # that raced through Phase 2 while we were doing LLM calls.
+                # ------------------------------------------------------------------
+                async with user_scoped_connection(pool, user_id=user_uuid) as conn2:  # noqa: SIM117
+                    # nested SAVEPOINT inside user_scoped_connection
+                    async with conn2.transaction():
+                        # Last-write-wins guard: if another worker committed first, bail.
+                        if await _check_idempotent(conn2, conversation_id, user_id, log):
+                            return {
+                                "topic_path": None,
+                                "entries_created": 0,
+                                "input_tokens": total_input_tokens,
+                                "output_tokens": total_output_tokens,
+                                "cents_spent": cents_spent,
+                                "skipped": True,
+                            }
+
+                        entries_created = await _persist_extraction(
+                            conn2,
+                            cipher,
+                            user_uuid,
+                            conversation_id,
+                            topic_path,
+                            categorization,
+                            extracted_entries,
+                            extraction_attempt_id,
+                            job_id,
+                            cents_spent,
+                            log,
+                        )
+
+                        # Best-effort budget delta write. Must NOT affect the SAVEPOINT:
+                        # extraction succeeded and the row is committed; the pre-charge
+                        # already protected the cap. Log + continue on any Redis failure.
+                        # Uses effective_period_start (loaded from job row in Phase 1)
+                        # to ensure the delta lands in the same bucket as the pre-charge.
+                        helper = ctx.get("budget_helper")
+                        if helper is not None:
+                            try:
+                                await helper.record_actual_cost(
+                                    user_id=user_uuid,
+                                    period_start=effective_period_start,
+                                    actual_cents=cents_spent,
+                                    estimated_cents=PRE_CHARGE_CENTS,
+                                )
+                            except Exception:  # broad: redis errors come in many shapes
+                                await log.warning("budget_delta_failed", exc_info=True)
+                # conn2 released here -- SAVEPOINT committed atomically.
+
+            except Exception as exc:
+                # SAVEPOINT is already poisoned (rolled back). Open a FRESH connection
+                # to record the failure terminal state -- do NOT reuse conn1 or conn2.
+                # Pre-charge refund first: actual=0 against the original PRE_CHARGE_CENTS
+                # estimate produces a negative delta, returning the budget the worker
+                # never spent. Best-effort: a Redis failure here must not block the
+                # extraction_jobs row update that follows. The two side effects are
+                # independent so the operator never loses one because the other failed.
+                #
+                # Refund is GATED by _period_start_known (R1 / MEDIUM-2): if the
+                # worker failed before the job row's period_start was read, we cannot
+                # guarantee the runtime period matches the bucket the pre-charge
+                # debited (a period boundary may have been crossed). In that window
+                # the refund is skipped and a metric is emitted so an operator can
+                # manually reconcile. Refunding into the wrong bucket is worse than
+                # not refunding -- the user gets a credit they shouldn't AND has a
+                # phantom debit in the original period.
                 helper = ctx.get("budget_helper")
                 if helper is not None:
-                    try:
-                        await helper.record_actual_cost(
-                            user_id=user_uuid,
-                            period_start=effective_period_start,
-                            actual_cents=cents_spent,
-                            estimated_cents=PRE_CHARGE_CENTS,
+                    if not _period_start_known:
+                        await logger.warning(
+                            "extraction.refund_skipped_unknown_period",
+                            user_id=str(user_uuid),
+                            conversation_id=conversation_id,
+                            job_id=job_id,
                         )
-                    except Exception:  # broad: redis errors come in many shapes
-                        await log.warning("budget_delta_failed", exc_info=True)
-        # conn2 released here -- SAVEPOINT committed atomically.
+                        _get_extraction_refund_skipped_counter().add(
+                            1,
+                            attributes={"reason": "unknown_period"},
+                        )
+                    else:
+                        try:
+                            await helper.record_actual_cost(
+                                user_id=user_uuid,
+                                period_start=effective_period_start,
+                                actual_cents=0,
+                                estimated_cents=PRE_CHARGE_CENTS,
+                            )
+                        except Exception:  # broad: redis errors come in many shapes
+                            await log.warning("budget_refund_failed", exc_info=True)
+                if job_id != "unknown":
+                    error_code = _classify_error(exc)
+                    await _mark_job_failed(pool, user_uuid, job_id, conversation_id, error_code)
+                raise
 
-    except Exception as exc:
-        # SAVEPOINT is already poisoned (rolled back). Open a FRESH connection
-        # to record the failure terminal state -- do NOT reuse conn1 or conn2.
-        # Pre-charge refund first: actual=0 against the original PRE_CHARGE_CENTS
-        # estimate produces a negative delta, returning the budget the worker
-        # never spent. Best-effort: a Redis failure here must not block the
-        # extraction_jobs row update that follows. The two side effects are
-        # independent so the operator never loses one because the other failed.
-        #
-        # Refund is GATED by _period_start_known (R1 / MEDIUM-2): if the
-        # worker failed before the job row's period_start was read, we cannot
-        # guarantee the runtime period matches the bucket the pre-charge
-        # debited (a period boundary may have been crossed). In that window
-        # the refund is skipped and a metric is emitted so an operator can
-        # manually reconcile. Refunding into the wrong bucket is worse than
-        # not refunding -- the user gets a credit they shouldn't AND has a
-        # phantom debit in the original period.
-        helper = ctx.get("budget_helper")
-        if helper is not None:
-            if not _period_start_known:
-                await logger.warning(
-                    "extraction.refund_skipped_unknown_period",
-                    user_id=str(user_uuid),
-                    conversation_id=conversation_id,
-                    job_id=job_id,
-                )
-                EXTRACTION_REFUND_SKIPPED.add(
-                    1,
-                    attributes={"reason": "unknown_period"},
-                )
-            else:
-                try:
-                    await helper.record_actual_cost(
-                        user_id=user_uuid,
-                        period_start=effective_period_start,
-                        actual_cents=0,
-                        estimated_cents=PRE_CHARGE_CENTS,
-                    )
-                except Exception:  # broad: redis errors come in many shapes
-                    await log.warning("budget_refund_failed", exc_info=True)
-        if job_id != "unknown":
-            error_code = _classify_error(exc)
-            await _mark_job_failed(pool, user_uuid, job_id, conversation_id, error_code)
-        raise
+            # ------------------------------------------------------------------
+            # Publish progress event (outside DB connection -- non-fatal).
+            # ------------------------------------------------------------------
+            await _publish_progress(
+                redis, user_id, conversation_id, str(job_id), topic_path, entries_created, log
+            )
 
-    # ------------------------------------------------------------------
-    # Publish progress event (outside DB connection -- non-fatal).
-    # ------------------------------------------------------------------
-    await _publish_progress(
-        redis, user_id, conversation_id, str(job_id), topic_path, entries_created, log
-    )
+            await log.info(
+                "Extraction complete",
+                user_id=user_id,
+                conversation_id=conversation_id,
+                topic_path=topic_path,
+                entries_created=entries_created,
+            )
 
-    await log.info(
-        "Extraction complete",
-        user_id=user_id,
-        conversation_id=conversation_id,
-        topic_path=topic_path,
-        entries_created=entries_created,
-    )
-
-    return {
-        "topic_path": topic_path,
-        "entries_created": entries_created,
-        "input_tokens": total_input_tokens,
-        "output_tokens": total_output_tokens,
-        "cents_spent": cents_spent,
-        "skipped": False,
-    }
+            return {
+                "topic_path": topic_path,
+                "entries_created": entries_created,
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "cents_spent": cents_spent,
+                "skipped": False,
+            }
+        except Exception as exc:
+            success = False
+            failure_reason = _classify_error(exc)
+            job_span.record_exception(exc)
+            # No ``description=``: same rationale as the llm_span sites
+            # above. ``record_exception`` emits the type+message as an
+            # event; the upstream sanitization at
+            # ``service.py:_parse_content`` keeps content out of the
+            # message string.
+            job_span.set_status(Status(StatusCode.ERROR))
+            raise
+        finally:
+            latency_ms = (time.monotonic_ns() - span_start_ns) / _NS_PER_MS
+            final_attrs: dict[str, Any] = {
+                "success": success,
+                "latency_ms": round(latency_ms, 2),
+            }
+            if failure_reason is not None:
+                final_attrs["failure_reason"] = failure_reason
+            safe_set_attributes(span_name, job_span, final_attrs)

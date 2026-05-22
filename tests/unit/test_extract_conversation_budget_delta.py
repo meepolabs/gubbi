@@ -461,7 +461,7 @@ async def test_refund_skipped_with_metric_when_period_unknown() -> None:
     `extraction.refund_skipped_total{reason=unknown_period}` so an operator
     can manually reconcile.
     """
-    from gubbi.extraction.jobs.extract_conversation import EXTRACTION_REFUND_SKIPPED
+    from gubbi.extraction.jobs.extract_conversation import _get_extraction_refund_skipped_counter
 
     redis = AsyncMock()
     helper = MagicMock()
@@ -476,6 +476,11 @@ async def test_refund_skipped_with_metric_when_period_unknown() -> None:
 
     def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
         add_calls.append((amount, attributes or {}))
+
+    # Bind the counter to a local before patch.object so the lru_cache
+    # is sealed deliberately rather than as an implicit side effect of
+    # constructing the patches list.
+    refund_counter = _get_extraction_refund_skipped_counter()
 
     patches = [
         patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
@@ -501,7 +506,7 @@ async def test_refund_skipped_with_metric_when_period_unknown() -> None:
             "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
             new=AsyncMock(return_value=date(2026, 5, 1)),
         ),
-        patch.object(EXTRACTION_REFUND_SKIPPED, "add", side_effect=_capture_add),
+        patch.object(refund_counter, "add", side_effect=_capture_add),
     ]
 
     with (
@@ -599,7 +604,7 @@ async def test_refund_skipped_with_metric_when_job_period_lookup_returns_none() 
     the worker still does not know which bucket ingest pre-charged. Refunding
     against the runtime period would mis-bucket across a month boundary.
     """
-    from gubbi.extraction.jobs.extract_conversation import EXTRACTION_REFUND_SKIPPED
+    from gubbi.extraction.jobs.extract_conversation import _get_extraction_refund_skipped_counter
 
     redis = AsyncMock()
     helper = MagicMock()
@@ -613,6 +618,10 @@ async def test_refund_skipped_with_metric_when_job_period_lookup_returns_none() 
 
     def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
         add_calls.append((amount, attributes or {}))
+
+    # Bind the counter to a local before patch.object (see helper-binding
+    # rationale at the first patch.object site in this module).
+    refund_counter = _get_extraction_refund_skipped_counter()
 
     patches = [
         patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
@@ -637,7 +646,7 @@ async def test_refund_skipped_with_metric_when_job_period_lookup_returns_none() 
             "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
             new=AsyncMock(return_value=None),
         ),
-        patch.object(EXTRACTION_REFUND_SKIPPED, "add", side_effect=_capture_add),
+        patch.object(refund_counter, "add", side_effect=_capture_add),
     ]
 
     with (
