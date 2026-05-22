@@ -101,6 +101,11 @@ _TEST_ENV: dict[str, str] = {
     "JOURNAL_SERVER_URL": "http://localhost:8100",
     "JOURNAL_DB_APP_URL": TEST_DATABASE_URL,
     "JOURNAL_OPERATOR_EMAIL": "operator@test.local",
+    # Disable the OTLP exporter under test: no code path should dial a
+    # live otel-collector at localhost:4317 during the suite (the worker
+    # now wires the meter at startup -- see #138). Tests that need real
+    # instruments install their own in-memory MeterProvider directly.
+    "OTEL_ENABLED": "false",
 }
 
 

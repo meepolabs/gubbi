@@ -7,15 +7,15 @@ the lifespan and read back through typed accessors in
 ``gubbi.app_state``.
 """
 
+from __future__ import annotations
+
 import asyncio
 import os
 import textwrap
-from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-import asyncpg
 import httpx
 import redis.asyncio as aioredis
 import structlog
@@ -26,7 +26,6 @@ from fastapi.responses import JSONResponse
 from gubbi_common.auth.prm import build_prm_metadata_url
 from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
-from mcp.server.fastmcp import FastMCP
 from starlette.middleware import Middleware
 
 from gubbi.app_context import AppContext
@@ -63,8 +62,15 @@ from gubbi.storage.exceptions import DatabaseUnavailable
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import configure_otel
 from gubbi.telemetry.logger import initialize_logger
+from gubbi.telemetry.metrics import record_replica_count_warning
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncGenerator
+
+    import asyncpg
+    from mcp.server.fastmcp import FastMCP
 
 __all__: list[str] = [
     "create_mcp_server",
@@ -248,6 +254,49 @@ async def _build_app_ctx(
     )
     mcp = create_mcp_server(app_ctx)
     return app_ctx, pool, admin_pool, mcp
+
+
+def _validate_replica_count() -> int:
+    """Parse and validate ``JOURNAL_REPLICA_COUNT`` (default "1").
+
+    M4 #138: gubbi's per-pod resources -- the DB connection pool and any
+    per-pod rate-limit logic -- run in-process, so under a multi-replica
+    deployment the effective per-pod cap multiplies by the replica count.
+    The lifespan logs a structured WARNING + increments an OTel counter
+    when the count is > 1 so the over-provisioning gap is visible before
+    it bites.
+
+    Mirrors the parse/validate shape of cloud-api's
+    ``_check_connection_budget`` (int-coerce, ``>= 1`` validate, fail fast
+    with an actionable RuntimeError) but deliberately does NOT read
+    Postgres ``max_connections`` or enforce a hard connection budget --
+    that guard is cloud-api-specific (#138 is the soft alarm only). Reads
+    the SAME ``JOURNAL_REPLICA_COUNT`` env var, per-container, so a single
+    deploy variable drives every service's self-report.
+
+    Assumes the deploy sets ``JOURNAL_REPLICA_COUNT`` PER CONTAINER -- each
+    service's container (gubbi HTTP, extraction worker) gets the env value
+    matching ITS OWN replica count. A single shared/global value injected
+    identically into every container would mis-report (each service would
+    inherit the others' replica counts rather than its own).
+
+    Returns the validated replica count.
+    """
+    raw = os.environ.get("JOURNAL_REPLICA_COUNT", "1")
+    try:
+        replicas = int(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"JOURNAL_REPLICA_COUNT={raw!r} is not an integer; "
+            "set it to the deployed replica count or unset for default 1"
+        ) from exc
+
+    if replicas < 1:
+        raise RuntimeError(
+            f"JOURNAL_REPLICA_COUNT={replicas} must be >= 1; "
+            "set it to the deployed replica count or unset for default 1"
+        )
+    return replicas
 
 
 @asynccontextmanager
@@ -462,6 +511,51 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         allowed_origins=ALLOWED_ORIGINS,
     )
     app.mount("/mcp", origin_validated_mcp)
+
+    # M4 #138: gubbi's per-pod DB connection pool runs in-process -- under
+    # a multi-replica deploy the cluster carries ``pool_max_per_pod *
+    # REPLICA_COUNT`` connections from gubbi alone, and the cloud-api
+    # startup connection-budget guard does NOT see them (it only counts
+    # cloud-api pools). gubbi has no in-process per-user concurrency
+    # limiter today, so the DB pool IS the resource that goes N-fold here.
+    # Log a structured WARNING + increment the alertable counter at
+    # startup so the over-provisioning is visible in HyperDX before a
+    # connection-refused storm at first peak. Default replica count is 1,
+    # so single-instance dev does not warn. We intentionally do NOT port
+    # cloud-api's hard ``max_connections`` RuntimeError guard -- #138 is
+    # the soft alarm only.
+    replica_count = _validate_replica_count()
+    if replica_count > 1:
+        # Read the LIVE pool max sizes rather than assuming constants: the
+        # admin pool is opened via ``init_pool(settings.db.admin_url)`` with
+        # no max_size override, so it inherits the app-pool default -- a
+        # constant-based estimate would under-report. Summing the live
+        # ``get_max_size()`` stays correct regardless of how each pool was
+        # actually sized. admin_pool is None in single-tenant dev (no
+        # BYPASSRLS pool opened); count only the app pool in that shape.
+        pool_max_per_pod = pool.get_max_size() + (
+            admin_pool.get_max_size() if admin_pool is not None else 0
+        )
+        await logger.warning(
+            "db_pool_over_provisioned",
+            db_pool_max_per_pod=pool_max_per_pod,
+            replica_count=replica_count,
+            effective_db_connections=pool_max_per_pod * replica_count,
+            note=(
+                "DB connection pool is per-pod; effective gubbi DB "
+                "connections = POOL_MAX_PER_POD * REPLICA_COUNT. The "
+                "cloud-api startup budget guard does not account for "
+                "these -- watch the cluster max_connections headroom."
+            ),
+        )
+        # Alertable counterpart to the WARNING above. The OTel counter NAME
+        # is shared cross-service (gateway.replica_count_warning); HyperDX
+        # rules fire on the metric directly, and log-stream sampling can
+        # drop the WARNING but not the counter. Emitters are distinguished
+        # by the service.name RESOURCE attribute (set in configure_otel),
+        # not a metric attribute -- matches cloud-api's helper exactly so
+        # one alert rule rolls up across all three services.
+        record_replica_count_warning(replica_count=replica_count)
 
     try:
         async with mcp.session_manager.run():

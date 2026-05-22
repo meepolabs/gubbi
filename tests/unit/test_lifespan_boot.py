@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import structlog
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
 
@@ -150,6 +151,14 @@ def test_module_import_has_no_side_effects_with_minimal_env(
 # ---------------------------------------------------------------------------
 
 
+# Stub app-pool max size returned by ``pool.get_max_size()`` in the lifespan
+# stubs. The lifespan's #138 WARNING reads the LIVE pool max via
+# ``get_max_size()`` (not a constant), so the stub must answer with a real
+# int. Kept distinct from the production ``APP_POOL_SIZE_MAX`` so the test
+# pins the live-read contract, not a particular configured size.
+_STUB_APP_POOL_MAX = 12
+
+
 def _build_stub_app_ctx() -> tuple[Any, Any, Any, Any]:
     """Return ``(app_ctx, pool, admin_pool, mcp)`` mimicking ``_build_app_ctx``.
 
@@ -159,6 +168,10 @@ def _build_stub_app_ctx() -> tuple[Any, Any, Any, Any]:
     """
     pool = MagicMock()
     pool.close = AsyncMock()
+    # The #138 WARNING reads the live per-pod pool max via get_max_size();
+    # a bare MagicMock would return a MagicMock (not an int) and break the
+    # arithmetic. Answer with a real int.
+    pool.get_max_size = MagicMock(return_value=_STUB_APP_POOL_MAX)
     admin_pool = None  # exercises the no-admin-pool branch
 
     mcp_app = MagicMock()  # ASGI handler stand-in
@@ -441,3 +454,138 @@ async def test_lifespan_aborts_when_redis_ping_fails(
     handles["oauth_storage"].close.assert_awaited_once()
     handles["redis_client"].aclose.assert_awaited_once()
     handles["pool"].close.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Case E: replica-count over-provisioning WARNING + alertable counter (#138).
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_lifespan_warns_and_increments_counter_when_replicas_gt_1(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """JOURNAL_REPLICA_COUNT=2 -> structured WARNING + replica-count counter.
+
+    gubbi's DB connection pool is per-pod; at N replicas the cluster
+    carries N * pool_max from gubbi alone and the cloud-api startup budget
+    guard does not see it. The lifespan must surface this with the
+    ``db_pool_over_provisioned`` WARNING (carrying the per-pod / effective
+    fields, read from the LIVE pool max) AND the alertable
+    ``gateway.replica_count_warning`` counter (the log-sampling-proof
+    counterpart -- counter NAME is shared cross-service, only the WARNING
+    event key is gubbi-specific). Emitter distinction is via the
+    ``service.name`` RESOURCE attribute set in ``configure_otel(app)``,
+    not a metric attribute, so the helper takes only ``replica_count``.
+    """
+    _drop_optional_env(monkeypatch)
+    _patch_lifespan_dependencies(monkeypatch)
+    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "2")
+
+    # Patch the counter helper so we assert the alertable signal fired
+    # without standing up a real OTel meter provider in this smoke test.
+    record_mock = MagicMock()
+    monkeypatch.setattr("gubbi.main.record_replica_count_warning", record_mock)
+
+    app = FastAPI(lifespan=gubbi.main.lifespan)
+
+    with structlog.testing.capture_logs() as logs:
+        async with LifespanManager(app):
+            pass
+
+    # Counter incremented exactly once. The emitter ("gubbi") is
+    # distinguished via the service.name RESOURCE attribute set in
+    # configure_otel(app), not via a metric attribute -- the helper takes
+    # only replica_count.
+    record_mock.assert_called_once_with(replica_count=2)
+
+    # The structured WARNING fired with the over-provisioning fields.
+    warnings = [
+        log
+        for log in logs
+        if log.get("event") == "db_pool_over_provisioned" and log.get("log_level") == "warning"
+    ]
+    assert len(warnings) == 1, f"expected one over-provisioning WARNING, got {warnings}"
+    emitted = warnings[0]
+    assert emitted["replica_count"] == 2
+    # admin_pool is None in this stub -> per-pod footprint is the live app
+    # pool max (read via get_max_size(), here the stub's _STUB_APP_POOL_MAX).
+    assert emitted["db_pool_max_per_pod"] == _STUB_APP_POOL_MAX
+    assert (
+        emitted["effective_db_connections"] == _STUB_APP_POOL_MAX * 2
+    ), "effective DB connections must be POOL_MAX_PER_POD * REPLICA_COUNT"
+
+
+@pytest.mark.unit
+async def test_lifespan_silent_at_default_replica_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (unset) JOURNAL_REPLICA_COUNT=1 -> no WARNING, no counter.
+
+    Single-instance dev (the default) must not warn -- the over-
+    provisioning gap only exists at > 1 replicas.
+    """
+    _drop_optional_env(monkeypatch)
+    _patch_lifespan_dependencies(monkeypatch)
+    monkeypatch.delenv("JOURNAL_REPLICA_COUNT", raising=False)
+
+    record_mock = MagicMock()
+    monkeypatch.setattr("gubbi.main.record_replica_count_warning", record_mock)
+
+    app = FastAPI(lifespan=gubbi.main.lifespan)
+
+    with structlog.testing.capture_logs() as logs:
+        async with LifespanManager(app):
+            pass
+
+    record_mock.assert_not_called()
+    assert not [
+        log for log in logs if log.get("event") == "db_pool_over_provisioned"
+    ], "default single-replica deploy must stay silent"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("value", "match"),
+    [
+        ("abc", "not an integer"),
+        ("0", ">= 1"),
+        ("-3", ">= 1"),
+    ],
+)
+async def test_lifespan_rejects_invalid_replica_count(
+    monkeypatch: pytest.MonkeyPatch,
+    value: str,
+    match: str,
+) -> None:
+    """A non-integer or < 1 JOURNAL_REPLICA_COUNT aborts the lifespan."""
+    _drop_optional_env(monkeypatch)
+    _patch_lifespan_dependencies(monkeypatch)
+    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", value)
+    monkeypatch.setattr("gubbi.main.record_replica_count_warning", MagicMock())
+
+    app = FastAPI(lifespan=gubbi.main.lifespan)
+
+    with pytest.raises(RuntimeError, match=match):
+        async with LifespanManager(app):
+            pass
+
+
+@pytest.mark.unit
+def test_validate_replica_count_helper_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unit-cover ``_validate_replica_count`` parse/validate in isolation."""
+    monkeypatch.delenv("JOURNAL_REPLICA_COUNT", raising=False)
+    assert gubbi.main._validate_replica_count() == 1
+
+    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "5")
+    assert gubbi.main._validate_replica_count() == 5
+
+    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "abc")
+    with pytest.raises(RuntimeError, match="not an integer"):
+        gubbi.main._validate_replica_count()
+
+    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "0")
+    with pytest.raises(RuntimeError, match=">= 1"):
+        gubbi.main._validate_replica_count()
