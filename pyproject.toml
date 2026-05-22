@@ -8,7 +8,7 @@ readme = "README.md"
 package-mode = false
 
 [tool.poetry.dependencies]
-python = "^3.11"
+python = "~3.12"
 fastapi = "^0.115.6"
 uvicorn = "^0.34.0"
 pydantic = "^2.13.2"  # Harmonised floor with gubbi-cloud.
@@ -48,7 +48,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "e4c08ee", extras = ["db"] }  # 0.13.2: + RESOURCE_DOCUMENTATION_URL shared constant.
+gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "6e56b81", extras = ["db"] }  # 0.13.2: + RESOURCE_DOCUMENTATION_URL shared constant + python ~3.12 pin.
 
 # LLM extraction — Arq worker + Anthropic API
 arq = "^0.26.0"
