@@ -32,7 +32,7 @@ from anthropic import (
 from anthropic.types import Message, Usage
 
 from gubbi.extraction.llm.anthropic_provider import (
-    ANTHROPIC_RETRY_COUNT,
+    _get_anthropic_retry_counter,
     _translate_anthropic_error,
 )
 from gubbi.extraction.llm.provider import (
@@ -385,9 +385,13 @@ async def test_retry_observability_logs_and_counter() -> None:
     async def no_sleep(_d: float) -> None:
         return None
 
+    # Bind the counter to a local before patch.object, so the lru_cache
+    # is sealed deliberately rather than as an implicit side effect of
+    # evaluating the with-statement arguments.
+    retry_counter = _get_anthropic_retry_counter()
     with (
         patch.object(provider._client.messages, "create", new_callable=AsyncMock) as mock_create,
-        patch.object(ANTHROPIC_RETRY_COUNT, "add", side_effect=_capture_add),
+        patch.object(retry_counter, "add", side_effect=_capture_add),
         patch("gubbi.extraction.llm.anthropic_provider.logger.info", side_effect=_capture_info),
         patch("asyncio.sleep", new=no_sleep),
     ):
@@ -432,9 +436,12 @@ async def test_retry_observability_emits_exhausted_on_budget_end() -> None:
     async def no_sleep(_d: float) -> None:
         return None
 
+    # Bind the counter to a local (see helper-binding rationale at the
+    # first patch.object site above).
+    retry_counter = _get_anthropic_retry_counter()
     with (
         patch.object(provider._client.messages, "create", new_callable=AsyncMock) as mock_create,
-        patch.object(ANTHROPIC_RETRY_COUNT, "add", side_effect=_capture_add),
+        patch.object(retry_counter, "add", side_effect=_capture_add),
         patch("gubbi.extraction.llm.anthropic_provider.logger.info", side_effect=_capture_info),
         patch("asyncio.sleep", new=no_sleep),
     ):

@@ -28,8 +28,9 @@ from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
 from gubbi.extraction.service import ExtractionService
 from gubbi.storage.pg_setup import init_pool
+from gubbi.telemetry import rebind_metrics_after_configure
 from gubbi.telemetry.logger import initialize_logger
-from gubbi.telemetry.metrics import initialize_metrics, record_replica_count_warning
+from gubbi.telemetry.metrics import record_replica_count_warning
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -162,9 +163,11 @@ def _configure_worker_telemetry(settings: Settings) -> None:
     AND a ``MeterProvider`` with a periodic OTLP metric reader. (It stays
     FastAPI-decoupled, so no FastAPI / asyncpg / redis auto-instrumentors
     are wired here -- those need the ASGI app and live on the HTTP path.)
-    After wiring, ``initialize_metrics()`` is re-primed so the
-    ``gateway.replica_count_warning`` counter -- and any future worker
-    metric -- binds to the live MeterProvider and actually exports.
+    After wiring, ``rebind_metrics_after_configure()`` is invoked so the
+    ``gateway.replica_count_warning`` counter -- and the three B5
+    orphan-counter factories (orphan_cleanup, extract_conversation,
+    anthropic_provider) -- bind to the live MeterProvider and actually
+    export.
 
     Deploy dependency: because this enables OTLP export, the worker's
     deploy must set ``OTEL_EXPORTER_OTLP_ENDPOINT`` (and may set
@@ -202,15 +205,18 @@ def _configure_worker_telemetry(settings: Settings) -> None:
             service_version=_gubbi_version,
             deployment_environment=settings.app_env,
         )
-        # initialize_metrics() is lru_cached; clear so it re-binds to the
-        # MeterProvider just installed above rather than a stale NoOp handle.
-        # The cache_clear + re-prime is NOT atomic, but it is safe here only
-        # because the health-server thread started later in ``startup`` does
-        # not call any metric helper during boot -- nothing races this swap.
-        # If a startup-time metric emitter is added to that thread (or any
-        # other), this re-prime needs a lock.
-        initialize_metrics.cache_clear()
-        initialize_metrics()
+        # Re-prime ALL metric instruments against the freshly installed
+        # MeterProvider. Goes through ``rebind_metrics_after_configure`` --
+        # the same hook the FastAPI lifespan uses -- so the canonical
+        # ``initialize_metrics`` lru_cache AND the three B5 orphan-counter
+        # factories (orphan_cleanup, extract_conversation, anthropic_provider)
+        # all bind to the SDK provider rather than a stale NoOp handle.
+        # The cache_clear + re-prime sequence is NOT atomic, but it is safe
+        # here only because the health-server thread started later in
+        # ``startup`` does not call any metric helper during boot --
+        # nothing races this swap. If a startup-time metric emitter is
+        # added to that thread (or any other), this re-prime needs a lock.
+        rebind_metrics_after_configure()
         # Latch only after a clean wiring: a failed configure leaves the
         # guard unset so a later retry (e.g. a re-armed test) can try again.
         _WORKER_TELEMETRY_CONFIGURED = True

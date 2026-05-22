@@ -1,4 +1,5 @@
 import asyncio
+import functools
 import random
 from collections.abc import Mapping
 from typing import Any
@@ -17,7 +18,7 @@ from anthropic import (
     RateLimitError,
     UnprocessableEntityError,
 )
-from opentelemetry import metrics
+from opentelemetry.metrics import Counter, get_meter
 
 from gubbi.config import LLMConfig
 from gubbi.constants import ANTHROPIC_MAX_RETRIES, ANTHROPIC_REQUEST_TIMEOUT_SECS
@@ -33,15 +34,27 @@ from gubbi.extraction.llm.provider import (
 
 logger = structlog.get_logger(__name__)
 
+
 # Retry observability counter. Emitted per retry attempt with an attribute
 # describing whether the attempt was followed by another retry or marked the
 # end of the budget.
-_meter = metrics.get_meter("gubbi")
-ANTHROPIC_RETRY_COUNT = _meter.create_counter(
-    name="anthropic.retry_count_total",
-    description="Anthropic provider retry attempts, partitioned by result and error_class",
-    unit="1",
-)
+@functools.lru_cache(maxsize=1)
+def _get_anthropic_retry_counter() -> Counter:
+    """Lazily create the anthropic-retry counter against the live meter.
+
+    CRIT-5 B5 (2026-05-22): the previous module-scope ``_meter.create_counter``
+    bound at import time, well before ``configure_otel`` ran during the
+    FastAPI lifespan -- so the counter held a NoOp instrument and silently
+    discarded every ``.add(...)``. Deferring creation to first call (and
+    re-priming via ``rebind_metrics_after_configure``) ensures the counter
+    binds to the SDK provider configured at lifespan time. Mirrors the
+    canonical pattern in ``gubbi.telemetry.metrics.initialize_metrics``.
+    """
+    return get_meter("gubbi").create_counter(
+        name="anthropic.retry_count_total",
+        description="Anthropic provider retry attempts, partitioned by result and error_class",
+        unit="1",
+    )
 
 
 def _translate_anthropic_error(exc: Exception) -> LLMProviderError:
@@ -211,7 +224,7 @@ class AnthropicProvider(LLMProvider):
                         error_class=error_class,
                         exhausted=False,
                     )
-                    ANTHROPIC_RETRY_COUNT.add(
+                    _get_anthropic_retry_counter().add(
                         1,
                         attributes={"result": "retried", "error_class": error_class},
                     )
@@ -222,7 +235,7 @@ class AnthropicProvider(LLMProvider):
                     attempt=attempt + 1,
                     error_class=error_class,
                 )
-                ANTHROPIC_RETRY_COUNT.add(
+                _get_anthropic_retry_counter().add(
                     1,
                     attributes={"result": "exhausted", "error_class": error_class},
                 )
@@ -238,6 +251,5 @@ class AnthropicProvider(LLMProvider):
 
 
 __all__: list[str] = [
-    "ANTHROPIC_RETRY_COUNT",
     "AnthropicProvider",
 ]

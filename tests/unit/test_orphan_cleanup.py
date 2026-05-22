@@ -11,7 +11,7 @@ import pytest
 
 from gubbi.extraction.orphan_cleanup import (
     _RUNNING_THRESHOLD_SECS,
-    ORPHAN_CLEANUP_SWEPT,
+    _get_orphan_cleanup_swept_counter,
     run_orphan_cleanup,
 )
 
@@ -156,7 +156,8 @@ async def test_otel_counter_swept_attribute() -> None:
     def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
         add_calls.append((amount, attributes or {}))
 
-    with patch.object(ORPHAN_CLEANUP_SWEPT, "add", side_effect=_capture_add):
+    counter = _get_orphan_cleanup_swept_counter()
+    with patch.object(counter, "add", side_effect=_capture_add):
         await _run_one_cycle(pool)
 
     assert any(
@@ -174,7 +175,8 @@ async def test_otel_counter_none_attribute() -> None:
     def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
         add_calls.append((amount, attributes or {}))
 
-    with patch.object(ORPHAN_CLEANUP_SWEPT, "add", side_effect=_capture_add):
+    counter = _get_orphan_cleanup_swept_counter()
+    with patch.object(counter, "add", side_effect=_capture_add):
         await _run_one_cycle(pool)
 
     assert any(
@@ -229,7 +231,8 @@ async def test_running_sweep_emits_state_running_counter() -> None:
     def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
         add_calls.append((amount, attributes or {}))
 
-    with patch.object(ORPHAN_CLEANUP_SWEPT, "add", side_effect=_capture_add):
+    counter = _get_orphan_cleanup_swept_counter()
+    with patch.object(counter, "add", side_effect=_capture_add):
         await _run_one_cycle(pool)
 
     swept_running = [

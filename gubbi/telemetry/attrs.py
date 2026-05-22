@@ -27,6 +27,13 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 # Shared constants
 # ---------------------------------------------------------------------------
+# Underscore-prefixed names indicate they are intentionally not part of
+# the public ``__all__`` API for ``import *`` consumers, but they are
+# explicitly imported by name across the package (`gubbi.telemetry.spans`,
+# `gubbi.crypto.cipher`, `gubbi.tools.registry`,
+# `gubbi.storage.embedding_service`, `gubbi.extraction.jobs.extract_conversation`).
+# Treat as package-internal constants -- canonical home is here, do not
+# duplicate elsewhere.
 _TRACER_NAME: Final[str] = "gubbi"
 _NS_PER_MS: Final[int] = 1_000_000
 
@@ -45,6 +52,8 @@ class SpanNames:
     CIPHER_DECRYPT: Final[str] = "cipher.decrypt"
     AUDIT_WRITE: Final[str] = "audit.write"
     HTTP_REQUEST: Final[str] = "http.request"
+    EXTRACTION_JOB: Final[str] = "extraction.job"
+    EXTRACTION_LLM_CALL: Final[str] = "extraction.llm_call"
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +126,6 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
     SpanNames.AUDIT_WRITE: frozenset(
         {
             "event_type",
-            "target_id",
             "actor_type",
             "success",
             "latency_ms",
@@ -134,6 +142,28 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
     ),
     SpanNames.HTTP_REQUEST: frozenset(
         {
+            "correlation_id",
+        }
+    ),
+    SpanNames.EXTRACTION_JOB: frozenset(
+        {
+            "job_id",
+            "user_id",
+            "conversation_id",
+            "success",
+            "failure_reason",
+            "attempt_number",
+            "latency_ms",
+            "correlation_id",
+        }
+    ),
+    SpanNames.EXTRACTION_LLM_CALL: frozenset(
+        {
+            "provider_name",
+            "model_name",
+            "prompt_size",
+            "completion_size",
+            "latency_ms",
             "correlation_id",
         }
     ),
@@ -186,8 +216,6 @@ __all__ = [
     "BANNED_KEYS",
     "GUBBI_SPAN_ALLOWLIST",
     "MCP_TOOL_CALL_ATTRS",
-    "_NS_PER_MS",
-    "_TRACER_NAME",
     "MetricNames",
     "SpanNames",
     "get_allowlisted_attrs",

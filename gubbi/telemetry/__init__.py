@@ -103,11 +103,48 @@ def rebind_metrics_after_configure() -> None:
     Factored out of ``configure_otel`` so unit tests can exercise the
     lifespan re-bind contract without pulling in the FastAPI /
     instrumentor / OTLP exporter wiring.
+
+    CRIT-5 B5 (2026-05-22): three out-of-tree counters live in their own
+    ``@lru_cache``-deferred factories rather than ``initialize_metrics`` --
+    ``orphan_cleanup`` / ``extract_conversation`` / ``anthropic_provider``
+    each define their own counter local to the module that emits it,
+    keeping the counter definition co-located with its single call site
+    (none of these need a ``record_*`` indirection layer). Each factory
+    is cleared + re-primed here so all four post-lifespan emitters bind
+    to the SDK provider, not the import-time NoOp.
     """
+    from gubbi.extraction.jobs.extract_conversation import (
+        _get_extraction_refund_skipped_counter,
+    )
+    from gubbi.extraction.llm.anthropic_provider import _get_anthropic_retry_counter
+    from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
     from gubbi.telemetry.metrics import initialize_metrics
 
     initialize_metrics.cache_clear()
     initialize_metrics()
+
+    # B5 orphan-counter factories: clear the lru_cache so the next call
+    # binds to the post-configure_otel SDK provider rather than the stale
+    # NoOp captured at module import.
+    #
+    # CONVENTION: when adding a new ``@lru_cache``-deferred metric factory
+    # to gubbi (especially an "orphan" counter that lives in its own
+    # module rather than ``gubbi.telemetry.metrics.initialize_metrics``),
+    # add a ``cache_clear()`` + immediate re-call pair here so the
+    # factory rebinds to the SDK provider at lifespan time. ALSO add a
+    # corresponding clear in the ``_restore_otel_globals`` autouse
+    # fixture in ``tests/unit/test_telemetry_metrics.py`` so tests do
+    # not leak state. Both lists must stay in sync; the
+    # ``test_b5_orphan_counter_modules_have_no_module_scope_counter_names``
+    # regression test is the canary that catches one specific drift
+    # shape (re-introducing a module-scope counter) but does NOT catch
+    # the rebind-list omission shape.
+    _get_orphan_cleanup_swept_counter.cache_clear()
+    _get_orphan_cleanup_swept_counter()
+    _get_extraction_refund_skipped_counter.cache_clear()
+    _get_extraction_refund_skipped_counter()
+    _get_anthropic_retry_counter.cache_clear()
+    _get_anthropic_retry_counter()
 
 
 def _wire_instrumentors(app: FastAPI) -> None:
