@@ -126,6 +126,29 @@ def _get_app_ctx(request: Request) -> AppContext:
     return require_app_ctx(request)
 
 
+async def _set_user_rls_local(conn: asyncpg.Connection, user_id: UUID) -> None:
+    """Apply the ``app.current_user_id`` RLS GUC scoped to the current transaction.
+
+    PostgreSQL's ``set_config(name, value, is_local=true)`` is the
+    expression-context equivalent of ``SET LOCAL`` -- it requires an
+    open transaction to be transaction-scoped. Outside any transaction,
+    the third argument is silently ignored and the GUC promotes to
+    session scope; on a pooled connection that means the next checkout
+    inherits the previous user's identity (the original B1 bug).
+
+    This helper centralises the SET-LOCAL incantation so the
+    security-critical contract -- "set the GUC inside a transaction
+    only" -- has one canonical home. Every call site in this module
+    must already be inside an ``async with conn.transaction():`` block;
+    the helper itself does not open one (callers vary in how they
+    couple SET LOCAL to the rest of their transaction body).
+    """
+    await conn.execute(
+        "SELECT set_config('app.current_user_id', $1, true)",
+        str(user_id),
+    )
+
+
 @router.post("/conversations", response_model=IngestConversationResponse)
 async def ingest_conversations(
     request: Request,
@@ -138,13 +161,18 @@ async def ingest_conversations(
     saved under the default "inbox" topic, and returns counts of saved
     vs skipped conversations.
 
-    Transaction design (B3-H1 fix):
-    - Acquires ONE connection for the request (no outer transaction).
-    - Each conversation save is its own top-level transaction (TXN 1).
-    - Each extraction_jobs INSERT is its own top-level transaction (TXN 2).
-    - TXN 1 and TXN 2 commit independently: a TXN 2 failure does NOT roll
-      back TXN 1 (conversation save is durable per D1).
-    - RLS GUC is set with SET LOCAL inside each transaction via set_config.
+    Transaction design:
+    - Acquires ONE bare connection for the request via ``safe_acquire``.
+    - Each independent unit of DB work opens its own ``conn.transaction()``
+      and applies the ``app.current_user_id`` RLS GUC with ``SET LOCAL``
+      inside that transaction. ``SET LOCAL`` is transaction-scoped, so the
+      GUC unwinds at COMMIT/ROLLBACK and the connection cannot return to
+      the pool carrying a session-level GUC for the prior user.
+    - Dedupe pre-check, conversation save (TXN 1), and extraction_jobs
+      INSERT (TXN 2) are each their own top-level transaction. They commit
+      independently: a TXN 2 failure does NOT roll back TXN 1's
+      conversation row (D1), and the per-conversation pre-charge happens
+      OUTSIDE any open transaction (no network IO inside an open PG txn).
     - On TXN 2 failure: refund pre-charge, count as extractions_skipped_error,
       continue (HTTP 200).
     """
@@ -165,37 +193,40 @@ async def ingest_conversations(
     enqueue_tasks: list[tuple[UUID, int]] = []
 
     async with safe_acquire(app_ctx.pool) as conn:
-        # Ensure inbox topic exists -- run in its own txn so failure does not
-        # poison subsequent conversation saves.
-        async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.current_user_id', $1, true)",
-                str(user_id),
-            )
-            try:
-                await get_topic_id(conn, DEFAULT_INBOX_TOPIC)
-            except TopicNotFoundError:
-                # Concurrent ingest race: another request for the same user
-                # may have created the inbox between our get and create.
-                # TopicAlreadyExists is the same-user-duplicate signal post-
-                # migration 0030 (topics_user_path_key UNIQUE (user_id, path));
-                # treat as a no-op since the topic now exists.
-                with contextlib.suppress(TopicAlreadyExists):
+        # Ensure inbox topic exists -- own transaction, GUC set with SET LOCAL.
+        # Concurrent ingest race: another request for the same user may have
+        # created the inbox between our get and create. ``TopicAlreadyExists``
+        # is the same-user-duplicate signal post-migration 0030
+        # (topics_user_path_key UNIQUE (user_id, path)); treat as a no-op
+        # since the topic now exists. The ``contextlib.suppress`` lives
+        # OUTSIDE the transaction so the exception triggers ROLLBACK
+        # (clearing PG's aborted-transaction state) before being swallowed.
+        with contextlib.suppress(TopicAlreadyExists):
+            async with conn.transaction():
+                await _set_user_rls_local(conn, user_id)
+                try:
+                    await get_topic_id(conn, DEFAULT_INBOX_TOPIC)
+                except TopicNotFoundError:
                     await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
 
         for conv in body.conversations:
-            # Dedupe pre-check: read-only, no explicit txn needed; the UNIQUE
-            # constraint on (platform, platform_id) inside TXN 1 catches the race.
-            await conn.execute(
-                "SELECT set_config('app.current_user_id', $1, true)",
-                str(user_id),
-            )
-            existing = await conv_repo.exists_by_platform_id(
-                conn,
-                user_id,
-                conv.platform,
-                conv.platform_id,
-            )
+            # Dedupe pre-check in its own transaction so the SET LOCAL
+            # GUC is properly transaction-scoped (and unwinds before the
+            # connection is reused). The pre-check requires RLS to be
+            # active to function correctly: without the GUC, the FORCE
+            # ROW LEVEL SECURITY policy on conversations would filter all
+            # rows and the read would falsely report "not exists",
+            # leading to redundant TXN 1 inserts that the UNIQUE
+            # constraint would then catch as dedupe-races. Setting the
+            # GUC inside this short transaction restores the fast path.
+            async with conn.transaction():
+                await _set_user_rls_local(conn, user_id)
+                existing = await conv_repo.exists_by_platform_id(
+                    conn,
+                    user_id,
+                    conv.platform,
+                    conv.platform_id,
+                )
             if existing:
                 conversations_skipped_dedupe += 1
                 continue
@@ -217,17 +248,13 @@ async def ingest_conversations(
 
             # ============================================================
             # TRANSACTION 1: save conversation + set platform metadata.
-            # Top-level (no outer txn active) so it commits independently.
-            # UniqueViolationError on the platform_id race rolls back ONLY
-            # this txn; treat as dedupe skip.
+            # Top-level transaction; commits independently of TXN 2 below.
+            # SET LOCAL applies the RLS GUC for this transaction only.
             # ============================================================
             save_result = None
             try:
                 async with conn.transaction():
-                    await conn.execute(
-                        "SELECT set_config('app.current_user_id', $1, true)",
-                        str(user_id),
-                    )
+                    await _set_user_rls_local(conn, user_id)
                     save_result = await conv_repo.save_conversation(
                         conn,
                         cipher,
@@ -280,17 +307,16 @@ async def ingest_conversations(
 
             # ============================================================
             # TRANSACTION 2: extraction_jobs INSERT + audit.
-            # Top-level -- rolls back independently of TXN 1.
+            # Top-level transaction; rollback here only undoes TXN 2,
+            # leaving TXN 1's conversation row durable. SET LOCAL applies
+            # the RLS GUC for this transaction only.
             # On failure: refund pre-charge (D4), log, count, CONTINUE.
             # HTTP 200 is still returned (D3); save is durable (D1).
             # ============================================================
             job_uuid: UUID | None = None
             try:
                 async with conn.transaction():
-                    await conn.execute(
-                        "SELECT set_config('app.current_user_id', $1, true)",
-                        str(user_id),
-                    )
+                    await _set_user_rls_local(conn, user_id)
                     try:
                         job_uuid = await extraction_jobs.create_pending(
                             conn,
