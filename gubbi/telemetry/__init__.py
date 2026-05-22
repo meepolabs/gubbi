@@ -120,6 +120,17 @@ def _wire_instrumentors(app: FastAPI) -> None:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
         FastAPIInstrumentor.instrument_app(app)
+        # Invalidate Starlette's cached middleware_stack. The lifespan
+        # ``__call__`` event arrives BEFORE this code path runs and lazily
+        # builds + caches ``app.middleware_stack`` (Starlette
+        # applications.py:110-112). FastAPIInstrumentor patches
+        # ``build_middleware_stack`` to wrap the chain with
+        # OpenTelemetryMiddleware, but the patch lands AFTER the cache --
+        # without this invalidation every subsequent HTTP request reuses
+        # the unpatched cached stack and no Kind=Server spans ever fire.
+        # Setting to None forces a rebuild on the first HTTP ``__call__``,
+        # which then sees the patched ``build_middleware_stack``.
+        app.middleware_stack = None
         _logger.debug("FastAPI auto-instrumentation wired")
     except Exception as exc:
         _logger.warning("FastAPIInstrumentor failed: %s", exc)

@@ -342,3 +342,40 @@ def test_gubbi_main_server_shape_pins_outer_wrap() -> None:
         f"{middleware_classes}. Move them into the ASGI wrap chain at "
         "the bottom of gubbi/main.py instead."
     )
+
+
+def test_wire_instrumentors_invalidates_cached_middleware_stack() -> None:
+    """Pin: ``_wire_instrumentors`` invalidates ``app.middleware_stack``.
+
+    Starlette's ``Starlette.__call__`` lazily builds + caches
+    ``self.middleware_stack`` on the first ``__call__``. uvicorn fires a
+    ``lifespan.startup`` ASGI scope BEFORE any HTTP request, and that
+    lifespan ``__call__`` triggers the build with the unpatched
+    ``build_middleware_stack``. configure_otel runs INSIDE the lifespan
+    handler, AFTER the cache is populated, so
+    ``FastAPIInstrumentor.instrument_app``'s patch lands too late --
+    every subsequent HTTP request reuses the unpatched stack and no
+    ``Kind=Server`` spans ever fire.
+
+    The fix is one line in ``_wire_instrumentors``: set
+    ``app.middleware_stack = None`` after instrumentation completes so
+    the next HTTP ``__call__`` rebuilds with the patched method. This
+    test pins that invalidation against accidental removal.
+    """
+    from gubbi.telemetry import _wire_instrumentors
+
+    app = FastAPI()
+    # Simulate the lifespan ``__call__`` priming Starlette's cache.
+    app.middleware_stack = app.build_middleware_stack()
+    assert app.middleware_stack is not None, "test setup failed to prime the cache"
+
+    _wire_instrumentors(app)
+
+    assert app.middleware_stack is None, (
+        "_wire_instrumentors must set ``app.middleware_stack = None`` after "
+        "FastAPIInstrumentor.instrument_app(app) so the next HTTP __call__ "
+        "rebuilds the chain with the OpenTelemetryMiddleware patch in place. "
+        "Without this, the cached pre-patch stack persists and FastAPI "
+        "auto-instrumentation never produces Kind=Server spans -- the bug "
+        "the testbench correlation_id test was designed to catch."
+    )
