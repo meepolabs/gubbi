@@ -582,28 +582,40 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await arq_pool.close()
 
 
-# Construct the FastAPI app. Two-tier middleware model:
+# Construct the FastAPI app with an EMPTY middleware list. All custom
+# middleware -- including ones that don't strictly need to be outside
+# the OTel server span -- is composed at the ASGI layer below, mirroring
+# gubbi-cloud's pattern.
 #
-#   Tier 1 (INSIDE the OTel server span -- attached via app.add_middleware
-#   below): middleware that does not need to populate state visible to
-#   the OTel layer. Path rewriters, body validators, anything HTTP-
-#   semantic. FastAPIInstrumentor wraps these with OpenTelemetryMiddleware
-#   at request time, which is the right shape for them.
+# Why all-ASGI rather than the hybrid model (some via app.add_middleware,
+# some via ASGI wrap):
 #
-#   Tier 2 (OUTSIDE the OTel server span -- composed at module level
-#   below): middleware that MUST run before any OTel layer because a
-#   SpanProcessor reads state it sets (e.g., CorrelationIDMiddleware ->
-#   CorrelationSpanProcessor.on_start). These cannot live in
-#   user_middleware -- FastAPIInstrumentor's build_middleware_stack patch
-#   would put them inside the OTel wrap and the server span would open
-#   before they ran. See gubbi-common's CorrelationIDMiddleware docstring.
+#   1. SSE safety. FastMCP's streamable-http transport returns SSE
+#      response bodies on /mcp/. A future ``@app.middleware("http")``
+#      decorator would create a Starlette BaseHTTPMiddleware which
+#      buffers both request and response bodies, silently breaking
+#      SSE streaming. Keeping ``user_middleware`` empty closes that
+#      tripwire structurally.
+#   2. CorrelationIDMiddleware MUST run before any OTel layer because
+#      CorrelationSpanProcessor.on_start reads the request-scoped
+#      ContextVar this middleware sets. FastAPIInstrumentor patches
+#      build_middleware_stack so OpenTelemetryMiddleware lands OUTSIDE
+#      anything in user_middleware -- the only place state-setting
+#      middleware can live is OUTSIDE the FastAPI app.
+#   3. Symmetry with gubbi-cloud's gateway shape (one mental model
+#      across the two services).
+#
+# MCPPathNormalizer ends up outside the OTel server span as a
+# consequence. The cosmetic effect is that the span's http.target
+# attribute reflects the rewritten path (``/mcp/``) rather than the
+# original (``/mcp``). The rewrite is a sub-microsecond dict mutation
+# that cannot raise; nothing meaningful is lost by being outside OTel.
 app: FastAPI = FastAPI(
     title="gubbi",
     description="Personal journal MCP server",
     version="0.2.0",
     lifespan=lifespan,
 )
-app.add_middleware(MCPPathNormalizer)
 
 
 # Register REST API routers
@@ -661,15 +673,27 @@ async def mcp_health() -> dict[str, Any]:
     return {"status": "ok"}
 
 
-# Tier-2 ASGI composition: CorrelationIDMiddleware MUST run before any
-# OTel layer because CorrelationSpanProcessor.on_start reads the request-
-# scoped ContextVar this middleware sets. FastAPIInstrumentor patches
-# build_middleware_stack so OpenTelemetryMiddleware lands OUTSIDE
-# anything in user_middleware -- the only place state-setting middleware
-# can live is OUTSIDE the FastAPI app at the ASGI layer. The deployment
-# target (uvicorn / gunicorn / `gubbi.main:server`) is this wrapper;
-# `app` remains the FastAPI handle for routes, decorators, and tests.
-server: ASGIApp = CorrelationIDMiddleware(app)
+# ASGI-layer middleware composition. Order, outermost first:
+#
+#   CorrelationIDMiddleware -> MCPPathNormalizer -> FastAPI app
+#
+# CorrelationIDMiddleware is OUTSIDE the FastAPI app so the request-
+# scoped correlation_id ContextVar is populated before any OTel layer
+# runs. CorrelationSpanProcessor.on_start (registered via
+# configure_otel) reads the ContextVar when the FastAPI server span
+# opens; with the wrap order above, the value is always present. See
+# gubbi-common's CorrelationIDMiddleware docstring for the contract.
+#
+# MCPPathNormalizer rewrites /mcp -> /mcp/ before FastAPI's router
+# sees the request. Outside-OTel placement is incidental, not required
+# (it is a sub-microsecond dict mutation with no failure mode), but
+# keeping the FastAPI middleware list empty closes the SSE-streaming
+# tripwire described above.
+#
+# The deployment target (uvicorn / gunicorn / `gubbi.main:server`) is
+# this wrapper. `app` remains the FastAPI handle for routes,
+# decorators, and tests that need state inspection.
+server: ASGIApp = CorrelationIDMiddleware(MCPPathNormalizer(app))
 
 
 def main() -> None:
