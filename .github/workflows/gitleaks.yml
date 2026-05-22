@@ -32,7 +32,11 @@ jobs:
         uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.7
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Free tier: scan only on PR + push. No license needed for OSS or
-          # personal-tier private repos under 25 contributors.
+          # gitleaks-action v2 requires a license for any repo owned by a
+          # GitHub organization (free for OSS / individual-owned private
+          # repos). Store the key from gitleaks.io as a repo or org secret
+          # named GITLEAKS_LICENSE. Leaving it unset on an org repo causes
+          # the action to fail with "License key is required."
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
           GITLEAKS_ENABLE_UPLOAD_ARTIFACT: true
           GITLEAKS_ENABLE_SUMMARY: true
