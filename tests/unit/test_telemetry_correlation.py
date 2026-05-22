@@ -278,32 +278,31 @@ def test_correlation_id_uuid4_fallback_when_header_absent(
 
 
 def test_gubbi_main_server_shape_pins_outer_wrap() -> None:
-    """``gubbi.main.server`` is a CorrelationIDMiddleware wrapping a FastAPI app.
+    """``gubbi.main.server`` is the full pure-ASGI chain pinning Pattern B.
 
-    Structural pin -- catches the wrap-order regression unambiguously
-    even when the in-process span tests above pass via the defensive
+    Structural pin -- catches wrap-order regressions unambiguously even
+    when the in-process span tests above pass via the defensive
     ``set_attribute`` compensation that runs inside
     ``CorrelationIDMiddleware.__call__``. The compensation tags the
-    server span retroactively only when the OTel context propagates
-    into user middleware (which it does in the unit-test sandbox but
-    NOT in the actual gubbi production wiring -- see the validated
-    diagnosis at the top of the docstring).
+    server span retroactively only when the OTel context propagates into
+    user middleware (which it does in the unit-test sandbox but NOT in
+    the actual gubbi production wiring -- see the validated diagnosis
+    at the top of the docstring).
 
-    This test does NOT depend on OTel context propagation. It asserts:
+    Pattern B contract (full pure-ASGI):
 
       1. ``gubbi.main.server`` is a CorrelationIDMiddleware instance
-         (so requests pass through the ContextVar set BEFORE entering
-         the FastAPI app's middleware stack).
-      2. The wrapped inner is the FastAPI application.
-      3. CorrelationIDMiddleware is NOT also listed in the inner
-         FastAPI's user_middleware -- listing it both inside and
-         outside would double-fire the middleware (one ContextVar set
-         and reset cycle nested inside another), and only the inner
-         set would be in scope when the outer reset runs, leaving the
-         outer reset attempting to restore a token from a stale
-         contextvar lineage.
+         (request-scoped ContextVar set BEFORE the FastAPI app starts
+         processing the ASGI scope).
+      2. The wrapped layer below is MCPPathNormalizer (path rewrite
+         /mcp -> /mcp/ before the FastAPI router sees the request).
+      3. The FastAPI app's ``user_middleware`` list MUST be empty.
+         Closes the ``@app.middleware("http")`` SSE-buffering tripwire
+         structurally; any middleware that needs to live in this list
+         is the wrong tier and must move to the ASGI wrap above.
     """
     import gubbi.main as gm
+    from gubbi.middleware import MCPPathNormalizer
 
     assert isinstance(gm.server, CorrelationIDMiddleware), (
         f"gubbi.main.server must be wrapped by CorrelationIDMiddleware "
@@ -313,26 +312,33 @@ def test_gubbi_main_server_shape_pins_outer_wrap() -> None:
         "middleware opens a server span."
     )
 
-    inner = gm.server.app
+    path_layer = gm.server.app
+    assert isinstance(path_layer, MCPPathNormalizer), (
+        f"gubbi.main.server.app must be MCPPathNormalizer (the next "
+        f"ASGI layer in the pure-ASGI chain) -- got "
+        f"{type(path_layer).__name__}. The wrap order is "
+        "CorrelationID -> MCPPathNormalizer -> FastAPI; a regression "
+        "here likely means MCPPathNormalizer was moved back into the "
+        "FastAPI middleware list (which would re-open the SSE tripwire)."
+    )
+
+    inner = path_layer.app
     assert isinstance(inner, FastAPI), (
-        f"gubbi.main.server.app should be the inner FastAPI; got " f"{type(inner).__name__}"
+        f"the innermost layer must be the FastAPI app; got " f"{type(inner).__name__}"
     )
     # The exposed `app` symbol must point at the same FastAPI instance
-    # the wrap holds. A drift here means callers using `app` for state
+    # the chain holds. A drift here means callers using `app` for state
     # probes would inspect a stale clone.
-    assert inner is gm.app, "gubbi.main.app must alias gubbi.main.server.app"
+    assert inner is gm.app, "gubbi.main.app must alias gubbi.main.server.app.app"
 
-    # ``Middleware.cls`` is typed by Starlette as a generic
-    # ``_MiddlewareFactory[P]`` (a Protocol that accepts the first arg
-    # as the inner ASGI app). At runtime it is the middleware class
-    # itself; comparing the actual ``CorrelationIDMiddleware`` class
-    # against the list is the contract we want. The ``type[Any]`` cast
-    # acknowledges the Protocol-vs-class shape without weakening the
-    # runtime check.
+    # Pattern B contract: FastAPI's user_middleware is EMPTY. Anything
+    # added via ``app.add_middleware(...)`` or the constructor's
+    # ``middleware=[...]`` shows up here; both are off-pattern under
+    # Pattern B and re-open the SSE tripwire.
     middleware_classes: list[type[Any]] = [cast("type[Any]", m.cls) for m in inner.user_middleware]
-    assert CorrelationIDMiddleware not in middleware_classes, (
-        "CorrelationIDMiddleware must NOT appear in the inner FastAPI's "
-        "user_middleware -- it is wrapped from outside. Listing it here "
-        "would cause the middleware to fire twice per request and break "
-        f"the ContextVar token lineage. Got: {middleware_classes}"
+    assert middleware_classes == [], (
+        "FastAPI user_middleware MUST be empty under Pattern B (full "
+        "pure-ASGI). Found: "
+        f"{middleware_classes}. Move them into the ASGI wrap chain at "
+        "the bottom of gubbi/main.py instead."
     )
