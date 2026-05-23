@@ -8,7 +8,11 @@ unique-violation.
 
 target_kind provides the namespace discriminator.  Going forward,
 record_audit() requires target_kind whenever target_id is supplied.
-Existing rows have NULL target_kind (nullable column, no backfill needed).
+Pre-0020 rows with a non-null target_id have NULL target_kind; migration
+0029 VALIDATE CONSTRAINT aborts on any such row.  The upgrade backfills
+target_kind = target_type for those rows using the session_replication_role
+bypass (same technique as migration 0015) to suppress the append-only
+immutability trigger installed in migration 0010.
 
 The upgrade rebuilds the dedup index with target_kind as the first column
 to prevent cross-namespace collisions.  Both index creates use CONCURRENTLY
@@ -40,6 +44,29 @@ def upgrade() -> None:
 
     conn = op.get_bind()
     with autocommit_block(conn) as raw:
+        # ------------------------------------------------------------------
+        # Step 1b: Backfill target_kind for pre-0020 rows that already have
+        #          target_id set.  Migration 0029 VALIDATE CONSTRAINT aborts
+        #          on any such row (CHECK: target_id IS NULL OR target_kind
+        #          IS NOT NULL).  The append-only immutability trigger from
+        #          0010 blocks plain UPDATE; bypass via
+        #          session_replication_role (same as migration 0015).
+        #
+        #          The reset MUST run on the failure path: session GUCs are
+        #          not transaction-scoped, so a failed UPDATE without the
+        #          finally would leave the pooled connection in replica
+        #          mode with all triggers suppressed for any subsequent
+        #          statement on the same session.
+        # ------------------------------------------------------------------
+        raw.execute("SET session_replication_role = 'replica'")
+        try:
+            raw.execute(
+                "UPDATE audit_log SET target_kind = target_type"
+                " WHERE target_id IS NOT NULL AND target_kind IS NULL"
+            )
+        finally:
+            raw.execute("SET session_replication_role = 'origin'")
+
         # ------------------------------------------------------------------
         # Step 2: Rebuild the dedup index with target_kind to prevent
         #         cross-namespace false unique-violations (H-3 follow-up).
