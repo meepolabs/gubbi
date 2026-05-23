@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import asyncpg
 import structlog
+from gubbi_common.audit.targets import TargetKind
 
 from gubbi.audit import Action, record_audit
 
@@ -79,6 +80,7 @@ async def scaffold_operator(
                         action=Action.IDENTITY_CREATED,
                         target_type="user",
                         target_id=str(inserted_id),
+                        target_kind=TargetKind.USER,
                         metadata={"provision_path": "scaffold"},
                     )
                 except Exception:

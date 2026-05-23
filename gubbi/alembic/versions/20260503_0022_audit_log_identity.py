@@ -59,8 +59,9 @@ def downgrade() -> None:
     # Step 1: Drop the IDENTITY constraint.
     op.execute("ALTER TABLE audit_log ALTER COLUMN id DROP IDENTITY IF EXISTS")
 
-    # Steps 2-3: Recreate sequence as BIGSERIAL-style and wire it back as default.
-    # Use PL/pgSQL so the RESTART value is self-computed from existing data.
+    # Steps 2-3: Recreate sequence as BIGSERIAL-style and compute restart value.
+    # SET DEFAULT is pure static DDL (no runtime value) -- extract it to a
+    # standalone op.execute() below to avoid PL/pgSQL string-escaping complexity.
     downgrade_sql = (
         "DO $$ DECLARE nxt BIGINT; BEGIN CREATE SEQUENCE audit_log_id_seq OWNED BY audit_log.id; "
         "SELECT COALESCE(MAX(id), 0) + 1 INTO nxt FROM audit_log; "
@@ -68,7 +69,9 @@ def downgrade() -> None:
         # parsed through SPI, which treats a bare ``nxt`` as a literal token
         # rather than the PL/pgSQL variable (mirrors the upgrade path above).
         "EXECUTE format('ALTER SEQUENCE audit_log_id_seq RESTART WITH %s', nxt); "
-        """EXECUTE format('ALTER TABLE audit_log ALTER COLUMN id SET DEFAULT nextval(''audit_log_id_seq''));"""  # noqa: E501
-        " END $$;"
+        "END $$;"
     )
     conn.connection.execute(downgrade_sql)
+    # Wire the sequence as the column default. Mirrors upgrade()'s DROP DEFAULT
+    # at line 38 -- both are one-line static DDL, no PL/pgSQL needed.
+    op.execute("ALTER TABLE audit_log ALTER COLUMN id SET DEFAULT nextval('audit_log_id_seq')")
