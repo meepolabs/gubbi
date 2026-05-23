@@ -1,13 +1,15 @@
 import logging
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Final, Literal, Self
+from typing import Annotated, Any, Final, Literal, Self
 
 from pydantic import BaseModel, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     EnvSettingsSource,
+    NoDecode,
     PydanticBaseSettingsSource,
     SettingsConfigDict,
 )
@@ -126,7 +128,16 @@ class AuthConfig(BaseModel):
     trust_gateway: bool = False
     gateway_secret: str = ""
     gateway_require_signature: bool = True
-    api_key_scopes: list[str] = ["journal:read", "journal:write"]
+    api_key_scopes: Annotated[list[str], NoDecode] = ["journal:read", "journal:write"]
+    # ``NoDecode`` here suppresses pydantic-settings' default JSON
+    # decoding of complex types so the env source delivers the raw
+    # string to ``_split_csv_scopes``. The annotation is honored by
+    # pydantic-settings 2.x when traversing into nested ``BaseModel``
+    # fields; if a future release stops respecting NoDecode on nested
+    # models, the validator below will see a pre-decoded list and pass
+    # it through, but a CSV operator value would fail at the env
+    # source's JSON-decode step with a confusing message. Verify the
+    # CSV path still works after each pydantic-settings major bump.
     # When True, client_ip() honours the rightmost X-Forwarded-For entry --
     # the IP added by the trusted edge proxy -- as the original client IP
     # (DEC-086 rule 4). Requires a trusted reverse-proxy in front of
@@ -142,6 +153,37 @@ class AuthConfig(BaseModel):
         # so Mode 3 can leave this empty without tripping the length check.
         if v and len(v) < 32:
             raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
+        return v
+
+    @field_validator("api_key_scopes", mode="before")
+    @classmethod
+    def _split_csv_scopes(cls, v: object) -> Any:
+        """Split a comma- or newline-separated string into a list.
+
+        ``NoDecode`` on the field suppresses pydantic-settings' JSON
+        decoding of complex types so the env source delivers the raw
+        string here. CSV is the only accepted env shape -- matches
+        ``cors_allowed_origins`` and the convention everywhere else for
+        env-driven scope/origin lists.
+
+        Detection of JSON-array shape uses ``startswith("[")`` only --
+        every JSON-array string starts with ``[``, so the leading-bracket
+        check catches all malicious inputs without false-positiving on
+        any legit scope value. Splitting accepts ``,`` and ``\\n`` /
+        ``\\r\\n`` as separators so a Doppler import that introduces CRLF
+        does not degrade into a single malformed scope.
+
+        Example: ``JOURNAL_AUTH__API_KEY_SCOPES=journal:read,journal:write``
+        """
+        if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("["):
+                raise ValueError(
+                    "api_key_scopes expects a comma-separated string "
+                    "(e.g. 'journal:read,journal:write'), not a JSON "
+                    "array. Drop the brackets and quotes."
+                )
+            return [s for item in re.split(r"[,\n\r]+", stripped) if (s := item.strip())]
         return v
 
     @model_validator(mode="after")
