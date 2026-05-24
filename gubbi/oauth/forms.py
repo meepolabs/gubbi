@@ -49,7 +49,7 @@ logger = structlog.get_logger(__name__)
 def client_ip(request: Request) -> str:
     """Extract client IP, optionally honouring X-Forwarded-For.
 
-    Honours JOURNAL_AUTH__TRUST_FORWARDED_HEADERS (default False).  When
+    Honours JOURNAL_TRUST_FORWARDED_HEADERS (default False).  When
     True the RIGHTMOST X-Forwarded-For value (the trusted-proxy stamp,
     per DEC-086 rule 4) is treated as the originating client IP; when
     False the XFF header is ignored and only request.client.host is

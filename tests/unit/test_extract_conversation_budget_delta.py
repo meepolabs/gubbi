@@ -58,7 +58,7 @@ def _make_patch_stack(
 
     budget_enabled is kept as a parameter for API compatibility with existing
     test call sites.  The extract_conversation worker no longer checks
-    get_settings().llm.journal_llm_budget_enabled -- the helper presence
+    get_settings().llm.llm_budget_enabled -- the helper presence
     alone gates the delta write (B3-L2 simplification).  The parameter is
     therefore unused inside this function but retained so callers need no
     changes.

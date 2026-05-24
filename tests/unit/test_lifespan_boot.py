@@ -69,13 +69,6 @@ _MINIMAL_ENV_DROP: tuple[str, ...] = (
     "JOURNAL_HYDRA_PUBLIC_ISSUER_URL",
     "JOURNAL_HYDRA_PUBLIC_URL",
     "JOURNAL_API_KEY_SCOPES",
-    "JOURNAL_AUTH__HYDRA_ADMIN_URL",
-    "JOURNAL_AUTH__TRUST_GATEWAY",
-    "JOURNAL_AUTH__GATEWAY_SECRET",
-    "JOURNAL_AUTH__GATEWAY_REQUIRE_SIGNATURE",
-    "JOURNAL_AUTH__OPERATOR_EMAIL",
-    "JOURNAL_AUTH__HYDRA_PUBLIC_ISSUER_URL",
-    "JOURNAL_AUTH__HYDRA_PUBLIC_URL",
     "JOURNAL_OPERATOR_USER_ID",
     "JOURNAL_HEALTH_BIND_PUBLIC",
 )
@@ -311,7 +304,7 @@ async def test_lifespan_populates_app_state_before_first_request(
         # None is a valid configured-disabled state.
 
         # budget_helper: must be set (or None) after lifespan startup (B3-L3).
-        # With JOURNAL_LLM__BUDGET_ENABLED unset (default False), the value is None.
+        # With JOURNAL_LLM_BUDGET_ENABLED unset (default False), the value is None.
         assert hasattr(app.state, "budget_helper")
         # The value is None in minimal-env (budget disabled by default).
         assert app.state.budget_helper is None

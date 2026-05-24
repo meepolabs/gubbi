@@ -323,7 +323,7 @@ async def startup(ctx: ExtractionContext) -> None:
 
     # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
     # register the Lua script anyway (cheapest option; no API split).
-    if settings.llm.journal_llm_budget_enabled:
+    if settings.llm.llm_budget_enabled:
         pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
         ctx["budget_helper"] = BudgetHelper(
             redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
