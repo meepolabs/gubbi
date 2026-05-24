@@ -83,7 +83,7 @@ def upgrade() -> None:
             RETURN NEW;
         END;
         $func$ LANGUAGE plpgsql
-        """  # noqa: E501
+        """
     )
     op.execute("DROP TRIGGER IF EXISTS trg_audit_log_admin_no_user_actor ON audit_log")
     op.execute(
