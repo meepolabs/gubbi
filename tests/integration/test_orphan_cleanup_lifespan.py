@@ -41,9 +41,9 @@ async def test_cron_task_in_background_tasks() -> None:
         patch("gubbi.main.run_orphan_cleanup", new=AsyncMock()),
     ):
         mock_app_ctx = MagicMock()
-        mock_app_ctx.settings.llm.journal_llm_budget_enabled = False
+        mock_app_ctx.settings.llm.llm_budget_enabled = False
         mock_app_ctx.settings.server.host = "127.0.0.1"
-        mock_app_ctx.settings.journal_orphan_cleanup_threshold_minutes = 30
+        mock_app_ctx.settings.llm.orphan_cleanup_threshold_minutes = 30
         mock_app_ctx.admin_pool = AsyncMock()
         mock_build.return_value = (mock_app_ctx, AsyncMock(), AsyncMock(), MagicMock())
         mock_oauth.return_value = (AsyncMock(), None)

@@ -1,18 +1,11 @@
 import logging
-import os
 import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self
 
-from pydantic import BaseModel, field_validator, model_validator
-from pydantic_settings import (
-    BaseSettings,
-    EnvSettingsSource,
-    NoDecode,
-    PydanticBaseSettingsSource,
-    SettingsConfigDict,
-)
+from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 __all__: list[str] = [
     "ALLOWED_ORIGINS",
@@ -62,97 +55,88 @@ OAUTH_AUTH_CODE_TTL_SECS: Final[int] = 300  # 5 minutes
 # emits return coroutines that must be awaited; sync callers cannot use it.
 logger = logging.getLogger(__name__)
 
-# Maps old flat env var names (without JOURNAL_ prefix) to new double-underscore
-# nested names that pydantic-settings v2 understands with env_nested_delimiter="__".
-# JOURNAL_DB_APP_URL -> JOURNAL_DB__APP_URL -> settings.db.app_url
-_FLAT_TO_NESTED_ENV: dict[str, str] = {
-    "JOURNAL_DB_APP_URL": "JOURNAL_DB__APP_URL",
-    "JOURNAL_DB_ADMIN_URL": "JOURNAL_DB__ADMIN_URL",
-    "JOURNAL_HYDRA_ADMIN_URL": "JOURNAL_AUTH__HYDRA_ADMIN_URL",
-    "JOURNAL_HYDRA_PUBLIC_ISSUER_URL": "JOURNAL_AUTH__HYDRA_PUBLIC_ISSUER_URL",
-    "JOURNAL_HYDRA_PUBLIC_URL": "JOURNAL_AUTH__HYDRA_PUBLIC_URL",
-    "JOURNAL_PASSWORD_HASH": "JOURNAL_AUTH__PASSWORD_HASH",
-    "JOURNAL_API_KEY": "JOURNAL_AUTH__API_KEY",
-    "JOURNAL_OPERATOR_EMAIL": "JOURNAL_AUTH__OPERATOR_EMAIL",
-    "JOURNAL_TRUST_GATEWAY": "JOURNAL_AUTH__TRUST_GATEWAY",
-    "JOURNAL_GUBBI_GATEWAY_SECRET": "JOURNAL_AUTH__GATEWAY_SECRET",
-    "JOURNAL_GATEWAY_REQUIRE_SIGNATURE": "JOURNAL_AUTH__GATEWAY_REQUIRE_SIGNATURE",
-    "JOURNAL_API_KEY_SCOPES": "JOURNAL_AUTH__API_KEY_SCOPES",
-    "JOURNAL_SERVER_URL": "JOURNAL_SERVER__URL",
-    "JOURNAL_HOST": "JOURNAL_SERVER__HOST",
-    "JOURNAL_PORT": "JOURNAL_SERVER__PORT",
-    "JOURNAL_TRANSPORT": "JOURNAL_SERVER__TRANSPORT",
-    "JOURNAL_LLM_API_KEY": "JOURNAL_LLM__API_KEY",
-    "JOURNAL_LLM_MODEL": "JOURNAL_LLM__MODEL",
-    "JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES": "JOURNAL_LLM__ORPHAN_CLEANUP_THRESHOLD_MINUTES",
-}
+
+# ---------------------------------------------------------------------------
+# Sub-configs.
+#
+# Each sub-config is a ``BaseSettings`` whose fields declare a
+# ``validation_alias`` carrying the FULL flat env-var name (e.g.
+# ``JOURNAL_API_KEY``). The parent ``Settings`` constructs each sub-config
+# via ``default_factory``; pydantic-settings on the child reads env vars
+# independently using the per-field aliases. The double-underscore nested
+# form (``JOURNAL_AUTH__API_KEY``) is INTENTIONALLY not honoured -- the
+# external contract is flat-only. The internal class hierarchy
+# (``settings.auth.api_key`` etc.) is preserved purely for code organization.
+# ---------------------------------------------------------------------------
 
 
-class _FlatCompatEnvSource(EnvSettingsSource):
-    """Env source that remaps legacy flat env vars to nested double-underscore form.
+class DbConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
 
-    pydantic-settings v2 caches os.environ at source __init__ time, so the
-    injection must happen before super().__init__() loads env_vars. The
-    injected keys are cleaned up in __del__ to avoid polluting the process env.
-
-    This allows JOURNAL_DB_APP_URL (flat, legacy) to coexist with
-    JOURNAL_DB__APP_URL (nested, new-style). When both are set, the nested
-    form takes precedence (injection is skipped).
-    """
-
-    def __init__(self, settings_cls: type, **kwargs: Any) -> None:
-        self._injected: list[str] = []
-        for flat, nested in _FLAT_TO_NESTED_ENV.items():
-            if flat in os.environ and nested not in os.environ:
-                os.environ[nested] = os.environ[flat]
-                self._injected.append(nested)
-        super().__init__(settings_cls, **kwargs)
-
-    def __del__(self) -> None:
-        for k in self._injected:
-            os.environ.pop(k, None)
+    app_url: str = Field(..., validation_alias="JOURNAL_DB_APP_URL")
+    admin_url: str = Field(default="", validation_alias="JOURNAL_DB_ADMIN_URL")
 
 
-class DbConfig(BaseModel):
-    app_url: str
-    admin_url: str = ""
+class AuthConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
 
-
-class AuthConfig(BaseModel):
-    api_key: str = ""
-    hydra_admin_url: str = ""
-    hydra_public_issuer_url: str = ""
-    hydra_public_url: str | None = None
-    password_hash: str = ""
-    operator_email: str = ""
-    trust_gateway: bool = False
-    gateway_secret: str = ""
-    gateway_require_signature: bool = True
-    api_key_scopes: Annotated[list[str], NoDecode] = ["journal:read", "journal:write"]
+    api_key: str = Field(default="", validation_alias="JOURNAL_API_KEY")
+    hydra_admin_url: str = Field(default="", validation_alias="JOURNAL_HYDRA_ADMIN_URL")
+    hydra_public_issuer_url: str = Field(
+        default="", validation_alias="JOURNAL_HYDRA_PUBLIC_ISSUER_URL"
+    )
+    hydra_public_url: str | None = Field(default=None, validation_alias="JOURNAL_HYDRA_PUBLIC_URL")
+    password_hash: str = Field(default="", validation_alias="JOURNAL_PASSWORD_HASH")
+    operator_email: str = Field(default="", validation_alias="JOURNAL_OPERATOR_EMAIL")
+    trust_gateway: bool = Field(default=False, validation_alias="JOURNAL_TRUST_GATEWAY")
+    gateway_secret: str = Field(default="", validation_alias="JOURNAL_GUBBI_GATEWAY_SECRET")
+    gateway_require_signature: bool = Field(
+        default=True, validation_alias="JOURNAL_GATEWAY_REQUIRE_SIGNATURE"
+    )
     # ``NoDecode`` here suppresses pydantic-settings' default JSON
     # decoding of complex types so the env source delivers the raw
     # string to ``_split_csv_scopes``. The annotation is honored by
-    # pydantic-settings 2.x when traversing into nested ``BaseModel``
-    # fields; if a future release stops respecting NoDecode on nested
-    # models, the validator below will see a pre-decoded list and pass
-    # it through, but a CSV operator value would fail at the env
-    # source's JSON-decode step with a confusing message. Verify the
-    # CSV path still works after each pydantic-settings major bump.
+    # pydantic-settings 2.x; if a future release stops respecting NoDecode,
+    # the validator below will see a pre-decoded list and pass it through,
+    # but a CSV operator value would fail at the env source's JSON-decode
+    # step with a confusing message. Verify the CSV path still works after
+    # each pydantic-settings major bump.
+    api_key_scopes: Annotated[list[str], NoDecode] = Field(
+        default=["journal:read", "journal:write"],
+        validation_alias="JOURNAL_API_KEY_SCOPES",
+    )
     # When True, client_ip() honours the rightmost X-Forwarded-For entry --
     # the IP added by the trusted edge proxy -- as the original client IP
     # (DEC-086 rule 4). Requires a trusted reverse-proxy in front of
     # gubbi; default False for direct-to-container deploys (M-9.3).
-    trust_forwarded_headers: bool = False
+    trust_forwarded_headers: bool = Field(
+        default=False, validation_alias="JOURNAL_TRUST_FORWARDED_HEADERS"
+    )
 
     @field_validator("api_key")
     @classmethod
     def validate_api_key(cls, v: str) -> str:
         """Reject keys shorter than 32 chars (empty allowed for Mode 3)."""
         # Non-empty keys must still be strong. Length enforcement for the
-        # "required vs optional" contract lives in the model validator below,
-        # so Mode 3 can leave this empty without tripping the length check.
+        # "required vs optional" contract lives in the model validator on
+        # ``Settings``, so Mode 3 can leave this empty without tripping the
+        # length check.
         if v and len(v) < 32:
             raise ValueError("JOURNAL_API_KEY must be at least 32 characters")
+        return v
+
+    @field_validator("operator_email", mode="before")
+    @classmethod
+    def _strip_operator_email(cls, v: object) -> object:
+        """Normalize whitespace-only inputs to empty string.
+
+        Pre-launch hardening: a single-space OPERATOR_EMAIL would otherwise
+        pass the not-empty deploy-shape check (whitespace is truthy) and
+        fail later at operator-UUID lookup. Strip at field-input boundary
+        so the deploy-shape validator catches it.
+        """
+        if isinstance(v, str):
+            return v.strip()
         return v
 
     @field_validator("api_key_scopes", mode="before")
@@ -173,7 +157,7 @@ class AuthConfig(BaseModel):
         ``\\r\\n`` as separators so a Doppler import that introduces CRLF
         does not degrade into a single malformed scope.
 
-        Example: ``JOURNAL_AUTH__API_KEY_SCOPES=journal:read,journal:write``
+        Example: ``JOURNAL_API_KEY_SCOPES=journal:read,journal:write``
         """
         if isinstance(v, str):
             stripped = v.strip()
@@ -198,27 +182,35 @@ class AuthConfig(BaseModel):
         return self
 
 
-class ServerConfig(BaseModel):
-    url: str = "http://localhost:8100"
-    host: str = "0.0.0.0"  # noqa: S104 -- bind all interfaces for Docker
-    port: int = 8100
-    transport: str = "streamable-http"  # or "stdio"
+class ServerConfig(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    url: str = Field(default="http://localhost:8100", validation_alias="JOURNAL_SERVER_URL")
+    host: str = Field(
+        default="0.0.0.0",  # noqa: S104 -- bind all interfaces for Docker
+        validation_alias="JOURNAL_HOST",
+    )
+    port: int = Field(default=8100, validation_alias="JOURNAL_PORT")
+    transport: str = Field(default="streamable-http", validation_alias="JOURNAL_TRANSPORT")
 
 
-class LLMConfig(BaseModel):
+class LLMConfig(BaseSettings):
     """Optional LLM configuration for extraction services.
 
     All fields are optional (empty-string defaults) so self-hosters who
     do not use extraction can ignore them entirely.
     """
 
-    api_key: str = ""
-    model: str = ""
-    # JOURNAL_LLM__BUDGET_ENABLED; gates budget delta writes from worker
-    # (hosted: True; self-host: False)
-    journal_llm_budget_enabled: bool = False
-    # JOURNAL_LLM__ORPHAN_CLEANUP_THRESHOLD_MINUTES; stale pending-job sweep.
-    orphan_cleanup_threshold_minutes: int = 30
+    model_config = SettingsConfigDict(extra="ignore")
+
+    api_key: str = Field(default="", validation_alias="JOURNAL_LLM_API_KEY")
+    model: str = Field(default="", validation_alias="JOURNAL_LLM_MODEL")
+    # Gates budget delta writes from worker (hosted: True; self-host: False).
+    llm_budget_enabled: bool = Field(default=False, validation_alias="JOURNAL_LLM_BUDGET_ENABLED")
+    # Stale pending-job sweep window.
+    orphan_cleanup_threshold_minutes: int = Field(
+        default=30, validation_alias="JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES"
+    )
 
 
 # Canonical Environment Literal (mirrored byte-for-byte across gubbi + gubbi-cloud).
@@ -229,8 +221,10 @@ Environment = Literal["dev", "ci", "staging", "production"]
 class Settings(BaseSettings):
     """Application settings, loaded from environment variables.
 
-    All variables are prefixed with JOURNAL_ in the environment.
-    Managed by Doppler in production, .env in local dev.
+    Env vars are flat-named only (e.g. ``JOURNAL_API_KEY``,
+    ``JOURNAL_DB_APP_URL``). The internal class structure
+    (``settings.auth.api_key`` etc.) is a code-organization convenience and
+    does not affect the env-var contract.
 
     The server supports three mutually-exclusive deploy shapes, selected by
     which of JOURNAL_HYDRA_ADMIN_URL, JOURNAL_PASSWORD_HASH, and
@@ -249,13 +243,8 @@ class Settings(BaseSettings):
     Setting both HYDRA_ADMIN_URL and PASSWORD_HASH is a configuration
     error and fails startup.
 
-    Legacy flat env var names (JOURNAL_DB_APP_URL, JOURNAL_API_KEY, etc.) are
-    supported via _FlatCompatEnvSource. New-style double-underscore names
-    (JOURNAL_DB__APP_URL, JOURNAL_AUTH__API_KEY) also work and take precedence
-    when both are set.
-
     Additional hardening flags (M-9 cluster):
-    - JOURNAL_AUTH__TRUST_FORWARDED_HEADERS: When True, client_ip() honours
+    - JOURNAL_TRUST_FORWARDED_HEADERS: When True, client_ip() honours
       the rightmost X-Forwarded-For entry -- the trusted-proxy stamp per
       DEC-086 rule 4 -- (default False; M-9.3).
     - JOURNAL_HEALTH_BIND_PUBLIC: When set and "true", the extraction
@@ -263,31 +252,104 @@ class Settings(BaseSettings):
       localhost-only; M-9.7).
     """
 
+    model_config = SettingsConfigDict(
+        extra="ignore",
+        env_prefix="JOURNAL_",
+        # ``env_prefix_target`` defaults to ``"variable"`` in pydantic-settings
+        # (sources/base.py). Pinned here for reviewer clarity: the env_prefix
+        # above is NOT prepended to per-field ``validation_alias`` values, so
+        # each sub-config keeps reading its own per-field flat env-vars
+        # unchanged.
+        env_prefix_target="variable",
+    )
+
     # Deploy environment marker. Controls safe-by-default gates that should
     # only relax in local development. Env var: JOURNAL_APP_ENV.
     # See DEC-094 (canonical app_env literal); default stays "dev" to honour
     # the self-host first principle.
-    app_env: Environment = "dev"
+    app_env: Environment = Field(default="dev", validation_alias="JOURNAL_APP_ENV")
 
-    db: DbConfig
-    auth: AuthConfig = AuthConfig()
-    server: ServerConfig = ServerConfig()
-    llm: LLMConfig = LLMConfig()
+    # Sub-configs construct themselves from per-field flat env-vars via
+    # ``default_factory``. The ``validation_alias`` here is a STRUCTURAL
+    # GUARD SENTINEL, not a real env-var name -- pydantic-settings looks
+    # up this name as JSON before falling back to ``default_factory``.
+    # Sentinel values are intentionally never set in any environment, so
+    # the JSON-decode bypass class (where ``AUTH={"api_key":"..."}`` would
+    # inject a nested config) is closed.
+    db: DbConfig = Field(
+        default_factory=DbConfig,
+        validation_alias="JOURNAL_NESTED_ANCHOR_DB",
+    )
+    auth: AuthConfig = Field(
+        default_factory=AuthConfig,
+        validation_alias="JOURNAL_NESTED_ANCHOR_AUTH",
+    )
+    server: ServerConfig = Field(
+        default_factory=ServerConfig,
+        validation_alias="JOURNAL_NESTED_ANCHOR_SERVER",
+    )
+    llm: LLMConfig = Field(
+        default_factory=LLMConfig,
+        validation_alias="JOURNAL_NESTED_ANCHOR_LLM",
+    )
 
     # Paths
-    data_dir: Path = Path("./journal")
+    data_dir: Path = Field(default=Path("./journal"), validation_alias="JOURNAL_DATA_DIR")
 
     # Redis -- used by extraction pub/sub SSE endpoint and worker queue.
     # Read from JOURNAL_REDIS_URL env var; falls back to localhost.
-    redis_url: str = "redis://localhost:6379"
+    redis_url: str = Field(default="redis://localhost:6379", validation_alias="JOURNAL_REDIS_URL")
 
     # Timezone -- controls the "today" default for journal_append_entry and
     # journal_save_conversation when no explicit date is provided.
-    timezone: str = "UTC"
+    timezone: str = Field(default="UTC", validation_alias="JOURNAL_TIMEZONE")
 
     # Logging
-    log_level: str = "info"
-    log_dir: Path = Path("./logs")
+    log_level: str = Field(default="info", validation_alias="JOURNAL_LOG_LEVEL")
+    log_dir: Path = Field(default=Path("./logs"), validation_alias="JOURNAL_LOG_DIR")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _force_subconfig_default_factory(cls, data: Any) -> Any:
+        """Defense-in-depth: drop dict-shaped inputs for sub-config anchors.
+
+        The sentinel ``validation_alias`` (JOURNAL_NESTED_ANCHOR_<X>) closes
+        the bare-name JSON-decode bypass class (``AUTH={...}``,
+        ``JOURNAL_AUTH={...}``). This validator closes the residual case
+        where a misconfigured environment sets the sentinel itself with
+        alias-keyed JSON.
+
+        Sub-configs MUST construct from their own per-field flat env vars
+        via ``default_factory``. This validator drops dict-shaped inputs
+        for the four sub-config anchors at parent-validation phase so the
+        ``default_factory`` always runs.
+
+        Limitation: this validator is NOT a general-purpose "preserve
+        explicit BaseSettings instances" guard. Direct kwargs construction
+        like ``Settings(auth=AuthConfig(...))`` is supported only for cases
+        where the env still satisfies all required fields of every
+        sub-config (because each ``BaseSettings`` sub-config still reads
+        its own env at construction time).
+        """
+        if isinstance(data, dict):
+            for key in (
+                "JOURNAL_NESTED_ANCHOR_DB",
+                "JOURNAL_NESTED_ANCHOR_AUTH",
+                "JOURNAL_NESTED_ANCHOR_SERVER",
+                "JOURNAL_NESTED_ANCHOR_LLM",
+                "db",
+                "auth",
+                "server",
+                "llm",
+            ):
+                value = data.get(key)
+                if value is not None and not isinstance(value, BaseModel):
+                    # Drop dict-shaped (or string-shaped) inputs; keep
+                    # already-constructed BaseSettings/BaseModel instances
+                    # so explicit Settings(auth=AuthSettings(...)) at the
+                    # call site (tests) still works.
+                    data.pop(key)
+        return data
 
     @model_validator(mode="after")
     def _validate_deploy_shape(self) -> Self:
@@ -366,7 +428,7 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
-    def _validate_trust_gateway_signature(self) -> "Settings":
+    def _validate_trust_gateway_signature(self) -> Self:
         """Refuse trust_gateway=True without signature enforcement in deployed envs.
 
         Gated on ``self.is_deployed`` (True for staging+production) per
@@ -406,25 +468,6 @@ class Settings(BaseSettings):
     def oauth_db_path(self) -> Path:
         """SQLite file backing the self-host OAuth server (Mode 2)."""
         return self.data_dir / "oauth.db"
-
-    model_config = SettingsConfigDict(env_prefix="JOURNAL_", env_nested_delimiter="__")
-
-    @classmethod
-    def settings_customise_sources(
-        cls,
-        settings_cls: type[BaseSettings],
-        init_settings: PydanticBaseSettingsSource,
-        env_settings: PydanticBaseSettingsSource,
-        dotenv_settings: PydanticBaseSettingsSource,
-        file_secret_settings: PydanticBaseSettingsSource,
-    ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Inject _FlatCompatEnvSource so legacy flat env vars resolve before nested ones."""
-        return (
-            init_settings,
-            _FlatCompatEnvSource(settings_cls),
-            dotenv_settings,
-            file_secret_settings,
-        )
 
 
 @lru_cache

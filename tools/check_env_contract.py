@@ -52,17 +52,14 @@ def parse_settings(path: str, cls_name: str = "Settings") -> dict[str, Any]:
 
     Handles nested sub-models: when a Settings field's annotation is a
     class defined in the same file (e.g. DbConfig, AuthConfig), it expands
-    that model's fields using the double-underscore delimiter
-    (JOURNAL_DB__APP_URL) and also records any flat legacy aliases extracted
-    from ``_FLAT_TO_NESTED_ENV`` so compose checks can match either form.
+    that model's fields using ``validation_alias`` per-field env-var names.
 
     Returns::
 
         {
             "fields": {
                 "logical_name": {
-                    "env_var": str,       # canonical nested form
-                    "aliases": list[str], # flat legacy names (may be empty)
+                    "env_var": str,       # canonical name (validation_alias or prefix+upper)
                     "required": bool,
                     "alias": str | None,
                 }
@@ -90,36 +87,12 @@ def parse_settings(path: str, cls_name: str = "Settings") -> dict[str, Any]:
 
     prefix = _extract_env_prefix(settings_class)
 
-    # Extract flat->nested alias map from _FLAT_TO_NESTED_ENV if present.
-    # Produces reverse mapping: nested_var -> [flat_var, ...]
-    # The variable may be a plain Assign or an annotated AnnAssign.
-    nested_to_flat: dict[str, list[str]] = {}
-    for node in ast.walk(tree):
-        dict_value: ast.expr | None = None
-        if isinstance(node, ast.Assign):
-            for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "_FLAT_TO_NESTED_ENV":
-                    dict_value = node.value
-        elif (
-            isinstance(node, ast.AnnAssign)
-            and isinstance(node.target, ast.Name)
-            and node.target.id == "_FLAT_TO_NESTED_ENV"
-        ):
-            dict_value = node.value
-        if dict_value is not None and isinstance(dict_value, ast.Dict):
-            for k, v in zip(dict_value.keys, dict_value.values, strict=True):
-                if isinstance(k, ast.Constant) and isinstance(v, ast.Constant):
-                    flat = str(k.value)
-                    nested = str(v.value)
-                    nested_to_flat.setdefault(nested, []).append(flat)
-
     fields: dict[str, dict[str, Any]] = {}
     _expand_class_fields(
         cls_node=settings_class,
         all_classes=all_classes,
         prefix=prefix,
         nested_delimiter="__",
-        nested_to_flat=nested_to_flat,
         parent_required=True,
         fields=fields,
     )
@@ -127,12 +100,32 @@ def parse_settings(path: str, cls_name: str = "Settings") -> dict[str, Any]:
     return {"fields": fields, "prefix": prefix}
 
 
+def _is_base_settings(cls_node: ast.ClassDef) -> bool:
+    """Return True when *cls_node* directly inherits from ``BaseSettings``.
+
+    Matches both ``class X(BaseSettings)`` (ast.Name) and
+    ``class X(module.BaseSettings)`` (ast.Attribute).
+
+    Workspace assumption: ``BaseSettings`` is the pydantic-settings
+    base class. If a future module ever exports an unrelated
+    ``BaseSettings`` symbol, this function would false-positive.
+    No such collision exists in the current workspace; the parent_required
+    reset on a falsely-detected sub-class would only surface as a
+    spurious env-contract lint flag, not a runtime bug.
+    """
+    for base in cls_node.bases:
+        if isinstance(base, ast.Name) and base.id == "BaseSettings":
+            return True
+        if isinstance(base, ast.Attribute) and base.attr == "BaseSettings":
+            return True
+    return False
+
+
 def _expand_class_fields(
     cls_node: ast.ClassDef,
     all_classes: dict[str, ast.ClassDef],
     prefix: str,
     nested_delimiter: str,
-    nested_to_flat: dict[str, list[str]],
     parent_required: bool,
     fields: dict[str, dict[str, Any]],
     logical_prefix: str = "",
@@ -140,8 +133,12 @@ def _expand_class_fields(
     """Recursively expand a class's annotated fields into the ``fields`` dict.
 
     When a field's annotation refers to a class in ``all_classes``, recurse
-    with an extended prefix (``JOURNAL_DB__`` for a ``db: DbConfig`` field).
-    Otherwise emit a leaf field entry.
+    with an extended prefix segment. If the nested class is itself a
+    ``BaseSettings`` subclass, reset ``parent_required`` to True so that
+    its required fields stay required at the AST level (they read their
+    own env vars at construction time, independent of how the parent field
+    is shaped). Otherwise propagate ``parent_required`` per the
+    parent-field default-factory state.
     """
     for body_item in ast.iter_child_nodes(cls_node):
         if not isinstance(body_item, ast.AnnAssign):
@@ -165,24 +162,22 @@ def _expand_class_fields(
         if nested_cls is not None:
             # Recurse into nested model with extended prefix segment.
             sub_prefix = prefix + name.upper() + nested_delimiter
+            sub_parent_required = True if _is_base_settings(nested_cls) else field_required
             _expand_class_fields(
                 cls_node=nested_cls,
                 all_classes=all_classes,
                 prefix=sub_prefix,
                 nested_delimiter=nested_delimiter,
-                nested_to_flat=nested_to_flat,
-                parent_required=field_required,
+                parent_required=sub_parent_required,
                 fields=fields,
                 logical_prefix=logical_prefix + name + ".",
             )
         else:
             # Leaf field -- emit env var entry.
             canonical = env_var_name(name, alias, prefix)
-            flat_aliases = nested_to_flat.get(canonical, [])
             logical_name = logical_prefix + name
             fields[logical_name] = {
                 "env_var": canonical,
-                "aliases": flat_aliases,
                 "required": field_required,
                 "alias": alias,
             }
@@ -367,11 +362,7 @@ def check_env_contract(
     for fname, finfo in fields.items():
         if finfo["required"]:
             env_var = finfo["env_var"]
-            aliases: list[str] = finfo.get("aliases", [])
-            # A field is satisfied if its canonical nested name OR any flat
-            # legacy alias appears in the compose declared/referenced vars.
-            satisfied = env_var in all_declared or any(a in all_declared for a in aliases)
-            if not satisfied:
+            if env_var not in all_declared:
                 drifts.append(
                     f"DRIFT: field={fname} env={env_var} "
                     f"not declared in {compose_file} service {target_service}"
@@ -382,17 +373,13 @@ def check_env_contract(
                     f"add a default value to the Settings field."
                 )
 
-    # All canonical env vars plus all flat aliases count as known.
-    known_env: set[str] = set()
-    for finfo in fields.values():
-        known_env.add(finfo["env_var"])
-        known_env.update(finfo.get("aliases", []))
-    for dk in sorted(svc["declared_keys"]):
-        if dk not in known_env:
-            stale.append(
-                f"WARN: stale passthrough `{dk}` in {target_service}. "
-                f"No matching Settings field found."
-            )
+    # All canonical env vars count as known.
+    known_env: set[str] = {finfo["env_var"] for finfo in fields.values()}
+    stale.extend(
+        f"WARN: stale passthrough `{dk}` in {target_service}. " f"No matching Settings field found."
+        for dk in sorted(svc["declared_keys"])
+        if dk not in known_env
+    )
 
     return drifts, stale
 

@@ -20,21 +20,26 @@ def _make_mode3(*, extra: dict[str, str] | None = None) -> object:
     base: dict[str, str] = {
         "JOURNAL_DB_APP_URL": "postgresql://user:pass@localhost/db",
         "JOURNAL_API_KEY": "placeholder-not-a-real-key-padding-to-32plus",
-        "JOURNAL_AUTH__HYDRA_ADMIN_URL": "https://hydra.example.com",
-        "JOURNAL_AUTH__HYDRA_PUBLIC_ISSUER_URL": "https://auth.example.com",
-        "JOURNAL_AUTH__HYDRA_PUBLIC_URL": "https://example.com",
+        "JOURNAL_HYDRA_ADMIN_URL": "https://hydra.example.com",
+        "JOURNAL_HYDRA_PUBLIC_ISSUER_URL": "https://auth.example.com",
+        "JOURNAL_HYDRA_PUBLIC_URL": "https://example.com",
     }
     if extra:
         base.update(extra)
     # Clear PASSWORD_HASH (mutual-exclusivity check). Also clear flat-form
     # JOURNAL_OPERATOR_EMAIL because the conftest _set_env fixture (autouse)
     # always sets it to "operator@test.local". For the rejection test, callers
-    # set JOURNAL_AUTH__OPERATOR_EMAIL in extra.
+    # set JOURNAL_OPERATOR_EMAIL in extra.
     env = {
         **base,
-        "JOURNAL_AUTH__PASSWORD_HASH": "",
+        "JOURNAL_PASSWORD_HASH": "",
         "JOURNAL_OPERATOR_EMAIL": "",
     }
+    if extra:
+        # Re-apply extras after the explicit clears so a caller-provided
+        # JOURNAL_OPERATOR_EMAIL or JOURNAL_PASSWORD_HASH wins (the
+        # rejection test sets JOURNAL_OPERATOR_EMAIL in extra).
+        env.update(extra)
     with patch.dict(os.environ, env):
         from gubbi.config import Settings
 
@@ -47,7 +52,7 @@ class TestMode3OperatorEmailRejection:
     def test_mode3_with_operator_email_raises(self) -> None:
         """When Hydra is on AND operator_email is set -- raise ValueError."""
         with pytest.raises(ValueError) as exc_info:
-            _make_mode3(extra={"JOURNAL_AUTH__OPERATOR_EMAIL": "op@example.com"})
+            _make_mode3(extra={"JOURNAL_OPERATOR_EMAIL": "op@example.com"})
         msg = str(exc_info.value)
         assert "JOURNAL_OPERATOR_EMAIL must not be set when JOURNAL_HYDRA_ADMIN_URL" in msg
         assert "mode 3 (multi-tenant hosted) has no operator concept" in msg
@@ -62,10 +67,10 @@ class TestMode3OperatorEmailRejection:
         env: dict[str, str] = {
             "JOURNAL_DB_APP_URL": "postgresql://user:pass@localhost/db",
             "JOURNAL_API_KEY": "placeholder-not-a-real-key-padding-to-32plus",
-            "JOURNAL_AUTH__PASSWORD_HASH": "$2b$12$salt_hash_here",
-            "JOURNAL_AUTH__OPERATOR_EMAIL": "op@example.com",
+            "JOURNAL_PASSWORD_HASH": "$2b$12$salt_hash_here",
+            "JOURNAL_OPERATOR_EMAIL": "op@example.com",
         }
-        with patch.dict(os.environ, {**env, "JOURNAL_AUTH__HYDRA_ADMIN_URL": ""}):
+        with patch.dict(os.environ, {**env, "JOURNAL_HYDRA_ADMIN_URL": ""}):
             from gubbi.config import Settings
 
             Settings()
