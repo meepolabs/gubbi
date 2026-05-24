@@ -16,9 +16,10 @@ from typing import TYPE_CHECKING
 import redis.asyncio as aioredis
 import structlog
 from arq.connections import RedisSettings
-from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
+from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
+from gubbi.bootstrap import PgLogProbe, WorkerReplicaCountWarnProbe
 from gubbi.config import Settings, get_settings
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
@@ -30,10 +31,12 @@ from gubbi.extraction.service import ExtractionService
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import rebind_metrics_after_configure
 from gubbi.telemetry.logger import initialize_logger
-from gubbi.telemetry.metrics import record_replica_count_warning
+from gubbi.telemetry.metrics import record_startup_probe_outcome
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    import asyncpg
 
     from gubbi.extraction.context import ExtractionContext
     from gubbi.extraction.llm.provider import LLMProvider
@@ -108,46 +111,6 @@ def _build_content_cipher() -> ContentCipher | None:
         )
         return None
     return ContentCipher(master_keys)
-
-
-def _validate_replica_count() -> int:
-    """Parse and validate ``JOURNAL_REPLICA_COUNT`` (default "1").
-
-    M4 #138: the extraction worker's per-pod resources -- the DB
-    connection pool and the per-pod extraction-budget logic -- run
-    in-process, so a worker running at N replicas applies that
-    budget/limit logic N times against the intended global cap.
-
-    Same parse/validate shape as ``gubbi.main._validate_replica_count``
-    (int-coerce, ``>= 1`` validate, fail fast with an actionable
-    RuntimeError). Reads the SAME ``JOURNAL_REPLICA_COUNT`` env var so a
-    single deploy variable drives every service's self-report; we do NOT
-    introduce a separate ``JOURNAL_GUBBI_REPLICA_COUNT`` /
-    ``JOURNAL_WORKER_REPLICA_COUNT``.
-
-    Assumes the deploy sets ``JOURNAL_REPLICA_COUNT`` PER CONTAINER -- each
-    service's container (gubbi HTTP, extraction worker) gets the env value
-    matching ITS OWN replica count. A single shared/global value injected
-    identically into every container would mis-report (e.g. the worker would
-    inherit the gubbi-web replica count and falsely flag a policy violation).
-
-    Returns the validated replica count.
-    """
-    raw = os.environ.get("JOURNAL_REPLICA_COUNT", "1")
-    try:
-        replicas = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"JOURNAL_REPLICA_COUNT={raw!r} is not an integer; "
-            "set it to the deployed replica count or unset for default 1"
-        ) from exc
-
-    if replicas < 1:
-        raise RuntimeError(
-            f"JOURNAL_REPLICA_COUNT={replicas} must be >= 1; "
-            "set it to the deployed replica count or unset for default 1"
-        )
-    return replicas
 
 
 def _configure_worker_telemetry(settings: Settings) -> None:
@@ -235,8 +198,16 @@ def _configure_worker_telemetry(settings: Settings) -> None:
 
 
 async def startup(ctx: ExtractionContext) -> None:
-    """Arq worker startup hook: init logging, health server, PG pool, and Redis client."""
-    # Load settings.
+    """Arq worker startup hook: init logging, health server, PG pool, and Redis client.
+
+    Uses the same ``StartupRunner``-driven probe sequence as the gubbi
+    HTTP lifespan: the worker's two probes (PgLog + WorkerReplicaCount)
+    run through the runner so their structured-log + counter emission
+    flows through the canonical pipeline. Required-probe failure
+    escalates as :class:`gubbi_common.bootstrap.ProbeFailure`; the outer
+    ``finally`` closes the pool best-effort so the same teardown path
+    covers pre-yield init failure and clean shutdown alike.
+    """
     settings = get_settings()
 
     # Configure structured logging FIRST -- emits below would crash with
@@ -245,136 +216,116 @@ async def startup(ctx: ExtractionContext) -> None:
     # structlog in the HTTP server. Tests pass via conftest's autouse
     # session-scoped fixture, masking the production gap.
     initialize_logger("gubbi-extraction-worker", log_dir=str(settings.log_dir))
+    worker_logger = structlog.get_logger("gubbi-extraction-worker")
 
     # Wire FULL OTel -- TracerProvider (OTLP span export) + MeterProvider --
     # for the worker process. The worker does not run the FastAPI lifespan,
     # so it never reaches configure_otel(app); without this it would be both
-    # span-dark and metric-NoOp (the replica-count counter below, and any
-    # future worker metric/span, silently dropped). Requires
+    # span-dark and metric-NoOp (the replica-count counter, and any future
+    # worker metric/span, silently dropped). Requires
     # OTEL_EXPORTER_OTLP_ENDPOINT in the deploy. One-shot + best-effort:
     # never blocks boot. See _configure_worker_telemetry.
     _configure_worker_telemetry(settings)
 
-    # Health server thread (existing behaviour).
-    health_thread = threading.Thread(
-        target=_run_health_server,
-        daemon=True,
-    )
-    health_thread.start()
-    ctx["health_thread"] = health_thread
+    pool: asyncpg.Pool | None = None
 
-    # PostgreSQL pool.
-    pool = await init_pool(settings.db.app_url)
-    ctx["pool"] = pool
-    await logger.info("Extraction worker PG pool ready")
-
-    # Postgres log-settings probe (mirrors gubbi.main lifespan): refuse to
-    # start when the cluster would capture statement text or bound
-    # parameters in its log -- the worker hits the same encrypted INSERT
-    # path as the HTTP API via ``extract_conversation``. Mode is read
-    # from JOURNAL_PG_LOG_PROBE_MODE (strict|warn|off; default strict).
-    pg_log_probe_mode = os.environ.get("JOURNAL_PG_LOG_PROBE_MODE", "strict")
     try:
-        await probe_pg_log_settings(pool, mode=pg_log_probe_mode)
+        # Health server thread (existing behaviour).
+        health_thread = threading.Thread(
+            target=_run_health_server,
+            daemon=True,
+        )
+        health_thread.start()
+        ctx["health_thread"] = health_thread
+
+        # PostgreSQL pool.
+        pool = await init_pool(settings.db.app_url)
+        ctx["pool"] = pool
+        await logger.info("Extraction worker PG pool ready")
+
+        # Worker probe sequence. PgLogProbe refuses to start when the
+        # cluster would capture statement text or bound parameters (the
+        # worker hits the same encrypted INSERT path as the HTTP API via
+        # ``extract_conversation``). WorkerReplicaCountWarnProbe flags the
+        # single-worker deploy-policy violation (M4 #138 worker variant)
+        # and increments the alertable ``gateway.replica_count_warning``
+        # counter. Mode for PgLogProbe is consumed from
+        # ``settings.pg_log_probe_mode`` (was ``JOURNAL_PG_LOG_PROBE_MODE``
+        # in the pre-StartupRunner shape); replica count is consumed from
+        # ``settings.replica_count`` (was the worker's now-deleted
+        # ``_validate_replica_count`` helper, which Settings.replica_count
+        # ge=1 supersedes at construction time).
+        probes: list[StartupProbe] = [
+            PgLogProbe(pool=pool, mode=settings.pg_log_probe_mode),
+            WorkerReplicaCountWarnProbe(
+                replica_count=settings.replica_count,
+                pool_max_per_pod=pool.get_max_size(),
+            ),
+        ]
+        runner = StartupRunner(
+            app_env=settings.app_env,
+            outcome_counter=record_startup_probe_outcome,
+        )
+        await runner.run(probes, logger=worker_logger)
+
+        # Content cipher.
+        cipher = _build_content_cipher()
+        ctx["cipher"] = cipher
+
+        # Extraction service.
+        # The LLM provider is selected by the ``JOURNAL_LLM_PROVIDER`` env
+        # var (default ``anthropic`` so a missing env in prod stays safe).
+        # Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER=fake`` so the
+        # worker boots against the in-process FakeLLMProvider stub instead
+        # of dialling api.anthropic.com -- keeps D-tier hermetic and avoids
+        # accidental spend if a leaked ANTHROPIC_API_KEY is in scope.
+        # PRD: llm_context/tasks/milestone-04.5-verification-suite.md TASK-04.5.07.
+        # Adding a new provider is a one-line append to ``_PROVIDER_FACTORIES``.
+        provider_name = os.environ.get("JOURNAL_LLM_PROVIDER", "anthropic").lower()
+        factory = _PROVIDER_FACTORIES.get(provider_name)
+        if factory is None:
+            raise ValueError(
+                f"Unknown JOURNAL_LLM_PROVIDER={provider_name!r}; expected "
+                f"one of {sorted(_PROVIDER_FACTORIES)}"
+            )
+        llm_provider: LLMProvider = factory(settings)
+        extraction_service = ExtractionService(llm_provider)
+        ctx["extraction_service"] = extraction_service
+
+        # Redis pub/sub client.
+        redis_url = _redis_url()
+        redis_pool = aioredis.ConnectionPool.from_url(redis_url)
+        redis_client = aioredis.Redis(connection_pool=redis_pool)
+        ctx["redis"] = redis_client
+        ctx["redis_pool"] = redis_pool
+
+        # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
+        # register the Lua script anyway (cheapest option; no API split).
+        if settings.llm.llm_budget_enabled:
+            pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
+            ctx["budget_helper"] = BudgetHelper(
+                redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+                pre_charge_script=pre_charge_script,
+            )
+            await logger.info("Extraction worker BudgetHelper ready")
+        else:
+            await logger.info("Extraction worker BudgetHelper disabled (budget_enabled=False)")
+
+        await logger.info("Extraction worker Redis client ready")
     except BaseException:
         # Catch BaseException (not Exception) so CancelledError /
-        # KeyboardInterrupt during the probe still close the pool
-        # before unwinding. Best-effort teardown; original error or
-        # cancellation must propagate.
+        # KeyboardInterrupt during init still close the pool before
+        # unwinding. Best-effort teardown; original error or cancellation
+        # must propagate.
         # Suppress asyncio.CancelledError from close() explicitly --
         # CancelledError is a BaseException (not Exception) since
         # Python 3.8, so a bare ``suppress(Exception)`` would let a
         # cancelled close() clobber the original cancellation we're
         # about to ``raise``.
-        with suppress(Exception, asyncio.CancelledError):
-            await pool.close()
+        if pool is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await pool.close()
         raise
-
-    # Content cipher.
-    cipher = _build_content_cipher()
-    ctx["cipher"] = cipher
-
-    # Extraction service.
-    # The LLM provider is selected by the ``JOURNAL_LLM_PROVIDER`` env
-    # var (default ``anthropic`` so a missing env in prod stays safe).
-    # Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER=fake`` so the
-    # worker boots against the in-process FakeLLMProvider stub instead
-    # of dialling api.anthropic.com -- keeps D-tier hermetic and avoids
-    # accidental spend if a leaked ANTHROPIC_API_KEY is in scope.
-    # PRD: llm_context/tasks/milestone-04.5-verification-suite.md TASK-04.5.07.
-    # Adding a new provider is a one-line append to ``_PROVIDER_FACTORIES``.
-    provider_name = os.environ.get("JOURNAL_LLM_PROVIDER", "anthropic").lower()
-    factory = _PROVIDER_FACTORIES.get(provider_name)
-    if factory is None:
-        raise ValueError(
-            f"Unknown JOURNAL_LLM_PROVIDER={provider_name!r}; expected "
-            f"one of {sorted(_PROVIDER_FACTORIES)}"
-        )
-    llm_provider: LLMProvider = factory(settings)
-    extraction_service = ExtractionService(llm_provider)
-    ctx["extraction_service"] = extraction_service
-
-    # Redis pub/sub client.
-    redis_url = _redis_url()
-    redis_pool = aioredis.ConnectionPool.from_url(redis_url)
-    redis_client = aioredis.Redis(connection_pool=redis_pool)
-    ctx["redis"] = redis_client
-    ctx["redis_pool"] = redis_pool
-
-    # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
-    # register the Lua script anyway (cheapest option; no API split).
-    if settings.llm.llm_budget_enabled:
-        pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
-        ctx["budget_helper"] = BudgetHelper(
-            redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
-            pre_charge_script=pre_charge_script,
-        )
-        await logger.info("Extraction worker BudgetHelper ready")
-    else:
-        await logger.info("Extraction worker BudgetHelper disabled (budget_enabled=False)")
-
-    await logger.info("Extraction worker Redis client ready")
-
-    # M4 #138: the worker's per-pod resources -- its DB connection pool and
-    # the per-pod extraction-budget logic -- run in-process, so a worker
-    # scaled to N replicas applies that budget/rate logic N times against
-    # the intended GLOBAL cap. Worse, the worker is fixed at a SINGLE
-    # replica by deploy convention (a single extraction worker is the
-    # locked shape regardless of gubbi-web replica count -- Anthropic's
-    # per-account rate limit is the bottleneck before the DB pool at this
-    # scale), so a worker JOURNAL_REPLICA_COUNT > 1 is itself a deploy-
-    # policy violation, not just an over-provisioning footgun. Log a
-    # structured WARNING + increment the alertable counter so both the
-    # budget-multiplication and the policy violation are visible in
-    # HyperDX. Default replica count is 1, so the normal single-worker
-    # deploy stays silent.
-    replica_count = _validate_replica_count()
-    if replica_count > 1:
-        # Read the LIVE per-pod pool max rather than assuming the constant,
-        # so the reported footprint tracks however the pool was actually
-        # sized. The worker opens ONLY the app pool (no admin/BYPASSRLS
-        # pool), so its per-pod DB footprint is that single pool's max.
-        db_pool_max_per_pod = pool.get_max_size()
-        await logger.warning(
-            "extraction_worker_replica_policy_violation",
-            db_pool_max_per_pod=db_pool_max_per_pod,
-            replica_count=replica_count,
-            effective_db_connections=db_pool_max_per_pod * replica_count,
-            note=(
-                "extraction worker is fixed at a single replica by deploy "
-                "convention; JOURNAL_REPLICA_COUNT > 1 multiplies the "
-                "per-pod extraction-budget logic AND the DB pool N-fold "
-                "and violates that single-worker policy"
-            ),
-        )
-        # Alertable counterpart to the WARNING. The OTel counter NAME is
-        # shared cross-service (gateway.replica_count_warning); emitters
-        # are distinguished by the service.name RESOURCE attribute set in
-        # _configure_worker_telemetry above (default
-        # "gubbi-extraction-worker", overridable via OTEL_SERVICE_NAME),
-        # not by a metric attribute -- matches cloud-api's helper so a
-        # single alert rule rolls up across cloud-api + gubbi + worker.
-        record_replica_count_warning(replica_count=replica_count)
 
 
 async def shutdown(ctx: ExtractionContext) -> None:
