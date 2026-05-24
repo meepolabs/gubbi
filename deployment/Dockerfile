@@ -16,7 +16,7 @@ ENV PATH="$POETRY_HOME/bin:$VENV_PATH/bin:$PATH"
 
 RUN apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y curl build-essential gosu && \
+    apt-get install -y curl build-essential gosu postgresql-client && \
     rm -rf /var/lib/apt/lists/*
 
 # Install poetry
@@ -26,7 +26,7 @@ RUN curl -sSL https://install.python-poetry.org | python -
 WORKDIR $PYSETUP_PATH
 COPY poetry.lock pyproject.toml ./
 
-# Install runtime deps — versions and hashes locked via poetry.lock
+# Install runtime deps -- versions and hashes locked via poetry.lock
 RUN poetry install --only main
 
 
@@ -41,7 +41,7 @@ RUN chown -R appuser:appuser /src /app /home/appuser
 
 # Entrypoint handles permission fixing + privilege drop
 # ONNX model (~80MB) downloads to /home/appuser/.cache on first container start,
-# persisted via the onnx-model-cache Docker volume — survives all future rebuilds.
+# persisted via the onnx-model-cache Docker volume -- survives all future rebuilds.
 COPY deployment/entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 ENTRYPOINT ["/entrypoint.sh"]
@@ -52,7 +52,7 @@ HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD curl -f http://localhost:8100/health || exit 1
 
 # No --preload: asyncpg pools must not be shared across os.fork().
-# Each worker creates its own pool independently (2 workers × min_size=2 = 4 connections).
+# Each worker creates its own pool independently (2 workers x min_size=2 = 4 connections).
 # ONNX model is pre-downloaded by entrypoint.sh; each worker loads from disk cache.
 CMD ["gunicorn", "gubbi.main:server", \
     "--workers", "2", \
@@ -62,4 +62,4 @@ CMD ["gunicorn", "gubbi.main:server", \
     "--keep-alive", "120", \
     "--log-level", "info", \
     "--access-logfile", "-", \
-    "--access-logformat", "%(m)s %(U)s → %(s)s (%(D)sμs)"]
+    "--access-logformat", "%(m)s %(U)s -> %(s)s (%(D)sus)"]

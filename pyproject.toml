@@ -101,6 +101,11 @@ convention = "google"
 "gubbi/alembic/versions/20260419_0004_add_user_id_to_tenants.py" = ["E501"]
 # Alembic migrations are auto-generated; no docstring discipline expected.
 "gubbi/alembic/versions/*.py" = ["D"]
+# Archived migration chain (frozen under _archive/, not loaded by alembic)
+# keeps its original shape; not subject to current docstring or line-length
+# rules. Same exemption as the live versions/ dir, plus E501 for the long
+# error message in 20260419_0004.
+"gubbi/alembic/_archive/*.py" = ["D", "E501"]
 # MCP tool descriptions live on the @mcp.tool decorator (surfaced to clients
 # in the tool list), not in Python docstrings. D102/D103 do not apply here;
 # format rules (D200/D205/D400) still apply for any docstrings that exist.

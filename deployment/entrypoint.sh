@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
 # Entrypoint script
 # Starts as root, fixes permissions on mounted volumes, then drops
@@ -21,6 +21,23 @@ mkdir -p /app/journal/knowledge /app/journal/conversations_json /app/logs
 # Fix ownership of app-internal directories (including ONNX model volume)
 chown -R appuser:appuser /src /app/journal /app/logs /home/appuser/.cache 2>/dev/null || true
 
+# Run database migrations as appuser BEFORE starting gunicorn.
+# Alembic resolves the DSN from JOURNAL_DB_MIGRATION_URL (preferred) or
+# JOURNAL_DB_ADMIN_URL (fallback); both are present in Doppler gubbi/prd
+# and forwarded by Kamal. Idempotent: alembic skips already-applied revisions.
+# Failure exits the entrypoint non-zero, which fails the container HEALTHCHECK
+# and aborts the kamal deploy after deploy_timeout.
+echo "[entrypoint] running alembic upgrade head..."
+gosu appuser python -m alembic -c alembic.ini upgrade head
+
+# Verify DB invariants (GRANTs / RLS / policies / triggers / otel_ro)
+# AFTER migrations succeed and BEFORE gunicorn starts. Same fail-fast
+# guarantee: any invariant violation aborts the container, fails the
+# HEALTHCHECK, and aborts the kamal deploy. psql is available in the
+# image (postgresql-client installed in the Dockerfile alongside gosu).
+echo "[entrypoint] running verify-db-invariants.sh..."
+gosu appuser /src/deployment/scripts/verify-db-invariants.sh
+
 # Pre-download ONNX model as appuser before gunicorn workers start.
 # Without --preload, each worker would try to download concurrently.
 # Running EmbeddingService() here serializes the download to disk cache
@@ -31,6 +48,13 @@ gosu appuser python -c "
 from gubbi.storage.embedding_service import EmbeddingService
 EmbeddingService()
 " 2>&1
+
+# Drop the migration-only superuser DSN from the runtime env so long-lived
+# gunicorn workers cannot read it from os.environ. Migrations + verify are
+# both done by this point; gunicorn only needs JOURNAL_DB_ADMIN_URL +
+# JOURNAL_DB_APP_URL. Defense-in-depth against in-process RCE escalating to
+# total DB ownership via the `journal` superuser.
+unset JOURNAL_DB_MIGRATION_URL
 
 # Drop privileges and run the CMD
 exec gosu appuser "$@"

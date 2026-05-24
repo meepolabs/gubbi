@@ -38,7 +38,7 @@ def upgrade() -> None:
             FOR UPDATE TO journal_app
             USING      (id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid))
             WITH CHECK (id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid))
-        """  # noqa: E501
+        """
     )
 
     op.execute("REVOKE INSERT, DELETE ON users FROM journal_app")
