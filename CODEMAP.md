@@ -41,7 +41,7 @@ that forwards via the trust-gateway header path.
 
 ```
 gubbi/
-  pyproject.toml          Poetry, Python ^3.12
+  pyproject.toml          Poetry, Python ~3.12
   alembic.ini             migrations under gubbi/alembic/
   docker-compose.yml      gubbi + postgres (bind-mounted ./data/)
   deployment/             Dockerfile, entrypoint, nginx snippet;
@@ -60,7 +60,7 @@ service, settings, cipher, operator UUID).
 
 | Module | What it does |
 |---|---|
-| `main.py` | FastAPI lifespan + MCP mount + ASGI middleware composition. Single entry point for both `streamable-http` and `stdio` transports. |
+| `main.py` | FastAPI lifespan + MCP mount + ASGI middleware composition. Single entry point for both `streamable-http` and `stdio` transports. The deployment target is the module-level `server: ASGIApp = CorrelationIDMiddleware(MCPPathNormalizer(app))` wrapper; FastAPI's `user_middleware` list is kept empty so no `BaseHTTPMiddleware` can buffer SSE responses. `app.middleware_stack` is invalidated after `FastAPIInstrumentor.instrument_app(app)` so Kind=Server OTel spans fire correctly. |
 | `mcp_validation.py` | `JournalFastMCP` subclass + `format_validation_error` helper. Maps pre-body pydantic `ValidationError` (raised by the MCP SDK before the tool body's try/except runs) to the canonical `validation_error` envelope so clients see a uniform `success=False, error_code=VALIDATION_ERROR` shape for both schema-validation and in-body failures. `main.create_mcp_server` instantiates this subclass instead of bare `FastMCP`. |
 | `app_state.py` | Typed accessors for `request.app.state.*` (replaces the legacy `CustomFastAPI` subclass). `require_<field>` raises if lifespan didn't install; `get_optional_<field>` for graceful-degrade paths. |
 | `app_context.py` | `AppContext` frozen dataclass (pool, admin_pool, embedding_service, settings, logger, cipher, operator_user_id). Captured by every tool's `register(mcp, app_ctx)` closure. |
@@ -71,7 +71,7 @@ service, settings, cipher, operator UUID).
 | `bootstrap/` | Lifespan helpers extracted from `main.lifespan`: trust-gateway bind-address safety check, MCP middleware assembly, OAuth wiring, gateway HMAC secret decode. |
 | `auth/` | `hydra.py` (introspection client, TTL cache, JIT email lookup). `strategies.py` (auth strategy Protocol + four impls: `TrustGatewayStrategy`, `ApiKeyStrategy`, `HydraStrategy`, `SelfHostStrategy`). `scope.py` (OAuth scope parser). |
 | `oauth/` | Self-host OAuth (Mode 2): MCP Python SDK provider impl, SQLite-backed storage for clients/codes/tokens, bcrypt login form, Mode-3 disabled stubs, well-known metadata payload builders. |
-| `middleware/` | ASGI middleware: `BearerAuthMiddleware` (strategies dispatched per-request), `MCPPathNormalizer`, `OriginValidationMiddleware`, `CorrelationMiddleware`. |
+| `middleware/` | ASGI middleware: `BearerAuthMiddleware` (strategies dispatched per-request), `MCPPathNormalizer`, `OriginValidationMiddleware`, `CorrelationIDMiddleware`. |
 | `audit/` | Audit log writer. `record_audit(conn, ...)` + `@audited` decorator. Action constants re-exported from gubbi-common. Append-only by DB trigger. |
 | `crypto/` | App-layer AES-256-GCM. `cipher.py` (`ContentCipher`, key-version-in-nonce, `load_master_keys_from_env`). `guard.py` (`require_cipher` fail-fast for tool entry points). |
 | `core/` | PEP 562 deprecation shim. Old import paths under `core/*` still work but new code uses the canonical homes (`audit/`, `crypto/`, top-level `auth_context.py` etc). Will be removed; do not add new symbols here. |
@@ -80,8 +80,8 @@ service, settings, cipher, operator UUID).
 | `models/` | Plain dataclasses: `TopicMeta`, `Entry`, `Message`, `ConversationMeta`, `SearchResult`. |
 | `tools/` | MCP tool handlers grouped by surface. Each module exports `register(mcp, app_ctx)`. `registry.py` calls them in order: topics -> entries -> search -> conversations -> context. `admin.py` is a library function (not registered), used by future admin API. |
 | `api/v1/` | REST endpoints for cloud-side gateway forwarding: `auth.py`, `ingest.py`, `extraction.py`. |
-| `extraction/` | Arq worker for conversation -> entry extraction. `service.py` orchestration, `worker.py` Arq settings (provider factory registry keyed by `JOURNAL_LLM_PROVIDER`), `jobs/` (single-conversation job), `llm/` (provider Protocol + `AnthropicProvider` real impl + `FakeLLMProvider` test stub for testbench D-tier; failure markers `FAKE_LLM_FAIL` / `FAKE_LLM_FAIL_PERMANENT`), `prompts/` (categorize + extract markdown templates). |
-| `telemetry/` | OTel span/metric/log helpers. `attrs.py` (canonical attribute names), `metrics.py` (Prometheus counters/histograms), `spans.py` (gubbi-common allowlist wrapper), `logger.py` (structlog -> OTel logs bridge). |
+| `extraction/` | Arq worker for conversation -> entry extraction. `service.py` orchestration, `worker.py` Arq settings (provider factory registry keyed by `JOURNAL_LLM_PROVIDER`), `jobs/` (single-conversation job; emits `extraction.job` + `extraction.llm_call` OTel spans; `_resolve_provider_attrs` helper resolves provider/model names for span attributes), `llm/` (provider Protocol + `AnthropicProvider` real impl + `FakeLLMProvider` test stub for testbench D-tier; failure markers `FAKE_LLM_FAIL` / `FAKE_LLM_FAIL_PERMANENT`), `prompts/` (categorize + extract markdown templates). |
+| `telemetry/` | OTel span/metric/log helpers. `attrs.py` (canonical attribute names including `SpanNames.EXTRACTION_JOB` + `SpanNames.EXTRACTION_LLM_CALL`), `metrics.py` (Prometheus counters/histograms + `rebind_metrics_after_configure` hook), `spans.py` (gubbi-common allowlist wrapper), `logger.py` (structlog -> OTel logs bridge). Three "orphan" counters (`orphan_cleanup`, `extract_conversation`, `anthropic_provider`) use `@lru_cache` factories deferred to first call; `rebind_metrics_after_configure` clears and re-primes all four counter factories after lifespan `configure_otel` so they bind to the SDK provider, not the import-time NoOp. Adding a new orphan counter requires wiring BOTH this rebind hook AND the autouse test fixture. |
 | `scripts/` | Operational scripts shipped with the package: encryption-key rotation. |
 | `alembic/` | DB migrations. Raw SQL via `op.execute`. Migration DSN resolved by env.py fallback chain (MIGRATION > ADMIN > APP). |
 ```
@@ -118,7 +118,7 @@ never lands in a column.
 
 | Direction | Repo | What |
 |---|---|---|
-| imports | [`gubbi-common`](https://github.com/meepolabs/gubbi-common) | `audit.actions.Action`, `audit.sql.AUDIT_INSERT_*_SQL`, `auth.gateway_signature`, `auth.bearer_challenge`, `db.user_scoped_connection`, `middleware.correlation`, `telemetry.allowlist`, `bootstrap.pg_log_probe` |
+| imports | [`gubbi-common`](https://github.com/meepolabs/gubbi-common) | `audit.actions.Action`, `audit.sql.AUDIT_INSERT_*_SQL`, `auth.gateway_signature`, `auth.bearer_challenge`, `db.user_scoped_connection`, `middleware.correlation`, `telemetry.allowlist`, `telemetry.correlation_processor` (CorrelationSpanProcessor stamps correlation_id onto every span), `bootstrap.pg_log_probe` |
 | trust-gateway producer | upstream cloud control plane | accepts `X-Auth-User-Id` envelope verified by HMAC (`JOURNAL_GUBBI_GATEWAY_SECRET`) when `JOURNAL_TRUST_GATEWAY=true`; the strategy list in lifespan reduces to `TrustGatewayStrategy` only |
 
 `gubbi` does NOT import the cloud control plane and does NOT write to
