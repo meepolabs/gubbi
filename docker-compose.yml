@@ -15,6 +15,7 @@
 # Local bind mounts under ./data/ -- data survives `docker compose down -v`:
 #   ./data/journal/   -- conversations_json/, knowledge/, oauth.db
 #   ./data/postgres/  -- PostgreSQL WAL and data files
+#   ./data/redis/     -- Redis AOF journal (RDB snapshots disabled)
 #   ./data/onnx/      -- cached ONNX model (avoid re-download on recreate)
 
 services:
@@ -35,6 +36,20 @@ services:
       timeout: 5s
       retries: 5
 
+  redis:
+    image: redis:7-alpine
+    container_name: gubbi-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--appendfsync", "everysec", "--save", ""]
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
   gubbi:
     container_name: gubbi
     build:
@@ -44,6 +59,8 @@ services:
     restart: unless-stopped
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
     ports:
       - "127.0.0.1:8100:8100"
@@ -63,6 +80,12 @@ services:
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
       - JOURNAL_LOG_DIR=/app/logs
+      # Self-host app_env. Defaults to `dev` so the in-production-mode
+      # security validators (loopback rejection, https-required for OAuth
+      # metadata URLs) stay relaxed for local boxes. Production deploys
+      # (server-infra/meepolabs-prod/kamal/) override this to `production`
+      # via Kamal's env.clear block, never via this compose file.
+      - JOURNAL_APP_ENV=${JOURNAL_APP_ENV:-dev}
       # Operator identity + encryption (multi-tenant auth)
       - JOURNAL_OPERATOR_EMAIL
       - JOURNAL_ENCRYPTION_MASTER_KEY_V1
@@ -75,11 +98,25 @@ services:
       - JOURNAL_HYDRA_ADMIN_URL
       - JOURNAL_HYDRA_PUBLIC_ISSUER_URL
       - JOURNAL_HYDRA_PUBLIC_URL
-      # Trust gateway mode (hosted Mode 3 behind cloud-api)
+      # Trust gateway mode (hosted Mode 3 behind cloud-api). Paired with
+      # the gateway HMAC secret below: when JOURNAL_TRUST_GATEWAY is on,
+      # gubbi requires every proxied request to carry a valid HMAC
+      # signature minted by cloud-api with this shared secret. Without
+      # the secret wired here, a self-hoster who enables TRUST_GATEWAY
+      # gets only a config-time log warning instead of a hard crash, and
+      # every /mcp/* request 503s at runtime. Bare passthrough -- empty
+      # default keeps Mode 1 / Mode 2 self-host (TRUST_GATEWAY off) working.
       - JOURNAL_TRUST_GATEWAY
+      - JOURNAL_GUBBI_GATEWAY_SECRET=${JOURNAL_GUBBI_GATEWAY_SECRET:-}
       # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
       - JOURNAL_PASSWORD_HASH
+      # Redis URL for the extraction worker + budget helpers. gubbi requires
+      # Redis to boot (startup ping is unconditional). The default points at
+      # the bundled `redis` service above; operators who already run Redis
+      # elsewhere can override JOURNAL_REDIS_URL in the environment and the
+      # explicit value wins.
+      - JOURNAL_REDIS_URL=${JOURNAL_REDIS_URL:-redis://redis:6379}
       # OpenTelemetry (TASK-03.19a). OTEL_ENABLED=false bypasses the
       # exporter entirely; useful when the Collector isn't deployed yet.
       - OTEL_ENABLED
