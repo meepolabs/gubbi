@@ -48,7 +48,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "218a949", extras = ["db"] }  # 0.13.2: + audit.write span allowlist via safe_set_attributes (drops actor_id/target_id/target_kind from spans).
+gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "3f48c93", extras = ["db"] }  # 0.14.0: + StartupProbe Protocol and StartupRunner orchestrator.
 
 # LLM extraction — Arq worker + Anthropic API
 arq = "^0.26.0"

@@ -10,7 +10,6 @@ the lifespan and read back through typed accessors in
 from __future__ import annotations
 
 import asyncio
-import os
 import textwrap
 from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any
@@ -24,7 +23,7 @@ from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from gubbi_common.auth.prm import build_prm_metadata_url
-from gubbi_common.bootstrap.pg_log_probe import probe_pg_log_settings
+from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from starlette.types import ASGIApp  # noqa: TC002 (used in runtime variable annotation)
 
@@ -38,10 +37,14 @@ from gubbi.auth.strategies import (
     TrustGatewayStrategy,
 )
 from gubbi.bootstrap import (
+    BindAddressProbe,
+    PgLogProbe,
+    RedisPingProbe,
+    ReplicaCountWarnProbe,
     build_mcp_middleware,
-    check_trust_gateway_bind_address,
     decode_gateway_secret,
     setup_oauth,
+    teardown_lifespan_resources,
 )
 from gubbi.config import (
     ALLOWED_ORIGINS,
@@ -62,7 +65,7 @@ from gubbi.storage.exceptions import DatabaseUnavailable
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import configure_otel
 from gubbi.telemetry.logger import initialize_logger
-from gubbi.telemetry.metrics import record_replica_count_warning
+from gubbi.telemetry.metrics import record_startup_probe_outcome
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
 
@@ -70,7 +73,10 @@ if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
     import asyncpg
+    from arq.connections import ArqRedis
     from mcp.server.fastmcp import FastMCP
+
+    from gubbi.oauth.storage import OAuthStorage
 
 __all__: list[str] = [
     "create_mcp_server",
@@ -256,52 +262,30 @@ async def _build_app_ctx(
     return app_ctx, pool, admin_pool, mcp
 
 
-def _validate_replica_count() -> int:
-    """Parse and validate ``JOURNAL_REPLICA_COUNT`` (default "1").
-
-    M4 #138: gubbi's per-pod resources -- the DB connection pool and any
-    per-pod rate-limit logic -- run in-process, so under a multi-replica
-    deployment the effective per-pod cap multiplies by the replica count.
-    The lifespan logs a structured WARNING + increments an OTel counter
-    when the count is > 1 so the over-provisioning gap is visible before
-    it bites.
-
-    Mirrors the parse/validate shape of cloud-api's
-    ``_check_connection_budget`` (int-coerce, ``>= 1`` validate, fail fast
-    with an actionable RuntimeError) but deliberately does NOT read
-    Postgres ``max_connections`` or enforce a hard connection budget --
-    that guard is cloud-api-specific (#138 is the soft alarm only). Reads
-    the SAME ``JOURNAL_REPLICA_COUNT`` env var, per-container, so a single
-    deploy variable drives every service's self-report.
-
-    Assumes the deploy sets ``JOURNAL_REPLICA_COUNT`` PER CONTAINER -- each
-    service's container (gubbi HTTP, extraction worker) gets the env value
-    matching ITS OWN replica count. A single shared/global value injected
-    identically into every container would mis-report (each service would
-    inherit the others' replica counts rather than its own).
-
-    Returns the validated replica count.
-    """
-    raw = os.environ.get("JOURNAL_REPLICA_COUNT", "1")
-    try:
-        replicas = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(
-            f"JOURNAL_REPLICA_COUNT={raw!r} is not an integer; "
-            "set it to the deployed replica count or unset for default 1"
-        ) from exc
-
-    if replicas < 1:
-        raise RuntimeError(
-            f"JOURNAL_REPLICA_COUNT={replicas} must be >= 1; "
-            "set it to the deployed replica count or unset for default 1"
-        )
-    return replicas
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
-    """Application lifespan: startup and shutdown."""
+    """Application lifespan: startup and shutdown.
+
+    Init phase opens long-lived resources (DB pools, OAuth storage,
+    optional Hydra HTTP client, Redis client/pool) and then drives
+    ``StartupRunner`` with the canonical probe sequence in TWO PHASES:
+
+    * Phase 1 (config-only) runs BEFORE any wiring -- currently just
+      ``BindAddressProbe``.  The bind-address contract violation is a
+      deploy-time misconfiguration; failing here means we abort before
+      allocating pools / OAuth storage / Redis client / Hydra HTTP
+      client, matching the original spec's "fail before resources" intent.
+    * Phase 2 (resources) runs AFTER pools / Redis / OAuth are wired and
+      covers ``PgLogProbe`` -> ``RedisPingProbe`` -> ``ReplicaCountWarnProbe``
+      in the canonical order pinned by ``test_lifespan_probe_trace.py``.
+
+    Required-probe failure escalates as ``ProbeFailure``; the outer
+    ``finally`` routes through :func:`teardown_lifespan_resources` so the
+    same helper covers pre-yield init failure and clean shutdown alike.
+    The same ``StartupRunner`` instance is reused across both phases --
+    it has no per-invocation state; the per-call timeout budget applies
+    to each phase independently.
+    """
     settings = get_settings()
 
     initialize_logger("gubbi", log_dir=str(settings.log_dir))
@@ -311,253 +295,186 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     await logger.info("Server starting up")
 
-    # Security: fail fast when trust_gateway is paired with a public-routable bind address.
-    await check_trust_gateway_bind_address(
-        settings.server.host, settings.auth.trust_gateway, logger
-    )
-
-    # Core startup: pools, operator scaffold, caching, cipher.
-    app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, logger)
-    app.state.app_ctx = app_ctx
-
-    # Postgres log-settings probe -- refuses to start when the cluster is
-    # configured to capture statement text or bound parameters in its log
-    # (which would silently turn the DB into a plaintext sink for journal
-    # content). Mode is read from JOURNAL_PG_LOG_PROBE_MODE
-    # (strict|warn|off; default strict). On failure, close pools
-    # symmetrically before propagating.
-    pg_log_probe_mode = os.environ.get("JOURNAL_PG_LOG_PROBE_MODE", "strict")
-    try:
-        await probe_pg_log_settings(pool, mode=pg_log_probe_mode)
-    except BaseException:
-        # Catch BaseException (not Exception) so CancelledError /
-        # KeyboardInterrupt during the probe still trip pool teardown
-        # before the original exception propagates. Pool close is
-        # best-effort -- a teardown failure must not mask the probe
-        # error or the cancellation that triggered the unwind.
-        # Suppress asyncio.CancelledError from the close() calls
-        # explicitly: under Python 3.8+ CancelledError is a BaseException
-        # (not Exception), so a bare ``suppress(Exception)`` would let a
-        # cancelled close() escape and clobber the original cancellation
-        # that the surrounding ``raise`` is meant to re-raise.
-        with suppress(Exception, asyncio.CancelledError):
-            await pool.close()
-        if admin_pool is not None:
-            with suppress(Exception, asyncio.CancelledError):
-                await admin_pool.close()
-        raise
-
-    operator_user_id = app_ctx.operator_user_id
-
-    # OAuth -- storage, routes, expired-token cleanup.
-    oauth_storage, token_validator = await setup_oauth(app, settings)
-    if token_validator:
-        await logger.info("OAuth endpoints registered")
-
-    # Gateway HMAC secret (three warning branches preserved verbatim).
-    app.state.gubbi_gateway_secret = await decode_gateway_secret(
-        settings.auth.gateway_secret,
-        require_signature=settings.auth.gateway_require_signature,
-        trust_gateway=settings.auth.trust_gateway,
-        logger=logger,
-    )
-
-    # Expose auth dependencies on app.state for REST API routes.
-    app.state.hydra_introspector = None  # may be replaced below
-    app.state.selfhost_token_validator = token_validator  # may be None
-    app.state.operator_user_id = operator_user_id  # may be None
-
-    # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
-    introspector: HydraIntrospector | None = None
+    pool: asyncpg.Pool | None = None
+    admin_pool: asyncpg.Pool | None = None
+    redis_pool_handle: aioredis.ConnectionPool | None = None
+    redis_client: aioredis.Redis | None = None
+    oauth_storage: OAuthStorage | None = None
     hydra_http_client: httpx.AsyncClient | None = None
-    if settings.auth.hydra_admin_url:
-        hydra_http_client = httpx.AsyncClient(timeout=HYDRA_INTROSPECT_TIMEOUT_SECS)
-        introspector = HydraIntrospector(
-            admin_url=settings.auth.hydra_admin_url,
-            http_client=hydra_http_client,
-            logger=logger,
-            cache=InMemoryHydraCache(),
-            timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
-        )
-        await logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
-        app.state.hydra_introspector = introspector
-
-    # Shared Redis client for SSE pub/sub (extraction progress).
-    redis_pool = aioredis.ConnectionPool.from_url(str(settings.redis_url))
-    redis_client = aioredis.Redis(connection_pool=redis_pool)
-    app.state.redis_client = redis_client
-
-    # Fail-fast PING: a Redis that is unreachable at startup must abort the
-    # lifespan rather than yield a half-open service whose first request
-    # discovers the failure. Without this, gubbi would start "successfully"
-    # against a dead Redis and then surface ConnectionError on every
-    # SSE / arq / budget call (post-DEC-098 alarm channel goes silent on
-    # whatever subset of those use Redis).
-    #
-    # On PING failure: close every pre-yield resource opened so far so the
-    # process does not leak DB connections, OAuth storage, the Hydra HTTP
-    # client, or the Redis pool when supervisor (uvicorn / kamal / k8s)
-    # restarts. Mirrors the same pattern as `_build_app_ctx`'s on-failure
-    # close block above and gubbi-cloud's PING-on-test-cleanup branch.
-    try:
-        await redis_client.ping()
-    except BaseException:
-        with suppress(Exception, asyncio.CancelledError):
-            await redis_client.aclose(close_connection_pool=True)
-        with suppress(Exception, asyncio.CancelledError):
-            await oauth_storage.close()
-        if hydra_http_client is not None:
-            with suppress(Exception, asyncio.CancelledError):
-                await hydra_http_client.aclose()
-        with suppress(Exception, asyncio.CancelledError):
-            await pool.close()
-        if admin_pool is not None:
-            with suppress(Exception, asyncio.CancelledError):
-                await admin_pool.close()
-        raise
-
-    # Arq pool for background job enqueue (separate from the SSE aioredis client).
-    arq_pool = await arq_create_pool(ArqRedisSettings.from_dsn(str(settings.redis_url)))
-    app.state.arq_pool = arq_pool
-    app_ctx.arq_pool = arq_pool
-
-    # BudgetHelper -- shared facade over Redis pre-charge + delta writes.
-    # Disabled in self-host mode (Mode 1/2); constructed only when the
-    # operator has opted into LLM budget enforcement.
-    if settings.llm.llm_budget_enabled:
-        pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
-        budget_helper = BudgetHelper(
-            redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
-            pre_charge_script=pre_charge_script,
-        )
-        app.state.budget_helper = budget_helper
-        app_ctx.budget_helper = budget_helper
-        await logger.info("BudgetHelper ready (lifespan)")
-    else:
-        app.state.budget_helper = None
-        app_ctx.budget_helper = None
-        await logger.info("BudgetHelper disabled (llm_budget_enabled=False)")
-
-    # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
-    # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
-    # admin pool is configured (single-tenant dev fallback).
-    app.state.background_tasks = set()
+    arq_pool: ArqRedis | None = None
     cron_task: asyncio.Task[None] | None = None
-    if admin_pool is not None:
-        cron_task = asyncio.create_task(
-            run_orphan_cleanup(
-                admin_pool,
-                threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
-                budget_helper=app.state.budget_helper,
-            ),
-        )
-        app.state.background_tasks.add(cron_task)
 
-    # Mode 3 (hosted) disables the shared static API key path -- operators
-    # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
-    # compare in the middleware can never match (every token is >= one char).
-    effective_api_key = "" if introspector is not None else settings.auth.api_key
+    runner = StartupRunner(
+        app_env=settings.app_env,
+        outcome_counter=record_startup_probe_outcome,
+    )
 
-    # Point clients at the OAuth protected-resource metadata doc so they can
-    # discover the authorization server (MCP spec 2025-11-25). Only surface
-    # the URL when OAuth is actually wired -- pure Mode 1 API-key deployments
-    # have no metadata endpoint to advertise.
-    protected_resource_metadata_url: str | None = None
-    if introspector is not None or token_validator is not None:
-        server_base = settings.server.url.rstrip("/")
-        protected_resource_metadata_url = build_prm_metadata_url(
-            f"{server_base}/mcp", legacy_suffix=True
-        )
-
-    # Build auth strategy list. Trust-gateway deployments use ONLY
-    # TrustGatewayStrategy; non-trust builds compose ApiKey + Hydra + SelfHost.
-    if settings.auth.trust_gateway:
-        auth_strategies: list[AuthStrategy] = [
-            TrustGatewayStrategy(
-                gateway_secret=app.state.gubbi_gateway_secret,
-                gateway_require_signature=settings.auth.gateway_require_signature,
+    try:
+        # Phase 1 (config-only probes).  Runs BEFORE wiring so a
+        # trust-gateway misconfiguration aborts boot before we open
+        # pools, OAuth storage, Redis client, or the Hydra HTTP client.
+        # The original lifespan-probe spec called for fail-before-
+        # resources; the ordering pin in
+        # ``tests/unit/test_lifespan_probe_trace.py`` enforces it.
+        config_probes: list[StartupProbe] = [
+            BindAddressProbe(
+                host=settings.server.host,
+                trust_gateway=settings.auth.trust_gateway,
             ),
         ]
-    else:
-        _raw_strategies: list[AuthStrategy | None] = [
-            (
-                ApiKeyStrategy(
-                    api_key=effective_api_key,
-                    api_key_scopes=tuple(settings.auth.api_key_scopes),
+        await runner.run(config_probes, logger=logger)
+
+        # Core startup: pools, operator scaffold, caching, cipher.
+        app_ctx, pool, admin_pool, mcp = await _build_app_ctx(settings, logger)
+        app.state.app_ctx = app_ctx
+        operator_user_id = app_ctx.operator_user_id
+
+        # OAuth -- storage, routes, expired-token cleanup.
+        oauth_storage, token_validator = await setup_oauth(app, settings)
+
+        # Hydra introspector -- optional, activated when JOURNAL_HYDRA_ADMIN_URL is set.
+        introspector: HydraIntrospector | None = None
+        if settings.auth.hydra_admin_url:
+            hydra_http_client = httpx.AsyncClient(timeout=HYDRA_INTROSPECT_TIMEOUT_SECS)
+            introspector = HydraIntrospector(
+                admin_url=settings.auth.hydra_admin_url,
+                http_client=hydra_http_client,
+                logger=logger,
+                cache=InMemoryHydraCache(),
+                timeout_seconds=HYDRA_INTROSPECT_TIMEOUT_SECS,
+            )
+            await logger.info("Hydra introspector ready", admin_url=settings.auth.hydra_admin_url)
+
+        # Shared Redis client for SSE pub/sub (extraction progress).
+        redis_pool_handle = aioredis.ConnectionPool.from_url(str(settings.redis_url))
+        redis_client = aioredis.Redis(connection_pool=redis_pool_handle)
+        app.state.redis_client = redis_client
+
+        # Phase 2 (resource probes).  Runs AFTER wiring; consumes the
+        # DB pool, the Redis client, and the live pool max sizes for
+        # the replica-count budget warning.  Order is pinned by
+        # ``tests/unit/test_lifespan_probe_trace.py``: pg_log ->
+        # redis_ping -> replica_count.  Adding / reordering probes
+        # forces that test to update.
+        resource_probes: list[StartupProbe] = [
+            PgLogProbe(pool=pool, mode=settings.pg_log_probe_mode),
+            RedisPingProbe(client=redis_client),
+            ReplicaCountWarnProbe(
+                replica_count=settings.replica_count,
+                pool_max_per_pod=pool.get_max_size()
+                + (admin_pool.get_max_size() if admin_pool is not None else 0),
+            ),
+        ]
+        await runner.run(resource_probes, logger=logger)
+
+        # Gateway HMAC secret (three warning branches preserved verbatim).
+        app.state.gubbi_gateway_secret = await decode_gateway_secret(
+            settings.auth.gateway_secret,
+            require_signature=settings.auth.gateway_require_signature,
+            trust_gateway=settings.auth.trust_gateway,
+            logger=logger,
+        )
+
+        # Expose auth dependencies on app.state for REST API routes.
+        app.state.hydra_introspector = introspector
+        app.state.selfhost_token_validator = token_validator  # may be None
+        app.state.operator_user_id = operator_user_id  # may be None
+
+        # Arq pool for background job enqueue (separate from the SSE aioredis client).
+        arq_pool = await arq_create_pool(ArqRedisSettings.from_dsn(str(settings.redis_url)))
+        app.state.arq_pool = arq_pool
+        app_ctx.arq_pool = arq_pool
+
+        # BudgetHelper -- shared facade over Redis pre-charge + delta writes.
+        # Disabled in self-host mode (Mode 1/2); constructed only when the
+        # operator has opted into LLM budget enforcement.
+        if settings.llm.llm_budget_enabled:
+            pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
+            budget_helper = BudgetHelper(
+                redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
+                pre_charge_script=pre_charge_script,
+            )
+            app.state.budget_helper = budget_helper
+            app_ctx.budget_helper = budget_helper
+            await logger.info("BudgetHelper ready (lifespan)")
+        else:
+            app.state.budget_helper = None
+            app_ctx.budget_helper = None
+            await logger.info("BudgetHelper disabled (llm_budget_enabled=False)")
+
+        # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
+        # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
+        # admin pool is configured (single-tenant dev fallback).
+        app.state.background_tasks = set()
+        if admin_pool is not None:
+            cron_task = asyncio.create_task(
+                run_orphan_cleanup(
+                    admin_pool,
+                    threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
+                    budget_helper=app.state.budget_helper,
+                ),
+            )
+            app.state.background_tasks.add(cron_task)
+
+        # Mode 3 (hosted) disables the shared static API key path -- operators
+        # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
+        # compare in the middleware can never match (every token is >= one char).
+        effective_api_key = "" if introspector is not None else settings.auth.api_key
+
+        # Point clients at the OAuth protected-resource metadata doc so they can
+        # discover the authorization server (MCP spec 2025-11-25). Only surface
+        # the URL when OAuth is actually wired -- pure Mode 1 API-key deployments
+        # have no metadata endpoint to advertise.
+        protected_resource_metadata_url: str | None = None
+        if introspector is not None or token_validator is not None:
+            server_base = settings.server.url.rstrip("/")
+            protected_resource_metadata_url = build_prm_metadata_url(
+                f"{server_base}/mcp", legacy_suffix=True
+            )
+
+        # Build auth strategy list. Trust-gateway deployments use ONLY
+        # TrustGatewayStrategy; non-trust builds compose ApiKey + Hydra + SelfHost.
+        if settings.auth.trust_gateway:
+            auth_strategies: list[AuthStrategy] = [
+                TrustGatewayStrategy(
+                    gateway_secret=app.state.gubbi_gateway_secret,
+                    gateway_require_signature=settings.auth.gateway_require_signature,
+                ),
+            ]
+        else:
+            _raw_strategies: list[AuthStrategy | None] = [
+                (
+                    ApiKeyStrategy(
+                        api_key=effective_api_key,
+                        api_key_scopes=tuple(settings.auth.api_key_scopes),
+                        operator_user_id=operator_user_id,
+                    )
+                )
+                if effective_api_key
+                else None,
+                HydraStrategy(introspector=introspector) if introspector is not None else None,
+                SelfHostStrategy(
+                    token_validator=token_validator,
                     operator_user_id=operator_user_id,
                 )
-            )
-            if effective_api_key
-            else None,
-            HydraStrategy(introspector=introspector) if introspector is not None else None,
-            SelfHostStrategy(
-                token_validator=token_validator,
-                operator_user_id=operator_user_id,
-            )
-            if token_validator is not None
-            else None,
-        ]
-        auth_strategies = [s for s in _raw_strategies if s is not None]
+                if token_validator is not None
+                else None,
+            ]
+            auth_strategies = [s for s in _raw_strategies if s is not None]
 
-    app.state.auth_strategies = auth_strategies
+        app.state.auth_strategies = auth_strategies
 
-    # Assemble MCP middleware chain and mount at /mcp.
-    mcp_http = mcp.streamable_http_app()
-    origin_validated_mcp = build_mcp_middleware(
-        mcp_http,
-        strategies=auth_strategies,
-        required_scope=REQUIRED_OAUTH_SCOPE,
-        protected_resource_metadata_url=protected_resource_metadata_url,
-        allowed_origins=ALLOWED_ORIGINS,
-    )
-    app.mount("/mcp", origin_validated_mcp)
-
-    # M4 #138: gubbi's per-pod DB connection pool runs in-process -- under
-    # a multi-replica deploy the cluster carries ``pool_max_per_pod *
-    # REPLICA_COUNT`` connections from gubbi alone, and the cloud-api
-    # startup connection-budget guard does NOT see them (it only counts
-    # cloud-api pools). gubbi has no in-process per-user concurrency
-    # limiter today, so the DB pool IS the resource that goes N-fold here.
-    # Log a structured WARNING + increment the alertable counter at
-    # startup so the over-provisioning is visible in HyperDX before a
-    # connection-refused storm at first peak. Default replica count is 1,
-    # so single-instance dev does not warn. We intentionally do NOT port
-    # cloud-api's hard ``max_connections`` RuntimeError guard -- #138 is
-    # the soft alarm only.
-    replica_count = _validate_replica_count()
-    if replica_count > 1:
-        # Read the LIVE pool max sizes rather than assuming constants: the
-        # admin pool is opened via ``init_pool(settings.db.admin_url)`` with
-        # no max_size override, so it inherits the app-pool default -- a
-        # constant-based estimate would under-report. Summing the live
-        # ``get_max_size()`` stays correct regardless of how each pool was
-        # actually sized. admin_pool is None in single-tenant dev (no
-        # BYPASSRLS pool opened); count only the app pool in that shape.
-        pool_max_per_pod = pool.get_max_size() + (
-            admin_pool.get_max_size() if admin_pool is not None else 0
+        # Assemble MCP middleware chain and mount at /mcp.
+        mcp_http = mcp.streamable_http_app()
+        origin_validated_mcp = build_mcp_middleware(
+            mcp_http,
+            strategies=auth_strategies,
+            required_scope=REQUIRED_OAUTH_SCOPE,
+            protected_resource_metadata_url=protected_resource_metadata_url,
+            allowed_origins=ALLOWED_ORIGINS,
         )
-        await logger.warning(
-            "db_pool_over_provisioned",
-            db_pool_max_per_pod=pool_max_per_pod,
-            replica_count=replica_count,
-            effective_db_connections=pool_max_per_pod * replica_count,
-            note=(
-                "DB connection pool is per-pod; effective gubbi DB "
-                "connections = POOL_MAX_PER_POD * REPLICA_COUNT. The "
-                "cloud-api startup budget guard does not account for "
-                "these -- watch the cluster max_connections headroom."
-            ),
-        )
-        # Alertable counterpart to the WARNING above. The OTel counter NAME
-        # is shared cross-service (gateway.replica_count_warning); HyperDX
-        # rules fire on the metric directly, and log-stream sampling can
-        # drop the WARNING but not the counter. Emitters are distinguished
-        # by the service.name RESOURCE attribute (set in configure_otel),
-        # not a metric attribute -- matches cloud-api's helper exactly so
-        # one alert rule rolls up across all three services.
-        record_replica_count_warning(replica_count=replica_count)
+        app.mount("/mcp", origin_validated_mcp)
 
-    try:
         async with mcp.session_manager.run():
             yield
     finally:
@@ -566,20 +483,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             cron_task.cancel()
             with suppress(asyncio.CancelledError):
                 await cron_task
-        if hydra_http_client is not None:
-            await hydra_http_client.aclose()
-        if admin_pool is not None:
-            await admin_pool.close()
-        await pool.close()
-        await oauth_storage.close()
-        # Explicit two-step Redis teardown: redis_client.aclose() does NOT drain
-        # an externally-supplied ConnectionPool (redis-py: "If a pool is passed
-        # in, do not close it"). Disconnect the pool ourselves to avoid
-        # leaking pooled connections across lifespan restarts.
-        await redis_client.aclose()
-        await redis_pool.aclose()
-        # Close the Arq pool (separate Redis connection used for job enqueue).
-        await arq_pool.close()
+        if arq_pool is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await arq_pool.close()
+        # Single helper covers pre-yield init failure and clean shutdown
+        # alike: each parameter is None-safe so partially-initialized
+        # state at the failure point still tears down what was opened.
+        # Replaces the 8-9 duplicated try/except teardown blocks the
+        # pre-StartupRunner lifespan body carried.
+        await teardown_lifespan_resources(
+            pool=pool,
+            admin_pool=admin_pool,
+            redis_client=redis_client,
+            redis_pool=redis_pool_handle,
+            oauth_storage=oauth_storage,
+            hydra_http_client=hydra_http_client,
+        )
 
 
 # Construct the FastAPI app with an EMPTY middleware list. All custom

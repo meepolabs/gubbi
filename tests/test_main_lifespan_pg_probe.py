@@ -1,26 +1,31 @@
-"""Lifespan integration: pg_log_probe wired after pool init.
+"""Lifespan integration: PgLogProbe wired into StartupRunner.
 
-Two scenarios:
+The legacy probe was a bare ``probe_pg_log_settings`` call directly in
+the lifespan body. After T1 it is composed as :class:`PgLogProbe` and
+sequenced by :class:`StartupRunner`. This test pins the new shape:
 
-* WARN/STRICT-with-safe-settings -- probe is invoked exactly once with
-  ``app_pool`` and the resolved ``mode`` keyword; lifespan continues
-  through to the yield point.
-* STRICT with the probe raising -- lifespan tears down both pools and
-  propagates the original error; no resource leak.
-
-Reuses the dependency-stub helpers from ``test_lifespan_boot.py`` so
-the test only differs in the probe wiring assertion.
+* SUCCESS path -- the lifespan reaches the yield point, probe ran with
+  ``settings.pg_log_probe_mode`` (default STRICT).
+* FAILURE path -- when the probe raises (STRICT mode + unsafe GUC),
+  ``StartupRunner`` raises ``ProbeFailure`` and the lifespan's outer
+  teardown helper closes the app pool exactly once.
 """
 
 from __future__ import annotations
 
 import importlib
-from unittest.mock import AsyncMock
+from dataclasses import dataclass
 
 import pytest
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
-from gubbi_common.bootstrap.pg_log_probe import PgLogProbeError
+from gubbi_common.bootstrap import (
+    ProbeFailure,
+    ProbeResult,
+    ProbeStatus,
+    StartupProbe,
+    StartupRunner,
+)
 
 import gubbi.main
 from tests.unit.test_lifespan_boot import (
@@ -29,77 +34,97 @@ from tests.unit.test_lifespan_boot import (
 )
 
 
+@dataclass
+class _AlwaysFailPgLogProbe:
+    """Stand-in :class:`StartupProbe` that always fails as ``pg_log``."""
+
+    name: str = "pg_log"
+    required: bool = True
+    timeout_s: float = 5.0
+
+    async def run(self) -> ProbeResult:
+        return ProbeResult(
+            ProbeStatus.FAIL,
+            diagnostic={"mode": "strict", "findings": "unsafe log_statement=all"},
+        )
+
+
 @pytest.mark.unit
-async def test_lifespan_calls_pg_log_probe_after_pool_init(
+async def test_lifespan_uses_settings_pg_log_probe_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The lifespan invokes ``probe_pg_log_settings`` exactly once with the app pool.
+    """Lifespan composes ``PgLogProbe`` from ``settings.pg_log_probe_mode``.
 
-    Default ``mode`` resolves to ``strict`` from
-    ``JOURNAL_PG_LOG_PROBE_MODE`` (env var unset -> strict). The probe
-    is async; ``AsyncMock`` ensures the await is well-formed.
+    Verified by patching :class:`StartupRunner` to capture the probes
+    handed to ``run()`` -- no real Postgres GUC fetch happens. The test
+    asserts that:
+
+    * a probe named ``pg_log`` is in the sequence;
+    * its ``mode`` matches the default ``STRICT`` resolved from the
+      Settings field (env var unset).
     """
     _drop_optional_env(monkeypatch)
     monkeypatch.delenv("JOURNAL_PG_LOG_PROBE_MODE", raising=False)
-    handles = _patch_lifespan_dependencies(monkeypatch)
-
-    probe_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr("gubbi.main.probe_pg_log_settings", probe_mock)
-
-    app = FastAPI(lifespan=gubbi.main.lifespan)
-
-    async with LifespanManager(app):
-        assert app.state.app_ctx is handles["app_ctx"]
-
-    # Probe called exactly once with the app pool stub and a mode= keyword.
-    probe_mock.assert_awaited_once()
-    args, kwargs = probe_mock.call_args
-    assert args == (handles["pool"],), f"probe called with unexpected args: {args}"
-    assert (
-        kwargs.get("mode") == "strict"
-    ), f"default JOURNAL_PG_LOG_PROBE_MODE should resolve to 'strict'; got {kwargs}"
-
-
-@pytest.mark.unit
-async def test_lifespan_calls_pg_log_probe_with_warn_mode_from_env(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``JOURNAL_PG_LOG_PROBE_MODE=warn`` is forwarded as the ``mode`` kwarg."""
-    _drop_optional_env(monkeypatch)
-    monkeypatch.setenv("JOURNAL_PG_LOG_PROBE_MODE", "warn")
     _patch_lifespan_dependencies(monkeypatch)
 
-    probe_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr("gubbi.main.probe_pg_log_settings", probe_mock)
+    captured: list[StartupProbe] = []
+
+    class _CaptureRunner:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+
+        async def run(self, probes: list[StartupProbe], **kwargs: object) -> tuple[()]:
+            del kwargs
+            captured.extend(probes)
+            return ()
+
+    monkeypatch.setattr("gubbi.main.StartupRunner", _CaptureRunner)
 
     app = FastAPI(lifespan=gubbi.main.lifespan)
-
     async with LifespanManager(app):
         pass
 
-    _, kwargs = probe_mock.call_args
-    assert kwargs.get("mode") == "warn"
+    pg_log_probes = [p for p in captured if p.name == "pg_log"]
+    assert len(pg_log_probes) == 1, f"expected exactly one pg_log probe, got {pg_log_probes}"
+    # Default JOURNAL_PG_LOG_PROBE_MODE resolves to STRICT via Settings.
+    assert pg_log_probes[0].mode.value == "strict"  # type: ignore[attr-defined]
 
 
 @pytest.mark.unit
-async def test_lifespan_aborts_when_pg_probe_raises_strict(
+async def test_lifespan_aborts_when_pg_probe_fails_required(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the probe raises ``PgLogProbeError`` the lifespan tears down the pool.
+    """Required ``pg_log`` FAIL escalates to :class:`ProbeFailure`; pool tears down.
 
-    We only require that the exception propagates (the ASGI lifespan
-    fails) and the app pool's ``close`` was awaited; the rest of the
-    teardown chain is exercised by ``test_lifespan_boot``.
+    We replace the runner with a real :class:`StartupRunner` instance
+    but inject an ``_AlwaysFailPgLogProbe`` ahead of the real probe
+    list by stubbing the constructor. Simpler path: monkeypatch
+    StartupRunner.run to receive a probe list whose pg_log probe
+    fails. The teardown helper closes the app pool exactly once via
+    the lifespan's outer ``finally``.
     """
     _drop_optional_env(monkeypatch)
     handles = _patch_lifespan_dependencies(monkeypatch)
 
-    probe_mock = AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all"))
-    monkeypatch.setattr("gubbi.main.probe_pg_log_settings", probe_mock)
+    failing_probe = _AlwaysFailPgLogProbe()
+
+    class _InjectFailingPgLog:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args, kwargs
+            self._inner = StartupRunner(app_env="dev")
+
+        async def run(self, probes: list[StartupProbe], **kwargs: object) -> tuple[()]:
+            # Replace the real pg_log probe with the failing stand-in;
+            # leave the rest in place so the runner's required-fail
+            # escalation still happens at the right ordinal.
+            replaced = [failing_probe if p.name == "pg_log" else p for p in probes]
+            return await self._inner.run(replaced, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("gubbi.main.StartupRunner", _InjectFailingPgLog)
 
     app = FastAPI(lifespan=gubbi.main.lifespan)
 
-    with pytest.raises(PgLogProbeError):
+    with pytest.raises(ProbeFailure):
         async with LifespanManager(app):
             pass
 
@@ -107,16 +132,16 @@ async def test_lifespan_aborts_when_pg_probe_raises_strict(
 
 
 @pytest.mark.unit
-def test_main_module_exposes_probe_pg_log_settings_symbol() -> None:
-    """``probe_pg_log_settings`` is imported at module scope so monkeypatch works.
+def test_main_module_exposes_startup_runner_symbol() -> None:
+    """``StartupRunner`` is bound on ``gubbi.main`` so monkeypatch can intercept.
 
-    The two scenarios above patch ``gubbi.main.probe_pg_log_settings``;
-    that path only resolves when the symbol is bound on the module --
-    a deferred ``import`` inside the lifespan body would skip the patch
-    and silently bypass these tests.
+    The two scenarios above patch ``gubbi.main.StartupRunner``; that
+    path only resolves when the symbol is bound on the module --
+    a deferred ``import`` inside the lifespan body would skip the
+    patch and silently bypass these tests.
     """
     importlib.reload(gubbi.main)
-    assert hasattr(gubbi.main, "probe_pg_log_settings"), (
-        "gubbi.main must import probe_pg_log_settings at module scope so "
-        "test monkeypatch can intercept the call."
+    assert hasattr(gubbi.main, "StartupRunner"), (
+        "gubbi.main must import StartupRunner at module scope so test "
+        "monkeypatch can intercept the construct + run."
     )

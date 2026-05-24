@@ -75,6 +75,12 @@ class MetricNames:
     # claim about which component emits it. The ``service`` attribute on
     # the increment distinguishes emitters (gubbi vs gubbi-worker).
     REPLICA_COUNT_WARNING: Final[str] = "gateway.replica_count_warning"
+    # Cross-service startup-probe outcome counter -- shared NAME with
+    # cloud-api so a single HyperDX rule rolls up across both. Emitter
+    # split via service.name; per-call attributes (probe name, outcome,
+    # app_env) cap cardinality at the small product of {probe-set} *
+    # {ok|warn|fail} * {dev|ci|staging|production}.
+    STARTUP_PROBE_OUTCOME: Final[str] = "startup.probe.outcome_total"
 
 
 # ---------------------------------------------------------------------------

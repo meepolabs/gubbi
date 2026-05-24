@@ -4,6 +4,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self
 
+from gubbi_common.bootstrap import PgLogProbeMode
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
@@ -268,6 +269,25 @@ class Settings(BaseSettings):
     # See DEC-094 (canonical app_env literal); default stays "dev" to honour
     # the self-host first principle.
     app_env: Environment = Field(default="dev", validation_alias="JOURNAL_APP_ENV")
+
+    pg_log_probe_mode: PgLogProbeMode = Field(
+        default=PgLogProbeMode.STRICT,
+        validation_alias="JOURNAL_PG_LOG_PROBE_MODE",
+        description=(
+            "PG log probe mode: STRICT raises on unsafe GUC; WARN logs; "
+            "OFF skips. STRICT in dev/prod; OFF only when an operator "
+            "intentionally bypasses the cluster-log leakage guard."
+        ),
+    )
+    replica_count: int = Field(
+        default=1,
+        ge=1,
+        validation_alias="JOURNAL_REPLICA_COUNT",
+        description=(
+            "Number of pod replicas behind the gateway, used by the "
+            "connection-budget guard to size pool ceilings."
+        ),
+    )
 
     # Sub-configs construct themselves from per-field flat env-vars via
     # ``default_factory``. The ``validation_alias`` here is a STRUCTURAL

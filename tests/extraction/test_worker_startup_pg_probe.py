@@ -1,10 +1,23 @@
-"""Worker startup wires ``probe_pg_log_settings`` after the PG pool opens.
+"""Worker startup wires PgLogProbe + WorkerReplicaCountWarnProbe through StartupRunner.
 
-The Arq worker hits the same encrypted INSERT path as the HTTP API
-(via ``extract_conversation``), so the probe runs in both surfaces.
-This test stubs every heavy dependency the ``startup`` hook touches and
-asserts the probe is invoked exactly once with the worker's pool and
-the env-resolved ``mode`` keyword.
+After T3 the Arq worker mirrors the gubbi HTTP lifespan: probes are
+constructed and handed to ``StartupRunner.run()``. The runner emits
+structured ``startup.probe.<outcome>`` events; required-probe FAIL
+surfaces as ``ProbeFailure``.
+
+Tests cover:
+
+* Probes are constructed with the right shape (pool + Settings-derived
+  mode for PgLog; replica_count + live pool max for WorkerReplicaCount).
+* PgLog probe FAIL escalates to ``ProbeFailure``; the worker's outer
+  ``except BaseException`` closes the pool best-effort before the error
+  propagates.
+* Settings rejects invalid ``JOURNAL_REPLICA_COUNT`` at construction
+  (one level UP from the worker, after T3 deleted ``_validate_replica_count``).
+* WorkerReplicaCountWarnProbe emits the alertable counter + structured
+  WARN when ``replica_count > 1``; default 1 stays silent.
+* OTel wiring stays one-shot per process; a configure-time failure leaves
+  the latch unset so a retry can re-try.
 """
 
 from __future__ import annotations
@@ -15,15 +28,21 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import structlog
-from gubbi_common.bootstrap.pg_log_probe import PgLogProbeError
+from gubbi_common.bootstrap import (
+    PgLogProbeError,
+    PgLogProbeMode,
+    ProbeFailure,
+)
 
+from gubbi.bootstrap.probes.pg_log import PgLogProbe
+from gubbi.bootstrap.probes.worker_replica_count import WorkerReplicaCountWarnProbe
 from gubbi.extraction import worker as worker_module
 
-# Stub app-pool max size returned by ``pool.get_max_size()``. The worker's
-# #138 WARNING reads the LIVE pool max via ``get_max_size()`` (not a
-# constant), so the stub pool must answer with a real int. Kept as a local
-# test constant so the assertion pins the live-read contract rather than a
-# particular production-configured size.
+# Stub app-pool max size returned by ``pool.get_max_size()``. The replica
+# probe reads the LIVE pool max via ``get_max_size()`` (not a constant), so
+# the stub pool must answer with a real int. Kept as a local test constant
+# so the assertion pins the live-read contract rather than a particular
+# production-configured size.
 _STUB_APP_POOL_MAX = 12
 
 
@@ -47,7 +66,13 @@ def _reset_worker_telemetry_guard_between_tests() -> Iterator[None]:
 def _patch_worker_dependencies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> dict[str, Any]:
-    """Stub out everything the worker startup hook would normally hit.
+    """Stub the heavy dependencies the worker startup hook would normally hit.
+
+    Does NOT stub ``_configure_worker_telemetry``: tests that exercise the
+    one-shot guard need the real function. Tests that don't care about
+    telemetry wiring add a local stub. ``OTEL_ENABLED=false`` in the
+    suite's env (see ``tests/conftest.py``) means the real wiring is
+    a benign no-op (SDK providers with no exporter).
 
     Critically, the ``threading.Thread`` constructor used by the worker
     is patched on the **module's** ``threading`` reference -- NOT on the
@@ -58,10 +83,22 @@ def _patch_worker_dependencies(
     """
     pool = MagicMock()
     pool.close = AsyncMock()
-    # The #138 WARNING reads the live per-pod pool max via get_max_size();
+    # The replica probe reads the live per-pod pool max via get_max_size();
     # a bare MagicMock would return a MagicMock (not an int) and break the
     # arithmetic. Answer with a real int.
     pool.get_max_size = MagicMock(return_value=_STUB_APP_POOL_MAX)
+
+    # PgLogProbe (when not stubbed at the runner level) reaches into the
+    # pool via ``async with pool.acquire() as conn: await
+    # conn.fetchval(...)``. Stub the connection so fetchval returns None
+    # (the safe default -- the probe's STRICT predicate treats ``None`` as
+    # "GUC not set" and returns OK).
+    conn_stub = MagicMock()
+    conn_stub.fetchval = AsyncMock(return_value=None)
+    acquire_cm = MagicMock()
+    acquire_cm.__aenter__ = AsyncMock(return_value=conn_stub)
+    acquire_cm.__aexit__ = AsyncMock(return_value=None)
+    pool.acquire = MagicMock(return_value=acquire_cm)
 
     monkeypatch.setattr(worker_module, "init_pool", AsyncMock(return_value=pool))
 
@@ -97,6 +134,11 @@ def _patch_worker_dependencies(
     monkeypatch.setattr(worker_module, "AnthropicProvider", MagicMock(return_value=MagicMock()))
     monkeypatch.setattr(worker_module, "ExtractionService", MagicMock(return_value=MagicMock()))
 
+    # The probe outcome counter helper is bound at import time; tests
+    # that don't care about counter emission need a no-op so the runner
+    # callback path is inert.
+    monkeypatch.setattr(worker_module, "record_startup_probe_outcome", MagicMock())
+
     return {
         "pool": pool,
         "redis_client": redis_client_stub,
@@ -104,109 +146,197 @@ def _patch_worker_dependencies(
     }
 
 
+def _stub_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub ``_configure_worker_telemetry`` for tests that don't care about it."""
+    monkeypatch.setattr(worker_module, "_configure_worker_telemetry", MagicMock())
+
+
+def _stub_runner_with_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Replace ``StartupRunner`` with a no-op that captures the probes list.
+
+    Returns a handle whose ``probes`` key is populated after ``runner.run``
+    is awaited. Tests use this to assert which probes the worker
+    constructs and with which keyword arguments.
+    """
+    captured: dict[str, Any] = {"probes": None, "constructor_kwargs": None}
+
+    class _CapturingRunner:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            del args
+            captured["constructor_kwargs"] = kwargs
+
+        async def run(self, probes: object, **kwargs: object) -> tuple[()]:
+            del kwargs
+            captured["probes"] = probes
+            return ()
+
+    monkeypatch.setattr(worker_module, "StartupRunner", _CapturingRunner)
+    return captured
+
+
+# ---------------------------------------------------------------------------
+# Probe wiring: the worker constructs PgLogProbe + WorkerReplicaCountWarnProbe
+# ---------------------------------------------------------------------------
+
+
 @pytest.mark.unit
-async def test_worker_startup_calls_pg_log_probe_with_default_mode(
+async def test_worker_startup_constructs_pg_log_probe_with_strict_default(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``startup`` invokes ``probe_pg_log_settings`` with the worker pool + strict mode."""
+    """``startup`` builds a PgLogProbe carrying the worker pool + STRICT mode."""
     monkeypatch.delenv("JOURNAL_PG_LOG_PROBE_MODE", raising=False)
     handles = _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    captured = _stub_runner_with_capture(monkeypatch)
 
-    probe_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", probe_mock)
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
 
     ctx: dict[str, Any] = {}
     await worker_module.startup(ctx)  # type: ignore[arg-type]
 
-    probe_mock.assert_awaited_once()
-    args, kwargs = probe_mock.call_args
-    assert args == (handles["pool"],)
-    assert kwargs.get("mode") == "strict"
+    probes = captured["probes"]
+    assert probes is not None, "runner.run was never invoked"
+    pg_probes = [p for p in probes if isinstance(p, PgLogProbe)]
+    assert len(pg_probes) == 1
+    assert pg_probes[0].pool is handles["pool"]
+    assert pg_probes[0].mode is PgLogProbeMode.STRICT
+
+    get_settings.cache_clear()
 
 
 @pytest.mark.unit
-async def test_worker_startup_forwards_warn_mode_from_env(
+async def test_worker_startup_forwards_warn_mode_from_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``JOURNAL_PG_LOG_PROBE_MODE=warn`` is forwarded to the probe."""
+    """``JOURNAL_PG_LOG_PROBE_MODE=warn`` flows through Settings into the probe."""
     monkeypatch.setenv("JOURNAL_PG_LOG_PROBE_MODE", "warn")
     _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    captured = _stub_runner_with_capture(monkeypatch)
 
-    probe_mock = AsyncMock(return_value=None)
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", probe_mock)
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
 
     ctx: dict[str, Any] = {}
     await worker_module.startup(ctx)  # type: ignore[arg-type]
 
-    _, kwargs = probe_mock.call_args
-    assert kwargs.get("mode") == "warn"
+    probes = captured["probes"]
+    pg_probes = [p for p in probes if isinstance(p, PgLogProbe)]
+    assert len(pg_probes) == 1
+    assert pg_probes[0].mode is PgLogProbeMode.WARN
+
+    get_settings.cache_clear()
 
 
 @pytest.mark.unit
-async def test_worker_startup_aborts_when_pg_probe_raises(
+async def test_worker_startup_probe_order_is_pg_log_then_replica_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When the probe raises, the worker pool is closed and the error propagates."""
-    handles = _patch_worker_dependencies(monkeypatch)
+    """Worker probe order is structurally pinned: PgLog -> WorkerReplicaCount.
 
-    probe_mock = AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all"))
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", probe_mock)
+    Mirrors the test_lifespan_probe_trace.py pattern for the gubbi HTTP
+    service. Adding/reordering worker probes will force this test to update
+    so the order is reviewed deliberately, not silently shuffled.
+    """
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    captured = _stub_runner_with_capture(monkeypatch)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
 
     ctx: dict[str, Any] = {}
-    with pytest.raises(PgLogProbeError):
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    probes = captured["probes"]
+    assert probes is not None
+    assert len(probes) == 2
+    assert isinstance(probes[0], PgLogProbe)
+    assert isinstance(probes[1], WorkerReplicaCountWarnProbe)
+
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# PgLog probe FAIL: ProbeFailure propagates; pool closed by outer except.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_worker_startup_aborts_when_pg_probe_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unsafe pg_log GUC raises ProbeFailure and closes the worker pool.
+
+    After T3 the runner is the failure-translation layer:
+    ``probe_pg_log_settings`` raising ``PgLogProbeError`` inside the
+    PgLogProbe surfaces as ``ProbeFailure`` from ``runner.run()``. The
+    outer ``except BaseException`` block in the worker's startup body
+    still closes the pool best-effort before the error propagates to
+    the Arq runtime.
+    """
+    handles = _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    # Use the real StartupRunner so the PgLogProbe actually executes; stub
+    # the underlying ``probe_pg_log_settings`` at the probe's import path
+    # to raise the canonical PgLogProbeError.
+    monkeypatch.setattr(
+        "gubbi.bootstrap.probes.pg_log.probe_pg_log_settings",
+        AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all")),
+    )
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ProbeFailure):
         await worker_module.startup(ctx)  # type: ignore[arg-type]
 
     handles["pool"].close.assert_awaited_once()
 
-
-@pytest.mark.unit
-def test_worker_module_exposes_probe_pg_log_settings_symbol() -> None:
-    """``probe_pg_log_settings`` is bound on ``gubbi.extraction.worker`` for monkeypatch."""
-    assert hasattr(worker_module, "probe_pg_log_settings"), (
-        "gubbi.extraction.worker must import probe_pg_log_settings at module "
-        "scope so test monkeypatch can intercept the call."
-    )
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
-# Replica-count over-provisioning WARNING + alertable counter (#138).
+# Replica-count over-provisioning WARN + alertable counter (#138 worker variant).
 # ---------------------------------------------------------------------------
-
-
-def _patch_worker_for_replica_tests(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
-    """Stub the worker startup deps + return the patched counter helper mock.
-
-    Stubs the pg-log probe (no real GUCs), the OTel meter wiring (no real
-    SDK in a unit test), and the ``record_replica_count_warning`` counter
-    helper so the alertable signal can be asserted without a live meter.
-    """
-    _patch_worker_dependencies(monkeypatch)
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", AsyncMock(return_value=None))
-    # The worker wires the OTel meter at startup; in a unit test we stub it
-    # so no real exporter/provider is installed. The counter helper itself
-    # is patched separately so the alertable contract is observable.
-    monkeypatch.setattr(worker_module, "_configure_worker_telemetry", MagicMock())
-    record_mock = MagicMock()
-    monkeypatch.setattr(worker_module, "record_replica_count_warning", record_mock)
-    return record_mock
 
 
 @pytest.mark.unit
 async def test_worker_startup_warns_and_increments_counter_when_replicas_gt_1(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """JOURNAL_REPLICA_COUNT=2 -> WARNING + counter increment.
+    """JOURNAL_REPLICA_COUNT=2 -> startup.probe.warn + record_replica_count_warning.
 
-    The worker is fixed at a single replica by deploy convention, so a
-    replica count > 1 multiplies the per-pod extraction-budget logic + DB
-    pool N-fold AND violates that single-worker policy. Both must surface.
-    The emitter is distinguished by the ``service.name`` RESOURCE
-    attribute set at OTel init (here ``"gubbi-extraction-worker"`` from
-    ``_configure_worker_telemetry``), not by a metric attribute -- the
-    helper takes only ``replica_count``.
+    The worker is fixed at a single replica by deploy convention. Replica
+    count > 1 multiplies the per-pod extraction-budget logic + DB pool
+    N-fold AND violates the single-worker policy. After T3 the
+    WorkerReplicaCountWarnProbe emits both signals through the runner.
+
+    Emitter distinction across services (gubbi HTTP / worker / cloud-api)
+    is via the ``service.name`` RESOURCE attribute set at OTel init, not
+    via a metric attribute -- the helper takes only ``replica_count``.
     """
-    record_mock = _patch_worker_for_replica_tests(monkeypatch)
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
     monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "2")
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    # Patch the counter helper at the probe's import path so the alertable
+    # signal can be asserted without standing up a real OTel meter.
+    record_mock = MagicMock()
+    monkeypatch.setattr(
+        "gubbi.bootstrap.probes.worker_replica_count.record_replica_count_warning",
+        record_mock,
+    )
 
     ctx: dict[str, Any] = {}
     with structlog.testing.capture_logs() as logs:
@@ -214,31 +344,46 @@ async def test_worker_startup_warns_and_increments_counter_when_replicas_gt_1(
 
     record_mock.assert_called_once_with(replica_count=2)
 
+    # The runner's structured WARN event carries the policy-violation
+    # diagnostic the WorkerReplicaCountWarnProbe builds.
     warnings = [
         log
         for log in logs
-        if log.get("event") == "extraction_worker_replica_policy_violation"
+        if log.get("event") == "startup.probe.warn"
+        and log.get("name") == "worker_replica_count"
         and log.get("log_level") == "warning"
     ]
-    assert len(warnings) == 1, f"expected one over-provisioning WARNING, got {warnings}"
-    emitted = warnings[0]
-    assert emitted["replica_count"] == 2
-    # Worker opens ONLY the app pool (admin pool not opened), so the per-pod
-    # footprint is the live app pool max (read via get_max_size(), here the
-    # stub's _STUB_APP_POOL_MAX).
-    assert emitted["db_pool_max_per_pod"] == _STUB_APP_POOL_MAX
-    assert emitted["effective_db_connections"] == _STUB_APP_POOL_MAX * 2
+    assert len(warnings) == 1, f"expected one worker_replica_count WARN, got {warnings}"
+    diagnostic = warnings[0]["diagnostic"]
+    assert diagnostic["replica_count"] == 2
+    # Worker opens ONLY the app pool (no admin pool), so per-pod footprint
+    # is the live app pool max via get_max_size().
+    assert diagnostic["pool_max_per_pod"] == _STUB_APP_POOL_MAX
+    assert diagnostic["pool_max_total"] == _STUB_APP_POOL_MAX * 2
     # The note must flag the single-worker deploy-policy violation.
-    assert "single" in emitted["note"].lower()
+    assert "single" in diagnostic["note"].lower()
+
+    get_settings.cache_clear()
 
 
 @pytest.mark.unit
 async def test_worker_startup_silent_at_default_replica_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Default (unset) JOURNAL_REPLICA_COUNT=1 -> no WARNING, no counter."""
-    record_mock = _patch_worker_for_replica_tests(monkeypatch)
+    """Default (unset) JOURNAL_REPLICA_COUNT=1 -> no WARN, no counter."""
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
     monkeypatch.delenv("JOURNAL_REPLICA_COUNT", raising=False)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    record_mock = MagicMock()
+    monkeypatch.setattr(
+        "gubbi.bootstrap.probes.worker_replica_count.record_replica_count_warning",
+        record_mock,
+    )
 
     ctx: dict[str, Any] = {}
     with structlog.testing.capture_logs() as logs:
@@ -246,51 +391,53 @@ async def test_worker_startup_silent_at_default_replica_count(
 
     record_mock.assert_not_called()
     assert not [
-        log for log in logs if log.get("event") == "extraction_worker_replica_policy_violation"
+        log
+        for log in logs
+        if log.get("event") == "startup.probe.warn" and log.get("name") == "worker_replica_count"
     ], "default single-worker deploy must stay silent"
+
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# Replica count validation moved one level up: Settings construction.
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("value", "match"),
+    ("value", "expected_match"),
     [
-        ("abc", "not an integer"),
-        ("0", ">= 1"),
-        ("-2", ">= 1"),
+        ("abc", "Input should be a valid integer"),
+        ("0", "greater than or equal to 1"),
+        ("-2", "greater than or equal to 1"),
     ],
 )
-async def test_worker_startup_rejects_invalid_replica_count(
+def test_settings_rejects_invalid_replica_count(
     monkeypatch: pytest.MonkeyPatch,
     value: str,
-    match: str,
+    expected_match: str,
 ) -> None:
-    """A non-integer or < 1 JOURNAL_REPLICA_COUNT aborts worker startup."""
-    _patch_worker_for_replica_tests(monkeypatch)
+    """Invalid ``JOURNAL_REPLICA_COUNT`` fails Settings construction.
+
+    Pre-T3 the worker's local ``_validate_replica_count`` raised
+    ``RuntimeError`` from inside ``startup()``. After T3 the worker no
+    longer re-validates -- ``Settings.replica_count`` (default 1, ge=1)
+    catches the bad value at Settings construction, BEFORE
+    ``worker.startup()`` runs. The test pins the validation layer at
+    Settings, not at the worker.
+    """
+    import pydantic
+
+    from gubbi.config import Settings, get_settings
+
     monkeypatch.setenv("JOURNAL_REPLICA_COUNT", value)
+    get_settings.cache_clear()
 
-    ctx: dict[str, Any] = {}
-    with pytest.raises(RuntimeError, match=match):
-        await worker_module.startup(ctx)  # type: ignore[arg-type]
+    with pytest.raises(pydantic.ValidationError, match=expected_match):
+        Settings()
 
-
-@pytest.mark.unit
-def test_worker_validate_replica_count_helper_directly(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Unit-cover the worker's ``_validate_replica_count`` in isolation."""
-    monkeypatch.delenv("JOURNAL_REPLICA_COUNT", raising=False)
-    assert worker_module._validate_replica_count() == 1
-
-    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "4")
-    assert worker_module._validate_replica_count() == 4
-
-    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "nope")
-    with pytest.raises(RuntimeError, match="not an integer"):
-        worker_module._validate_replica_count()
-
-    monkeypatch.setenv("JOURNAL_REPLICA_COUNT", "0")
-    with pytest.raises(RuntimeError, match=">= 1"):
-        worker_module._validate_replica_count()
+    get_settings.cache_clear()
 
 
 # ---------------------------------------------------------------------------
@@ -318,8 +465,13 @@ async def test_worker_telemetry_wiring_is_one_shot_across_two_startups(
     not break this test as long as the latch contract is preserved.
     """
     _patch_worker_dependencies(monkeypatch)
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", AsyncMock(return_value=None))
-    monkeypatch.setattr(worker_module, "record_replica_count_warning", MagicMock())
+    # Note: do NOT call _stub_telemetry() -- this test exercises the real
+    # _configure_worker_telemetry function.
+    monkeypatch.setattr(
+        worker_module,
+        "StartupRunner",
+        MagicMock(return_value=MagicMock(run=AsyncMock(return_value=()))),
+    )
     monkeypatch.delenv("JOURNAL_REPLICA_COUNT", raising=False)
 
     # Stub the SDK init the wiring would otherwise run -- no real exporter
@@ -327,6 +479,10 @@ async def test_worker_telemetry_wiring_is_one_shot_across_two_startups(
     # the call count of these stubs; the flag transitions are the contract.
     monkeypatch.setattr("gubbi_common.telemetry.otel.configure_otel", MagicMock())
     monkeypatch.setattr(worker_module, "rebind_metrics_after_configure", MagicMock())
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
 
     ctx: dict[str, Any] = {}
     assert worker_module._WORKER_TELEMETRY_CONFIGURED is False, (
@@ -348,6 +504,8 @@ async def test_worker_telemetry_wiring_is_one_shot_across_two_startups(
         "here would mean the wiring re-ran and the guard failed"
     )
 
+    get_settings.cache_clear()
+
 
 @pytest.mark.unit
 async def test_worker_telemetry_guard_unlatched_on_configure_failure(
@@ -365,8 +523,14 @@ async def test_worker_telemetry_guard_unlatched_on_configure_failure(
     inside ``_configure_worker_telemetry``.
     """
     _patch_worker_dependencies(monkeypatch)
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", AsyncMock(return_value=None))
-    monkeypatch.setattr(worker_module, "record_replica_count_warning", MagicMock())
+    # Note: do NOT call _stub_telemetry() -- this test exercises the real
+    # _configure_worker_telemetry function (specifically its swallow-and-log
+    # branch).
+    monkeypatch.setattr(
+        worker_module,
+        "StartupRunner",
+        MagicMock(return_value=MagicMock(run=AsyncMock(return_value=()))),
+    )
     monkeypatch.delenv("JOURNAL_REPLICA_COUNT", raising=False)
 
     # Stub the SDK init to raise -- exercises the swallow-and-log branch
@@ -377,6 +541,10 @@ async def test_worker_telemetry_guard_unlatched_on_configure_failure(
         MagicMock(side_effect=RuntimeError("boom")),
     )
     monkeypatch.setattr(worker_module, "rebind_metrics_after_configure", MagicMock())
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
 
     ctx: dict[str, Any] = {}
     # First startup: failure is swallowed (best-effort), flag stays False.
@@ -395,3 +563,5 @@ async def test_worker_telemetry_guard_unlatched_on_configure_failure(
     assert (
         worker_module._WORKER_TELEMETRY_CONFIGURED is False
     ), "a second failed configure must still leave the guard unset"
+
+    get_settings.cache_clear()

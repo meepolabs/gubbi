@@ -49,6 +49,7 @@ __all__: list[str] = [
     "initialize_metrics",
     "record_audit_persistence_failure",
     "record_replica_count_warning",
+    "record_startup_probe_outcome",
     "record_tool_call",
     "record_tool_response_size",
 ]
@@ -102,6 +103,18 @@ def initialize_metrics() -> dict[str, object]:
             "worker). Emitters are distinguished by the service.name "
             "RESOURCE attribute set at OTel init (the canonical OTel "
             "cross-service identifier), not by a metric attribute."
+        ),
+        unit="1",
+    )
+    inst[MetricNames.STARTUP_PROBE_OUTCOME] = meter.create_counter(
+        name=MetricNames.STARTUP_PROBE_OUTCOME,
+        description=(
+            "Incremented once per startup probe invocation by "
+            "StartupRunner via the OutcomeCounterCallback hook. Carries "
+            "{name, outcome, app_env} attributes; emitter split via "
+            "service.name. Cardinality bounded by the small product of "
+            "probe-set x {ok, warn, fail} x {dev, ci, staging, "
+            "production}."
         ),
         unit="1",
     )
@@ -208,3 +221,27 @@ def record_replica_count_warning(*, replica_count: int) -> None:
     raw = inst.get(MetricNames.REPLICA_COUNT_WARNING)
     if raw is not None:
         cast(Counter, raw).add(1, {"replica_count": str(replica_count)})
+
+
+def record_startup_probe_outcome(*, name: str, outcome: str, app_env: str) -> None:
+    """Increment the startup.probe.outcome_total counter.
+
+    Bound to the ``OutcomeCounterCallback`` slot on
+    ``StartupRunner``: invoked once per probe with the OBSERVABILITY
+    outcome (after the runner's non-required FAIL -> WARN downgrade).
+
+    Like ``record_replica_count_warning``, this guards against a
+    missing instrument with ``.get()`` rather than raising: when the
+    OTel meter is unwired (e.g. a worker that never reached
+    ``configure_otel``), the lookup returns None and the call is a
+    no-op. The runner catches probe-author-side counter exceptions
+    via its own try/except, so this helper raising would not abort
+    boot -- but a no-op is the cleaner contract.
+    """
+    inst = initialize_metrics()
+    raw = inst.get(MetricNames.STARTUP_PROBE_OUTCOME)
+    if raw is not None:
+        cast(Counter, raw).add(
+            1,
+            {"name": name, "outcome": outcome, "app_env": app_env},
+        )
