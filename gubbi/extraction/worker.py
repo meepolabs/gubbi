@@ -275,13 +275,17 @@ async def startup(ctx: ExtractionContext) -> None:
         # Extraction service.
         # The LLM provider is selected by the ``JOURNAL_LLM_PROVIDER`` env
         # var (default ``anthropic`` so a missing env in prod stays safe).
+        # Read via ``settings.llm.provider`` so the env var participates in
+        # the env-contract lint sweep (``tools/check_env_contract.py``)
+        # alongside the rest of the ``LLMConfig`` keys; legacy direct
+        # ``os.environ`` reads slipped past that lint by design.
         # Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER=fake`` so the
         # worker boots against the in-process FakeLLMProvider stub instead
         # of dialling api.anthropic.com -- keeps D-tier hermetic and avoids
         # accidental spend if a leaked ANTHROPIC_API_KEY is in scope.
         # PRD: llm_context/tasks/milestone-04.5-verification-suite.md TASK-04.5.07.
         # Adding a new provider is a one-line append to ``_PROVIDER_FACTORIES``.
-        provider_name = os.environ.get("JOURNAL_LLM_PROVIDER", "anthropic").lower()
+        provider_name = settings.llm.provider.lower()
         factory = _PROVIDER_FACTORIES.get(provider_name)
         if factory is None:
             raise ValueError(

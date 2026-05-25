@@ -205,6 +205,7 @@ class LLMConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     api_key: str = Field(default="", validation_alias="JOURNAL_LLM_API_KEY")
+    provider: str = Field(default="anthropic", validation_alias="JOURNAL_LLM_PROVIDER")
     model: str = Field(default="", validation_alias="JOURNAL_LLM_MODEL")
     # Gates budget delta writes from worker (hosted: True; self-host: False).
     llm_budget_enabled: bool = Field(default=False, validation_alias="JOURNAL_LLM_BUDGET_ENABLED")
