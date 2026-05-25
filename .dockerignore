@@ -11,5 +11,6 @@ tests/
 docs/
 deployment/
 !deployment/entrypoint.sh
+!deployment/scripts/
 *.dump
 *.db
