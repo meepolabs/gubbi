@@ -18,9 +18,13 @@ model validator:
 
 | Mode | Trigger | Auth | Used by |
 |---|---|---|---|
-| 1 -- API-key self-host | `JOURNAL_API_KEY` set, no Hydra vars | static Bearer | single operator |
-| 2 -- OAuth self-host | `JOURNAL_PASSWORD_HASH` set, no Hydra vars | DCR + bcrypt login | single operator + multiple MCP clients |
-| 3 -- Hosted (multi-tenant) | All `JOURNAL_HYDRA_*` vars set | Hydra OAuth 2.1 | gubbi.ai prod |
+| 1 -- API-key self-host | API-key only | static Bearer | single operator |
+| 2 -- OAuth self-host | bcrypt password hash | DCR + bcrypt login | single operator + multiple MCP clients |
+| 3 -- Hosted (multi-tenant) | external IdP wired in | Hydra OAuth 2.1 | gubbi.ai prod |
+
+Per-key env-var triggers and required combinations are catalogued in
+the env registry (private-repo); see [`docs/deployment.md`](./docs/deployment.md)
+for the public Mode 1/2 self-host wiring.
 
 Mode 3 sits behind a separate gateway (proprietary, not in this repo)
 that forwards via the trust-gateway header path.
@@ -80,17 +84,17 @@ service, settings, cipher, operator UUID).
 | `models/` | Plain dataclasses: `TopicMeta`, `Entry`, `Message`, `ConversationMeta`, `SearchResult`. |
 | `tools/` | MCP tool handlers grouped by surface. Each module exports `register(mcp, app_ctx)`. `registry.py` calls them in order: topics -> entries -> search -> conversations -> context. `admin.py` is a library function (not registered), used by future admin API. |
 | `api/v1/` | REST endpoints for cloud-side gateway forwarding: `auth.py`, `ingest.py`, `extraction.py`. |
-| `extraction/` | Arq worker for conversation -> entry extraction. `service.py` orchestration, `worker.py` Arq settings (provider factory registry keyed by `JOURNAL_LLM_PROVIDER`), `jobs/` (single-conversation job; emits `extraction.job` + `extraction.llm_call` OTel spans; `_resolve_provider_attrs` helper resolves provider/model names for span attributes), `llm/` (provider Protocol + `AnthropicProvider` real impl + `FakeLLMProvider` test stub for testbench D-tier; failure markers `FAKE_LLM_FAIL` / `FAKE_LLM_FAIL_PERMANENT`), `prompts/` (categorize + extract markdown templates). |
+| `extraction/` | Arq worker for conversation -> entry extraction. `service.py` orchestration, `worker.py` Arq settings (provider factory registry keyed off the LLM-provider config field), `jobs/` (single-conversation job; emits `extraction.job` + `extraction.llm_call` OTel spans; `_resolve_provider_attrs` helper resolves provider/model names for span attributes), `llm/` (provider Protocol + `AnthropicProvider` real impl + `FakeLLMProvider` test stub for testbench D-tier; failure markers `FAKE_LLM_FAIL` / `FAKE_LLM_FAIL_PERMANENT`), `prompts/` (categorize + extract markdown templates). |
 | `telemetry/` | OTel span/metric/log helpers. `attrs.py` (canonical attribute names including `SpanNames.EXTRACTION_JOB` + `SpanNames.EXTRACTION_LLM_CALL`), `metrics.py` (Prometheus counters/histograms + `rebind_metrics_after_configure` hook), `spans.py` (gubbi-common allowlist wrapper), `logger.py` (structlog -> OTel logs bridge). Three "orphan" counters (`orphan_cleanup`, `extract_conversation`, `anthropic_provider`) use `@lru_cache` factories deferred to first call; `rebind_metrics_after_configure` clears and re-primes all four counter factories after lifespan `configure_otel` so they bind to the SDK provider, not the import-time NoOp. Adding a new orphan counter requires wiring BOTH this rebind hook AND the autouse test fixture. |
 | `scripts/` | Operational scripts shipped with the package: encryption-key rotation. |
-| `alembic/` | DB migrations. Raw SQL via `op.execute`. Migration DSN resolved by env.py fallback chain (MIGRATION > ADMIN > APP). |
+| `alembic/` | DB migrations. Raw SQL via `op.execute`. Migration DSN resolved by env.py fallback chain (MIGRATION -> ADMIN -> APP). |
 ```
 
 ## Entry points
 
 - **HTTP server:** `gubbi.main:server` -- gunicorn `--workers 2 --worker-class uvicorn.workers.UvicornWorker`. Each worker creates its own asyncpg pools (no `--preload`; asyncpg cannot survive `os.fork()`).
-- **stdio:** `gubbi.main:main()` with `JOURNAL_TRANSPORT=stdio` -- builds the same AppContext and runs FastMCP over stdin/stdout.
-- **Migrations:** `alembic upgrade head` against `JOURNAL_DB_MIGRATION_URL` (or fallback chain).
+- **stdio:** `gubbi.main:main()` with the stdio transport selected via config -- builds the same AppContext and runs FastMCP over stdin/stdout.
+- **Migrations:** `alembic upgrade head` against the migration DSN (resolved via the env.py fallback chain).
 - **Reindex script:** `gubbi.scripts.rotate_encryption_key` (and the deployment-side backfills).
 
 ## Storage shape (live schema; see migrations for evolution)
@@ -119,7 +123,7 @@ never lands in a column.
 | Direction | Repo | What |
 |---|---|---|
 | imports | [`gubbi-common`](https://github.com/meepolabs/gubbi-common) | `audit.actions.Action`, `audit.sql.AUDIT_INSERT_*_SQL`, `auth.gateway_signature`, `auth.bearer_challenge`, `db.user_scoped_connection`, `middleware.correlation`, `telemetry.allowlist`, `telemetry.correlation_processor` (CorrelationSpanProcessor stamps correlation_id onto every span), `bootstrap.pg_log_probe` |
-| trust-gateway producer | upstream cloud control plane | accepts `X-Auth-User-Id` envelope verified by HMAC (`JOURNAL_GUBBI_GATEWAY_SECRET`) when `JOURNAL_TRUST_GATEWAY=true`; the strategy list in lifespan reduces to `TrustGatewayStrategy` only |
+| trust-gateway producer | upstream cloud control plane | accepts an `X-Auth-User-Id` envelope verified by HMAC against a shared trust-gateway secret when trust-gateway mode is enabled; the strategy list in lifespan reduces to `TrustGatewayStrategy` only |
 
 `gubbi` does NOT import the cloud control plane and does NOT write to
 its tables.
