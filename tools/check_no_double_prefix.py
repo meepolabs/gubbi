@@ -18,7 +18,7 @@ from __future__ import annotations
 import re
 import sys
 from pathlib import Path
-from typing import Any
+from typing import IO
 
 # Match a doubled JOURNAL_ prefix followed by an UPPER_SNAKE_CASE name.
 PATTERN = re.compile(r"\bJOURNAL_JOURNAL_[A-Z][A-Z0-9_]*\b")
@@ -27,7 +27,7 @@ PATTERN = re.compile(r"\bJOURNAL_JOURNAL_[A-Z][A-Z0-9_]*\b")
 ALLOWLIST = frozenset({"JOURNAL_JOURNAL_TARGET_URL"})
 
 
-def _out(msg: str, file: Any = sys.stderr) -> None:
+def _out(msg: str, file: IO[str] = sys.stderr) -> None:
     file.write(msg + "\n")
 
 
