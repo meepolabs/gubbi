@@ -33,8 +33,8 @@ from gubbi_common.bootstrap import (
     PgLogProbeMode,
     ProbeFailure,
 )
+from gubbi_common.bootstrap.probes import PgLogProbe
 
-from gubbi.bootstrap.probes.pg_log import PgLogProbe
 from gubbi.bootstrap.probes.worker_replica_count import WorkerReplicaCountWarnProbe
 from gubbi.extraction import worker as worker_module
 
@@ -106,6 +106,12 @@ def _patch_worker_dependencies(
     redis_pool_stub.aclose = AsyncMock()
     redis_client_stub = MagicMock()
     redis_client_stub.aclose = AsyncMock()
+    # T2 follow-up: the worker now PINGs Redis at startup via
+    # ``RedisPingProbe`` BEFORE the BudgetHelper wiring runs. Default to
+    # a successful PONG so the smoke fixture's happy path works; tests
+    # that exercise the probe failure path override ``ping`` on the
+    # returned handle.
+    redis_client_stub.ping = AsyncMock(return_value=b"PONG")
     redis_client_stub.register_script = MagicMock(return_value=MagicMock())
 
     monkeypatch.setattr(
@@ -232,15 +238,19 @@ async def test_worker_startup_forwards_warn_mode_from_settings(
 
 
 @pytest.mark.unit
-async def test_worker_startup_probe_order_is_pg_log_then_replica_count(
+async def test_worker_startup_probe_order_is_pg_log_redis_ping_then_replica_count(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker probe order is structurally pinned: PgLog -> WorkerReplicaCount.
+    """Worker probe order is structurally pinned: PgLog -> RedisPing -> WorkerReplicaCount.
 
-    Mirrors the test_lifespan_probe_trace.py pattern for the gubbi HTTP
-    service. Adding/reordering worker probes will force this test to update
-    so the order is reviewed deliberately, not silently shuffled.
+    Mirrors the gubbi HTTP lifespan probe trace (PgLog -> RedisPing ->
+    ReplicaCount). Adding/reordering worker probes will force this test
+    to update so the order is reviewed deliberately, not silently
+    shuffled. RedisPingProbe was added in T2 follow-up so a dead Redis
+    surfaces at boot rather than at first arq poll.
     """
+    from gubbi_common.bootstrap.probes import RedisPingProbe
+
     _patch_worker_dependencies(monkeypatch)
     _stub_telemetry(monkeypatch)
     captured = _stub_runner_with_capture(monkeypatch)
@@ -254,9 +264,10 @@ async def test_worker_startup_probe_order_is_pg_log_then_replica_count(
 
     probes = captured["probes"]
     assert probes is not None
-    assert len(probes) == 2
+    assert len(probes) == 3
     assert isinstance(probes[0], PgLogProbe)
-    assert isinstance(probes[1], WorkerReplicaCountWarnProbe)
+    assert isinstance(probes[1], RedisPingProbe)
+    assert isinstance(probes[2], WorkerReplicaCountWarnProbe)
 
     get_settings.cache_clear()
 
@@ -285,7 +296,7 @@ async def test_worker_startup_aborts_when_pg_probe_fails(
     # the underlying ``probe_pg_log_settings`` at the probe's import path
     # to raise the canonical PgLogProbeError.
     monkeypatch.setattr(
-        "gubbi.bootstrap.probes.pg_log.probe_pg_log_settings",
+        "gubbi_common.bootstrap.probes.pg_log.probe_pg_log_settings",
         AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all")),
     )
 

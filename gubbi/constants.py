@@ -6,6 +6,14 @@ from typing import Final
 
 HTTPX_CONNECT_TIMEOUT_SECS: Final = 5  # httpx client connect timeout (seconds)
 DB_HEALTH_TIMEOUT_SECS: Final = 5  # DB health-probe timeout (seconds, forward-looking)
+# /health/ready probe budget: split acquire vs query so a saturated
+# pool fails the readiness check fast (asyncpg pool.acquire blocks
+# until a slot is free, query timeout caps the SELECT 1 round-trip).
+# Mirrors gubbi-cloud's ``DB_HEALTH_ACQUIRE_TIMEOUT_SECS`` /
+# ``DB_HEALTH_QUERY_TIMEOUT_SECS`` so the readiness contract is
+# uniform across the gateway and self-host paths.
+DB_HEALTH_ACQUIRE_TIMEOUT_SECS: Final = 2
+DB_HEALTH_QUERY_TIMEOUT_SECS: Final = 1
 EMBEDDING_REQUEST_TIMEOUT_SECS: Final = (
     120  # Embedding API request timeout -- reserved; currently using ONNX inference
 )
