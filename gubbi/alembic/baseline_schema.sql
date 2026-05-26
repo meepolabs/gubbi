@@ -44,8 +44,7 @@ COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access met
 -- LOGIN + pg_monitor is the read-only monitoring role for the OTel
 -- collector's postgresql receiver; pg_monitor is the standard built-in
 -- role for read-only observability scrapers (no data-table grants). The
--- password is set out-of-band at deploy time -- a LOGIN role with no
--- password cannot authenticate, so the role stays inert until then.
+-- login password is set out-of-band at deploy time (kept out of source).
 --
 
 DO $$
