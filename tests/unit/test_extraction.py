@@ -284,13 +284,17 @@ def _make_anthropic_provider() -> AnthropicProvider:
     LLMConfig is a pydantic-settings BaseSettings whose fields use
     ``validation_alias`` for the flat env-var names. Plain Python
     kwargs that match the field names (``api_key``, ``model``) are
-    silently ignored -- only the alias keys populate the fields. We
-    pass the env-var aliases here so the values actually take effect.
+    silently ignored -- only the alias keys populate the fields.
+    Build via ``model_validate`` with a dict so the alias keys are
+    matched explicitly without relying on ``__init__`` accepting
+    arbitrary kwargs (which type-checkers reject).
     """
     return AnthropicProvider(
-        LLMConfig(
-            JOURNAL_LLM_API_KEY="test-api-key",  # type: ignore[call-arg]
-            JOURNAL_LLM_MODEL="test-model",  # type: ignore[call-arg]
+        LLMConfig.model_validate(
+            {
+                "JOURNAL_LLM_API_KEY": "test-api-key",
+                "JOURNAL_LLM_MODEL": "test-model",
+            }
         )
     )
 
