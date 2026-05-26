@@ -281,14 +281,21 @@ async def test_worker_startup_probe_order_is_pg_log_redis_ping_then_replica_coun
 async def test_worker_startup_aborts_when_pg_probe_fails(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An unsafe pg_log GUC raises ProbeFailure and closes the worker pool.
+    """An unsafe pg_log GUC raises ProbeFailure and closes worker resources in reverse order.
 
     After T3 the runner is the failure-translation layer:
     ``probe_pg_log_settings`` raising ``PgLogProbeError`` inside the
     PgLogProbe surfaces as ``ProbeFailure`` from ``runner.run()``. The
     outer ``except BaseException`` block in the worker's startup body
-    still closes the pool best-effort before the error propagates to
-    the Arq runtime.
+    still drains every resource best-effort before the error propagates
+    to the Arq runtime.
+
+    Reverse-lifecycle order is structural: redis_client.aclose ->
+    redis_pool.aclose -> pool.close. The probe runs AFTER the redis
+    handles are constructed so a probe failure at this point must leak
+    NEITHER the redis client NOR the redis pool while the PG pool
+    drains. Pinned with a parent-mock attach so the order is reviewed
+    deliberately, not silently shuffled.
     """
     handles = _patch_worker_dependencies(monkeypatch)
     _stub_telemetry(monkeypatch)
@@ -300,6 +307,15 @@ async def test_worker_startup_aborts_when_pg_probe_fails(
         AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all")),
     )
 
+    # Attach the three teardown mocks under one parent so call ordering
+    # across distinct mock objects becomes observable on
+    # ``parent.mock_calls``. This is the canonical unittest.mock pattern
+    # for cross-mock ordering assertions.
+    teardown_parent = MagicMock()
+    teardown_parent.attach_mock(handles["redis_client"].aclose, "redis_client_aclose")
+    teardown_parent.attach_mock(handles["redis_pool"].aclose, "redis_pool_aclose")
+    teardown_parent.attach_mock(handles["pool"].close, "pg_pool_close")
+
     from gubbi.config import get_settings
 
     get_settings.cache_clear()
@@ -308,7 +324,92 @@ async def test_worker_startup_aborts_when_pg_probe_fails(
     with pytest.raises(ProbeFailure):
         await worker_module.startup(ctx)  # type: ignore[arg-type]
 
+    handles["redis_client"].aclose.assert_awaited_once()
+    handles["redis_pool"].aclose.assert_awaited_once()
     handles["pool"].close.assert_awaited_once()
+
+    # Reverse-lifecycle: redis_client before redis_pool before pg_pool.
+    observed = [call[0] for call in teardown_parent.mock_calls]
+    assert observed == [
+        "redis_client_aclose",
+        "redis_pool_aclose",
+        "pg_pool_close",
+    ], f"teardown order drifted: {observed}"
+
+    get_settings.cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# JOURNAL_LLM_PROVIDER selection: the worker dispatches via _PROVIDER_FACTORIES
+# and surfaces an unknown provider as a startup-time ValueError so a typo or
+# stale config fails fast rather than silently ingesting against the wrong
+# backend.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_worker_startup_selects_fake_provider_when_env_is_fake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``JOURNAL_LLM_PROVIDER=fake`` instantiates ``FakeLLMProvider``.
+
+    Pinned because the testbench D-tier compose sets this env var to
+    keep the worker hermetic (no api.anthropic.com round-trip, no
+    accidental spend on a leaked ANTHROPIC_API_KEY). A regression that
+    drops ``"fake"`` from ``_PROVIDER_FACTORIES`` would silently boot
+    against the real provider with the testbench's stub key.
+    """
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", "fake")
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+
+    captured_services: list[Any] = []
+
+    def _capture_extraction_service(provider: Any) -> Any:
+        captured_services.append(provider)
+        return MagicMock()
+
+    monkeypatch.setattr(worker_module, "ExtractionService", _capture_extraction_service)
+
+    from gubbi.config import get_settings
+    from gubbi.extraction.llm.fake_provider import FakeLLMProvider
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    assert len(captured_services) == 1
+    assert isinstance(captured_services[0], FakeLLMProvider)
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_worker_startup_raises_for_unknown_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown ``JOURNAL_LLM_PROVIDER`` value raises ``ValueError`` at startup.
+
+    The worker dispatches via the ``_PROVIDER_FACTORIES`` registry and
+    raises with the unknown key + the sorted list of known providers
+    when the env var carries a typo. Fail-fast at startup is preferred
+    over silent fall-through to a default because the latter could
+    masquerade a config typo as a working deploy.
+    """
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", "unknown_xyz")
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ValueError, match="Unknown JOURNAL_LLM_PROVIDER"):
+        await worker_module.startup(ctx)  # type: ignore[arg-type]
 
     get_settings.cache_clear()
 
