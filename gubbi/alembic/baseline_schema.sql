@@ -15,7 +15,10 @@
 --
 -- Roles journal_app + journal_admin are pre-created with passwords by
 -- testbench config/postgres/init.sh and prod gubbi-stack/postgres-init.sh.
--- This migration only creates otel_ro (NOLOGIN; no password needed).
+-- This migration creates otel_ro: LOGIN, read-only monitoring role for the
+-- OTel collector's postgresql receiver, pg_monitor-only (no data access).
+-- The password is set out-of-band at deploy time (a LOGIN role with no
+-- password cannot authenticate, so the role is inert until then).
 --
 -- The old chain (0001-0031) lives at _archive/ for dev-DB forward
 -- migration; it is not loaded by alembic.
@@ -38,15 +41,17 @@ COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access met
 --
 -- pg_dump --schema-only does not capture cluster-global roles, so we
 -- recreate the role declaration from the original migration 0026 here.
--- NOLOGIN keeps the role inert until an operator attaches login or a
--- password at deploy time; pg_monitor is the standard built-in role
--- for read-only observability scrapers.
+-- LOGIN + pg_monitor is the read-only monitoring role for the OTel
+-- collector's postgresql receiver; pg_monitor is the standard built-in
+-- role for read-only observability scrapers (no data-table grants). The
+-- password is set out-of-band at deploy time -- a LOGIN role with no
+-- password cannot authenticate, so the role stays inert until then.
 --
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'otel_ro') THEN
-        CREATE ROLE otel_ro NOLOGIN;
+        CREATE ROLE otel_ro LOGIN;
     END IF;
 END $$;
 

@@ -14,9 +14,9 @@ gubbi-cloud's baseline assumes users already exists.
 Roles journal_app + journal_admin must exist before this migration
 runs; they are pre-created with passwords by testbench
 config/postgres/init.sh and prod gubbi-stack/postgres-init.sh. The
-otel_ro role IS created by this migration (NOLOGIN, no password
-needed) since pg_dump --schema-only does not capture cluster-global
-roles.
+otel_ro role IS created by this migration (LOGIN, pg_monitor-only, no
+data grants; password set out-of-band at deploy time) since pg_dump
+--schema-only does not capture cluster-global roles.
 
 The original 0001-0031 chain lives at _archive/ (sibling of
 versions/) for forward dev-DB migration; alembic does not load it.
