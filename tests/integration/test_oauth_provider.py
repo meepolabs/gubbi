@@ -258,7 +258,7 @@ class TestRevocation:
 
 class TestRotationAtomicity:
     async def test_rotation_leaves_no_partial_state(self, oauth_storage: OAuthStorage) -> None:
-        """HIGH-1: if rotate_refresh_token fails mid-way, old state must be intact."""
+        """If rotate_refresh_token fails mid-way, old state must be intact."""
         provider = _make_provider(oauth_storage)
         client = _make_client()
 

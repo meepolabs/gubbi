@@ -1,4 +1,4 @@
-"""OpenTelemetry setup module for gubbi (TASK-03.19).
+"""OpenTelemetry setup module for gubbi.
 
 Provides ``configure_otel(app)`` called during FastAPI app startup.
 
@@ -47,7 +47,7 @@ def configure_otel(app: FastAPI) -> None:
     Call during app lifespan startup, before any request handling.
     Idempotent: safe to call multiple times (subsequent calls no-op).
 
-    Resource attributes (S8 M-1) are populated from in-process defaults:
+    Resource attributes are populated from in-process defaults:
 
     * ``service.version`` -- ``gubbi.__version__`` (mirrors pyproject).
     * ``deployment.environment`` -- ``settings.app_env``.
@@ -89,12 +89,12 @@ def configure_otel(app: FastAPI) -> None:
 def rebind_metrics_after_configure() -> None:
     """Clear and re-prime ``initialize_metrics()`` against the live provider.
 
-    CRIT-5 H-1: ``initialize_metrics()`` is ``lru_cache``-memoized so it
+    ``initialize_metrics()`` is ``lru_cache``-memoized so it
     only resolves a meter once. If any helper (e.g.
     ``record_audit_persistence_failure``) fired BEFORE ``configure_otel``
     completed -- for example from an early ``_build_app_ctx`` failure
     during ``scaffold_operator`` -- the cache would be sealed against the
-    NoOp provider permanently and the DEC-098 ``audit.persistence_failure``
+    NoOp provider permanently and the ``audit.persistence_failure``
     alarm sensor would be dead. Clearing and re-priming here guarantees
     the cached instruments are bound to whatever meter provider is
     current at this call site (the SDK provider configured above in
@@ -104,7 +104,7 @@ def rebind_metrics_after_configure() -> None:
     lifespan re-bind contract without pulling in the FastAPI /
     instrumentor / OTLP exporter wiring.
 
-    CRIT-5 B5 (2026-05-22): three out-of-tree counters live in their own
+    Three out-of-tree counters live in their own
     ``@lru_cache``-deferred factories rather than ``initialize_metrics`` --
     ``orphan_cleanup`` / ``extract_conversation`` / ``anthropic_provider``
     each define their own counter local to the module that emits it,
@@ -123,7 +123,7 @@ def rebind_metrics_after_configure() -> None:
     initialize_metrics.cache_clear()
     initialize_metrics()
 
-    # B5 orphan-counter factories: clear the lru_cache so the next call
+    # Orphan-counter factories: clear the lru_cache so the next call
     # binds to the post-configure_otel SDK provider rather than the stale
     # NoOp captured at module import.
     #

@@ -167,7 +167,7 @@ class TestTrustGatewayMode:
 
 
 class TestTrustGatewayEnvelopeVerification:
-    """Auth mode (a) -- H-1 HMAC envelope verification on REST."""
+    """Auth mode (a) -- HMAC envelope verification on REST."""
 
     _SECRET = b"\x42" * 32
 
@@ -533,7 +533,7 @@ class TestRouteIntegration:
 
 
 class TestTrustGatewayBoundarySecurity:
-    """D3 security boundary: trust-gateway deploy MUST NOT accept other auth modes."""
+    """Security boundary: trust-gateway deploy MUST NOT accept other auth modes."""
 
     async def test_hydra_token_rejected_when_trust_gateway(self) -> None:
         """When trust_gateway=True, a Hydra bearer token should not be accepted."""

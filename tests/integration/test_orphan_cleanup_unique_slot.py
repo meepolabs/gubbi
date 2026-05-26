@@ -131,7 +131,7 @@ async def test_unique_slot_freed_after_cleanup(admin_pool: asyncpg.Pool) -> None
 
 
 # ---------------------------------------------------------------------------
-# Stuck-running reaper (B2 / Q3)
+# Stuck-running reaper
 # ---------------------------------------------------------------------------
 
 

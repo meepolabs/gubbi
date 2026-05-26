@@ -185,7 +185,7 @@ async def test_otel_counter_none_attribute() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Stuck-running reaper (B2 / Q3)
+# Stuck-running reaper
 # ---------------------------------------------------------------------------
 
 
@@ -199,7 +199,7 @@ async def test_running_sweep_uses_2x_arq_timeout_threshold() -> None:
 
 @pytest.mark.asyncio
 async def test_running_sweep_calls_correct_query() -> None:
-    """Running-sweep UPDATE matches the locked B2 contract (status, error_code, threshold)."""
+    """Running-sweep UPDATE matches the locked contract (status, error_code, threshold)."""
     pool = _empty_pool(swept_count=0)
 
     await _run_one_cycle(pool)

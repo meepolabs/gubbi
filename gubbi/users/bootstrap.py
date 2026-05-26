@@ -40,7 +40,7 @@ async def scaffold_operator(
     Inserts when absent; raises RuntimeError if no active user row is
     found after the insert attempt.
 
-    User-row write paths (M2 review #6):
+    User-row write paths:
 
     * **This path (Mode 1/2 self-host only)** -- runs once at gubbi
       startup to ensure the founder row exists. ON CONFLICT DO NOTHING

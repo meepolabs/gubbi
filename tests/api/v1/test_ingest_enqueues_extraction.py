@@ -6,9 +6,9 @@ Verifies that POST /api/v1/ingest/conversations:
   - Skipped-by-dedup conversations produce neither a row nor an enqueue call
   - An audit row is written for each created job
   - Replay (re-POST same payload) does NOT duplicate in-flight rows (idempotency)
-  - Pre-charge denial: conversation saves but no extraction row / no enqueue (D1, D2, D3)
+  - Pre-charge denial: conversation saves but no extraction row / no enqueue
   - Mid-batch exhaustion: correct per-conversation counters
-  - Pre-charge succeeds + savepoint 2 fails: refund called with actual=0 (D4)
+  - Pre-charge succeeds + savepoint 2 fails: refund called with actual=0
   - helper=None (self-host): all conversations enqueue unconditionally
 
 The arq pool is mocked -- no Redis required.
@@ -376,7 +376,7 @@ class TestIngestEnqueuesExtraction:
     ) -> None:
         """Pre-charge returns False -- conversation saves; no extraction row; no enqueue.
 
-        Asserts D1 + D2 + D3: save commits unconditionally, response carries
+        Asserts: save commits unconditionally, response carries
         extractions_skipped_budget=1 and budget_exhausted=True, HTTP 200.
         """
         # Arrange: install a mock helper that denies pre_charge.
@@ -484,7 +484,7 @@ class TestIngestEnqueuesExtraction:
     ) -> None:
         """Pre-charge True -> TXN 2 INSERT raises -> refund + continue (200).
 
-        Asserts B3-H1 + D4:
+        Asserts:
         - HTTP 200 (not 500; TXN 2 failure is counted, not propagated).
         - extractions_skipped_error == 1.
         - conversations_saved == 1 (TXN 1 committed independently).
@@ -518,7 +518,7 @@ class TestIngestEnqueuesExtraction:
             headers={"X-Auth-User-Id": str(TEST_USER_ID)},
         )
 
-        # B3-H1: TXN 2 failure continues; HTTP 200 (not 500).
+        # TXN 2 failure continues; HTTP 200 (not 500).
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert data["conversations_saved"] == 1
@@ -527,7 +527,7 @@ class TestIngestEnqueuesExtraction:
         assert data["extractions_skipped_budget"] == 0
 
         # Conversation row IS committed (TXN 1 succeeded independently).
-        # Scoped to platform_id to avoid interference from other tests (B3-H3).
+        # Scoped to platform_id to avoid interference from other tests.
         async with pool.acquire() as conn:
             conv_count = await conn.fetchval(
                 """

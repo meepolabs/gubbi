@@ -1,4 +1,4 @@
-"""Metric instruments for gubbi (TASK-03.19).
+"""Metric instruments for gubbi.
 
 Defines and initializes the gubbi-side metric instruments:
     - mcp.tool_call_duration (histogram)
@@ -12,12 +12,12 @@ they bind to the meter provider configured by ``configure_otel()`` during
 time. This mirrors the cloud pattern at
 ``gubbi-cloud/gubbi_cloud/telemetry/metrics.py``.
 
-CRIT-5 (M4 e2e review, 2026-05-13): prior to this refactor the four
+Prior to this refactor the four
 instruments were created at module import, which runs before
 ``configure_otel()`` -- they bound to the NoOp provider and silently
 discarded every ``.add(...)`` / ``.record(...)``. That made the
-``audit.persistence_failure`` alarm contract that DEC-098 depends on
-non-functional. The fix is to defer instrument creation to
+``audit.persistence_failure`` alarm contract non-functional. The fix is
+to defer instrument creation to
 ``initialize_metrics()`` and look up the cached instruments on every
 record call.
 
@@ -171,14 +171,14 @@ def record_tool_response_size(size_chars: int, tool_name: str) -> None:
 def record_audit_persistence_failure(event_type: str) -> None:
     """Increment the audit persistence failure counter.
 
-    CRIT-5: this is the sensor for the DEC-098 fail-open compensating
+    This is the sensor for the fail-open compensating
     alarm. Must bind to the real meter provider (post-lifespan) for the
     HyperDX alarm contract to fire. ``initialize_metrics()`` is
     lru_cached and primed at the tail of ``configure_otel()`` so the
     cached instruments are bound to the configured provider.
 
     Direct ``inst[key]`` access: a missing key here would silently
-    disable the DEC-098 alarm sensor. Let KeyError surface.
+    disable the alarm sensor. Let KeyError surface.
     """
     attrs = _validate_metric_attrs({"event_type": event_type})
     inst = initialize_metrics()
@@ -188,7 +188,7 @@ def record_audit_persistence_failure(event_type: str) -> None:
 def record_replica_count_warning(*, replica_count: int) -> None:
     """Increment the gateway.replica_count_warning counter at startup.
 
-    M4 #138: emitted once per process startup when
+    Emitted once per process startup when
     ``JOURNAL_REPLICA_COUNT > 1`` -- from the FastAPI lifespan and from
     the Arq extraction worker's startup hook. Pairs with the structured
     ``db_pool_over_provisioned`` (gubbi) /

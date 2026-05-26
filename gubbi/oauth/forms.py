@@ -50,18 +50,18 @@ def client_ip(request: Request) -> str:
     """Extract client IP, optionally honouring X-Forwarded-For.
 
     Honours JOURNAL_TRUST_FORWARDED_HEADERS (default False).  When
-    True the RIGHTMOST X-Forwarded-For value (the trusted-proxy stamp,
-    per DEC-086 rule 4) is treated as the originating client IP; when
+    True the RIGHTMOST X-Forwarded-For value (the trusted-proxy stamp)
+    is treated as the originating client IP; when
     False the XFF header is ignored and only request.client.host is
     used so reverse-proxy headers cannot forge the caller address.
 
     Operators enabling this flag MUST ensure a trusted reverse proxy is
     in front of gubbi and that direct access to the application is not
-    possible.  (M-9.3).
+    possible.
 
     Delegates to gubbi_common.http.client_ip which is the single source
     of truth for XFF parsing across both gubbi and gubbi-cloud (helper
-    introduced in gubbi-common 0.10.0; see DEC-086).  The helper returns
+    introduced in gubbi-common 0.10.0).  The helper returns
     None when no IP is recoverable; this wrapper preserves the legacy
     "unknown" sentinel for log-shape stability.
     """

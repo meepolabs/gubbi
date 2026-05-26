@@ -1,4 +1,4 @@
-"""Tenant fixtures for cross-tenant RLS tests (TASK-02.15).
+"""Tenant fixtures for cross-tenant RLS tests.
 
 These fixtures compose on top of ``conftest.py``'s ``app_pool`` and
 ``admin_pool``. They create two throwaway users (A and B), return their

@@ -1,4 +1,4 @@
-"""Tests for m234-review LOW bundle: mode-3 operator rejection, tags max_length, scope precompute."""
+"""Tests for mode-3 operator rejection, tags max_length, and scope precompute."""
 
 from __future__ import annotations
 

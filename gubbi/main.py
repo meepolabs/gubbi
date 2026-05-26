@@ -597,7 +597,7 @@ async def mcp_health() -> dict[str, Any]:
     this route intercepts it, the client receives application/json
     instead of text/event-stream and bails with "Authorization
     failed" (a misleading client-side error). Bug caught during
-    M3 deploy on bunsamosa 2026-04-30.
+    a deploy on 2026-04-30.
     """
     return {"status": "ok"}
 

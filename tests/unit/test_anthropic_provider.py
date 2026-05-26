@@ -1,6 +1,6 @@
 """Unit tests for the AnthropicProvider exception translation + retry observability.
 
-Covers (B2 / S7 M2):
+Covers:
   * Each anthropic SDK exception type translates to the right LLM* class.
   * _call_with_retry retries LLMTransientError, raises LLMPermanentError
     immediately, and emits the retry observability counter.
@@ -158,7 +158,7 @@ def _make_response_validation_error() -> APIResponseValidationError:
 def test_translate_anthropic_error_mapping(
     exc_factory: Callable[[], Exception], expected_cls: type[LLMProviderError]
 ) -> None:
-    """Vendor exceptions map to the correct LLM* class (B2 mapping lock + R1 expansion)."""
+    """Vendor exceptions map to the correct LLM* class."""
     translated = _translate_anthropic_error(exc_factory())
     assert isinstance(translated, expected_cls), (
         f"{type(exc_factory()).__name__} should map to {expected_cls.__name__}, "
@@ -484,14 +484,14 @@ def test_classify_error_uses_llm_hierarchy(exc: Exception, expected: str) -> Non
 
 
 def test_extract_conversation_module_does_not_import_anthropic() -> None:
-    """S7 M2 contract: extract_conversation.py must not import the vendor SDK."""
+    """Contract: extract_conversation.py must not import the vendor SDK."""
     import gubbi.extraction.jobs.extract_conversation as mod
 
     # The classify_error function is the only place that historically used
     # anthropic.*; verify the module dict has no `anthropic` symbol now.
     assert "anthropic" not in mod.__dict__, (
         "anthropic should not be imported in extract_conversation.py "
-        "after B2 -- _classify_error uses LLM* abstraction"
+        "_classify_error uses LLM* abstraction"
     )
 
 

@@ -107,9 +107,9 @@ class AuthConfig(BaseSettings):
         validation_alias="JOURNAL_API_KEY_SCOPES",
     )
     # When True, client_ip() honours the rightmost X-Forwarded-For entry --
-    # the IP added by the trusted edge proxy -- as the original client IP
-    # (DEC-086 rule 4). Requires a trusted reverse-proxy in front of
-    # gubbi; default False for direct-to-container deploys (M-9.3).
+    # the IP added by the trusted edge proxy -- as the original client IP.
+    # Requires a trusted reverse-proxy in front of
+    # gubbi; default False for direct-to-container deploys.
     trust_forwarded_headers: bool = Field(
         default=False, validation_alias="JOURNAL_TRUST_FORWARDED_HEADERS"
     )
@@ -155,7 +155,7 @@ class AuthConfig(BaseSettings):
         every JSON-array string starts with ``[``, so the leading-bracket
         check catches all malicious inputs without false-positiving on
         any legit scope value. Splitting accepts ``,`` and ``\\n`` /
-        ``\\r\\n`` as separators so a Doppler import that introduces CRLF
+        ``\\r\\n`` as separators so a secret-store import that introduces CRLF
         does not degrade into a single malformed scope.
 
         Example: ``JOURNAL_API_KEY_SCOPES=journal:read,journal:write``
@@ -216,7 +216,7 @@ class LLMConfig(BaseSettings):
 
 
 # Canonical Environment Literal (mirrored byte-for-byte across gubbi + gubbi-cloud).
-# See DEC-094 (canonical app_env literal); env-contract-lint enforces parity.
+# env-contract-lint enforces parity across the two repos.
 Environment = Literal["dev", "ci", "staging", "production"]
 
 
@@ -245,13 +245,13 @@ class Settings(BaseSettings):
     Setting both HYDRA_ADMIN_URL and PASSWORD_HASH is a configuration
     error and fails startup.
 
-    Additional hardening flags (M-9 cluster):
+    Additional hardening flags:
     - JOURNAL_TRUST_FORWARDED_HEADERS: When True, client_ip() honours
-      the rightmost X-Forwarded-For entry -- the trusted-proxy stamp per
-      DEC-086 rule 4 -- (default False; M-9.3).
+      the rightmost X-Forwarded-For entry -- the trusted-proxy stamp --
+      (default False).
     - JOURNAL_HEALTH_BIND_PUBLIC: When set and "true", the extraction
       health server listens on 0.0.0.0 instead of 127.0.0.1 (default
-      localhost-only; M-9.7).
+      localhost-only).
     """
 
     model_config = SettingsConfigDict(
@@ -267,8 +267,7 @@ class Settings(BaseSettings):
 
     # Deploy environment marker. Controls safe-by-default gates that should
     # only relax in local development. Env var: JOURNAL_APP_ENV.
-    # See DEC-094 (canonical app_env literal); default stays "dev" to honour
-    # the self-host first principle.
+    # Default stays "dev" to honour the self-host first principle.
     app_env: Environment = Field(default="dev", validation_alias="JOURNAL_APP_ENV")
 
     pg_log_probe_mode: PgLogProbeMode = Field(
@@ -452,8 +451,8 @@ class Settings(BaseSettings):
     def _validate_trust_gateway_signature(self) -> Self:
         """Refuse trust_gateway=True without signature enforcement in deployed envs.
 
-        Gated on ``self.is_deployed`` (True for staging+production) per
-        DEC-094. The unsafe combination is reachable in non-deployed
+        Gated on ``self.is_deployed`` (True for staging+production).
+        The unsafe combination is reachable in non-deployed
         envs (``dev``, ``ci``) for local trust-gateway smoke tests and
         the CI harness, but never in ``staging``/``production``.
         """
@@ -470,7 +469,7 @@ class Settings(BaseSettings):
         """Return True when running in a deployed environment.
 
         Canonical predicate replacing every ``app_env != "dev"`` check across
-        both gubbi and gubbi-cloud (DEC-094). dev + ci are non-deployed
+        both gubbi and gubbi-cloud. dev + ci are non-deployed
         (developer laptop, CI runner); staging + production are deployed.
         """
         return self.app_env in ("staging", "production")

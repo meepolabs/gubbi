@@ -112,7 +112,7 @@ class TestStoreAndSearch:
 
 
 class TestStoreByVectorDeprecation:
-    """store_by_vector is a deprecated alias for save_by_vector (CO.43)."""
+    """store_by_vector is a deprecated alias for save_by_vector."""
 
     async def test_store_by_vector_emits_deprecation_warning(
         self, mock_embedding_service: Any

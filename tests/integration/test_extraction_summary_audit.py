@@ -1,4 +1,4 @@
-"""Integration test: extraction worker writes a summary audit row (H-3/D4).
+"""Integration test: extraction worker writes a summary audit row.
 
 Verifies that after a successful extraction run, a
 ``conversation.extracted`` audit row appears with the correct

@@ -1,8 +1,8 @@
-"""Span helpers for gubbi critical-path spans (TASK-03.19).
+"""Span helpers for gubbi critical-path spans.
 
 Provides async context managers for spans that are not instrumented
 inline in the relevant modules. Currently that is the forward-prep
-mcp.tool_response_size_check hook (TASK-03.23).
+mcp.tool_response_size_check hook.
 
 The primary critical-path spans (mcp.tool_call,
 embedding.encode, cipher.encrypt/decrypt, audit.write) are instrumented
@@ -29,7 +29,7 @@ _tracer = trace.get_tracer(_TRACER_NAME)
 
 
 # ---------------------------------------------------------------------------
-# mcp.tool_response_size_check  (forward-prep for TASK-03.23)
+# mcp.tool_response_size_check  (forward-prep)
 # ---------------------------------------------------------------------------
 
 
@@ -41,7 +41,7 @@ async def record_mcp_tool_response_size_check(
 ) -> AsyncIterator[Span]:
     """Async context manager for the safety-net size check span.
 
-    This is a forward-prep hook for TASK-03.23. Once the 80KB safety
+    This is a forward-prep hook. Once the 80KB safety
     net lands, callers fire this span when a tool response exceeds the
     threshold.
 

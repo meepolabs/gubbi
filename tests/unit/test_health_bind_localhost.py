@@ -1,4 +1,4 @@
-"""Test extraction worker health server binds to localhost by default (M-9.7 / M-11)."""
+"""Test extraction worker health server binds to localhost by default."""
 
 from __future__ import annotations
 

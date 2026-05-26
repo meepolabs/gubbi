@@ -1,4 +1,4 @@
-"""Tests for gubbi.core.crypto (TASK-02.11).
+"""Tests for gubbi.core.crypto.
 
 Covers ContentCipher round-trips, nonce uniqueness, version rotation,
 construction guards, error handling, load_master_keys_from_env behaviour,
@@ -353,7 +353,7 @@ def test_encrypt_decrypt_1mb_under_100ms() -> None:
     assert result == plaintext
 
 
-# -- DecryptionError + decrypt_or_raise wrap (TASK-02.13) --
+# -- DecryptionError + decrypt_or_raise wrap --
 
 
 def test_decrypt_or_raise_happy_path() -> None:
@@ -404,7 +404,7 @@ def test_decrypt_or_raise_does_not_swallow_type_error(monkeypatch: pytest.Monkey
         decrypt_or_raise(cipher, b"ct", b"nonce")
 
 
-# -- hypothesis property tests (TASK-02.16) --
+# -- hypothesis property tests --
 
 
 @settings(max_examples=100, deadline=None)
@@ -454,7 +454,7 @@ def test_hypothesis_ciphertext_byte_tamper_raises_invalid_tag(
         cipher.decrypt(tampered, nonce)
 
 
-# ── A. encrypt_with_version tests (TASK-03.13 Approach A) ────────────────────
+# --- A. encrypt_with_version tests ---
 
 
 def test_encrypt_with_version_valid_version_round_trip() -> None:

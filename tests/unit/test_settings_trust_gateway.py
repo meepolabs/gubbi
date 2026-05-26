@@ -2,9 +2,9 @@
 
 The outer Settings._validate_trust_gateway_signature validator must refuse
 auth.trust_gateway=True together with auth.gateway_require_signature=False
-when self.is_deployed is True (staging + production) -- closes the C-011
+when self.is_deployed is True (staging + production) -- closes the
 default-unsafe footgun. dev + ci are non-deployed and intentionally
-permissive (DEC-094 / H-A2).
+permissive.
 """
 
 from __future__ import annotations
@@ -73,10 +73,10 @@ def test_prod_trust_gateway_with_signature_allowed() -> None:
 
 
 def test_ci_allows_trust_gateway_without_signature() -> None:
-    """Pin the intentional CI permissiveness introduced by B1's `is_deployed` flip.
+    """Pin the intentional CI permissiveness introduced by the `is_deployed` flip.
 
-    Before B1 the validator gated on ``app_env != "dev"`` which caught ``ci`` too;
-    after B1 (per architect H-A2 / DEC-094) it gates on ``self.is_deployed``,
+    Previously the validator gated on ``app_env != "dev"`` which caught ``ci`` too;
+    it now gates on ``self.is_deployed``,
     which is False for both ``dev`` and ``ci``. CI test harnesses set
     ``trust_gateway=True`` + ``gateway_require_signature=False`` to bypass the
     signed envelope when wiring synthetic users into gubbi -- this combination

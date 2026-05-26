@@ -217,14 +217,14 @@ def cipher() -> ContentCipher:
     """Deterministic test cipher with a fixed key so test data is reproducible.
 
     NEVER use this key outside tests -- it is intentionally weak (all 0x01
-    bytes) and must not end up in any .env, Doppler secret, or production
-    config. Production keys come from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*``.
+    bytes) and must not end up in any .env file, the deployment secret store,
+    or production config. Production keys come from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*``.
     """
     return ContentCipher({1: bytes([1]) * 32})
 
 
 # ---------------------------------------------------------------------------
-# RLS test-database fixtures (TASK-02.15)
+# RLS test-database fixtures
 # ---------------------------------------------------------------------------
 #
 # The legacy `pool` fixture above speaks to a schema-only test database
@@ -534,7 +534,7 @@ def _snapshot_otel_globals() -> dict[str, Any]:
     consumer that depends on a pre-existing provider surviving a test.
 
     Tracing is the only signal currently wired through this fixture; logger
-    and meter globals are snapshotted defensively so that as M5/M6 wire up
+    and meter globals are snapshotted defensively so that as later work wires up
     ``LoggerProvider`` / ``MeterProvider`` they automatically inherit
     snapshot-restore isolation without further fixture surgery.
 
@@ -578,7 +578,7 @@ def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
     after teardown.
 
     Logger and meter snapshots are taken defensively even though only the
-    tracer is mutated today, so that M5/M6 wiring of ``LoggerProvider`` and
+    tracer is mutated today, so that future wiring of ``LoggerProvider`` and
     ``MeterProvider`` inherits the same isolation guarantee for free.
 
     Validated against opentelemetry-api 1.41.1.

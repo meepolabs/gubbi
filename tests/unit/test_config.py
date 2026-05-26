@@ -1,6 +1,6 @@
 """Tests for `gubbi.config.Settings` -- canonical Environment Literal + properties.
 
-Bundle B1 (DEC-094) introduces the byte-identical
+The config layer provides the byte-identical
 ``Environment = Literal["dev", "ci", "staging", "production"]`` alias and the
 ``is_deployed`` property. These tests pin both, mirroring the corresponding
 gubbi-cloud module.
@@ -44,7 +44,7 @@ def _make_settings(**extra: str) -> Settings:
 def test_is_deployed_property_enumerates_four_values(
     app_env: str, expected_is_deployed: bool
 ) -> None:
-    """`is_deployed` must agree with DEC-094: True iff app_env in (staging, production)."""
+    """`is_deployed` must be True iff app_env in (staging, production)."""
     # Arrange + Act
     settings = _make_settings(JOURNAL_APP_ENV=app_env)
 

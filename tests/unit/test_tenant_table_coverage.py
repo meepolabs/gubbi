@@ -24,7 +24,7 @@ _TENANT_TABLES = frozenset(
         "conversations",
         "messages",
         "entry_embeddings",
-        "users",  # added by migration 0019_rls_users (m234 C-7)
+        "users",  # added by migration 0019_rls_users
         "extraction_jobs",  # added by migration 0023_extraction_jobs_relocate; RLS policy extraction_jobs_user_isolation
     }
 )
@@ -170,7 +170,7 @@ def test_all_app_sql_tables_are_accounted_for() -> None:
 
 
 def test_users_table_in_tenant_tables() -> None:
-    """Regression guard: users table must be in _TENANT_TABLES (m234 C-7)."""
+    """Regression guard: users table must be in _TENANT_TABLES."""
     assert (
         "users" in _TENANT_TABLES
-    ), "users table must be in _TENANT_TABLES -- migration 0019_rls_users (m234 C-7)"
+    ), "users table must be in _TENANT_TABLES -- migration 0019_rls_users"

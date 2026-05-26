@@ -1,9 +1,7 @@
 """Application-layer content encryption via AES-256-GCM.
 
 Used to encrypt sensitive tenant content (entries.content, entries.reasoning,
-messages.content) at the repository layer. See TASK-02.11 in
-llm_context/tasks/milestone-02-multitenant-auth.md for the spec and
-threat model.
+messages.content) at the repository layer.
 
 Versioning is carried in the first byte of the 12-byte nonce so key
 rotation does not require a separate column. Byte 0 = key version
@@ -182,10 +180,10 @@ class ContentCipher:
         ``"entry.content"``). No content is stored in span attributes.
 
         NOTE for callers: ``ValueError`` vs ``InvalidTag`` MUST NOT be
-        distinguished in any response surfaced to end users. Raising
-        different HTTP status codes or log verbosity for the two types
-        creates a version-existence oracle. Repository layer (TASK-02.13)
-        wraps both in a single opaque error.
+        distinguished in any response surfaced to end users. Both error
+        types are flattened into a single opaque error at the repository
+        layer; do not re-introduce a distinction via HTTP status code or
+        log verbosity.
 
         Records a ``cipher.decrypt`` OTel span with version, field_kind,
         bytes_processed, and latency_ms.
@@ -262,8 +260,9 @@ class DecryptionError(Exception):
     The repository layer wraps every ``cipher.decrypt`` call with
     ``decrypt_or_raise`` so callers see a single error type regardless of
     cause (tampered ciphertext, wrong key, unknown key version, malformed
-    nonce). Distinguishing causes in any response would create a
-    version-existence oracle -- see the note on ``ContentCipher.decrypt``.
+    nonce). Callers must not re-introduce a distinction between causes in
+    any response surfaced to end users -- see the note on
+    ``ContentCipher.decrypt``.
 
     The original exception is preserved via ``__cause__`` (implicit from
     ``raise ... from exc``) so server-side logs can still record the

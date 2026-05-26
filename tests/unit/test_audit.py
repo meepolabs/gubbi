@@ -1,6 +1,6 @@
 """Unit tests for ``gubbi.audit`` -- the re-export shim.
 
-As of gubbi-common 0.11.0 (A3 consolidation) ``record_audit`` is a
+As of gubbi-common 0.11.0 ``record_audit`` is a
 re-export of ``gubbi_common.audit.sql.record_audit_async``. The deep
 validation behaviour (actor_type / actor_id / target_id shape, banned-key
 metadata redaction, IP normalisation, metadata size cap, ``audit.write``
@@ -47,8 +47,8 @@ def test_record_audit_is_gubbi_common_record_audit_async() -> None:
 
     Regression guard: a future change that reintroduces a local
     ``record_audit`` (with its own validation surface or its own INSERT
-    SQL) would diverge silently from the canonical writer. The S2
-    HIGH-1 / S2 MEDIUM findings were exactly that kind of drift.
+    SQL) would diverge silently from the canonical writer. Prior review
+    findings were exactly that kind of drift.
     """
     from gubbi_common.audit.sql import record_audit_async
 
@@ -81,7 +81,7 @@ def test_action_enum_re_exported() -> None:
 async def test_record_audit_writes_target_kind_via_canonical_insert() -> None:
     """End-to-end smoke: writing through the gubbi re-export persists target_kind.
 
-    Closes the historical S2 MEDIUM gap where gubbi's local 10-column
+    Closes the historical gap where gubbi's local 10-column
     INSERT was the only path that captured target_kind. With the
     re-export, ``record_audit`` and ``record_audit_async`` produce the
     same INSERT shape.
@@ -119,7 +119,7 @@ async def test_record_audit_propagates_on_db_error() -> None:
 
 
 # ---------------------------------------------------------------------------
-# A3 Q1: audit.write OTel span emitted by the canonical writer
+# audit.write OTel span emitted by the canonical writer
 # ---------------------------------------------------------------------------
 
 

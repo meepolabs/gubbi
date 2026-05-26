@@ -1,4 +1,4 @@
-"""Tool-level cross-tenant isolation tests (TASK-03.01).
+"""Tool-level cross-tenant isolation tests.
 
 Verifies that MCP tool handlers enforce per-user RLS when called through
 the app_pool (journal_app role, BYPASSRLS=False).  Each test sets the

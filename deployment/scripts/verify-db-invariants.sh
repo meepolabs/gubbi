@@ -25,10 +25,10 @@ set -euo pipefail
 #       * journal_app on audit_log -> INSERT only
 #       * journal_admin on audit_log -> SELECT, INSERT only (no UPDATE/DELETE)
 #   - otel_ro role exists, LOGIN, member of pg_monitor, no data-table grants
-#   - alembic_version + alembic_version_cloud are journal_admin-only (M4)
+#   - alembic_version + alembic_version_cloud are journal_admin-only
 #   - default privileges for ROLE journal in schema public have the precise
 #     audited shape: TABLES default = SELECT/INSERT/UPDATE for journal_app
-#     (DELETE intentionally absent post-M3) + ALL for journal_admin;
+#     (DELETE intentionally absent) + ALL for journal_admin;
 #     SEQUENCES default = SELECT/USAGE for journal_app + ALL for journal_admin
 #
 # Exit 0 on pass, 1 on fail, 2 if no DSN.
@@ -255,7 +255,7 @@ assert_true "function_app_current_user_active" \
      )"
 
 # ---------------------------------------------------------------------------
-# 9. Alembic version tables: journal_admin only. journal_app revoked per M4.
+# 9. Alembic version tables: journal_admin only. journal_app revoked.
 # These tables are auto-created by alembic on first run; assertions here
 # guard against a future hand-edit / repair-grants run that re-grants them.
 # Skipped if either table doesn't exist yet (e.g., gubbi alembic hasn't run).
@@ -274,12 +274,12 @@ done
 
 # ---------------------------------------------------------------------------
 # 10. Default privileges (FOR ROLE journal IN SCHEMA public) -- exact ACL
-# shape, not just count. The post-M3 audited shape:
+# shape, not just count. The audited shape:
 #   TABLES:    journal_app -> SELECT,INSERT,UPDATE  (NO DELETE)
 #              journal_admin -> ALL
 #   SEQUENCES: journal_app -> SELECT,USAGE
 #              journal_admin -> ALL
-# Strict equality on per-grantee privilege set so M3 regressions are caught.
+# Strict equality on per-grantee privilege set so regressions are caught.
 # ---------------------------------------------------------------------------
 assert_true "default_privs_tables_journal_app_no_delete" \
     "SELECT NOT EXISTS (

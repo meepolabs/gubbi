@@ -1,4 +1,4 @@
-"""Integration tests: extraction worker resilience (m-h5-h6).
+"""Integration tests: extraction worker resilience.
 
 Tests cover:
 - Idempotent re-entry after LLM failure (retrying from scratch produces exactly N entries).
@@ -413,7 +413,7 @@ async def test_multi_worker_race_idempotent(
 
 
 # ---------------------------------------------------------------------------
-# Part 3: lifecycle UPDATE integration tests
+# lifecycle UPDATE integration tests
 # ---------------------------------------------------------------------------
 
 

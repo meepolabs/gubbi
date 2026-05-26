@@ -1,4 +1,4 @@
-"""Integration tests for TASK-02.06.1: repo INSERTs must auto-populate user_id
+"""Integration tests: repo INSERTs must auto-populate user_id
 from the session GUC so they work under ``user_scoped_connection`` without
 the caller passing user_id explicitly.
 """

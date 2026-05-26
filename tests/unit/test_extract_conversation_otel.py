@@ -1,4 +1,4 @@
-"""OTel span tests for the extract_conversation Arq job (B6).
+"""OTel span tests for the extract_conversation Arq job.
 
 Verifies that the job entry point emits a parent ``extraction.job`` span
 that wraps the body, captures success/failure outcome, records exceptions,

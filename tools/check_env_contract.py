@@ -4,10 +4,9 @@ Statically walks the Settings AST + compose YAML to verify that every
 required Settings field has its env-var declared in the docker-compose env
 block (as a bare passthrough, KEY=value, or ${VAR} variable reference).
 
-Also enforces (B1-T7):
+Also enforces:
 - Cross-repo parity of the canonical ``Environment = Literal[...]`` line
-  in ``gubbi/gubbi/config.py`` + ``gubbi-cloud/gubbi_cloud/config.py``
-  (DEC-094).
+  in ``gubbi/gubbi/config.py`` + ``gubbi-cloud/gubbi_cloud/config.py``.
 
 Exit 0 when the contract is satisfied.  Exit 1 on any drift.
 
@@ -388,7 +387,7 @@ def _out(msg: str, file: Any = sys.stdout) -> None:
     file.write(msg + "\n")
 
 
-# Regex matching the canonical Environment Literal alias (DEC-094 / B1-T7).
+# Regex matching the canonical Environment Literal alias.
 # Both gubbi/gubbi/config.py and gubbi-cloud/gubbi_cloud/config.py MUST
 # carry this exact line, byte-identical.
 _ENVIRONMENT_LITERAL_RE = re.compile(r"^Environment = Literal\[.+\]$", re.MULTILINE)
@@ -415,7 +414,7 @@ def check_environment_literal_parity(
     Empty list = parity holds.
 
     A non-existent path is itself a drift signal (parity cannot be checked);
-    DEC-094 rule 2 says drift fails CI, so the missing-path case appends a
+    the contract treats drift as a CI failure, so the missing-path case appends a
     DRIFT message rather than silently skipping.
     """
     drifts: list[str] = []
@@ -479,7 +478,7 @@ def main() -> None:
         default="../gubbi-cloud/gubbi_cloud/config.py",
         help=(
             "Path to gubbi-cloud's config.py for the Environment Literal "
-            "parity check (DEC-094 / B1-T7). Set to empty to skip."
+            "parity check (DEC-094). Set to empty to skip."
         ),
     )
     args = parser.parse_args()
@@ -495,8 +494,8 @@ def main() -> None:
         args.compose,
     )
 
-    # B1-T7: cross-repo Environment Literal parity (DEC-094).
-    # DEC-094 rule 2: drift fails CI -- a missing cross-repo config path is
+    # Cross-repo Environment Literal parity.
+    # Contract rule: drift fails CI -- a missing cross-repo config path is
     # itself a drift signal handled inside check_environment_literal_parity.
     if args.cloud_config:
         drifts.extend(check_environment_literal_parity(args.settings, args.cloud_config))

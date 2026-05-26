@@ -1,7 +1,7 @@
-"""X-4: ``_run_reindex`` correctly skips rows locked by another transaction.
+"""``_run_reindex`` correctly skips rows locked by another transaction.
 
 The pre-fix shape used ``FOR UPDATE OF e SKIP LOCKED`` on the joined
-SELECT, which (per architect D2) carried a plan-shape risk where the
+SELECT, which carried a plan-shape risk where the
 join could pull rows the inner ``WHERE indexed_at IS NULL`` filter had
 already excluded. The post-fix shape pushes the lock into a subquery
 against ``entries`` alone, then joins ``topics`` only for the rows the

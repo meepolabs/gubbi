@@ -8,7 +8,7 @@
 #   JOURNAL_DB_ADMIN_PASSWORD     -- privileged DB role password (journal_admin)
 #   JOURNAL_TIMEZONE              -- e.g. America/Los_Angeles
 #
-# Set these via Doppler, .env file, or export before running docker compose.
+# Set these via the deployment secret store, .env file, or export before running docker compose.
 # See docs/deployment.md for the full 3-shape deploy matrix (API-key-only /
 # full self-host / multi-tenant hosted).
 #
@@ -83,8 +83,8 @@ services:
       # Self-host app_env. Defaults to `dev` so the in-production-mode
       # security validators (loopback rejection, https-required for OAuth
       # metadata URLs) stay relaxed for local boxes. Production deploys
-      # (server-infra/meepolabs-prod/kamal/) override this to `production`
-      # via Kamal's env.clear block, never via this compose file.
+      # override this to `production` at deploy time, never via this
+      # compose file.
       - JOURNAL_APP_ENV=${JOURNAL_APP_ENV:-dev}
       # Operator identity + encryption (multi-tenant auth)
       - JOURNAL_OPERATOR_EMAIL
@@ -117,7 +117,7 @@ services:
       # elsewhere can override JOURNAL_REDIS_URL in the environment and the
       # explicit value wins.
       - JOURNAL_REDIS_URL=${JOURNAL_REDIS_URL:-redis://redis:6379}
-      # OpenTelemetry (TASK-03.19a). OTEL_ENABLED=false bypasses the
+      # OpenTelemetry. OTEL_ENABLED=false bypasses the
       # exporter entirely; useful when the Collector isn't deployed yet.
       - OTEL_ENABLED
       - OTEL_EXPORTER_OTLP_ENDPOINT

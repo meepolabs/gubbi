@@ -134,7 +134,7 @@ async def _set_user_rls_local(conn: asyncpg.Connection, user_id: UUID) -> None:
     open transaction to be transaction-scoped. Outside any transaction,
     the third argument is silently ignored and the GUC promotes to
     session scope; on a pooled connection that means the next checkout
-    inherits the previous user's identity (the original B1 bug).
+    inherits the previous user's identity (the original bug).
 
     This helper centralises the SET-LOCAL incantation so the
     security-critical contract -- "set the GUC inside a transaction
@@ -171,7 +171,7 @@ async def ingest_conversations(
     - Dedupe pre-check, conversation save (TXN 1), and extraction_jobs
       INSERT (TXN 2) are each their own top-level transaction. They commit
       independently: a TXN 2 failure does NOT roll back TXN 1's
-      conversation row (D1), and the per-conversation pre-charge happens
+      conversation row, and the per-conversation pre-charge happens
       OUTSIDE any open transaction (no network IO inside an open PG txn).
     - On TXN 2 failure: refund pre-charge, count as extractions_skipped_error,
       continue (HTTP 200).
@@ -281,7 +281,7 @@ async def ingest_conversations(
                 conversations_skipped_dedupe += 1
                 continue
 
-            # TXN 1 committed -- conversation row is durable (D1).
+            # TXN 1 committed -- conversation row is durable.
             assert save_result is not None  # noqa: S101  -- mypy; TXN 1 sets this
             conversations_saved += 1
             if save_result.superseded_json_path is not None:
@@ -310,8 +310,8 @@ async def ingest_conversations(
             # Top-level transaction; rollback here only undoes TXN 2,
             # leaving TXN 1's conversation row durable. SET LOCAL applies
             # the RLS GUC for this transaction only.
-            # On failure: refund pre-charge (D4), log, count, CONTINUE.
-            # HTTP 200 is still returned (D3); save is durable (D1).
+            # On failure: refund pre-charge, log, count, CONTINUE.
+            # HTTP 200 is still returned; save is durable.
             # ============================================================
             job_uuid: UUID | None = None
             try:
@@ -342,7 +342,7 @@ async def ingest_conversations(
                     )
             except Exception:
                 # TXN 2 rolled back.  Conv save (TXN 1) is already durable.
-                # Refund pre-charge so user is not over-billed (D4).
+                # Refund pre-charge so user is not over-billed.
                 extractions_skipped_error += 1
                 if helper is not None:
                     try:

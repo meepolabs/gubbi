@@ -1,6 +1,6 @@
 """Typed accessors for ``request.app.state`` fields populated by lifespan.
 
-Replaces the legacy ``CustomFastAPI`` subclass attribute pattern (CO.39).
+Replaces the legacy ``CustomFastAPI`` subclass attribute pattern.
 Each application-scoped resource the FastAPI lifespan installs on
 ``app.state`` is exposed via a paired accessor:
 

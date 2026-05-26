@@ -1,7 +1,7 @@
 """Bootstrap helper: trust-gateway bind-address safety check.
 
-Lifted from gubbi.main lifespan as part of CO.44a (Phase 4 of the
-code-organization review). Public symbol so tests + callers do not
+Lifted from gubbi.main lifespan as part of the
+code-organization review. Public symbol so tests + callers do not
 import a private name from ``gubbi.main``.
 """
 

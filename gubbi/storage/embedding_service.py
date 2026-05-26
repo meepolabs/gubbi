@@ -213,7 +213,7 @@ class EmbeddingService:
         entry_id: int,
         embedding: list[float],
     ) -> None:
-        """Deprecated alias for save_by_vector. Kept for one release per Part 9.8."""
+        """Deprecated alias for save_by_vector. Kept for one release."""
         warnings.warn(
             "EmbeddingService.store_by_vector is deprecated; use save_by_vector",
             DeprecationWarning,

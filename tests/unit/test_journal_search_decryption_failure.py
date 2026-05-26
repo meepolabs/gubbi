@@ -1,4 +1,4 @@
-"""Test journal search surfaces decryption failure with marker (M-9.8)."""
+"""Test journal search surfaces decryption failure with marker."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from gubbi.models.search import SearchResult
 
 
 class TestJournalSearchDecryptionFailure:
-    """M-9.8: decrypted entries that fail are returned with content and marker."""
+    """Decrypted entries that fail are returned with content and marker."""
 
     def test_search_result_has_decryption_failed_field(self) -> None:
         """SearchResult includes decryption_failed bool (default False)."""

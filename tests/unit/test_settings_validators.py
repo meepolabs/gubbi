@@ -10,7 +10,7 @@ Pins behaviour of the three model-validators on ``Settings``:
 * ``_validate_trust_gateway_signature`` -- the env-gated trust-gateway
   signature requirement (deployed envs only).
 
-Also pins the structural-guard sentinel pattern (Q1) that closes the
+Also pins the structural-guard sentinel pattern that closes the
 JSON-decode bypass attack class on the parent Settings sub-config fields.
 """
 
@@ -52,7 +52,7 @@ def _base_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Set the minimum env that lets Settings construct without raising.
 
     Also clears any ``JOURNAL_*`` env vars from the developer's local
-    environment so test runs are isolated from a stray Doppler / .env
+    environment so test runs are isolated from a stray secret-store or .env
     export that might otherwise flip a test result.
     """
     for name in list(os.environ):
@@ -248,7 +248,7 @@ def test_trust_gateway_signature_only_enforced_in_deployed_envs(
         Settings()
 
 
-# -------- Q1 sentinel structural-guard regression test --------
+# -------- sentinel structural-guard regression test --------
 
 
 @pytest.mark.unit

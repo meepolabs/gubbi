@@ -16,8 +16,7 @@ filter must not fail open if that ever changes).  After the split,
 update the mapping below.
 
 Also monkey-patches the MCP SDK's ToolManager.call_tool to add
-OpenTelemetry ``mcp.tool_call`` spans around every tool dispatch
-(TASK-03.19).
+OpenTelemetry ``mcp.tool_call`` spans around every tool dispatch.
 """
 
 from __future__ import annotations
