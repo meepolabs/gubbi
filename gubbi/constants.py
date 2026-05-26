@@ -14,6 +14,11 @@ DB_HEALTH_TIMEOUT_SECS: Final = 5  # DB health-probe timeout (seconds, forward-l
 # uniform across the gateway and self-host paths.
 DB_HEALTH_ACQUIRE_TIMEOUT_SECS: Final = 2
 DB_HEALTH_QUERY_TIMEOUT_SECS: Final = 1
+# /health/ready Redis ping budget. Mirrors the DB-side split so a
+# saturated Redis client surfaces fast instead of holding the readiness
+# slot. The PING is a cheap round-trip; 1s is generous against the
+# in-cluster Redis we ping.
+REDIS_HEALTH_PING_TIMEOUT_SECS: Final = 1
 EMBEDDING_REQUEST_TIMEOUT_SECS: Final = (
     120  # Embedding API request timeout -- reserved; currently using ONNX inference
 )
