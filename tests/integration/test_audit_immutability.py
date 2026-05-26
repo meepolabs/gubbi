@@ -1,4 +1,4 @@
-"""Integration test for audit_log trigger immutability (TASK-02.20).
+"""Integration test for audit_log trigger immutability.
 
 Verifies that the trg_audit_log_no_update and trg_audit_log_no_delete
 triggers raise 'audit_log rows are append-only' for any mutation attempt,

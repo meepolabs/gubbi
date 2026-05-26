@@ -1,4 +1,4 @@
-"""Append-only audit log helper -- DEC-061 / TASK-02.20.
+"""Append-only audit log helper.
 
 This module ships as a ready-to-call helper. Call-site wiring (Kratos
 webhooks, key rotation scripts, admin flows, subscription lifecycle) lands
@@ -27,7 +27,7 @@ Caller owns transaction lifecycle. ``record_audit`` executes a single
 INSERT inside whatever transaction (or autocommit context) the caller has
 open.
 
-As of gubbi-common 0.11.0 (A3 consolidation) the canonical INSERT,
+As of gubbi-common 0.11.0 the canonical INSERT,
 target_id / actor_id validation, banned-key metadata redaction, IP
 normalisation, metadata size cap, and ``audit.write`` OTel span all live
 in :func:`gubbi_common.audit.sql.record_audit_async`. This module re-exports
@@ -38,7 +38,7 @@ The ``Action`` enum lives in :mod:`gubbi_common.audit` (the cross-repo
 single source of truth); this module re-exports ``Action`` so existing
 imports keep working.
 
-See ``llm_context/audit_contract.md`` for actor_type taxonomy and when to
+See the audit contract for actor_type taxonomy and when to
 use ``record_audit`` vs. the ``@audited`` decorator.
 
 Security contract:

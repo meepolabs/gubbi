@@ -1,15 +1,15 @@
-"""Hosted Mode-3 OAuth E2E tests against the live dev stack on bunsamosa.
+"""Hosted Mode-3 OAuth E2E tests against the live dev stack.
 
 Flows: Hydra DCR + Kratos identity creation + PKCE/S256 auth request,
 followed by login/consent acceptance (via Hydra admin port when reachable),
 token exchange, and authenticated MCP call.
 
-NOTE: identities + DCR clients accumulate; cleanup via TASK-04.16 when shipped.
-No teardown of
+NOTE: identities + DCR clients accumulate; cleanup lands with a future
+cleanup API. No teardown of
 created Kratos identities or Hydra clients is performed by these tests.
 
-See lead_notes for SSH-tunnel option when JOURNAL_DEV_AUTH_ADMIN_URL is
-set to drive the full loop from laptop off-host.
+Use an SSH tunnel when JOURNAL_DEV_AUTH_ADMIN_URL is
+set to drive the full loop from a laptop off-host.
 """
 
 from __future__ import annotations
@@ -25,23 +25,23 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-# -- URL overrides via env vars (defaults point at bunsamosa dev stack) --
+# -- URL overrides via env vars (defaults point at the dev stack) --
 JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.gubbi.ai")
 JOURNAL_DEV_IDENTITY_URL: str = os.environ.get(
     "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.gubbi.ai"
 )
 JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://mcp-dev.gubbi.ai")
 
-# Optionally override the Hydra admin port (4445, loopback on bunsamosa).
+# Optionally override the Hydra admin port (4445, loopback on the dev box).
 # When set, drives login/consent acceptance and completes the full flow.
 JOURNAL_DEV_AUTH_ADMIN_URL: str | None = os.environ.get("JOURNAL_DEV_AUTH_ADMIN_URL", None)
 
 # -- Test constants --
-EMAIL_PREFIX = "test-hydra-oauth-"  # TASK-04.16 cleanup API filters on this
+EMAIL_PREFIX = "test-hydra-oauth-"  # cleanup API filters on this
 # Randomized per module load: each live-stack test run registers a Kratos
-# identity with a password no-one else knows. Leaking a static password into
-# the public AGPL repo would let anyone authenticate as these identities on
-# identity-dev.gubbi.ai until TASK-04.16 cleanup API catches up.
+# identity with a password no-one else knows. A static password committed to
+# the public AGPL repo would expose these throwaway dev identities until the
+# cleanup API catches up.
 TEST_PASSWORD = f"test-pass-{uuid.uuid4().hex}-Aa1!"
 TEST_REDIRECT_URI = "http://localhost/callback"
 TEST_SCOPE = "journal openid offline_access"
@@ -74,7 +74,7 @@ def _skip_if_no_admin_url() -> None:
         pytest.skip(
             "JOURNAL_DEV_AUTH_ADMIN_URL not set -- skipping login/consent "
             "acceptance and token exchange (admin port 4445 needed). "
-            "Set to http://localhost:4445 with SSH tunnel from bunsamosa."
+            "Set to http://localhost:4445 with SSH tunnel from the dev box."
         )
 
 
@@ -84,7 +84,7 @@ def _skip_if_no_admin_url() -> None:
     reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
 )
 class TestHydraOauthFlow:
-    """Hosted OAuth flow -- live dev stack on bunsamosa.
+    """Hosted OAuth flow -- live dev stack.
 
     The test class is skipped unless JOURNAL_LIVE_STACK=1.
 
@@ -92,7 +92,7 @@ class TestHydraOauthFlow:
     to be reachable from the test runner.  Without it, the test verifies DCR +
     Kratos registration + auth-request succeeded and skips the admin-gated path.
 
-    See lead_notes for SSH-tunnel option (b) when running off-host.
+    Use an SSH tunnel (option b) when running off-host.
     """
 
     async def test_full_flow(self) -> None:

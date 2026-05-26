@@ -134,7 +134,7 @@ def test_api_key_scopes_rejects_json_array() -> None:
 
 
 def test_api_key_scopes_accepts_newline_separators() -> None:
-    """CRLF / LF separators (e.g. from a Doppler multi-line paste) split cleanly."""
+    """CRLF / LF separators (e.g. from a multi-line secret-store paste) split cleanly."""
     s = _make_settings(JOURNAL_API_KEY_SCOPES="journal:read\r\njournal:write\nadmin:all")
     assert s.auth.api_key_scopes == ["journal:read", "journal:write", "admin:all"]
 

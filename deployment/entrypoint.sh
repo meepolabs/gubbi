@@ -23,17 +23,17 @@ chown -R appuser:appuser /src /app/journal /app/logs /home/appuser/.cache 2>/dev
 
 # Run database migrations as appuser BEFORE starting gunicorn.
 # Alembic resolves the DSN from JOURNAL_DB_MIGRATION_URL (preferred) or
-# JOURNAL_DB_ADMIN_URL (fallback); both are present in Doppler gubbi/prd
-# and forwarded by Kamal. Idempotent: alembic skips already-applied revisions.
+# JOURNAL_DB_ADMIN_URL (fallback); both are provided by the deployment
+# secret store at deploy time. Idempotent: alembic skips already-applied revisions.
 # Failure exits the entrypoint non-zero, which fails the container HEALTHCHECK
-# and aborts the kamal deploy after deploy_timeout.
+# and aborts the deploy after deploy_timeout.
 echo "[entrypoint] running alembic upgrade head..."
 gosu appuser python -m alembic -c alembic.ini upgrade head
 
 # Verify DB invariants (GRANTs / RLS / policies / triggers / otel_ro)
 # AFTER migrations succeed and BEFORE gunicorn starts. Same fail-fast
 # guarantee: any invariant violation aborts the container, fails the
-# HEALTHCHECK, and aborts the kamal deploy. psql is available in the
+# HEALTHCHECK, and aborts the deploy. psql is available in the
 # image (postgresql-client installed in the Dockerfile alongside gosu).
 echo "[entrypoint] running verify-db-invariants.sh..."
 gosu appuser /src/deployment/scripts/verify-db-invariants.sh

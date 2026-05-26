@@ -593,7 +593,7 @@ async def get_conversation(
     ]
 
 
-# Deprecated alias for one release per Part 9.8 of the code-org review (CO.43).
+# Deprecated alias kept for one release during the code-org rename.
 # `get_conversation` is the canonical name; `read_conversation` was inconsistent
 # with the `get_*` verb used elsewhere in this module.
 read_conversation = get_conversation

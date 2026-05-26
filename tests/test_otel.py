@@ -1,4 +1,4 @@
-"""Tests for OpenTelemetry instrumentation (TASK-03.19).
+"""Tests for OpenTelemetry instrumentation.
 
 Coverage:
     - Allowlist verification: banned attributes are dropped at the exporter layer.

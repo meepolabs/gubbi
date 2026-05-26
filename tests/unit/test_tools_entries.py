@@ -1,12 +1,12 @@
-"""Unit tests for `gubbi.tools.entries` tool-layer guards (A4 bundle).
+"""Unit tests for `gubbi.tools.entries` tool-layer guards.
 
 Covers:
-    - S6 H1: content + reasoning caps applied PRE-sanitization so the error
+    - content + reasoning caps applied PRE-sanitization so the error
       reports the real input size, not the post-strip size.
-    - S6 H2: all-None no-op update returns `validation_error("No fields to
+    - all-None no-op update returns `validation_error("No fields to
       update")` and signals failure via `success=False`, which prevents the
       @audited decorator from writing a ghost audit row.
-    - Append-mode empty content stays a distinct error (locked by A4 Q4).
+    - Append-mode empty content stays a distinct error.
 
 Tests call `_journal_append_entry` and `_journal_update_entry` directly, not
 through the registered MCP tool wrapper.  That bypasses the `@require_scope`
@@ -46,7 +46,7 @@ def _make_app_ctx() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# S6 H1 -- entry content + reasoning caps (append path)
+# entry content + reasoning caps (append path)
 # ---------------------------------------------------------------------------
 
 
@@ -108,10 +108,9 @@ async def test_append_entry_rejects_oversized_reasoning() -> None:
 async def test_append_entry_cap_uses_pre_sanitization_length() -> None:
     """Reported size is real input size, not post-strip size.
 
-    Control characters get stripped by ``sanitize_freetext``.  If the cap
-    were applied post-sanitization, an attacker could send a giant string
-    of NUL bytes that shrinks to zero after stripping and bypass the cap
-    entirely.  Pre-sanitization length check closes that gap.
+    Control characters get stripped by ``sanitize_freetext``.  The cap is
+    measured on the pre-sanitization length so that input which shrinks to
+    near-zero after stripping is still bounded by its real input size.
     """
     app_ctx = _make_app_ctx()
     # All NULs get stripped; post-sanitization length is 0.
@@ -125,7 +124,7 @@ async def test_append_entry_cap_uses_pre_sanitization_length() -> None:
 
 
 # ---------------------------------------------------------------------------
-# S6 H1 -- entry content + reasoning caps (update path)
+# entry content + reasoning caps (update path)
 # ---------------------------------------------------------------------------
 
 
@@ -156,7 +155,7 @@ async def test_update_entry_rejects_oversized_reasoning() -> None:
 
 
 # ---------------------------------------------------------------------------
-# S6 H2 -- no-op update early-exit (prevents ghost audit row)
+# no-op update early-exit (prevents ghost audit row)
 # ---------------------------------------------------------------------------
 
 
@@ -178,7 +177,7 @@ async def test_update_entry_noop_does_not_touch_db() -> None:
     invoked -- the tool returns the validation_error envelope without
     issuing any UPDATE.  This together with @audited's
     ``success=False`` short-circuit gives the "no ghost audit row"
-    contract claimed by A4 Q2.
+    contract.
     """
     app_ctx = _make_app_ctx()
 
@@ -209,13 +208,13 @@ async def test_update_entry_noop_success_false_suppresses_audit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# A4 Q4 -- append-mode empty content stays a distinct error
+# append-mode empty content stays a distinct error
 # ---------------------------------------------------------------------------
 
 
 async def test_update_entry_empty_content_is_distinct_from_noop() -> None:
     """mode='append', content='' returns the original empty-content error,
-    not the new no-op message.  Locked by A4 Q4."""
+    not the new no-op message."""
     app_ctx = _make_app_ctx()
 
     result = await _journal_update_entry(app_ctx, entry_id=1, content="", mode="append")
@@ -226,7 +225,7 @@ async def test_update_entry_empty_content_is_distinct_from_noop() -> None:
 
 
 # ---------------------------------------------------------------------------
-# A4 R2 M-1 -- empty-after-sanitize reasoning is normalized to noop
+# empty-after-sanitize reasoning is normalized to noop
 # ---------------------------------------------------------------------------
 #
 # Pre-fix bug: ``reasoning=""`` (or ``"\x00"`` or whitespace-only) passed the
@@ -348,7 +347,7 @@ async def test_update_entry_date_only_passes_noop_guard() -> None:
 
 
 # ---------------------------------------------------------------------------
-# H-1 integration: no-op + @audited decorator -> no ghost audit row
+# integration: no-op + @audited decorator -> no ghost audit row
 # ---------------------------------------------------------------------------
 
 
@@ -412,7 +411,7 @@ async def test_update_entry_noop_does_not_write_audit_row(
 
 
 # ---------------------------------------------------------------------------
-# M-1 integration: date-only update keeps the entry out of get_unindexed
+# integration: date-only update keeps the entry out of get_unindexed
 # ---------------------------------------------------------------------------
 
 

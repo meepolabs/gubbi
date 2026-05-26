@@ -1,13 +1,13 @@
-"""Unit tests for ``gubbi.telemetry.metrics`` (M4 e2e review).
+"""Unit tests for ``gubbi.telemetry.metrics``.
 
-Covers two M4 fixes that touch this module:
+Covers two fixes that touch this module:
 
-CRIT-5 / A1: pre-A1 the four instruments in ``gubbi/telemetry/metrics.py``
+Previously the four instruments in ``gubbi/telemetry/metrics.py``
 were built at module import, which runs before ``configure_otel()`` in the
 gubbi lifespan. They bound to the NoOp meter provider and silently discarded
 every ``.add(...)`` / ``.record(...)`` call -- which made the
-``audit.persistence_failure`` alarm sensor the DEC-098 contract depends on
-non-functional. These tests verify the post-A1 ``initialize_metrics()`` shape:
+``audit.persistence_failure`` alarm sensor non-functional. These tests
+verify the new ``initialize_metrics()`` shape:
 
 1. With a NoOp meter provider in place, ``initialize_metrics()`` returns
    NoOp instruments.
@@ -16,7 +16,7 @@ non-functional. These tests verify the post-A1 ``initialize_metrics()`` shape:
    the new provider -- proving the lifespan ordering is correct.
 3. ``record_audit_persistence_failure`` smoke-call does not raise.
 
-S8 H2 / A7: the filter delegates to
+The filter delegates to
 ``gubbi_common.telemetry.allowlist.is_banned_key`` so it honours
 ``DERIVATIVE_MODIFIERS`` (safe suffixes like ``_hash``, ``_size``,
 ``_len``) and ``NEVER_EXEMPT_BASES`` (credential-shaped roots like
@@ -44,7 +44,7 @@ pytestmark = pytest.mark.unit
 def _restore_otel_globals() -> Iterator[None]:
     """Snapshot + restore the OTel private meter-provider globals.
 
-    H-1 (R2 fix-pass 2026-05-13): each test in this module mutates the
+    Each test in this module mutates the
     ``opentelemetry.metrics._internal._METER_PROVIDER`` and
     ``_METER_PROVIDER_SET_ONCE`` private slots via ``_set_provider``.
     Without an explicit restore, the last test's provider leaks into
@@ -55,7 +55,7 @@ def _restore_otel_globals() -> Iterator[None]:
     This autouse fixture snapshots both slots before the test runs and
     restores them in ``finally`` regardless of test outcome. It also
     clears the gubbi ``initialize_metrics`` lru_cache and the three
-    B5 orphan-counter factories so the next test starts from a clean
+    orphan-counter factories so the next test starts from a clean
     cache state.
     """
     saved_provider = otel_metrics_internal._METER_PROVIDER  # type: ignore[attr-defined]
@@ -66,7 +66,7 @@ def _restore_otel_globals() -> Iterator[None]:
         otel_metrics_internal._METER_PROVIDER = saved_provider  # type: ignore[attr-defined]
         otel_metrics_internal._METER_PROVIDER_SET_ONCE = saved_once  # type: ignore[attr-defined]
         gubbi_metrics.initialize_metrics.cache_clear()
-        # B5: clear the three orphan-counter factory caches so each test
+        # clear the three orphan-counter factory caches so each test
         # observes a fresh meter resolution rather than the last test's
         # cached counter object.
         #
@@ -126,7 +126,7 @@ def test_initialize_metrics_returns_noop_when_provider_is_noop() -> None:
 def test_initialize_metrics_rebinds_to_real_provider_after_cache_clear() -> None:
     """Lifespan ordering: cache_clear + real provider -> real instruments.
 
-    This is the regression test for CRIT-5. Before the fix the
+    This is the regression test. Before the fix the
     instruments were captured at module import (NoOp), and a later
     ``set_meter_provider`` call had no effect. After the fix the first
     ``initialize_metrics()`` call post-clear binds to whatever provider
@@ -166,7 +166,7 @@ def test_record_audit_persistence_failure_smoke() -> None:
     _set_provider(real_provider)
 
     try:
-        # Must not raise -- this is the DEC-098 alarm sensor.
+        # Must not raise -- this is the alarm sensor.
         gubbi_metrics.record_audit_persistence_failure("test_event")
         gubbi_metrics.record_audit_persistence_failure("test_event")
     finally:
@@ -176,7 +176,7 @@ def test_record_audit_persistence_failure_smoke() -> None:
 def test_record_audit_persistence_failure_increments_counter() -> None:
     """Counter sum reaches 2 after two ``record_audit_persistence_failure`` calls.
 
-    Regression for H-2 (M4 e2e review). The previous smoke test only
+    Regression test. The previous smoke test only
     confirmed the call did not raise -- a key-mismatch bug in
     ``record_audit_persistence_failure`` (wrong instrument name lookup,
     no attribute set, etc.) would still have silently passed because no
@@ -184,7 +184,7 @@ def test_record_audit_persistence_failure_increments_counter() -> None:
     ``InMemoryMetricReader``'s captured data and asserts the
     ``audit.persistence_failure`` counter sum equals the number of
     record calls. If the helper ever stops incrementing the counter,
-    this fails loud -- which is what the DEC-098 alarm contract needs.
+    this fails loud -- which is what the alarm contract needs.
     """
     gubbi_metrics.initialize_metrics.cache_clear()
     reader = InMemoryMetricReader()
@@ -363,13 +363,13 @@ def test_record_tool_call_and_response_size_smoke() -> None:
 def test_rebind_metrics_after_configure_rebinds_lifespan_cache() -> None:
     """``rebind_metrics_after_configure`` rebinds NoOp -> real provider.
 
-    M-1 (R2 fix-pass 2026-05-13): the previous tests verified the
+    The previous tests verified the
     ``initialize_metrics`` lru_cache shape directly by clearing it
     inline, but the production lifespan wire-up
     (``configure_otel -> rebind_metrics_after_configure``) had no
     regression coverage. A future refactor that deletes the
     ``cache_clear()`` + warm-call lines from the lifespan path would
-    leave the DEC-098 alarm sensor permanently bound to NoOp without
+    leave the alarm sensor permanently bound to NoOp without
     a single failing test.
 
     This test pins the contract by:
@@ -406,14 +406,14 @@ def test_rebind_metrics_after_configure_rebinds_lifespan_cache() -> None:
     assert isinstance(rebound, Counter)
     assert not type(rebound).__name__.startswith("NoOp"), (
         "rebind_metrics_after_configure did not re-bind the lru_cache; "
-        "the DEC-098 alarm sensor would be dead in production"
+        "the alarm sensor would be dead in production"
     )
 
 
 def test_validate_metric_attrs_keeps_derivative_modifiers() -> None:
     """Derivative-suffixed keys (``_hash``, ``_size``, ``_len``) must survive.
 
-    The pre-S8 H2 substring loop dropped these because it matched ``agent``,
+    The previous substring loop dropped these because it matched ``agent``,
     ``text`` and ``query`` as substrings of the safe suffix forms. The
     canonical ``is_banned_key`` consults ``DERIVATIVE_MODIFIERS`` so these
     keys pass through.
@@ -508,13 +508,13 @@ def test_validate_metric_attrs_empty_input() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B5 (2026-05-22): orphan counter rebind regression tests
+# Orphan counter rebind regression tests
 # ---------------------------------------------------------------------------
 #
 # Three counters in gubbi previously created their meter instruments at
 # module import time, well before ``configure_otel`` ran during the FastAPI
 # lifespan. They permanently bound to the NoOp meter provider and silently
-# discarded every ``.add(...)`` -- the exact CRIT-5 H-1 shape that the
+# discarded every ``.add(...)`` -- the exact shape that the
 # canonical ``initialize_metrics`` rebind already addressed for the
 # audit/MCP/replica counters but had NOT been propagated to:
 #
@@ -558,7 +558,7 @@ def _walk_counter_total(reader: InMemoryMetricReader, metric_name: str) -> tuple
 def test_orphan_cleanup_swept_counter_rebinds_to_real_provider() -> None:
     """``extraction_jobs.orphan_cleanup_swept_total`` lands in real reader after rebind.
 
-    B5: the previous module-scope ``ORPHAN_CLEANUP_SWEPT = _meter.create_counter(...)``
+    The previous module-scope ``ORPHAN_CLEANUP_SWEPT = _meter.create_counter(...)``
     bound at import time and silently dropped every ``.add(...)`` because
     ``configure_otel`` had not run yet. Pin the rebind contract: after
     ``rebind_metrics_after_configure`` clears + re-primes the lru_cache
@@ -605,7 +605,7 @@ def test_orphan_cleanup_swept_counter_rebinds_to_real_provider() -> None:
 def test_extraction_refund_skipped_counter_rebinds_to_real_provider() -> None:
     """``extraction.refund_skipped_total`` lands in real reader after rebind.
 
-    B5: protects the refund-path observability for the worker. Without
+    Protects the refund-path observability for the worker. Without
     this, a refund-skipped event during a worker crash would be invisible
     at HyperDX even though the structured WARNING fires.
     """
@@ -645,7 +645,7 @@ def test_extraction_refund_skipped_counter_rebinds_to_real_provider() -> None:
 def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
     """``anthropic.retry_count_total`` lands in real reader after rebind.
 
-    B5: most beta-relevant of the three -- LLM retry storms are invisible
+    Most beta-relevant of the three -- LLM retry storms are invisible
     at HyperDX without this rebind. The Anthropic provider is on the hot
     path of every extraction job; a rate-limit cascade would drive the
     counter but the alarm rule would never fire.
@@ -686,10 +686,10 @@ def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
 
 
 def test_b5_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
-    """Pin: B5 orphan-counter modules expose factories, NOT module-scope counters.
+    """Pin: orphan-counter modules expose factories, NOT module-scope counters.
 
     A regression that re-introduces ``COUNTER_NAME = _meter.create_counter(...)``
-    at module scope -- the original B5 bug shape -- would leave the factory
+    at module scope -- the original bug shape -- would leave the factory
     rebind path silently parallel to a stale module-scope reference: any
     caller that imports the old name binds to the import-time NoOp meter
     permanently. The `_get_*_counter()` factory tests above only catch

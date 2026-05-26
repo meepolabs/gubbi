@@ -1,4 +1,4 @@
-"""Unit tests for ``entries.update`` dynamic SET clause (A4 / S6 H4 + MEDIUM).
+"""Unit tests for ``entries.update`` dynamic SET clause.
 
 Pre-fix shape: ``UPDATE entries`` always wrote
 ``date, tags, updated_at, indexed_at=NULL, content_encrypted, content_nonce,
@@ -65,7 +65,7 @@ def _make_cipher() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# S6 H4 -- indexed_at = NULL only when content or reasoning changes
+# indexed_at = NULL only when content or reasoning changes
 # ---------------------------------------------------------------------------
 
 
@@ -120,7 +120,7 @@ async def test_update_reasoning_nulls_indexed_at() -> None:
 
 
 # ---------------------------------------------------------------------------
-# S6 MEDIUM -- skip re-encrypt on tag/date-only updates
+# skip re-encrypt on tag/date-only updates
 # ---------------------------------------------------------------------------
 
 

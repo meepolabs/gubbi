@@ -1,4 +1,4 @@
-"""@audited decorator for MCP tool handlers (M3 requirement).
+"""@audited decorator for MCP tool handlers.
 
 Records an audit event after a write tool handler completes successfully.
 Best-effort at the decorator layer: ``record_audit`` propagates exceptions
@@ -28,7 +28,7 @@ The decorator inspects the handler's return value to decide success/failure:
   *Rationale:* The old ``"error" not in result`` heuristic falsely treated
   ``CallToolResult(isError=True, ...)`` as success (the dict surrogate for
   MCP errors in this codebase uses an ``"error"`` key, but the
-  ``CallToolResult`` envelope does not).  See H-3 audit-decorator-fix.
+  ``CallToolResult`` envelope does not).
 
 Actor context
 --------------

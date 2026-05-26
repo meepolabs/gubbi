@@ -1,4 +1,4 @@
-"""Cipher-presence guard for tool-layer entry points (TASK-02.13).
+"""Cipher-presence guard for tool-layer entry points.
 
 ``AppContext.cipher`` is ``ContentCipher | None`` because the lifespan
 accepts a dev config with no master key. Any MCP tool handler that writes

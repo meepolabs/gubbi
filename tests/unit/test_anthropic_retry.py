@@ -1,6 +1,6 @@
-"""Test AnthropicProvider only retries on transient errors (M-9.12, B2).
+"""Test AnthropicProvider only retries on transient errors.
 
-After B2: retries are gated by LLMTransientError (the provider-agnostic
+Retries are gated by LLMTransientError (the provider-agnostic
 hierarchy in gubbi.extraction.llm.provider), and vendor exceptions are
 translated at the boundary. These tests assert the post-translation
 behavior: vendor exceptions get retried when transient, surface as LLM*

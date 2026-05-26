@@ -1,6 +1,6 @@
 """Worker replica-count policy-violation probe.
 
-M4 #138 (worker variant): the extraction worker is fixed at a SINGLE
+The extraction worker is fixed at a SINGLE
 replica by deploy convention -- a single extraction worker is the
 locked shape regardless of gubbi-web replica count (Anthropic's
 per-account rate limit is the bottleneck before the DB pool at this

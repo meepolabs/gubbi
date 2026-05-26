@@ -1,4 +1,4 @@
-"""Tests for gubbi.core.cipher_guard (TASK-02.13)."""
+"""Tests for gubbi.core.cipher_guard."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Unit tests for response-size safety net (TASK-03.23)."""
+"""Unit tests for response-size safety net."""
 
 import pytest
 

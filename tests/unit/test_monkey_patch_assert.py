@@ -1,4 +1,4 @@
-"""Test monkey-patch assert at startup (M-9.10)."""
+"""Test monkey-patch assert at startup."""
 
 from __future__ import annotations
 

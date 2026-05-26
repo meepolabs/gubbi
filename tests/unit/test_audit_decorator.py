@@ -1,4 +1,4 @@
-"""Unit tests for the @audited decorator (M3 requirement).
+"""Unit tests for the @audited decorator.
 
 Tests cover:
     - Successful handler triggers an audit write (with target_kind)

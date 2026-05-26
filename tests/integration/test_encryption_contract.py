@@ -1,12 +1,12 @@
-"""Integration test for the repo-layer DecryptionError contract (TASK-02.13).
+"""Integration test for the repo-layer DecryptionError contract.
 
-TASK-02.11's ContentCipher distinguishes `ValueError` (unknown key version,
+ContentCipher distinguishes `ValueError` (unknown key version,
 malformed nonce) from `cryptography.exceptions.InvalidTag` (tamper, wrong
-key, truncation). Distinguishing those two in any response to the end user
-would be a version-existence oracle: an attacker could learn which key
-versions the server has loaded by mutating nonce[0] and observing the error.
+key, truncation). Those two MUST NOT be distinguished in any response to
+the end user; both are flattened into a single opaque error so callers
+cannot tell them apart.
 
-The repo layer (TASK-02.13) flattens both into a single opaque
+The repo layer flattens both into a single opaque
 `DecryptionError`. This test proves the invariant end-to-end: it seeds an
 encrypted entry via the admin pool (bypassing RLS), mutates the ciphertext
 or nonce directly, then exercises the repo read path and asserts
@@ -15,8 +15,8 @@ for forensic logging.
 
 Seeding goes through ``admin_pool`` (not through ``entry_repo.append``)
 because the repo-layer INSERTs do not yet wire ``user_id`` through --
-that is a pre-existing gap tracked against TASK-02.06 follow-up, not a
-02.13 concern. Admin-pool seeding gives this test a stable baseline that
+that is a pre-existing gap tracked as a repo-layer follow-up, not a
+concern for this contract. Admin-pool seeding gives this test a stable baseline that
 does not regress if / when the repo INSERT path is completed.
 
 Docker-backed: skipped automatically when Postgres is not reachable.

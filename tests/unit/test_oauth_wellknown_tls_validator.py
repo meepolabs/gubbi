@@ -249,7 +249,7 @@ class TestValidatorBypass:
 
         Testbench drives Hydra at ``http://localhost:4444``; if the
         validator fired here the local OAuth E2E suite would refuse
-        to start. ``is_deployed`` is False for ``dev`` per DEC-094.
+        to start. ``is_deployed`` is False for ``dev``.
         """
         # Arrange
         settings = _make_settings(

@@ -1,4 +1,4 @@
-"""Deprecation shim for ``gubbi.core`` -- CO.38 package split.
+"""Deprecation shim for ``gubbi.core`` -- package split.
 
 Every attribute formerly importable from :mod:`gubbi.core`,
 :mod:`gubbi.core.audit_decorator`, etc. is re-exported here with a

@@ -59,7 +59,7 @@ def _make_patch_stack(
     budget_enabled is kept as a parameter for API compatibility with existing
     test call sites.  The extract_conversation worker no longer checks
     get_settings().llm.llm_budget_enabled -- the helper presence
-    alone gates the delta write (B3-L2 simplification).  The parameter is
+    alone gates the delta write.  The parameter is
     therefore unused inside this function but retained so callers need no
     changes.
     """
@@ -147,7 +147,7 @@ async def test_budget_delta_called_when_flag_enabled() -> None:
 async def test_budget_delta_called_when_helper_is_set() -> None:
     """Delta is written whenever helper is not None, regardless of budget flag.
 
-    After B3-L2: the worker checks only `helper is not None`.
+    The worker checks only `helper is not None`.
     The budget flag controls whether BudgetHelper is constructed at startup;
     at runtime the helper presence is the sole gate.
     """
@@ -248,7 +248,7 @@ async def test_budget_delta_skipped_when_helper_is_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Pre-charge refund on worker failure (B2 / Q2)
+# Pre-charge refund on worker failure
 # ---------------------------------------------------------------------------
 
 
@@ -324,7 +324,7 @@ async def test_pre_charge_refund_called_before_mark_failed_on_worker_exception()
     assert kwargs["actual_cents"] == 0
     assert kwargs["estimated_cents"] == PRE_CHARGE_CENTS
 
-    # Refund happened BEFORE mark_failed (Q2 sequencing).
+    # Refund happened BEFORE mark_failed.
     assert call_log == ["refund", "mark_failed"]
 
 
@@ -440,7 +440,7 @@ async def test_no_refund_when_helper_is_none() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Refund period-bucket safety (R1 / MEDIUM-2)
+# Refund period-bucket safety
 # ---------------------------------------------------------------------------
 
 
@@ -448,7 +448,7 @@ async def test_no_refund_when_helper_is_none() -> None:
 async def test_refund_skipped_with_metric_when_period_unknown() -> None:
     """When the worker fails BEFORE Phase 1's period_start lookup, refund is skipped.
 
-    Simulates the dangerous window of R1 / MEDIUM-2:
+    Simulates the dangerous window:
       * pre-charge has already been debited at ingest (period X = 2026-05-01)
       * period boundary is crossed BEFORE the worker runs
         (current_period_start() now returns 2026-06-01)

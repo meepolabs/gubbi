@@ -1,4 +1,4 @@
-"""Response-size safety net for MCP tool outputs (TASK-03.23).
+"""Response-size safety net for MCP tool outputs.
 
 Guards against pathological single-record sizes (e.g. a 200KB entry)
 slipping through pagination. Errors-out with a structured response

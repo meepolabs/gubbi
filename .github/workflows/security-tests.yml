@@ -1,4 +1,4 @@
-# Security-critical test gate (TASK-02.17).
+# Security-critical test gate.
 #
 # Runs the three invariants that the multi-tenant / encryption model depends on:
 #   1. RLS cross-tenant isolation (tests/integration/test_rls_isolation.py)
@@ -16,7 +16,7 @@
 # (storage/repositories/entries.py, conversations.py, search.py) are
 # intentionally NOT on this gate: pre-02.06.1 legacy tests in
 # test_database.py previously drove their coverage above 80% but are
-# currently skipped pending rewrite (tracked in holla_tasks.md). Their
+# currently skipped pending rewrite. Their
 # correctness is exercised end-to-end by the integration suite; narrow
 # line-coverage will return to the gate once those tests are rewritten.
 #
@@ -44,9 +44,9 @@ jobs:
           python-version: "3.12"
       - run: pip install pyyaml
       # gubbi-cloud is private; checking it out from this public-repo workflow
-      # would require a PAT. Skip the DEC-094 cross-repo Environment Literal
+      # would require a PAT. Skip the cross-repo Environment Literal
       # parity check here -- it runs in gubbi-cloud's CI (which can check out
-      # public gubbi), so DEC-094 drift is still caught on PRs that touch
+      # public gubbi), so Environment Literal drift is still caught on PRs that touch
       # either side of the parity contract.
       - run: python tools/check_env_contract.py --cloud-config ""
 

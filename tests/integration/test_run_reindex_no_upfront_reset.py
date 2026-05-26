@@ -1,4 +1,4 @@
-"""X-3: ``_run_reindex`` no longer resets already-indexed rows.
+"""``_run_reindex`` no longer resets already-indexed rows.
 
 The pre-fix shape called ``reset_indexed_at`` upfront -- every reindex
 implicitly wiped ``indexed_at`` on every row. Under the new claim-then-

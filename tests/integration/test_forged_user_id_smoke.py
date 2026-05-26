@@ -1,6 +1,6 @@
 """CI smoke test: forged X-Auth-User-Id with no signature is rejected.
 
-This test exists because of H-1 audit prescription: the trust-gateway path
+This test exists because of the audit prescription: the trust-gateway path
 must reject unauthenticated identity headers. When REQUIRE_SIGNATURE=true,
 a request with a forged X-Auth-User-Id and NO signature headers must
 return 401.

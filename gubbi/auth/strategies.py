@@ -16,7 +16,7 @@ Four concrete strategies are provided:
   * ``HydraStrategy`` -- Ory Hydra introspection for ``ory_at_*`` tokens.
   * ``SelfHostStrategy`` -- self-host OAuth callback token validation.
 
-Deployment posture (D3 from Task CO.17a -- locked by Lead):
+Deployment posture:
 
   When ``settings.auth.trust_gateway is True``, the lifespan builds a list
   containing ONLY ``TrustGatewayStrategy``. Direct Hydra tokens, API keys

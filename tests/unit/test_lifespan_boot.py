@@ -1,4 +1,4 @@
-"""Lifespan boot-order smoke tests (CO.53-gubbi).
+"""Lifespan boot-order smoke tests.
 
 Three smoke cases pinned by the spec:
 
@@ -336,7 +336,7 @@ async def test_lifespan_populates_app_state_before_first_request(
         assert hasattr(app.state, "gubbi_gateway_secret")
         # None is a valid configured-disabled state.
 
-        # budget_helper: must be set (or None) after lifespan startup (B3-L3).
+        # budget_helper: must be set (or None) after lifespan startup.
         # With JOURNAL_LLM_BUDGET_ENABLED unset (default False), the value is None.
         assert hasattr(app.state, "budget_helper")
         # The value is None in minimal-env (budget disabled by default).
@@ -445,7 +445,7 @@ async def test_lifespan_aborts_when_redis_ping_fails(
 
     Without this, gubbi would yield a half-open service whose first SSE,
     arq, or budget call discovers Redis is down at request time. The
-    DEC-098 fail-open audit fallback also depends on Redis-backed
+    fail-open audit fallback also depends on Redis-backed
     components; a silent boot against a dead Redis would erase that
     contract too.
 

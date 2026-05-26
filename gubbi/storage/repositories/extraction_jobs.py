@@ -12,11 +12,11 @@ WITH CHECK clause requires it to match the session variable.
 Public surface
 --------------
 create_pending      -- INSERT a new pending job; raises ExtractionJobAlreadyInFlight on conflict
-mark_running        -- UPDATE status to 'running' (stub for Part 3)
-update_progress     -- monotonic UPDATE of topics/entries counters (stub for Part 3)
+mark_running        -- UPDATE status to 'running' (worker stub)
+update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
 mark_completed      -- terminal UPDATE to 'completed'
 mark_failed         -- terminal UPDATE to 'failed'
-get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint, Part 4)
+get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint)
 ExtractionJobAlreadyInFlight -- raised by create_pending on partial-unique conflict
 StatusCounts        -- dataclass returned by get_status_counts
 """
@@ -184,7 +184,7 @@ async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> None:
     transition resets started_at and clears any stale error_code. No-op if the
     row is already terminal-completed or currently running.
 
-    Stub for Part 3 -- reserved for worker use; not called by ingest.
+    Worker stub -- reserved for worker use; not called by ingest.
     """
     await conn.execute(
         """
@@ -216,7 +216,7 @@ async def update_progress(
     Accepts keyword-only arguments so callers are explicit about which counters
     are being updated. Passing None for a counter leaves it unchanged.
 
-    Stub for Part 3 -- reserved for worker use; not called by ingest.
+    Worker stub -- reserved for worker use; not called by ingest.
     """
     if topics_created is None and entries_created is None:
         return

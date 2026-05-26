@@ -1,6 +1,6 @@
-"""Integration tests for entries encryption round-trip (TASK-02.16).
+"""Integration tests for entries encryption round-trip.
 
-Covers the non-contract acceptance bullets of TASK-02.16 (the tamper +
+Covers the non-contract acceptance bullets (the tamper +
 unknown-version DecryptionError contract lives in
 ``test_encryption_contract.py``):
 

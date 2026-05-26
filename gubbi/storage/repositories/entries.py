@@ -866,7 +866,7 @@ async def get_texts(
                 entry_id=eid,
                 error_type=type(exc).__name__,
             )
-            result[eid] = ("[decryption-failed]", None)  # sentinel for search.py to surface (M-9.8)
+            result[eid] = ("[decryption-failed]", None)  # sentinel for search.py to surface
     return result
 
 

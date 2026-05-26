@@ -421,7 +421,7 @@ class TestFullOAuthFlow:
 
 class TestRegisterRateLimit:
     async def test_register_rate_limited_per_ip(self, oauth_storage: OAuthStorage) -> None:
-        """HIGH-4: /register returns 429 after REGISTER_MAX_ATTEMPTS in window."""
+        """/register returns 429 after REGISTER_MAX_ATTEMPTS in window."""
         from gubbi.oauth.constants import REGISTER_MAX_ATTEMPTS
 
         # Use the real register_oauth_routes so the wrap is applied

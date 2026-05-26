@@ -41,7 +41,7 @@ logger = structlog.get_logger(__name__)
 def _get_orphan_cleanup_swept_counter() -> Counter:
     """Lazily create the orphan-cleanup swept counter against the live meter.
 
-    CRIT-5 B5 (2026-05-22): the previous module-scope ``_meter.create_counter``
+    The previous module-scope ``_meter.create_counter``
     bound at import time, well before ``configure_otel`` ran during the
     FastAPI lifespan -- so the counter held a NoOp instrument and silently
     discarded every ``.add(...)``. Deferring creation to first call (and

@@ -42,7 +42,7 @@ def _make_token_validator(
     ``None`` on invalid/expired token.
 
     .. note::
-        **Breaking change (M4 H-1):** Previously returned ``bool``. Custom
+        **Breaking change:** Previously returned ``bool``. Custom
         self-host token validators must now return ``frozenset[str] | None``.
         ``None`` means invalid token; a frozenset means granted scopes.
     """

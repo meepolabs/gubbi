@@ -1,4 +1,4 @@
-"""Tests for the extract_conversation Arq job (m-h5-h6 connection-split)."""
+"""Tests for the extract_conversation Arq job (connection-split)."""
 
 from __future__ import annotations
 
@@ -425,7 +425,7 @@ class TestExtractConversationJob:
             assert json.loads(payload) == expected_event
 
     # ------------------------------------------------------------------
-    # New resilience tests (m-h5-h6)
+    # New resilience tests
     # ------------------------------------------------------------------
 
     @pytest.mark.asyncio
@@ -722,7 +722,7 @@ class TestExtractConversationJob:
 class TestClassifyError:
     """Unit tests for the _classify_error private helper.
 
-    After B2 the worker reads the provider-agnostic LLM* hierarchy from
+    The worker reads the provider-agnostic LLM* hierarchy from
     gubbi.extraction.llm.provider; vendor SDK types are translated at the
     AnthropicProvider boundary, never imported here.
     """
@@ -1039,7 +1039,7 @@ class TestLifecycleUpdates:
 
 
 # ---------------------------------------------------------------------------
-# FSM-transition gate tests (Part 3 / HIGH-1)
+# FSM-transition gate tests
 # ---------------------------------------------------------------------------
 
 

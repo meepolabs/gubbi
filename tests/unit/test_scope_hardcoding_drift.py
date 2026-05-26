@@ -20,7 +20,7 @@ _AUTH_PATH = Path(__file__).resolve().parents[2] / "gubbi" / "middleware" / "aut
 def test_no_bare_journal_scope_literal() -> None:
     """Assert no ``frozenset({"journal"})`` literal remains in auth.py source.
 
-    The H-1 fix replaced all uses of ``frozenset({"journal"})`` with
+    The fix replaced all uses of ``frozenset({"journal"})`` with
     ``frozenset({"journal:read","journal:write"})`` or a config-driven
     frozenset. A bare ``"journal"`` as a single-token scope literal
     would mean the drift has re-introduced the old hardcoded scope.
@@ -35,6 +35,6 @@ def test_no_bare_journal_scope_literal() -> None:
     # Match the specific pattern frozenset({"journal"}) with optional whitespace
     assert 'frozenset({"journal"})' not in src, (
         'Bare frozenset({"journal"}) literal found in auth.py -- '
-        "the H-1 fix should have replaced all uses with "
+        "the fix should have replaced all uses with "
         'frozenset({"journal:read","journal:write"}) or a config-driven frozenset.'
     )

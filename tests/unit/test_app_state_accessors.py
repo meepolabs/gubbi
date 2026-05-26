@@ -1,4 +1,4 @@
-"""Unit tests for ``gubbi.app_state`` typed accessors (CO.40).
+"""Unit tests for ``gubbi.app_state`` typed accessors.
 
 Each ``app.state`` field exposed by the lifespan has a paired
 ``require_*`` / ``get_optional_*`` accessor. These tests verify the

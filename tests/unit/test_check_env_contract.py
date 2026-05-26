@@ -253,7 +253,7 @@ def test_find_compose_file_empty_list_returns_default() -> None:
 
 
 # ---------------------------------------------------------------------------
-# B1-T7: Environment Literal cross-repo parity (DEC-094).
+# Environment Literal cross-repo parity.
 # ---------------------------------------------------------------------------
 
 
@@ -291,7 +291,7 @@ def test_environment_literal_drift_detected(tmp_path: Path) -> None:
 def test_environment_literal_parity_missing_path_hard_fails(tmp_path: Path) -> None:
     """A non-existent cross-repo config path is itself a drift signal.
 
-    DEC-094 rule 2 ("drift fails CI") -- the parity check must NOT silently
+    The contract requires drift to fail CI -- the parity check must NOT silently
     skip when the cross-repo path does not resolve; it must surface a DRIFT
     message so the CI invocation exits non-zero.
     """

@@ -1,6 +1,6 @@
 """Replica-count over-provisioning warn probe.
 
-M4 #138: gubbi's per-pod DB connection pool runs in-process, so under
+gubbi's per-pod DB connection pool runs in-process, so under
 a multi-replica deploy the cluster carries
 ``pool_max_per_pod * REPLICA_COUNT`` connections from gubbi alone --
 and the cloud-api startup connection-budget guard does NOT see them

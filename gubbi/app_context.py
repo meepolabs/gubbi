@@ -41,10 +41,10 @@ class AppContext:
     ``JOURNAL_OPERATOR_EMAIL``. ``None`` disables the operator-identity
     tenant binding.
 
-    ``cipher`` is the app-layer AES-256-GCM content cipher (TASK-02.11).
+    ``cipher`` is the app-layer AES-256-GCM content cipher.
     Built from ``JOURNAL_ENCRYPTION_MASTER_KEY_V*`` env vars at startup.
-    ``None`` = no master key configured; required once TASK-02.13 wires
-    repository encrypt/decrypt.
+    ``None`` = no master key configured; required once the repository
+    encrypt/decrypt path is wired.
 
     ``arq_pool`` is the Arq Redis connection pool used to enqueue background
     jobs (e.g. extract_conversation). Created during lifespan startup;

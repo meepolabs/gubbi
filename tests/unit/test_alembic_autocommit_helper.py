@@ -14,7 +14,7 @@ CONCURRENTLY`` migrations. The contract under test:
     6. The helper resolves the underlying driver connection through the
        SQLAlchemy ``_ConnectionFairy`` (PoolProxiedConnection): writes to
        ``autocommit`` must land on the DRIVER, NOT on the proxy. This is
-       the R1 critical fix -- the fairy does not forward ``__setattr__``,
+       the critical fix -- the fairy does not forward ``__setattr__``,
        so writing through the proxy silently never reaches psycopg.
 """
 
@@ -133,7 +133,7 @@ def test_autocommit_block_history_shape_on_normal_exit() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Proxy-shaped cases (R1 critical fix).
+# Proxy-shaped cases (critical fix).
 #
 # These mirror SQLAlchemy's ``_ConnectionFairy`` (PoolProxiedConnection):
 # the proxy exposes ``driver_connection`` / ``dbapi_connection`` accessors
@@ -182,7 +182,7 @@ class _FakeBindWithProxy:
 
 
 def test_proxy_shape_autocommit_true_lands_on_driver_not_proxy() -> None:
-    # R1 critical case: writing to the proxy directly would silently fail
+    # Critical case: writing to the proxy directly would silently fail
     # to flip the driver. The helper must resolve ``driver_connection``.
     driver = _FakeRawConn(initial=False)
     bind = _FakeBindWithProxy(driver)

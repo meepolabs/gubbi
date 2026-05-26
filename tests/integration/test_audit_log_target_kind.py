@@ -1,4 +1,4 @@
-"""Integration test: audit_log target_kind column roundtrip (H-3).
+"""Integration test: audit_log target_kind column roundtrip.
 
 Verifies that an audit row written with target_kind set survives a
 roundtrip read-back with the correct value.  Requires a running PostgreSQL

@@ -42,7 +42,7 @@ logger = structlog.get_logger(__name__)
 def _get_anthropic_retry_counter() -> Counter:
     """Lazily create the anthropic-retry counter against the live meter.
 
-    CRIT-5 B5 (2026-05-22): the previous module-scope ``_meter.create_counter``
+    The previous module-scope ``_meter.create_counter``
     bound at import time, well before ``configure_otel`` ran during the
     FastAPI lifespan -- so the counter held a NoOp instrument and silently
     discarded every ``.add(...)``. Deferring creation to first call (and
@@ -60,7 +60,7 @@ def _get_anthropic_retry_counter() -> Counter:
 def _translate_anthropic_error(exc: Exception) -> LLMProviderError:
     """Translate an anthropic SDK exception to the provider-agnostic hierarchy.
 
-    Mapping (locked in B2 + R1):
+    Mapping:
       RateLimitError                            -> LLMRateLimitError
       APIConnectionError (incl APITimeoutError) -> LLMTransientError
       APIResponseValidationError                -> LLMTransientError

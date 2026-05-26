@@ -239,7 +239,7 @@ async def _journal_update_entry(
         content = sanitize_freetext(content)
         if not content.strip():
             # NOTE: append-mode empty-content is locked as a distinct
-            # user-facing error (A4 Q4) -- "content cannot be empty" rather
+            # user-facing error -- "content cannot be empty" rather
             # than the no-op message -- so we MUST keep the explicit
             # validation_error here for content, even though reasoning takes
             # the silent normalize path.  The asymmetry is deliberate:

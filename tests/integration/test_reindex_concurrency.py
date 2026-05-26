@@ -1,4 +1,4 @@
-"""Concurrency tests for the reindex claim-then-process refactor (EDR-jc H6).
+"""Concurrency tests for the reindex claim-then-process refactor.
 
 Two reindex tasks run concurrently; ``FOR UPDATE OF e SKIP LOCKED`` plus
 the in-transaction ``mark_indexed_batch`` claim must produce a disjoint

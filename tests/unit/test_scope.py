@@ -1,4 +1,4 @@
-"""Tests for scope checking infrastructure (TASK-03.06).
+"""Tests for scope checking infrastructure.
 
 Covers:
 - check_scope() with the data-driven SCOPE_GRANTS mapping
@@ -591,7 +591,7 @@ def _extract_tool_annotations() -> dict[str, dict[str, bool]]:
     return out
 
 
-# Locked spec table from milestone-03-mcp-hosted.md TASK-03.06 (lines 268-282).
+# Locked spec table for the scope filter.
 # Columns omitted from the spec ("--") are intentionally absent from the
 # expectation; the test only enforces what the spec calls out explicitly.
 _EXPECTED_ANNOTATIONS: dict[str, dict[str, bool]] = {

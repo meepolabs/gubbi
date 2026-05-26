@@ -1,4 +1,4 @@
-"""Audit package -- DEC-061 / TASK-02.20.
+"""Audit package.
 
 Re-exports from :mod:`gubbi.audit.sql` (``record_audit``, ``Action``)
 and :mod:`gubbi.audit.decorator` (``@audited`` and constants).

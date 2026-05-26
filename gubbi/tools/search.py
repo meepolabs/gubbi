@@ -157,7 +157,7 @@ async def _hydrate_results(
             and result.entry_id in decrypted_entries
         ):
             content, _reasoning = decrypted_entries[result.entry_id]
-            decryption_failed = content == "[decryption-failed]"  # sentinel (M-9.8)
+            decryption_failed = content == "[decryption-failed]"  # sentinel
             update: dict[str, Any] = {
                 "content": (
                     "[decryption failed]" if decryption_failed else _truncate_text(content)

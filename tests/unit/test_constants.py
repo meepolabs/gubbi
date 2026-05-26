@@ -1,4 +1,4 @@
-"""Unit tests for tool-layer constants (TASK-03.23)."""
+"""Unit tests for tool-layer constants."""
 
 import pytest
 

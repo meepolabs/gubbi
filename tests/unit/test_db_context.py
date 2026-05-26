@@ -1,4 +1,4 @@
-"""Tests for gubbi_common.db.user_scoped user_scoped_connection GUC wiring (TASK-02.06).
+"""Tests for gubbi_common.db.user_scoped user_scoped_connection GUC wiring.
 
 These tests verify the transaction-scoped contract of `user_scoped_connection`:
 ``app.current_user_id`` and ``hnsw.ef_search`` are set inside the yielded

@@ -128,7 +128,7 @@ def _configure_worker_telemetry(settings: Settings) -> None:
     FastAPI-decoupled, so no FastAPI / asyncpg / redis auto-instrumentors
     are wired here -- those need the ASGI app and live on the HTTP path.)
     After wiring, ``rebind_metrics_after_configure()`` is invoked so the
-    ``gateway.replica_count_warning`` counter -- and the three B5
+    ``gateway.replica_count_warning`` counter -- and the three
     orphan-counter factories (orphan_cleanup, extract_conversation,
     anthropic_provider) -- bind to the live MeterProvider and actually
     export.
@@ -172,7 +172,7 @@ def _configure_worker_telemetry(settings: Settings) -> None:
         # Re-prime ALL metric instruments against the freshly installed
         # MeterProvider. Goes through ``rebind_metrics_after_configure`` --
         # the same hook the FastAPI lifespan uses -- so the canonical
-        # ``initialize_metrics`` lru_cache AND the three B5 orphan-counter
+        # ``initialize_metrics`` lru_cache AND the three orphan-counter
         # factories (orphan_cleanup, extract_conversation, anthropic_provider)
         # all bind to the SDK provider rather than a stale NoOp handle.
         # The cache_clear + re-prime sequence is NOT atomic, but it is safe
@@ -250,7 +250,7 @@ async def startup(ctx: ExtractionContext) -> None:
         # can ping it). The probe ladder below mirrors gubbi's HTTP
         # lifespan (PgLog -> RedisPing -> ReplicaCount): a dead Redis
         # surfaces at boot rather than at the first arq poll, matching
-        # the DEC-098 fail-loud ethos. Stored on ctx immediately so the
+        # the fail-loud ethos. Stored on ctx immediately so the
         # outer ``except BaseException`` arm can close the client and
         # pool even if a probe fails before the body completes.
         redis_url = _redis_url()
@@ -264,9 +264,9 @@ async def startup(ctx: ExtractionContext) -> None:
         # worker hits the same encrypted INSERT path as the HTTP API via
         # ``extract_conversation``). RedisPingProbe enforces Redis
         # liveness at boot -- the worker depends on Redis for arq job
-        # poll, BudgetHelper pre_charge, and DEC-098 audit fail-open.
+        # poll, BudgetHelper pre_charge, and audit fail-open.
         # WorkerReplicaCountWarnProbe flags the single-worker
-        # deploy-policy violation (M4 #138 worker variant) and
+        # deploy-policy violation (worker variant) and
         # increments the alertable ``gateway.replica_count_warning``
         # counter. Mode for PgLogProbe is consumed from
         # ``settings.pg_log_probe_mode`` (was ``JOURNAL_PG_LOG_PROBE_MODE``
@@ -303,7 +303,6 @@ async def startup(ctx: ExtractionContext) -> None:
         # worker boots against the in-process FakeLLMProvider stub instead
         # of dialling api.anthropic.com -- keeps D-tier hermetic and avoids
         # accidental spend if a leaked ANTHROPIC_API_KEY is in scope.
-        # PRD: llm_context/tasks/milestone-04.5-verification-suite.md TASK-04.5.07.
         # Adding a new provider is a one-line append to ``_PROVIDER_FACTORIES``.
         provider_name = settings.llm.provider.lower()
         factory = _PROVIDER_FACTORIES.get(provider_name)
@@ -316,7 +315,7 @@ async def startup(ctx: ExtractionContext) -> None:
         extraction_service = ExtractionService(llm_provider)
         ctx["extraction_service"] = extraction_service
 
-        # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
+        # BudgetHelper -- worker invokes only record_actual_cost, but we
         # register the Lua script anyway (cheapest option; no API split).
         if settings.llm.llm_budget_enabled:
             pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)

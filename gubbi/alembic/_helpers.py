@@ -12,7 +12,7 @@ which is used by ``CREATE INDEX CONCURRENTLY`` migrations to step out of
 Alembic's wrapping transaction safely.
 
 Pinned to psycopg 3.x semantics: the underlying psycopg connection exposes
-``autocommit`` as a settable property. The fix-pass that introduced
+``autocommit`` as a settable property. The change that introduced
 ``driver_connection`` resolution removed the proxy-vs-driver coupling, but
 the contract still depends on psycopg's ``autocommit`` property setter -- a
 psycopg 4.0 bump may switch to ``set_autocommit()`` method form or
@@ -47,7 +47,7 @@ def autocommit_block(conn: Any) -> Iterator[Any]:
     obvious in diff and easier to spot if a future psycopg version
     changes the underlying mechanism.
 
-    Why ``driver_connection`` is required (R1 fix):
+    Why ``driver_connection`` is required:
         ``op.get_bind()`` returns a SQLAlchemy ``Connection`` whose
         ``.connection`` attribute is a ``_ConnectionFairy``
         (PoolProxiedConnection), NOT the raw psycopg connection. The

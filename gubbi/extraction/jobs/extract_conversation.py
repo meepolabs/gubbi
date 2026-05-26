@@ -3,7 +3,7 @@
 See ``extract_conversation`` function docstring for the CALLER CONTRACT
 (security-critical).
 
-Connection-split design (m-h5-h6):
+Connection-split design:
   Phase 1 -- conn1: read-only load + early idempotency check.
   Phase 2 -- LLM phase: NO database connection held.
   Phase 3 -- conn2: persistence under an explicit nested SAVEPOINT transaction.
@@ -71,13 +71,12 @@ logger = structlog.get_logger(__name__)
 # Counter incremented when the worker fails BEFORE the period_start lookup
 # completes. In that window we cannot guarantee the runtime period equals the
 # bucket the pre-charge debited (a period boundary may have been crossed since
-# ingest), so the refund is skipped. Manual reconcile signal -- see backlog
-# item from R1 / MEDIUM-2.
+# ingest), so the refund is skipped. Manual reconcile signal.
 @functools.lru_cache(maxsize=1)
 def _get_extraction_refund_skipped_counter() -> Counter:
     """Lazily create the refund-skipped counter against the live meter.
 
-    CRIT-5 B5 (2026-05-22): the previous module-scope ``_meter.create_counter``
+    The previous module-scope ``_meter.create_counter``
     bound at import time, well before ``configure_otel`` ran during the
     FastAPI lifespan -- so the counter held a NoOp instrument and silently
     discarded every ``.add(...)``. Deferring creation to first call (and
@@ -370,7 +369,7 @@ async def _persist_extraction(
 
     Returns the count of persisted entries.
 
-    NOTE-m-h5-h6: entry_repo.append uses a plain INSERT with no ON CONFLICT
+    NOTE: entry_repo.append uses a plain INSERT with no ON CONFLICT
     clause.  The entries table has no uniqueness constraint on
     (conversation_id, topic_id, content) that would make ON CONFLICT DO NOTHING
     meaningful without a schema migration.  The conn2 second-idempotency-check
@@ -509,18 +508,18 @@ async def extract_conversation(
     and writes are RLS-protected. A wrong user_id at enqueue time will:
       - Read the wrong tenant's conversation (RLS blocks; results in 0
         rows; the job loads an empty conversation and returns).
-      - Or, if a future caller bypasses the API path with admin pool:
-        could read across tenants. Don't bypass the API path.
+      - Or, if a future caller uses the admin pool instead of the API
+        path: RLS isolation is lost. Always go through the API path.
 
-    See llm_context/audit_contract.md for actor_type semantics on the
+    See the audit contract for actor_type semantics on the
     summary audit row this job produces.
 
-    Connection-split design (m-h5-h6):
+    Connection-split design:
       Phase 1 -- conn1: read-only load + early idempotency check.
       Phase 2 -- LLM phase: no database connection held.
       Phase 3 -- conn2: persistence under explicit nested SAVEPOINT.
 
-    Lifecycle UPDATEs (Part 3):
+    Lifecycle UPDATEs:
       mark_running  -- called in Phase 1 after idempotency check passes.
       mark_completed -- called inside the Phase 3 SAVEPOINT via _persist_extraction.
       mark_failed   -- called on a FRESH connection in the outer except block,
@@ -540,7 +539,7 @@ async def extract_conversation(
             dedup) and is NOT forwarded to this function -- the
             positional arg is the only path. Defaults to "unknown" so
             the function remains callable from tests that pre-date the
-            Part 3 signature change; the ``mark_completed`` /
+            signature change; the ``mark_completed`` /
             ``mark_failed`` paths gate on this sentinel and skip when
             it is "unknown".
 
@@ -577,7 +576,7 @@ async def extract_conversation(
     # job-row lookup completes (e.g. asyncpg connection failure during conn1).
     # Phase 1 may overwrite this with the job row's period_start once known.
     #
-    # _period_start_known gates the outer-except refund (R1 / MEDIUM-2):
+    # _period_start_known gates the outer-except refund:
     # only after the job row's period_start has been read (or there is no
     # real pre-charge to reconcile, i.e. job_id == "unknown") may the refund
     # be issued. Otherwise we cannot guarantee the runtime period matches
@@ -609,7 +608,7 @@ async def extract_conversation(
                 # conn1 is released before any LLM call.
                 # ------------------------------------------------------------------
                 # period_start loaded from the job row so the budget delta in Phase 3
-                # lands in the same billing bucket that ingest pre-charged (B3-H2).
+                # lands in the same billing bucket that ingest pre-charged.
                 # Falls back to current_period_start() when job_id is 'unknown' (tests)
                 # or the row is not visible under RLS.
                 job_period_start: date | None = None
@@ -805,7 +804,7 @@ async def extract_conversation(
                 # extraction_jobs row update that follows. The two side effects are
                 # independent so the operator never loses one because the other failed.
                 #
-                # Refund is GATED by _period_start_known (R1 / MEDIUM-2): if the
+                # Refund is GATED by _period_start_known: if the
                 # worker failed before the job row's period_start was read, we cannot
                 # guarantee the runtime period matches the bucket the pre-charge
                 # debited (a period boundary may have been crossed). In that window

@@ -1,4 +1,4 @@
-"""Integration test: full MCP tool call via OAuth (TASK-03.09).
+"""Integration test: full MCP tool call via OAuth.
 
 Two test functions exercising the complete Mode 3 OAuth flow—DCR, Kratos identity,
 PKCE/S256 authorization_code grant, token exchange—and then a battery of MCP tool
@@ -373,7 +373,7 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
     admin_url = JOURNAL_DEV_AUTH_ADMIN_URL
     assert admin_url is not None, (
         "JOURNAL_DEV_AUTH_ADMIN_URL required for login/consent acceptance -- "
-        "tunnel Hydra admin port 4445 from bunsamosa and set this variable"
+        "tunnel Hydra admin port 4445 from the dev box and set this variable"
     )
 
     client = httpx.AsyncClient(
@@ -725,7 +725,7 @@ async def test_openai_style_mcp_oauth_flow() -> None:
     admin_url = JOURNAL_DEV_AUTH_ADMIN_URL
     assert (
         admin_url is not None
-    ), "JOURNAL_DEV_AUTH_ADMIN_URL required -- tunnel Hydra admin port 4445 from bunsamosa"
+    ), "JOURNAL_DEV_AUTH_ADMIN_URL required -- tunnel Hydra admin port 4445 from the dev box"
 
     client = httpx.AsyncClient(
         timeout=_TIMEOUT,

@@ -1,4 +1,4 @@
-"""Test OAuth backfill caps rows at 10000 per startup (M-9.11)."""
+"""Test OAuth backfill caps rows at 10000 per startup."""
 
 from __future__ import annotations
 

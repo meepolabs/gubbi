@@ -66,7 +66,7 @@ class MetricNames:
     MCP_TOOL_CALL_COUNT: Final[str] = "mcp.tool_call_count"
     MCP_TOOL_RESPONSE_SIZE_CHARS: Final[str] = "mcp.tool_response_size_chars"
     AUDIT_PERSISTENCE_FAILURE: Final[str] = "audit.persistence_failure"
-    # M4 #138: instrument name is deliberately the SAME as cloud-api's
+    # Instrument name is deliberately the SAME as cloud-api's
     # ``gateway.replica_count_warning`` so one HyperDX alerting rule rolls
     # up across cloud-api + gubbi + worker (OTel aggregates by instrument
     # name, with service.name as a resource dimension). The ``gateway.``

@@ -208,7 +208,7 @@ class OAuthStorage:
         """One-time backfill of expires_at column from JSON blob data.
 
         Safe to run on every startup -- only updates rows where expires_at IS NULL.
-        Limited to 10 000 rows per startup (M-9.11); excess rows are picked up
+        Limited to 10 000 rows per startup; excess rows are picked up
         on subsequent startups.
         """
         assert self._conn is not None  # noqa: S101
@@ -502,7 +502,7 @@ class OAuthStorage:
             await conn.commit()
 
     # ------------------------------------------------------------------
-    # Atomic refresh token rotation (HIGH-1)
+    # Atomic refresh token rotation
     # ------------------------------------------------------------------
 
     async def rotate_refresh_token(
@@ -516,7 +516,7 @@ class OAuthStorage:
         """Atomically revoke old refresh + its paired access tokens and issue new pair.
 
         Wraps all operations in a single SQLite transaction + asyncio.Lock so
-        a crash or coroutine interleaving cannot leave partial state (closes HIGH-1
+        a crash or coroutine interleaving cannot leave partial state (closes the
         refresh rotation atomicity gap).
         """
         async with self._atomic() as conn:
