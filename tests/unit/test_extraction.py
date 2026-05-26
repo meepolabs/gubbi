@@ -280,8 +280,19 @@ def _make_anthropic_provider() -> AnthropicProvider:
 
     The client class is already patched; we just need to ensure
     the init args are fixed for deterministic tests.
+
+    LLMConfig is a pydantic-settings BaseSettings whose fields use
+    ``validation_alias`` for the flat env-var names. Plain Python
+    kwargs that match the field names (``api_key``, ``model``) are
+    silently ignored -- only the alias keys populate the fields. We
+    pass the env-var aliases here so the values actually take effect.
     """
-    return AnthropicProvider(LLMConfig(api_key="test-api-key", model="test-model"))
+    return AnthropicProvider(
+        LLMConfig(
+            JOURNAL_LLM_API_KEY="test-api-key",  # type: ignore[call-arg]
+            JOURNAL_LLM_MODEL="test-model",  # type: ignore[call-arg]
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
