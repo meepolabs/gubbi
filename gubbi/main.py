@@ -27,10 +27,11 @@ from gubbi_common.auth.prm import build_prm_metadata_url
 from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
+from redis.exceptions import RedisError
 from starlette.types import ASGIApp  # noqa: TC002 (used in runtime variable annotation)
 
 from gubbi.app_context import AppContext
-from gubbi.app_state import get_optional_app_ctx
+from gubbi.app_state import get_optional_app_ctx, get_optional_redis_client
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
 from gubbi.auth.strategies import (
     ApiKeyStrategy,
@@ -57,6 +58,7 @@ from gubbi.config import (
 from gubbi.constants import (
     DB_HEALTH_ACQUIRE_TIMEOUT_SECS,
     DB_HEALTH_QUERY_TIMEOUT_SECS,
+    REDIS_HEALTH_PING_TIMEOUT_SECS,
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
@@ -611,9 +613,21 @@ async def mcp_health_ready(request: Request) -> Response:
     ``/health/ready`` so HEALTHCHECK and orchestrator readiness probes
     share a single contract across both services.
 
-    Short timeouts (2s acquire, 1s SELECT) prevent a single readiness
-    poll from holding a slot a real request wants under pool
-    saturation -- mirrors gubbi-cloud's split.
+    Order of checks (each independently observable in the response):
+
+    1. ``app_ctx`` not initialised -> 503 ``not_ready``.
+    2. Redis PING timeout / driver error -> 503 ``redis_unreachable``.
+    3. DB acquire / SELECT 1 driver error -> 503 ``db_unreachable``.
+
+    Each failure envelope additionally carries an ``error_class`` field
+    holding the underlying exception class name (no message text), so
+    pool-exhaustion vs socket-reset vs query-timeout vs connection-
+    refused are distinguishable at a glance on the on-call dashboard
+    without leaking driver detail into the body.
+
+    Short timeouts (2s acquire, 1s SELECT, 1s Redis PING) prevent a
+    single readiness poll from holding a slot a real request wants
+    under pool saturation -- mirrors gubbi-cloud's split.
     """
     app_ctx = get_optional_app_ctx(request)
     if app_ctx is None:
@@ -622,12 +636,25 @@ async def mcp_health_ready(request: Request) -> Response:
             media_type="application/json",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
+    redis_client = get_optional_redis_client(request)
+    if redis_client is not None:
+        try:
+            async with asyncio.timeout(REDIS_HEALTH_PING_TIMEOUT_SECS):
+                await redis_client.ping()
+        except (RedisError, OSError, TimeoutError) as exc:
+            error_class = type(exc).__name__
+            return Response(
+                content=f'{{"status":"redis_unreachable","error_class":"{error_class}"}}',
+                media_type="application/json",
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
     try:
         async with app_ctx.pool.acquire(timeout=DB_HEALTH_ACQUIRE_TIMEOUT_SECS) as conn:
             await conn.fetchval("SELECT 1", timeout=DB_HEALTH_QUERY_TIMEOUT_SECS)
-    except (asyncpg.PostgresError, OSError, TimeoutError):
+    except (asyncpg.PostgresError, OSError, TimeoutError) as exc:
+        error_class = type(exc).__name__
         return Response(
-            content='{"status":"db_unreachable"}',
+            content=f'{{"status":"db_unreachable","error_class":"{error_class}"}}',
             media_type="application/json",
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         )
