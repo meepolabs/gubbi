@@ -15,19 +15,22 @@ from contextlib import asynccontextmanager, suppress
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
+import asyncpg
 import httpx
 import redis.asyncio as aioredis
 import structlog
 from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings as ArqRedisSettings
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response, status
 from fastapi.responses import JSONResponse
 from gubbi_common.auth.prm import build_prm_metadata_url
 from gubbi_common.bootstrap import StartupProbe, StartupRunner
+from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from starlette.types import ASGIApp  # noqa: TC002 (used in runtime variable annotation)
 
 from gubbi.app_context import AppContext
+from gubbi.app_state import get_optional_app_ctx
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
 from gubbi.auth.strategies import (
     ApiKeyStrategy,
@@ -38,8 +41,6 @@ from gubbi.auth.strategies import (
 )
 from gubbi.bootstrap import (
     BindAddressProbe,
-    PgLogProbe,
-    RedisPingProbe,
     ReplicaCountWarnProbe,
     build_mcp_middleware,
     decode_gateway_secret,
@@ -52,6 +53,10 @@ from gubbi.config import (
     REQUIRED_OAUTH_SCOPE,
     Settings,
     get_settings,
+)
+from gubbi.constants import (
+    DB_HEALTH_ACQUIRE_TIMEOUT_SECS,
+    DB_HEALTH_QUERY_TIMEOUT_SECS,
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
@@ -72,7 +77,6 @@ from gubbi.users.bootstrap import scaffold_operator
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
 
-    import asyncpg
     from arq.connections import ArqRedis
     from mcp.server.fastmcp import FastMCP
 
@@ -581,6 +585,10 @@ async def general_exception_handler(
 async def mcp_health() -> dict[str, Any]:
     """Liveness probe for Docker health checks.
 
+    Always 200 once uvicorn is bound -- it does NOT inspect lifespan
+    state or pool reachability.  Use ``/health/ready`` for readiness
+    (drained when ``app_ctx`` / pool is unset).
+
     NOTE: do NOT add @app.get("/mcp/") here -- it shadows the
     FastMCP streamable-http app mounted at /mcp via app.mount(...).
     Claude.ai opens a GET to /mcp/ to start the SSE handshake; if
@@ -590,6 +598,44 @@ async def mcp_health() -> dict[str, Any]:
     M3 deploy on bunsamosa 2026-04-30.
     """
     return {"status": "ok"}
+
+
+@app.get("/health/ready")
+async def mcp_health_ready(request: Request) -> Response:
+    """Readiness probe -- 200 only when the lifespan finished startup.
+
+    Returns 503 during cold-start (before lifespan attaches
+    ``app.state.app_ctx``) and during shutdown (after the pool is
+    closed) so an upstream load balancer drains traffic off this
+    instance at the right moments.  Symmetric with cloud-api's
+    ``/health/ready`` so HEALTHCHECK and orchestrator readiness probes
+    share a single contract across both services.
+
+    Short timeouts (2s acquire, 1s SELECT) prevent a single readiness
+    poll from holding a slot a real request wants under pool
+    saturation -- mirrors gubbi-cloud's split.
+    """
+    app_ctx = get_optional_app_ctx(request)
+    if app_ctx is None:
+        return Response(
+            content='{"status":"not_ready"}',
+            media_type="application/json",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    try:
+        async with app_ctx.pool.acquire(timeout=DB_HEALTH_ACQUIRE_TIMEOUT_SECS) as conn:
+            await conn.fetchval("SELECT 1", timeout=DB_HEALTH_QUERY_TIMEOUT_SECS)
+    except (asyncpg.PostgresError, OSError, TimeoutError):
+        return Response(
+            content='{"status":"db_unreachable"}',
+            media_type="application/json",
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        )
+    return Response(
+        content='{"status":"ok"}',
+        media_type="application/json",
+        status_code=status.HTTP_200_OK,
+    )
 
 
 # ASGI-layer middleware composition. Order, outermost first:

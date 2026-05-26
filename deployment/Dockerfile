@@ -49,7 +49,7 @@ ENTRYPOINT ["/entrypoint.sh"]
 EXPOSE 8100
 
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
-    CMD curl -f http://localhost:8100/health || exit 1
+    CMD curl -f http://localhost:8100/health/ready || exit 1
 
 # No --preload: asyncpg pools must not be shared across os.fork().
 # Each worker creates its own pool independently (2 workers x min_size=2 = 4 connections).

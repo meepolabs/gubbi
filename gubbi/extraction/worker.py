@@ -17,9 +17,10 @@ import redis.asyncio as aioredis
 import structlog
 from arq.connections import RedisSettings
 from gubbi_common.bootstrap import StartupProbe, StartupRunner
+from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
-from gubbi.bootstrap import PgLogProbe, WorkerReplicaCountWarnProbe
+from gubbi.bootstrap import WorkerReplicaCountWarnProbe
 from gubbi.config import Settings, get_settings
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
@@ -228,6 +229,8 @@ async def startup(ctx: ExtractionContext) -> None:
     _configure_worker_telemetry(settings)
 
     pool: asyncpg.Pool | None = None
+    redis_pool: aioredis.ConnectionPool | None = None
+    redis_client: aioredis.Redis | None = None
 
     try:
         # Health server thread (existing behaviour).
@@ -243,20 +246,37 @@ async def startup(ctx: ExtractionContext) -> None:
         ctx["pool"] = pool
         await logger.info("Extraction worker PG pool ready")
 
+        # Redis pub/sub client (built BEFORE the runner so RedisPingProbe
+        # can ping it). The probe ladder below mirrors gubbi's HTTP
+        # lifespan (PgLog -> RedisPing -> ReplicaCount): a dead Redis
+        # surfaces at boot rather than at the first arq poll, matching
+        # the DEC-098 fail-loud ethos. Stored on ctx immediately so the
+        # outer ``except BaseException`` arm can close the client and
+        # pool even if a probe fails before the body completes.
+        redis_url = _redis_url()
+        redis_pool = aioredis.ConnectionPool.from_url(redis_url)
+        redis_client = aioredis.Redis(connection_pool=redis_pool)
+        ctx["redis"] = redis_client
+        ctx["redis_pool"] = redis_pool
+
         # Worker probe sequence. PgLogProbe refuses to start when the
         # cluster would capture statement text or bound parameters (the
         # worker hits the same encrypted INSERT path as the HTTP API via
-        # ``extract_conversation``). WorkerReplicaCountWarnProbe flags the
-        # single-worker deploy-policy violation (M4 #138 worker variant)
-        # and increments the alertable ``gateway.replica_count_warning``
+        # ``extract_conversation``). RedisPingProbe enforces Redis
+        # liveness at boot -- the worker depends on Redis for arq job
+        # poll, BudgetHelper pre_charge, and DEC-098 audit fail-open.
+        # WorkerReplicaCountWarnProbe flags the single-worker
+        # deploy-policy violation (M4 #138 worker variant) and
+        # increments the alertable ``gateway.replica_count_warning``
         # counter. Mode for PgLogProbe is consumed from
         # ``settings.pg_log_probe_mode`` (was ``JOURNAL_PG_LOG_PROBE_MODE``
-        # in the pre-StartupRunner shape); replica count is consumed from
-        # ``settings.replica_count`` (was the worker's now-deleted
+        # in the pre-StartupRunner shape); replica count is consumed
+        # from ``settings.replica_count`` (was the worker's now-deleted
         # ``_validate_replica_count`` helper, which Settings.replica_count
         # ge=1 supersedes at construction time).
         probes: list[StartupProbe] = [
             PgLogProbe(pool=pool, mode=settings.pg_log_probe_mode),
+            RedisPingProbe(client=redis_client),
             WorkerReplicaCountWarnProbe(
                 replica_count=settings.replica_count,
                 pool_max_per_pod=pool.get_max_size(),
@@ -296,13 +316,6 @@ async def startup(ctx: ExtractionContext) -> None:
         extraction_service = ExtractionService(llm_provider)
         ctx["extraction_service"] = extraction_service
 
-        # Redis pub/sub client.
-        redis_url = _redis_url()
-        redis_pool = aioredis.ConnectionPool.from_url(redis_url)
-        redis_client = aioredis.Redis(connection_pool=redis_pool)
-        ctx["redis"] = redis_client
-        ctx["redis_pool"] = redis_pool
-
         # BudgetHelper -- worker invokes only record_actual_cost, but per D7 we
         # register the Lua script anyway (cheapest option; no API split).
         if settings.llm.llm_budget_enabled:
@@ -318,14 +331,24 @@ async def startup(ctx: ExtractionContext) -> None:
         await logger.info("Extraction worker Redis client ready")
     except BaseException:
         # Catch BaseException (not Exception) so CancelledError /
-        # KeyboardInterrupt during init still close the pool before
-        # unwinding. Best-effort teardown; original error or cancellation
-        # must propagate.
+        # KeyboardInterrupt during init still close the pool + redis
+        # before unwinding. Best-effort teardown; original error or
+        # cancellation must propagate.
         # Suppress asyncio.CancelledError from close() explicitly --
         # CancelledError is a BaseException (not Exception) since
         # Python 3.8, so a bare ``suppress(Exception)`` would let a
         # cancelled close() clobber the original cancellation we're
         # about to ``raise``.
+        # Reverse-lifecycle order: redis client + pool first (last
+        # opened), then PG pool, so a probe failure that fires AFTER
+        # the redis client was constructed cannot leak the redis pool
+        # while the PG pool drains.
+        if redis_client is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await redis_client.aclose()
+        if redis_pool is not None:
+            with suppress(Exception, asyncio.CancelledError):
+                await redis_pool.aclose()
         if pool is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await pool.close()
