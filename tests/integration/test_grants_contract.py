@@ -114,7 +114,7 @@ async def test_grants_match_audited_baseline(admin_pool: asyncpg.Pool) -> None:
 
 @pytest.mark.asyncio
 async def test_otel_ro_posture(admin_pool: asyncpg.Pool) -> None:
-    """otel_ro role exists, NOLOGIN, member of pg_monitor, no data-table SELECT."""
+    """otel_ro role exists, LOGIN, member of pg_monitor, no data-table SELECT."""
     failures: list[str] = []
 
     async with admin_pool.acquire() as conn:
@@ -124,11 +124,11 @@ async def test_otel_ro_posture(admin_pool: asyncpg.Pool) -> None:
         if not exists:
             failures.append("otel_ro role missing")
 
-        nologin = await conn.fetchval(
-            "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname = 'otel_ro'"
+        can_login = await conn.fetchval(
+            "SELECT rolcanlogin FROM pg_roles WHERE rolname = 'otel_ro'"
         )
-        if not nologin:
-            failures.append("otel_ro is LOGIN-enabled (should be NOLOGIN)")
+        if not can_login:
+            failures.append("otel_ro is not LOGIN-enabled (should be LOGIN)")
 
         has_monitor = await conn.fetchval(
             """

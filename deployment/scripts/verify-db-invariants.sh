@@ -24,7 +24,7 @@ set -euo pipefail
 #       * journal_app on users     -> SELECT, UPDATE only (no INSERT/DELETE)
 #       * journal_app on audit_log -> INSERT only
 #       * journal_admin on audit_log -> SELECT, INSERT only (no UPDATE/DELETE)
-#   - otel_ro role exists, NOLOGIN, member of pg_monitor, no data-table grants
+#   - otel_ro role exists, LOGIN, member of pg_monitor, no data-table grants
 #   - alembic_version + alembic_version_cloud are journal_admin-only (M4)
 #   - default privileges for ROLE journal in schema public have the precise
 #     audited shape: TABLES default = SELECT/INSERT/UPDATE for journal_app
@@ -205,13 +205,13 @@ for t in "${JOURNAL_ADMIN_FULL[@]}"; do
 done
 
 # ---------------------------------------------------------------------------
-# 8. otel_ro role: exists, NOLOGIN, member of pg_monitor, NO grants on any
+# 8. otel_ro role: exists, LOGIN, member of pg_monitor, NO grants on any
 # gubbi-owned data table.
 # ---------------------------------------------------------------------------
 assert_true "otel_ro_exists" \
     "SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='otel_ro')"
-assert_true "otel_ro_nologin" \
-    "SELECT NOT rolcanlogin FROM pg_roles WHERE rolname='otel_ro'"
+assert_true "otel_ro_login" \
+    "SELECT rolcanlogin FROM pg_roles WHERE rolname='otel_ro'"
 assert_true "otel_ro_pg_monitor" \
     "SELECT EXISTS (
         SELECT 1 FROM pg_auth_members am
