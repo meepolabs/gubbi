@@ -1,13 +1,15 @@
 """Regression guard against future alembic forks.
 
-The migration directory has forked once already (two ``0020_*`` revisions
-both pointing at ``0019_rls_users`` as ``down_revision``); the orphan was
-recovered as ``0028_audit_log_cross_attribution_guard``. This unit test
-asserts that the chain stays single-headed and pinned to that specific
-revision. If a future migration is added off the wrong parent (or a
-duplicate revision number is introduced), ``ScriptDirectory.get_heads()``
+The chain was squashed on 2026-05-24 into a single mechanically-derived
+baseline (``0001_squashed_baseline``); the prior 0001-0031 chain lives
+under ``gubbi/alembic/_archive/`` and is not loaded by alembic.
+
+This test asserts the chain stays single-headed and pinned to the
+current head. If a future migration is added off the wrong parent (or
+a duplicate revision number is introduced), ``ScriptDirectory.get_heads()``
 will return more than one head -- or a different head name -- and this
-test will fail before the fork can land.
+test will fail before the fork can land. When a new migration is
+intentionally added, update ``_EXPECTED_HEAD`` to its revision id.
 
 No database is needed: alembic walks the version directory purely from
 file metadata.
@@ -24,7 +26,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0031_audit_log_dedup_actor_scope"
+_EXPECTED_HEAD = "0001_squashed_baseline"
 
 
 def _alembic_config() -> Config:
@@ -46,7 +48,7 @@ def test_alembic_has_single_head() -> None:
     assert len(heads) == 1, f"expected exactly one alembic head, got: {heads!r}"
 
 
-def test_alembic_head_is_audit_log_target_kind_check() -> None:
+def test_alembic_head_is_squashed_baseline() -> None:
     # Arrange
     cfg = _alembic_config()
     script_dir = ScriptDirectory.from_config(cfg)
