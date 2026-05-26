@@ -356,12 +356,13 @@ async def startup(ctx: ExtractionContext) -> None:
 
 
 async def shutdown(ctx: ExtractionContext) -> None:
-    """Arq worker shutdown hook: close PG pool and Redis client/connection pool."""
-    pool = ctx.get("pool")
-    if pool is not None:
-        await pool.close()
-        await logger.info("Extraction worker PG pool closed")
+    """Arq worker shutdown hook: close PG pool and Redis client/connection pool.
 
+    Reverse-lifecycle order matches the startup-fail teardown above
+    (redis_client.aclose -> redis_pool.aclose -> pool.close): close
+    last-opened first so a Redis hiccup during shutdown cannot leak
+    the redis pool while the PG pool drains.
+    """
     redis_client = ctx.get("redis")
     if redis_client is not None:
         await redis_client.aclose()
@@ -374,6 +375,11 @@ async def shutdown(ctx: ExtractionContext) -> None:
     if redis_pool is not None:
         await redis_pool.aclose()
         await logger.info("Extraction worker Redis pool closed")
+
+    pool = ctx.get("pool")
+    if pool is not None:
+        await pool.close()
+        await logger.info("Extraction worker PG pool closed")
 
 
 def _run_health_server() -> None:
