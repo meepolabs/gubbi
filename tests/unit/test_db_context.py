@@ -2,7 +2,7 @@
 
 These tests verify the transaction-scoped contract of `user_scoped_connection`:
 ``app.current_user_id`` and ``hnsw.ef_search`` are set inside the yielded
-transaction, and both are cleared when the transaction commits or rolls back —
+transaction, and both are cleared when the transaction commits or rolls back --
 so nothing leaks back into the pool when the connection is released.
 
 The ``pool`` fixture lives in ``tests/conftest.py`` and skips the session if
@@ -56,7 +56,7 @@ async def test_custom_hnsw_ef_search(pool: asyncpg.Pool) -> None:
 
 
 async def test_cleared_after_commit(pool: asyncpg.Pool) -> None:
-    """SET LOCAL does not leak — new transactions start clean after commit."""
+    """SET LOCAL does not leak -- new transactions start clean after commit."""
     user_a = uuid.uuid4()
     async with user_scoped_connection(pool, user_id=user_a) as conn:
         assert await conn.fetchval("SELECT current_setting('app.current_user_id', true)") == str(

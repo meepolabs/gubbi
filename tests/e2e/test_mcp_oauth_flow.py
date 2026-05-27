@@ -1,7 +1,7 @@
 """Integration test: full MCP tool call via OAuth.
 
-Two test functions exercising the complete Mode 3 OAuth flow—DCR, Kratos identity,
-PKCE/S256 authorization_code grant, token exchange—and then a battery of MCP tool
+Two test functions exercising the complete Mode 3 OAuth flow--DCR, Kratos identity,
+PKCE/S256 authorization_code grant, token exchange--and then a battery of MCP tool
 calls with cross-user RLS isolation proof.
 
 - test_anthropic_style_mcp_oauth_flow: protected-resource metadata, 401/403 WWW-Authenticate
@@ -446,7 +446,7 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
         assert "resource" in pr_data, f"Missing 'resource' PRM fields={list(pr_data.keys())}"
         assert "authorization_servers" in pr_data, "Missing 'authorization_servers'"
 
-        # ---- Step 5: No Authorization header → 401 ---------------------------
+        # ---- Step 5: No Authorization header -> 401 ---------------------------
         status, result = await call_mcp_tool(
             client, JOURNAL_DEV_MCP_URL, None, "journal_briefing", {}
         )
@@ -472,7 +472,7 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
         # Anthropic: must include resource_metadata
         assert 'resource_metadata="' in www_auth or _has_resource_wwwauth(no_token_resp_raw)
 
-        # ---- Step 6: Invalid token → 401 -------------------------------------
+        # ---- Step 6: Invalid token -> 401 -------------------------------------
         malformed_jwt = "eyJhbGciOiJub25lIn0.eyJzdWIiOiJoYWNrZXIifQ.invalid-signature!!!"
         inv_resp = await client.post(
             f"{JOURNAL_DEV_MCP_URL}/mcp/",
@@ -719,7 +719,7 @@ async def test_openai_style_mcp_oauth_flow() -> None:
     * Access token aud claim is non-empty
     * All 12 MCP tools called with basic invocation
     * insufficient_scope path: DCR client with ONLY openid+offline_access (no journal)
-      → calls a journal tool → HTTP 403 OR MCP error result with
+      -> calls a journal tool -> HTTP 403 OR MCP error result with
         _meta["mcp/www_authenticate"] containing "insufficient_scope"
     """
     admin_url = JOURNAL_DEV_AUTH_ADMIN_URL

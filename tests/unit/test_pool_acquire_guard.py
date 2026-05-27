@@ -3,12 +3,12 @@
 Every tenant-scoped tool has to go through ``user_scoped_connection`` so that
 ``app.current_user_id`` is set before RLS policies evaluate. A stray
 ``pool.acquire()`` inside a tool handler would silently return zero rows
-under RLS (default-deny) — the kind of regression that passes code review
+under RLS (default-deny) -- the kind of regression that passes code review
 by accident because the failure mode looks like "no results" rather than
 "crash".
 
 This test greps the tool source files for the forbidden pattern. Admin
-module (``admin.py``) is exempt — it is no longer an MCP tool; its
+module (``admin.py``) is exempt -- it is no longer an MCP tool; its
 ``pool.acquire()`` calls are library internals for the future admin API.
 """
 

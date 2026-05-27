@@ -230,7 +230,7 @@ def cipher() -> ContentCipher:
 # The legacy `pool` fixture above speaks to a schema-only test database
 # (`journal_test`) and is shared by every pre-multi-tenant test. RLS tests
 # need a SEPARATE database where migrations 0001..0005 are applied, because
-# migration 0005 uses FORCE ROW LEVEL SECURITY — that would cause existing
+# migration 0005 uses FORCE ROW LEVEL SECURITY -- that would cause existing
 # tests to see zero rows under the legacy pool, breaking the whole suite.
 #
 # Layout (all three DSNs share host+port, differ by user+password+database):
@@ -276,7 +276,7 @@ async def _ensure_database_exists(dsn: str) -> None:
     """CREATE DATABASE <name> if it does not already exist. Caller must have CREATEDB."""
     maintenance_dsn = _postgres_db_dsn(dsn)
     target_db = _db_name(dsn)
-    # Escape embedded double-quotes in the identifier — mirrors the pattern
+    # Escape embedded double-quotes in the identifier -- mirrors the pattern
     # used by migration 0002's _quoted_db_name(). Defense-in-depth even though
     # target_db is sourced from an env-configured DSN rather than user input.
     safe_name = target_db.replace('"', '""')
@@ -322,14 +322,14 @@ async def _set_role_passwords(bootstrap_dsn: str) -> None:
 
     ``ALTER ROLE ... PASSWORD`` is a PostgreSQL utility statement and cannot be
     parameterized. f-string interpolation is safe here ONLY because both passwords
-    are hard-coded module-level constants containing no single-quotes — the
+    are hard-coded module-level constants containing no single-quotes -- the
     guard below locks that invariant so a future contributor who switches to
     env-sourced passwords is forced to introduce proper escaping. Using ``raise``
     (not ``assert``) so ``python -O`` cannot strip the check.
     """
     if "'" in _RLS_APP_PASSWORD or "'" in _RLS_ADMIN_PASSWORD:
         raise ValueError(
-            "RLS test passwords must not contain single-quotes — "
+            "RLS test passwords must not contain single-quotes -- "
             "see _set_role_passwords docstring for the interpolation-safety contract"
         )
     conn = await asyncpg.connect(bootstrap_dsn, timeout=5)
@@ -344,14 +344,14 @@ async def _set_role_passwords(bootstrap_dsn: str) -> None:
 async def _rls_provisioned() -> None:
     """One-shot session setup: ensure DB exists, migrations applied, roles have passwords.
 
-    Demanded purely for its side effects — consumers depend on it so the pool
+    Demanded purely for its side effects -- consumers depend on it so the pool
     fixtures see a migrated DB with logins ready. On any failure the fixture
     calls ``pytest.skip``, which aborts the demanding test (and any other tests
     that depend on this fixture transitively) with a clear reason.
 
     Recovery note: alembic upgrade is idempotent, so a partial provisioning in
     one session (e.g. upgrade succeeded but _set_role_passwords failed) recovers
-    automatically on the next session — the upgrade no-ops and password setting
+    automatically on the next session -- the upgrade no-ops and password setting
     runs fresh. Do NOT add an early-exit before _set_role_passwords.
     """
     try:
@@ -428,7 +428,7 @@ async def app_pool(_rls_provisioned: None) -> AsyncIterator[asyncpg.Pool]:
 
     Use this pool with ``gubbi_common.db.user_scoped.user_scoped_connection`` for RLS
     assertions. Direct ``pool.acquire()`` without the helper will see zero
-    rows — that's intentional default-deny.
+    rows -- that's intentional default-deny.
     """
     _pool = await asyncpg.create_pool(
         RLS_APP_URL,
@@ -449,7 +449,7 @@ async def admin_pool(_rls_provisioned: None) -> AsyncIterator[asyncpg.Pool]:
     """asyncpg pool authenticated as ``journal_admin`` (BYPASSRLS).
 
     Used only to seed cross-tenant test data and to tear down between tests.
-    Must NOT be used for RLS assertions — BYPASSRLS defeats the policy check.
+    Must NOT be used for RLS assertions -- BYPASSRLS defeats the policy check.
     """
     _pool = await asyncpg.create_pool(
         RLS_ADMIN_URL,

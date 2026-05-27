@@ -3,7 +3,7 @@
 Starlette's Mount("/mcp") returns a 307 redirect for requests to
 /mcp (without trailing slash).  HTTP clients following the 307
 often change POST->GET, which breaks the MCP streamable HTTP
-transport — the initialize POST arrives as a GET and opens an
+transport -- the initialize POST arrives as a GET and opens an
 SSE stream instead.
 
 This raw ASGI middleware rewrites the path before it reaches the

@@ -3,7 +3,7 @@
 
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- ── Topics ──────────────────────────────────────────────────────────────────
+-- -- Topics ------------------------------------------------------------------
 -- Schema baseline (applied verbatim by migration 0001_baseline). The
 -- ``path TEXT NOT NULL UNIQUE`` here is the pre-migration shape; migrations
 -- 0004 (add user_id) and 0030 (replace UNIQUE(path) with the composite
@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS topics (
 
 CREATE INDEX IF NOT EXISTS idx_topics_updated ON topics (updated_at DESC);
 
--- ── Conversations ────────────────────────────────────────────────────────────
+-- -- Conversations ------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS conversations (
     id            INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     topic_id      INTEGER NOT NULL REFERENCES topics (id) ON DELETE RESTRICT,
@@ -47,7 +47,7 @@ CREATE INDEX IF NOT EXISTS idx_conv_slug    ON conversations (topic_id, slug);
 -- Needed for list_conversations ORDER BY and briefing/timeline date-range queries
 CREATE INDEX IF NOT EXISTS idx_conv_created ON conversations (created_at DESC);
 
--- ── Entries ──────────────────────────────────────────────────────────────────
+-- -- Entries ------------------------------------------------------------------
 -- search_vector is GENERATED: auto-updated whenever content or reasoning changes.
 -- No application-side FTS sync needed.
 CREATE TABLE IF NOT EXISTS entries (
@@ -80,7 +80,7 @@ CREATE INDEX IF NOT EXISTS idx_entries_conv       ON entries (conversation_id);
 CREATE INDEX IF NOT EXISTS idx_entries_indexed_at ON entries (id) WHERE indexed_at IS NULL;
 CREATE INDEX IF NOT EXISTS idx_entries_fts        ON entries USING GIN (search_vector);
 
--- ── Messages ─────────────────────────────────────────────────────────────────
+-- -- Messages -----------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS messages (
     id              INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     conversation_id INTEGER NOT NULL REFERENCES conversations (id) ON DELETE CASCADE,
@@ -92,7 +92,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages (conversation_id, position);
 
--- ── Entry embeddings (pgvector) ───────────────────────────────────────────────
+-- -- Entry embeddings (pgvector) -----------------------------------------------
 -- ON DELETE CASCADE: deleting an entry row automatically removes its embedding.
 -- This replaces the hard_delete_by_entry_id() raw-SQL hack.
 CREATE TABLE IF NOT EXISTS entry_embeddings (

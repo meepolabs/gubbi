@@ -413,20 +413,20 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Call proactively when the user shares significant news, decisions,
         progress, or milestones.
 
-        The topic must already exist — check the briefing for recently used topics,
+        The topic must already exist -- check the briefing for recently used topics,
         journal_list_topics to see all available topics, or create one with journal_create_topic.
 
         Example: User says "We decided to use PostgreSQL instead of MongoDB."
-        → journal_append_entry(topic="projects/alpha", content="Chose PostgreSQL for the database",
+        -> journal_append_entry(topic="projects/alpha", content="Chose PostgreSQL for the database",
             reasoning="Mongo had no ACID transactions, team already knows SQL")
 
-        Do NOT use for searching or reading — use journal_search or journal_read_topic.
+        Do NOT use for searching or reading -- use journal_search or journal_read_topic.
 
         Quality guidelines:
-        - content: Write a clear, scannable headline — this appears in briefings and timelines.
+        - content: Write a clear, scannable headline -- this appears in briefings and timelines.
           Good: "Chose PostgreSQL over MongoDB for Project Alpha"
           Bad:  "Database decision" or the user's full paragraph pasted verbatim.
-        - reasoning: Capture the WHY — tradeoffs, context, constraints. Omit for routine events.
+        - reasoning: Capture the WHY -- tradeoffs, context, constraints. Omit for routine events.
           This field is only loaded on full read, so it's the place for detail.
         - tags: Use any relevant tags for filtering and categorization
           (e.g. 'finance', 'idea', 'important').
@@ -434,8 +434,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         Args:
             topic: Topic path (e.g. 'work/acme', 'health', 'hobbies/woodworking').
-            content: What happened — the headline. Shown in briefing and timeline.
-            reasoning: Why it happened — reasoning or tradeoffs. Only loaded when
+            content: What happened -- the headline. Shown in briefing and timeline.
+            reasoning: Why it happened -- reasoning or tradeoffs. Only loaded when
                         the entry is read in full; leave empty for routine events.
             tags: Tags relevant to the entry (e.g. ['finance', 'idea', 'important']).
             date: Date of the entry as YYYY-MM-DD. Defaults to today.
@@ -464,11 +464,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Use when the user wants to review a specific topic's entries.
         Returns entries in chronological order with content and reasoning.
 
-        Do NOT use for keyword search across topics — use journal_search instead.
-        Do NOT use for time-based browsing — use journal_timeline instead.
+        Do NOT use for keyword search across topics -- use journal_search instead.
+        Do NOT use for time-based browsing -- use journal_timeline instead.
 
         Args:
-            topic: Topic path — lowercase alphanumeric with hyphens, max 2 levels
+            topic: Topic path -- lowercase alphanumeric with hyphens, max 2 levels
                    (e.g. 'work/acme').
             limit: Max entries to return (default 10). Use a large number for more history.
             date_from: Only entries on or after this date (YYYY-MM-DD).
@@ -502,15 +502,15 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         date: str | None = None,
         tags: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Correct or expand a journal entry — "fix that entry" or "add more detail.".
+        """Correct or expand a journal entry -- "fix that entry" or "add more detail.".
 
         Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
-        Do NOT use to remove an entry — use journal_delete_entry instead.
+        Do NOT use to remove an entry -- use journal_delete_entry instead.
 
         Args:
             entry_id: The entry's 'id' (from read, search, or timeline results).
-            content: New content for the entry (optional — omit to only change date/tags).
+            content: New content for the entry (optional -- omit to only change date/tags).
             reasoning: Updated reasoning (optional). Omit to keep current reasoning.
             mode: 'replace' overwrites the entire entry content (use for corrections or rewrites).
                   'append' adds new text to the end (use for follow-up notes or addenda).
@@ -539,13 +539,13 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
     async def journal_delete_entry(
         entry_id: int,
     ) -> dict[str, Any]:
-        """Remove a journal entry permanently — wrong data, duplicate, or mistake.
+        """Remove a journal entry permanently -- wrong data, duplicate, or mistake.
 
         Trigger: 'delete that', 'forget that', 'undo that', 'scratch that', 'that was wrong.'.
 
         Use the entry's 'id' from journal_read_topic, journal_search, or journal_timeline results.
 
-        Do NOT use to correct an entry — use journal_update_entry instead.
+        Do NOT use to correct an entry -- use journal_update_entry instead.
 
         Args:
             entry_id: The entry's 'id' (from read, search, or timeline results).

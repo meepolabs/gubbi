@@ -30,7 +30,7 @@ async def decode_gateway_secret(
 
     Mirrors the lifespan body verbatim (lines 341-369 of ``main.py``):
 
-    * Decode hex → reject if < 32 bytes (warning logged).
+    * Decode hex -> reject if < 32 bytes (warning logged).
     * Reject non-hex input (warning logged).
     * Flag ``require_signature`` without a usable secret.
     * Flag ``trust_gateway`` with ``gateway_require_signature`` disabled.

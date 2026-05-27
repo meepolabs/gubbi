@@ -116,7 +116,7 @@ class TestCodeExchange:
         loaded = await provider.load_authorization_code(other_client, "test-code")
         assert loaded is None
 
-        # Code is now burned — correct client can't use it either
+        # Code is now burned -- correct client can't use it either
         correct_client = _make_client("test-client")
         loaded2 = await provider.load_authorization_code(correct_client, "test-code")
         assert loaded2 is None

@@ -146,7 +146,7 @@ async def test_extraction_service_extract_entries() -> None:
 
 
 # ---------------------------------------------------------------------------
-# AnthropicProvider — verifies correct API call construction via mock
+# AnthropicProvider -- verifies correct API call construction via mock
 # ---------------------------------------------------------------------------
 
 

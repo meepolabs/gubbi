@@ -1,6 +1,6 @@
 # gubbi
 
-A self-hosted [MCP](https://modelcontextprotocol.io/) server that gives any LLM a persistent, searchable journal — a personal memory infrastructure layer for AI, backed by PostgreSQL on your own infrastructure.
+A self-hosted [MCP](https://modelcontextprotocol.io/) server that gives any LLM a persistent, searchable journal -- a personal memory infrastructure layer for AI, backed by PostgreSQL on your own infrastructure.
 
 **Works with any MCP-compatible client** -- not tied to any specific LLM provider. Any chat app or CLI tool that supports MCP servers via Bearer token or OAuth 2.1 can connect.
 
@@ -13,16 +13,16 @@ Next week, different device, different client:
 
 You: "Where did I leave off with the homelab?"
 
-LLM: *searches journal* → "On March 23rd you finished the initial setup..."
+LLM: *searches journal* -> "On March 23rd you finished the initial setup..."
 ```
 
 ## Why this exists
 
-If you use LLMs across multiple clients — CLI tools, desktop apps, browser, mobile — your conversations vanish between sessions. You lose the thread on ongoing projects, life decisions, and accumulated context.
+If you use LLMs across multiple clients -- CLI tools, desktop apps, browser, mobile -- your conversations vanish between sessions. You lose the thread on ongoing projects, life decisions, and accumulated context.
 
-gubbi solves this by providing a **persistent memory layer** accessible from any MCP-compatible client. Every client connects to the same journal, so you pick up exactly where you left off — whether that's a coding project, a hobby log, a fitness plan, or a reading list.
+gubbi solves this by providing a **persistent memory layer** accessible from any MCP-compatible client. Every client connects to the same journal, so you pick up exactly where you left off -- whether that's a coding project, a hobby log, a fitness plan, or a reading list.
 
-The journal is an **append-only ledger**, not a brain. It faithfully stores everything — decisions, conversations, milestones, research — and never compresses, forgets, or consolidates. Full-text search (`tsvector` + GIN) and semantic search (`pgvector` HNSW) are both built into the same PostgreSQL database. No data leaves your infrastructure.
+The journal is an **append-only ledger**, not a brain. It faithfully stores everything -- decisions, conversations, milestones, research -- and never compresses, forgets, or consolidates. Full-text search (`tsvector` + GIN) and semantic search (`pgvector` HNSW) are both built into the same PostgreSQL database. No data leaves your infrastructure.
 
 ## Quick start
 
@@ -67,17 +67,17 @@ Plus 7 more tools for topic management, conversation browsing, entry editing, de
 
 ```
 data/
-├── postgres/                        # PostgreSQL cluster (WAL + tablespaces)
-├── onnx/                            # Cached ONNX embedding model (~/.cache/gubbi)
-└── journal/
-    ├── oauth.db                     # OAuth tokens/clients (SQLite, separate from PG)
-    ├── conversations_json/          # Archived conversation transcripts (JSON)
-    │   └── {uuid}.json
-    └── knowledge/
-        └── user-profile.md          # Your identity profile, loaded by journal_briefing
+|-- postgres/                        # PostgreSQL cluster (WAL + tablespaces)
+|-- onnx/                            # Cached ONNX embedding model (~/.cache/gubbi)
++-- journal/
+    |-- oauth.db                     # OAuth tokens/clients (SQLite, separate from PG)
+    |-- conversations_json/          # Archived conversation transcripts (JSON)
+    |   +-- {uuid}.json
+    +-- knowledge/
+        +-- user-profile.md          # Your identity profile, loaded by journal_briefing
 ```
 
-All journal data lives in PostgreSQL 17 (`topics`, `conversations`, `entries`, `messages`, `entry_embeddings`). Full-text search is a `tsvector` generated column with a GIN index — auto-maintained by the database, no reindex needed. Semantic search is a `pgvector` HNSW index keyed to `entries.id` via `ON DELETE CASCADE`. A local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) generates embeddings on the CPU. Rebuilding semantic embeddings is a recovery operation available through internal primitives — `tsvector` stays in sync automatically.
+All journal data lives in PostgreSQL 17 (`topics`, `conversations`, `entries`, `messages`, `entry_embeddings`). Full-text search is a `tsvector` generated column with a GIN index -- auto-maintained by the database, no reindex needed. Semantic search is a `pgvector` HNSW index keyed to `entries.id` via `ON DELETE CASCADE`. A local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) generates embeddings on the CPU. Rebuilding semantic embeddings is a recovery operation available through internal primitives -- `tsvector` stays in sync automatically.
 
 OAuth state (clients, auth codes, tokens) stays in a separate SQLite file (`oauth.db`), intentionally independent from the journal database.
 
@@ -112,11 +112,11 @@ See [CODEMAP.md](./CODEMAP.md) for the per-module breakdown.
 - **Worker-owned pools.** Each gunicorn worker creates its own asyncpg pool in its lifespan (no `--preload`), because asyncpg pools cannot survive `os.fork()`.
 - **No in-process git.** No GitPython, no cross-process locking. Backup strategy is your choice.
 - **gosu Docker pattern.** Container starts as root, detects bind mount owner UID, drops to non-root.
-- **Cross-platform neutral.** Any MCP-compatible client connects — Claude (CLI/Desktop/Web/Mobile), ChatGPT (Apps SDK over MCP), Gemini. Provider-neutral memory infrastructure.
+- **Cross-platform neutral.** Any MCP-compatible client connects -- Claude (CLI/Desktop/Web/Mobile), ChatGPT (Apps SDK over MCP), Gemini. Provider-neutral memory infrastructure.
 
 ## Stack
 
-Python 3.12 · FastAPI · FastMCP · PostgreSQL 17 · pgvector · asyncpg · ONNX embeddings (all-MiniLM-L6-v2) · Docker · nginx
+Python 3.12 | FastAPI | FastMCP | PostgreSQL 17 | pgvector | asyncpg | ONNX embeddings (all-MiniLM-L6-v2) | Docker | nginx
 
 ## License
 

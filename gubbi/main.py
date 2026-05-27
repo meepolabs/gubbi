@@ -181,17 +181,17 @@ def create_mcp_server(app_ctx: AppContext) -> FastMCP:
             and semantic search.
 
             DATA MODEL
-            Topic — A category or area of life (e.g. 'project/mcp', 'cars/toyota').
+            Topic -- A category or area of life (e.g. 'project/mcp', 'cars/toyota').
                     Topics are containers. All entries and conversations live under a topic.
                     Topic paths are permanent, lowercase, max 2 levels deep.
-            Entry — A dated record within a topic: a decision, event, milestone, or reflection.
+            Entry -- A dated record within a topic: a decision, event, milestone, or reflection.
                     Has content (the headline) and optional reasoning (the why).
                     Created with journal_append_entry, read with journal_read_topic.
-            Conversation — A saved chat transcript within a topic.
+            Conversation -- A saved chat transcript within a topic.
                     Has messages, a summary, and a title.
                     Created with journal_save_conversation, browsed with journal_list_conversations.
 
-            Hierarchy: Topic contains → Entries + Conversations
+            Hierarchy: Topic contains -> Entries + Conversations
             journal_search spans both topics and conversations.
             journal_read_topic returns all entries the topic.
             journal_list_conversations returns all conversations of the topic.

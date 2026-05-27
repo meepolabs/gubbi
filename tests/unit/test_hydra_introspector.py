@@ -320,7 +320,7 @@ class TestIntrospectErrors:
     async def test_non_json_body_raises_unreachable(
         self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
     ) -> None:
-        """Non-JSON 200 response → HydraUnreachable, not uncaught ValueError."""
+        """Non-JSON 200 response -> HydraUnreachable, not uncaught ValueError."""
         resp = MagicMock()
         resp.status_code = 200
         resp.json.side_effect = ValueError("not json")
@@ -331,7 +331,7 @@ class TestIntrospectErrors:
     async def test_non_object_json_body_raises_unreachable(
         self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
     ) -> None:
-        """JSON array or scalar body → HydraUnreachable, not uncaught AttributeError."""
+        """JSON array or scalar body -> HydraUnreachable, not uncaught AttributeError."""
         mock_httpx_client.post.return_value = _make_response(200, [{"active": True}])  # type: ignore[arg-type]
         with pytest.raises(HydraUnreachable, match="non-object"):
             await introspector.introspect(FAKE_TOKEN)

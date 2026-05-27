@@ -229,7 +229,7 @@ async def test_handler_exception_propagates(
 
 
 # ---------------------------------------------------------------------------
-# _result_is_success — CallToolResult vs. dict
+# _result_is_success -- CallToolResult vs. dict
 # ---------------------------------------------------------------------------
 
 
@@ -268,7 +268,7 @@ class TestResultIsSuccess:
 
 
 # ---------------------------------------------------------------------------
-# target_id extraction — now returns (target_id, target_kind) tuple
+# target_id extraction -- now returns (target_id, target_kind) tuple
 # ---------------------------------------------------------------------------
 
 

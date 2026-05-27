@@ -1,4 +1,4 @@
-"""Entry repository — all SQL for entries table."""
+"""Entry repository -- all SQL for entries table."""
 
 from __future__ import annotations
 
@@ -46,7 +46,7 @@ logger = structlog.get_logger(__name__)
 _sync_logger = logging.getLogger(__name__)
 
 
-# ── module-private helpers ────────────────────────────────────────────────────
+# -- module-private helpers ----------------------------------------------------
 
 
 def _decrypt_content_field(

@@ -1,4 +1,4 @@
-"""Integration tests for MCP tools — end-to-end through the tool layer."""
+"""Integration tests for MCP tools -- end-to-end through the tool layer."""
 
 from pathlib import Path
 from typing import Any

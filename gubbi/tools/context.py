@@ -47,7 +47,7 @@ def _month_end(year: int, month: int) -> date:
 
 
 def _normalize_period(period: str) -> str:
-    """Normalize period string — lowercase, collapse spaces/underscores to hyphens."""
+    """Normalize period string -- lowercase, collapse spaces/underscores to hyphens."""
     return re.sub(r"[\s_]+", "-", period.strip().lower())
 
 
@@ -156,7 +156,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             stats (total counts: topics, entries, conversations).
         """
 
-        # User profile — tri-state: missing / empty / configured
+        # User profile -- tri-state: missing / empty / configured
         profile = knowledge.read(app_ctx.settings.data_dir, "user-profile")
         if profile is None:
             user_profile_status = "missing"
@@ -172,7 +172,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
         date_from, date_to, label = _resolve_period("this-week", today=_today)
 
-        # Encode before acquiring a DB connection — keeps the pool free during inference
+        # Encode before acquiring a DB connection -- keeps the pool free during inference
         key_facts_embedding: list[float] | None = None
         try:
             key_facts_embedding = await asyncio.to_thread(
