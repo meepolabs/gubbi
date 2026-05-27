@@ -1,8 +1,8 @@
 # Deployment Guide (self-host)
 
 > **Hosted deploys:** if you are operating the multi-tenant hosted variant
-> (Mode 3), see `gubbi-cloud/docs/RUNBOOK.md` in the private cloud
-> repo. This document covers the two self-host shapes only.
+> (Mode 3), operator docs live with the deploy stack -- this document
+> covers the two self-host shapes only.
 
 Gubbi supports three mutually-exclusive deploy shapes, selected by
 which of `JOURNAL_HYDRA_ADMIN_URL` and `JOURNAL_PASSWORD_HASH` are set.
@@ -330,6 +330,41 @@ Two things to back up:
 2. **Conversation JSON archives.** `data/journal/conversations_json/` -- rsync or S3 sync. These are the rebuildable source for `conversations` and `messages` tables.
 
 The ONNX model cache (`data/onnx/`) is not worth backing up -- it's re-downloaded automatically on boot if missing.
+
+## Observability (OpenTelemetry)
+
+gubbi emits distributed traces, metrics, and structured logs via
+OpenTelemetry. Instrumentation is gated by the `OTEL_ENABLED` flag:
+when disabled, the SDK is configured with NoOp tracer and meter
+providers so instrumentation calls stay safe no-ops, and the app
+boots cleanly even without a Collector running.
+
+### Env vars
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OTEL_ENABLED` | `true` | Master switch. Set to `false` to disable OTel exports (NoOp providers stay wired). |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` | gRPC endpoint of the OTel Collector relay. |
+| `OTEL_EXPORTER_OTLP_HEADERS` | (empty) | Headers for OTLP export. Leave empty when gubbi exports to a Collector on the same internal network. |
+| `OTEL_SERVICE_NAME` | `gubbi` | Service name reported in traces and metrics. |
+| `OTEL_RESOURCE_ATTRIBUTES` | (empty) | Comma-separated `key=value` pairs, e.g. `env=prod,version=abc1234`. |
+
+### Disable in dev
+
+```bash
+export OTEL_ENABLED=false
+```
+
+When disabled, auto-instrumentation modules still load but produce
+no output -- safe to run without a Collector.
+
+### Collector deployment
+
+Run an OTel Collector somewhere reachable from gubbi (same host,
+sibling container, or a dedicated relay). Point
+`OTEL_EXPORTER_OTLP_ENDPOINT` at its OTLP/gRPC ingress (default port
+`4317`) and route the Collector's exports to your observability
+backend of choice.
 
 ## Memory requirements
 

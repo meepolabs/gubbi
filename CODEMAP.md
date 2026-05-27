@@ -23,7 +23,7 @@ model validator:
 | 3 -- Hosted (multi-tenant) | external IdP wired in | Hydra OAuth 2.1 | gubbi.ai prod |
 
 Per-key env-var triggers and required combinations are catalogued in
-the env registry (private-repo); see [`docs/deployment.md`](./docs/deployment.md)
+the operator's deployment env registry; see [`docs/deployment.md`](./docs/deployment.md)
 for the public Mode 1/2 self-host wiring.
 
 Mode 3 sits behind a separate gateway (proprietary, not in this repo)
