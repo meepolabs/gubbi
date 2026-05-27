@@ -1,6 +1,7 @@
 """Tests for input validation, sanitization, and path traversal prevention."""
 
 import pytest
+from pydantic import ValidationError
 
 from gubbi.validation import (
     harden_llm_topic_path,
@@ -202,3 +203,41 @@ class TestHardenLLMTopicPath:
         short_path = "a" * 10
         assert harden_llm_topic_path(short_path, max_len=5) is None
         assert harden_llm_topic_path(short_path, max_len=10) == short_path
+
+
+class TestTagsMaxLen:
+    """Pydantic input validation rejects tags exceeding 128 characters."""
+
+    def test_conversation_accepts_128_char_tag(self) -> None:
+        from gubbi.models.conversation import ConversationMeta
+
+        long_ok = "a" * 128
+        meta = ConversationMeta(title="t", topic="x", created="2025-01-01", updated="2025-01-01")
+        meta.tags = [long_ok]
+        assert meta.tags[-1] == long_ok
+
+    def test_conversation_rejects_129_char_tag(self) -> None:
+        from gubbi.models.conversation import ConversationMeta
+
+        with pytest.raises(ValidationError):
+            ConversationMeta(
+                title="t",
+                topic="x",
+                created="2025-01-01",
+                updated="2025-01-01",
+                tags=["a" * 129],
+            )
+
+    def test_entry_accepts_128_char_tag(self) -> None:
+        from gubbi.models.journal import Entry
+
+        e = Entry(id=1, date="2025-01-01", content="hi")
+        long_ok = "b" * 128
+        e.tags = [long_ok]
+        assert e.tags[-1] == long_ok
+
+    def test_entry_rejects_129_char_tag(self) -> None:
+        from gubbi.models.journal import Entry
+
+        with pytest.raises(ValidationError):
+            Entry(id=1, date="2025-01-01", content="hi", tags=["b" * 129])

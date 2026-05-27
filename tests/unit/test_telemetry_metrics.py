@@ -685,7 +685,7 @@ def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
     # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
 
 
-def test_b5_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
+def test_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
     """Pin: orphan-counter modules expose factories, NOT module-scope counters.
 
     A regression that re-introduces ``COUNTER_NAME = _meter.create_counter(...)``

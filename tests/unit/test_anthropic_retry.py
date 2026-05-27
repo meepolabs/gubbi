@@ -184,7 +184,7 @@ async def test_anthropic_retry_jitter_is_added() -> None:
 async def test_anthropic_retries_on_broadened_transient_errors(
     exc_factory: Callable[[], Exception], label: str
 ) -> None:
-    """Item 3: APIConnectionError / APITimeoutError / InternalServerError now retry."""
+    """APIConnectionError / APITimeoutError / InternalServerError now retry."""
     from gubbi.config import LLMConfig
     from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 
