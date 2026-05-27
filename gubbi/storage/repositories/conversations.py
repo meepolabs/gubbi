@@ -1,4 +1,4 @@
-"""PostgreSQL conversation storage — module-level async functions.
+"""PostgreSQL conversation storage -- module-level async functions.
 
 All functions take an asyncpg.Connection as the first argument.
 The ConversationMixin class is removed; DatabaseStorage inheritance is no longer needed.
@@ -69,7 +69,7 @@ def _parse_ts(ts: str | None) -> datetime_cls | None:
         return None
 
 
-# ── JSON archive ──────────────────────────────────────────────────────────────
+# -- JSON archive --------------------------------------------------------------
 
 
 def _write_conversation_json(
@@ -142,7 +142,7 @@ def _decrypt_message_content(
     raise DecryptionError("message content_encrypted and content_nonce must both be present")
 
 
-# ── Save ──────────────────────────────────────────────────────────────────────
+# -- Save ----------------------------------------------------------------------
 
 
 class SaveConversationResult(NamedTuple):
@@ -244,7 +244,7 @@ async def save_conversation(
     json_path = _write_conversation_json(conversations_json_dir, str(uuid4()), meta, messages)
 
     # --- Phase 2: All DB writes in a single transaction, json_path included ---
-    # topic_id already verified and fetched in the pre-check above — no need to re-query.
+    # topic_id already verified and fetched in the pre-check above -- no need to re-query.
     conv_id, is_update = await _upsert_conversation_record(
         conn,
         cipher,
@@ -485,7 +485,7 @@ async def _upsert_linked_entry(
     return int(row["id"])
 
 
-# ── List / Read ───────────────────────────────────────────────────────────────
+# -- List / Read ---------------------------------------------------------------
 
 
 async def count_conversations(
@@ -500,7 +500,7 @@ async def count_conversations(
         where = (
             f"WHERE t.path LIKE {_add_param(params, _escape_like(topic_prefix) + '%')} ESCAPE '!'"
         )
-    sql = f"SELECT COUNT(*) FROM conversations c JOIN topics t ON t.id = c.topic_id {where}"  # noqa: S608 — safe: topic_prefix is validated by validate_topic(); all user values go through _add_param()
+    sql = f"SELECT COUNT(*) FROM conversations c JOIN topics t ON t.id = c.topic_id {where}"  # noqa: S608 -- safe: topic_prefix is validated by validate_topic(); all user values go through _add_param()
     return int(await conn.fetchval(sql, *params) or 0)
 
 
@@ -514,7 +514,7 @@ async def list_conversations(
     """List conversations, optionally filtered by topic prefix.
 
     Returns (conversations, total_count).
-    total_count reflects the full filtered set before LIMIT — use for pagination.
+    total_count reflects the full filtered set before LIMIT -- use for pagination.
     """
     params: list[Any] = []
     where = ""

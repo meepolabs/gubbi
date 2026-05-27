@@ -165,7 +165,7 @@ async def _count_rows_at_version(
     """Count rows in *table* whose ``col_nonce`` first byte matches *version*.
 
     Table and column names come from module-level constants in
-    ``_ROTATION_SCREENS``, not user input — safe for parameterized queries.
+    ``_ROTATION_SCREENS``, not user input -- safe for parameterized queries.
     """
     hex_prefix = f"{version:02x}"
     return int(

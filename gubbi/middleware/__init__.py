@@ -1,7 +1,7 @@
 """ASGI middleware for the journal MCP server.
 
 All middleware here uses raw ASGI (NOT BaseHTTPMiddleware) to avoid
-buffering responses — BaseHTTPMiddleware breaks SSE streaming required
+buffering responses -- BaseHTTPMiddleware breaks SSE streaming required
 by MCP's streamable HTTP transport.
 """
 

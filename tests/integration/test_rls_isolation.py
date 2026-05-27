@@ -1,6 +1,6 @@
 """Integration tests for migration 0005 RLS policies.
 
-Every test here asserts that RLS actually blocks cross-tenant access —
+Every test here asserts that RLS actually blocks cross-tenant access --
 if any of these fails, the tenant-isolation invariant is broken and
 nothing downstream is safe. The file is organised into five sections:
 
@@ -32,7 +32,7 @@ from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import topics as topic_repo
 
 # NB: tenant fixtures (tenant_a, tenant_b, seeded_a, seeded_b, seed_for,
-# TenantSeed) come from tests/integration/conftest.py — pytest auto-discovers
+# TenantSeed) come from tests/integration/conftest.py -- pytest auto-discovers
 # them by name so they must NOT be imported at module scope here (that would
 # shadow the fixture function with the same name and break resolution).
 from tests.fixtures.tenants import TenantSeed, seed_for
@@ -419,7 +419,7 @@ async def test_vector_search_cross_tenant_returns_only_own_rows(
     """
     # Use a non-zero unit vector so cosine distance is well-defined (zero vectors
     # would produce NaN). pgvector codec is registered on the pool, so a plain
-    # Python list is accepted as the bound parameter — no SQL cast needed.
+    # Python list is accepted as the bound parameter -- no SQL cast needed.
     query_vec = [1.0] + [0.0] * 383
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         rows = await conn.fetch(
@@ -436,7 +436,7 @@ async def test_messages_visible_only_to_owner(
     seeded_a: TenantSeed,
     seeded_b: TenantSeed,
 ) -> None:
-    """messages table — a direct scoped query confirms RLS hides B's messages from A."""
+    """messages table -- a direct scoped query confirms RLS hides B's messages from A."""
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         ids = {r["id"] for r in await conn.fetch("SELECT id FROM messages")}
     assert ids == set(seeded_a.message_ids)

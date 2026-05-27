@@ -23,7 +23,7 @@ from gubbi.crypto.cipher import (
     load_master_keys_from_env,
 )
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# -- Helpers ------------------------------------------------------------------
 
 
 def _key(n: int) -> bytes:
@@ -34,7 +34,7 @@ def _b64_key(n: int) -> str:
     return base64.b64encode(_key(n)).decode("ascii")
 
 
-# ── 1. Round-trip decrypt == plaintext ───────────────────────────────────────
+# -- 1. Round-trip decrypt == plaintext ---------------------------------------
 
 
 def _round_trip(plaintext: str) -> None:
@@ -69,7 +69,7 @@ def test_round_trip_null_byte() -> None:
     _round_trip("a\x00b")
 
 
-# ── 2. Nonce uniqueness (50 distinct nonces AND 50 distinct ciphertexts) ────
+# -- 2. Nonce uniqueness (50 distinct nonces AND 50 distinct ciphertexts) ----
 
 
 def test_nonce_uniqueness() -> None:
@@ -84,7 +84,7 @@ def test_nonce_uniqueness() -> None:
     assert len(ciphertexts) == 50
 
 
-# ── 3. active_version == max(keys) ──────────────────────────────────────────
+# -- 3. active_version == max(keys) ------------------------------------------
 
 
 def test_active_version_is_max_key() -> None:
@@ -98,7 +98,7 @@ def test_encrypt_nonce_active_version_byte() -> None:
     assert nonce[0] == 5
 
 
-# ── 4. known_versions ───────────────────────────────────────────────────────
+# -- 4. known_versions -------------------------------------------------------
 
 
 def test_known_versions() -> None:
@@ -106,7 +106,7 @@ def test_known_versions() -> None:
     assert cipher.known_versions == frozenset({1, 2, 5})
 
 
-# ── 5. Tampered ciphertext / nonce → InvalidTag ─────────────────────────────
+# -- 5. Tampered ciphertext / nonce -> InvalidTag -----------------------------
 
 
 def test_decrypt_raises_on_tampered_ciphertext() -> None:
@@ -127,7 +127,7 @@ def test_decrypt_raises_on_tampered_nonce() -> None:
         cipher.decrypt(ct, bytes(tampered_nonce))
 
 
-# ── 6. Wrong key → InvalidTag ──────────────────────────────────────────────
+# -- 6. Wrong key -> InvalidTag ----------------------------------------------
 
 
 def test_decrypt_raises_on_wrong_key() -> None:
@@ -140,7 +140,7 @@ def test_decrypt_raises_on_wrong_key() -> None:
         cipher_b.decrypt(ct, nonce)
 
 
-# ── 7. Unknown key version → ValueError ─────────────────────────────────────
+# -- 7. Unknown key version -> ValueError -------------------------------------
 
 
 def test_decrypt_raises_on_unknown_key_version() -> None:
@@ -152,7 +152,7 @@ def test_decrypt_raises_on_unknown_key_version() -> None:
         cipher.decrypt(ct, bytes(bad_nonce))
 
 
-# ── 8. Malformed nonce lengths → ValueError ────────────────────────────────
+# -- 8. Malformed nonce lengths -> ValueError --------------------------------
 
 
 def test_decrypt_raises_on_empty_nonce() -> None:
@@ -173,7 +173,7 @@ def test_decrypt_raises_on_13_byte_nonce() -> None:
         cipher.decrypt(b"fake", b"x" * 13)
 
 
-# ── 9. Non-bytes nonce → ValueError ────────────────────────────────────────
+# -- 9. Non-bytes nonce -> ValueError ----------------------------------------
 
 
 def test_decrypt_raises_on_string_nonce() -> None:
@@ -182,7 +182,7 @@ def test_decrypt_raises_on_string_nonce() -> None:
         cipher.decrypt(b"fake", "not-bytes")  # type: ignore[arg-type]
 
 
-# ── 10. Version rotation ───────────────────────────────────────────────────
+# -- 10. Version rotation ---------------------------------------------------
 
 
 def test_version_rotation_old_encrypts_decrypt_with_v2() -> None:
@@ -209,7 +209,7 @@ def test_version_rotation_new_encrypt_uses_highest_version() -> None:
     assert result == "new-data"
 
 
-# ── 11. Construction guards ────────────────────────────────────────────────
+# -- 11. Construction guards ------------------------------------------------
 
 
 def test_construct_rejects_empty_dict() -> None:
@@ -254,7 +254,7 @@ def test_construct_accepts_bytearray_key() -> None:
     assert cipher.decrypt(*cipher.encrypt("bytearray-ok")) == "bytearray-ok"
 
 
-# ── 12. Key isolation: mutate bytearray after construction ──────────────────
+# -- 12. Key isolation: mutate bytearray after construction ------------------
 
 
 def test_key_isolation_bytearray_mutation() -> None:
@@ -264,7 +264,7 @@ def test_key_isolation_bytearray_mutation() -> None:
     assert cipher.decrypt(*cipher.encrypt("isolated")) == "isolated"
 
 
-# ── 13-18. load_master_keys_from_env ────────────────────────────────────────
+# -- 13-18. load_master_keys_from_env ----------------------------------------
 
 
 def test_env_single_v1_key() -> None:
@@ -338,7 +338,7 @@ def test_env_pattern_rejects_similar_names() -> None:
     assert load_master_keys_from_env(env) == {}
 
 
-# ── 19. Performance (1 MB round-trip < 100 ms) ─────────────────────────────
+# -- 19. Performance (1 MB round-trip < 100 ms) -----------------------------
 
 
 @pytest.mark.slow

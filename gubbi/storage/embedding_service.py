@@ -24,7 +24,7 @@ __all__: list[str] = ["EmbeddingService"]
 
 logger = logging.getLogger(__name__)
 
-# ── Model constants ───────────────────────────────────────────────────────────
+# -- Model constants -----------------------------------------------------------
 _MODEL_REPO = "sentence-transformers/all-MiniLM-L6-v2"
 _CACHE_DIR = Path.home() / ".cache" / "gubbi" / "onnx_models"
 _MODEL_DIR_NAME = "sentence-transformers_all-MiniLM-L6-v2"
@@ -49,7 +49,7 @@ def _download_file(url: str, dest: Path) -> bool:
         with dest.open("wb") as f:
             for chunk in response.iter_content(chunk_size=8192):
                 f.write(chunk)
-        logger.info("Downloaded %s → %s", url, dest)
+        logger.info("Downloaded %s -> %s", url, dest)
         return True
     except Exception as exc:
         logger.warning("Failed to download %s: %s", url, exc)
@@ -120,7 +120,7 @@ class EmbeddingService:
         logger.info("EmbeddingService ready (model=%s)", model_path.name)
 
     def encode(self, text: str) -> list[float]:
-        """Encode text → 384-dim normalised embedding vector (sync).
+        """Encode text -> 384-dim normalised embedding vector (sync).
 
         Uses mean pooling over non-padding tokens followed by L2 normalisation,
         which is the standard approach for all-MiniLM-L6-v2.
@@ -309,7 +309,7 @@ class EmbeddingService:
         limit: int = 10,
         topic_prefix: str | None = None,
     ) -> list[dict[str, Any]]:
-        """Encode text then search. Convenience wrapper — holds conn during inference.
+        """Encode text then search. Convenience wrapper -- holds conn during inference.
 
         Prefer encode() + search_by_vector() when conn comes from a pool to avoid
         pinning a connection during CPU-bound ONNX inference.

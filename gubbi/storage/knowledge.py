@@ -1,4 +1,4 @@
-"""File-based knowledge store — not backed by PostgreSQL."""
+"""File-based knowledge store -- not backed by PostgreSQL."""
 
 from __future__ import annotations
 

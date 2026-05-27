@@ -46,7 +46,7 @@ def mock_embedding_service() -> Any:
 
 
 class TestEncode:
-    """EmbeddingService.encode() — sync ONNX inference."""
+    """EmbeddingService.encode() -- sync ONNX inference."""
 
     def test_returns_384_floats(self, mock_embedding_service: Any) -> None:
         result = mock_embedding_service.encode("Hello, world!")
@@ -68,7 +68,7 @@ class TestEncode:
 
 
 class TestStoreAndSearch:
-    """EmbeddingService.store() and search() — async DB operations."""
+    """EmbeddingService.store() and search() -- async DB operations."""
 
     async def test_store_calls_execute(self, mock_embedding_service: Any) -> None:
         conn = AsyncMock()

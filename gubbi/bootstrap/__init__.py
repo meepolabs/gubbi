@@ -1,4 +1,4 @@
-"""Bootstrap helpers — extracted from gubbi.main.lifespan.
+"""Bootstrap helpers -- extracted from gubbi.main.lifespan.
 
 Each helper encapsulates one startup concern so the lifespan reads as a
 sequence of named calls.  Values are passed through explicit parameters.

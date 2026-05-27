@@ -1,4 +1,4 @@
-"""Tests for storage/pg_setup.py — pool initialisation and schema bootstrap."""
+"""Tests for storage/pg_setup.py -- pool initialisation and schema bootstrap."""
 
 import asyncpg
 import pytest

@@ -1,4 +1,4 @@
-"""Topic repository — all SQL for topics table."""
+"""Topic repository -- all SQL for topics table."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ async def get_id(conn: asyncpg.Connection, topic: str) -> int:
     row = await conn.fetchrow("SELECT id FROM topics WHERE path = $1", topic)
     if row:
         return int(row["id"])
-    msg = f"Topic '{topic}' not found — create it first with journal_create_topic"
+    msg = f"Topic '{topic}' not found -- create it first with journal_create_topic"
     raise TopicNotFoundError(msg)
 
 
@@ -116,7 +116,7 @@ async def list_all(
 ) -> tuple[list[TopicMeta], int]:
     """List topics sorted by most recently updated. Returns (topics, total_count).
 
-    total_count reflects the full filtered set before LIMIT — use for pagination.
+    total_count reflects the full filtered set before LIMIT -- use for pagination.
     """
     params: list[Any] = []
     where = ""
@@ -159,5 +159,5 @@ async def count(
         where = (
             f"WHERE t.path LIKE {_add_param(params, _escape_like(topic_prefix) + '%')} ESCAPE '!'"
         )
-    sql = f"SELECT COUNT(*) FROM topics t {where}"  # noqa: S608 — safe: topic_prefix is validated by validate_topic(); all user values go through _add_param()
+    sql = f"SELECT COUNT(*) FROM topics t {where}"  # noqa: S608 -- safe: topic_prefix is validated by validate_topic(); all user values go through _add_param()
     return int(await conn.fetchval(sql, *params) or 0)

@@ -39,7 +39,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit: int = DEFAULT_TOPICS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Browse all journal topics — "what topics do I have?" or "what do I track?".
+        """Browse all journal topics -- "what topics do I have?" or "what do I track?".
 
         Use when the user asks about their journal structure, or when you need to
         discover valid topic paths for other tools.
@@ -105,7 +105,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         Required before writing entries or conversations to a new topic.
         Check journal_list_topics or the briefing first to avoid duplicates.
-        Topic paths are permanent and cannot be renamed after creation — choose carefully.
+        Topic paths are permanent and cannot be renamed after creation -- choose carefully.
 
         Args:
             topic: Topic path (e.g. 'hobbies/woodworking').

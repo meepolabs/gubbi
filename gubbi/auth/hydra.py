@@ -61,18 +61,18 @@ class InMemoryHydraCache:
 
 
 def _token_digest(token: str) -> tuple[str, str]:
-    """Return (full_sha256_hex, 12_char_log_fp) — single hash, two views."""
+    """Return (full_sha256_hex, 12_char_log_fp) -- single hash, two views."""
     digest = hashlib.sha256(token.encode()).hexdigest()
     return digest, digest[:12]
 
 
 def _cache_key(token: str) -> str:
-    """Full sha256 hex — collision-resistant cache key (256 bits)."""
+    """Full sha256 hex -- collision-resistant cache key (256 bits)."""
     return _token_digest(token)[0]
 
 
 def _log_fp(token: str) -> str:
-    """Truncated sha256 for log correlation only — not a cache key."""
+    """Truncated sha256 for log correlation only -- not a cache key."""
     return _token_digest(token)[1]
 
 

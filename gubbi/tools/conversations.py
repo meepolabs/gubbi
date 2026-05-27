@@ -334,7 +334,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         Call when the user asks to save, or offer during meaningful moments:
         decisions, plans, breakthroughs, or reflections. The topic must already
-        exist — check the briefing, or create one with journal_create_topic.
+        exist -- check the briefing, or create one with journal_create_topic.
 
         Re-saving the same topic + title updates the previous version.
 
@@ -379,7 +379,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         limit: int = DEFAULT_CONVERSATIONS_LIMIT,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Browse saved conversations by topic — 'what conversations have we had about X?'.
+        """Browse saved conversations by topic -- 'what conversations have we had about X?'.
 
         Use this tool when the user wants to browse a list of chats, not find
         specific content within them. For keyword search across both entries AND

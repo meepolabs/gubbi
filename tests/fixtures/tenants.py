@@ -3,13 +3,13 @@
 These fixtures compose on top of ``conftest.py``'s ``app_pool`` and
 ``admin_pool``. They create two throwaway users (A and B), return their
 UUIDs, and expose a ``seed_for`` helper that populates every tenant
-table with rows owned by a specific user — using ``admin_pool`` so the
+table with rows owned by a specific user -- using ``admin_pool`` so the
 seed bypasses RLS (otherwise the WITH CHECK clause blocks cross-tenant
 INSERTs, which is exactly what the isolation tests need to verify
 separately).
 
 Tests then assert against the data using ``app_pool`` +
-``user_scoped_connection`` — that pool has no BYPASSRLS attribute so
+``user_scoped_connection`` -- that pool has no BYPASSRLS attribute so
 the policies run.
 """
 
@@ -44,7 +44,7 @@ class TenantSeed:
     entry_ids: tuple[int, ...]
     conversation_id: int | None
     message_ids: tuple[int, ...]
-    # entry_embeddings is keyed by entry_id (PK) — one embedding per entry_id above.
+    # entry_embeddings is keyed by entry_id (PK) -- one embedding per entry_id above.
 
 
 async def _create_user(admin_pool: asyncpg.Pool, email: str) -> UUID:
@@ -88,7 +88,7 @@ async def seed_for(
     """Populate every tenant table with rows owned by ``user_id``.
 
     Runs through ``admin_pool`` (BYPASSRLS) so the inserts ignore the
-    ``tenant_isolation`` WITH CHECK clause — that's the whole point: the
+    ``tenant_isolation`` WITH CHECK clause -- that's the whole point: the
     test harness needs to plant data the RLS-enforced pool will later
     refuse to reach. Everything writes in one transaction so a partial
     seed never leaves the DB inconsistent.
@@ -193,7 +193,7 @@ async def seed_for(
 
         # Plant one embedding row per entry. entry_embeddings.entry_id IS the PK,
         # so there is no separate ``id`` column. A unit vector (first dim 1.0) keeps
-        # cosine distance well-defined for HNSW ORDER BY tests — zero vectors would
+        # cosine distance well-defined for HNSW ORDER BY tests -- zero vectors would
         # produce NaN distances and mask the real ordering behaviour.
         unit_embedding = [1.0] + [0.0] * 383
         for entry_id in entry_ids:
