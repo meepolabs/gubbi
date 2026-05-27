@@ -48,7 +48,7 @@ gubbi/
   pyproject.toml          Poetry, Python ~3.12
   alembic.ini             migrations under gubbi/alembic/
   docker-compose.yml      gubbi + postgres (bind-mounted ./data/)
-  deployment/             Dockerfile, entrypoint, nginx snippet;
+  deployment/             Dockerfile (builds the gubbi MCP server image -- used by docker-compose.yml and the prod Kamal deploy), entrypoint, nginx snippet;
                           deployment/scripts/ holds init.sql, grants.sql,
                           restore-db.sh, verify-db-invariants.sh
   tools/                  standalone helpers (env-contract checker)
