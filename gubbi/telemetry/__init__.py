@@ -135,7 +135,7 @@ def rebind_metrics_after_configure() -> None:
     # corresponding clear in the ``_restore_otel_globals`` autouse
     # fixture in ``tests/unit/test_telemetry_metrics.py`` so tests do
     # not leak state. Both lists must stay in sync; the
-    # ``test_b5_orphan_counter_modules_have_no_module_scope_counter_names``
+    # ``test_orphan_counter_modules_have_no_module_scope_counter_names``
     # regression test is the canary that catches one specific drift
     # shape (re-introducing a module-scope counter) but does NOT catch
     # the rebind-list omission shape.

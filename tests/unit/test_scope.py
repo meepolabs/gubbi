@@ -115,7 +115,7 @@ class TestScopeGrantsMapping:
 
 
 # ---------------------------------------------------------------------------
-# Item 8: Precomputed dicts correctness
+# Precomputed dicts correctness
 # ---------------------------------------------------------------------------
 
 
