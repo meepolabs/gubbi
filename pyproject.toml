@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "gubbi"
-version = "0.3.0"
+version = "0.3.1"
 description = "Personal journal MCP server - append-only historical record with semantic memory"
 authors = ["madhukar01 <mholla8@gmail.com>"]
 license = "AGPL-3.0-or-later"
