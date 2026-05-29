@@ -53,4 +53,4 @@ repos:
       - id: check-no-double-prefix
         name: check-no-double-prefix
         language: system
-        entry: python tools/check_no_double_prefix.py
+        entry: python -m gubbi_common.tools.check_no_double_prefix
