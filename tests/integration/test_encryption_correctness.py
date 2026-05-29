@@ -14,7 +14,7 @@ from gubbi_common.db.user_scoped import user_scoped_connection
 from mcp.server.fastmcp import FastMCP
 
 from gubbi.app_context import AppContext
-from gubbi.auth_context import current_user_id
+from gubbi.auth_context import current_token_scopes, current_user_id
 from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.models.conversation import Message
@@ -36,11 +36,13 @@ class _StaticEmbeddingService(EmbeddingService):
 
 
 async def _with_user(user_id: UUID, coro: Any) -> Any:
-    token = current_user_id.set(user_id)
+    user_token = current_user_id.set(user_id)
+    scope_token = current_token_scopes.set(frozenset({"journal"}))
     try:
         return await coro
     finally:
-        current_user_id.reset(token)
+        current_token_scopes.reset(scope_token)
+        current_user_id.reset(user_token)
 
 
 async def _insert_user(admin_pool: asyncpg.Pool, email: str) -> UUID:
