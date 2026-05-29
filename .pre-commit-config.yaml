@@ -56,4 +56,4 @@ repos:
         language_version: python3.12
         entry: python -m gubbi_common.tools.check_no_double_prefix
         additional_dependencies:
-          - "gubbi-common @ git+https://github.com/meepolabs/gubbi-common.git@3627369"
+          - "gubbi-common @ git+https://github.com/meepolabs/gubbi-common.git@ce7e2a4"
