@@ -284,7 +284,7 @@ async def test_worker_startup_aborts_when_pg_probe_fails(
     """An unsafe pg_log GUC raises ProbeFailure and closes worker resources in reverse order.
 
     After T3 the runner is the failure-translation layer:
-    ``probe_pg_log_settings`` raising ``PgLogProbeError`` inside the
+    ``_probe_pg_log_settings`` raising ``PgLogProbeError`` inside the
     PgLogProbe surfaces as ``ProbeFailure`` from ``runner.run()``. The
     outer ``except BaseException`` block in the worker's startup body
     still drains every resource best-effort before the error propagates
@@ -300,10 +300,10 @@ async def test_worker_startup_aborts_when_pg_probe_fails(
     handles = _patch_worker_dependencies(monkeypatch)
     _stub_telemetry(monkeypatch)
     # Use the real StartupRunner so the PgLogProbe actually executes; stub
-    # the underlying ``probe_pg_log_settings`` at the probe's import path
+    # the underlying ``_probe_pg_log_settings`` at the probe's import path
     # to raise the canonical PgLogProbeError.
     monkeypatch.setattr(
-        "gubbi_common.bootstrap.probes.pg_log.probe_pg_log_settings",
+        "gubbi_common.bootstrap.probes.pg_log._probe_pg_log_settings",
         AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all")),
     )
 
