@@ -20,10 +20,8 @@ from __future__ import annotations
 
 from gubbi.bootstrap.probes.bind_address import BindAddressProbe
 from gubbi.bootstrap.probes.replica_count import ReplicaCountWarnProbe
-from gubbi.bootstrap.probes.worker_replica_count import WorkerReplicaCountWarnProbe
 
 __all__ = [
     "BindAddressProbe",
     "ReplicaCountWarnProbe",
-    "WorkerReplicaCountWarnProbe",
 ]

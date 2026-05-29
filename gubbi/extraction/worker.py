@@ -20,7 +20,7 @@ from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
-from gubbi.bootstrap import WorkerReplicaCountWarnProbe
+from gubbi.bootstrap import ReplicaCountWarnProbe
 from gubbi.config import Settings, get_settings
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
@@ -265,21 +265,22 @@ async def startup(ctx: ExtractionContext) -> None:
         # ``extract_conversation``). RedisPingProbe enforces Redis
         # liveness at boot -- the worker depends on Redis for arq job
         # poll, BudgetHelper pre_charge, and audit fail-open.
-        # WorkerReplicaCountWarnProbe flags the single-worker
-        # deploy-policy violation (worker variant) and
-        # increments the alertable ``gateway.replica_count_warning``
-        # counter. Mode for PgLogProbe is consumed from
-        # ``settings.pg_log_probe_mode`` (was ``JOURNAL_PG_LOG_PROBE_MODE``
-        # in the pre-StartupRunner shape); replica count is consumed
-        # from ``settings.replica_count`` (was the worker's now-deleted
-        # ``_validate_replica_count`` helper, which Settings.replica_count
-        # ge=1 supersedes at construction time).
+        # ReplicaCountWarnProbe(role="worker") flags the single-worker
+        # deploy-policy violation and increments the alertable
+        # ``gateway.replica_count_warning`` counter. Mode for PgLogProbe
+        # is consumed from ``settings.pg_log_probe_mode`` (was
+        # ``JOURNAL_PG_LOG_PROBE_MODE`` in the pre-StartupRunner shape);
+        # replica count is consumed from ``settings.replica_count`` (was
+        # the worker's now-deleted ``_validate_replica_count`` helper,
+        # which Settings.replica_count ge=1 supersedes at construction
+        # time).
         probes: list[StartupProbe] = [
             PgLogProbe(pool=pool, mode=settings.pg_log_probe_mode),
             RedisPingProbe(client=redis_client),
-            WorkerReplicaCountWarnProbe(
+            ReplicaCountWarnProbe(
                 replica_count=settings.replica_count,
                 pool_max_per_pod=pool.get_max_size(),
+                role="worker",
             ),
         ]
         runner = StartupRunner(

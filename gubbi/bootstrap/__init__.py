@@ -14,13 +14,11 @@ from gubbi.bootstrap._teardown import teardown_lifespan_resources
 from gubbi.bootstrap.probes import (
     BindAddressProbe,
     ReplicaCountWarnProbe,
-    WorkerReplicaCountWarnProbe,
 )
 
 __all__ = [
     "BindAddressProbe",
     "ReplicaCountWarnProbe",
-    "WorkerReplicaCountWarnProbe",
     "build_mcp_middleware",
     "check_trust_gateway_bind_address",
     "decode_gateway_secret",
