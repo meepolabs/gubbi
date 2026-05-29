@@ -1,4 +1,4 @@
-"""Worker startup wires PgLogProbe + WorkerReplicaCountWarnProbe through StartupRunner.
+"""Worker startup wires PgLogProbe + ReplicaCountWarnProbe(role="worker") through StartupRunner.
 
 After T3 the Arq worker mirrors the gubbi HTTP lifespan: probes are
 constructed and handed to ``StartupRunner.run()``. The runner emits
@@ -14,7 +14,7 @@ Tests cover:
   propagates.
 * Settings rejects invalid ``JOURNAL_REPLICA_COUNT`` at construction
   (one level UP from the worker, after T3 deleted ``_validate_replica_count``).
-* WorkerReplicaCountWarnProbe emits the alertable counter + structured
+* ReplicaCountWarnProbe(role="worker") emits the alertable counter + structured
   WARN when ``replica_count > 1``; default 1 stays silent.
 * OTel wiring stays one-shot per process; a configure-time failure leaves
   the latch unset so a retry can re-try.
@@ -35,7 +35,7 @@ from gubbi_common.bootstrap import (
 )
 from gubbi_common.bootstrap.probes import PgLogProbe
 
-from gubbi.bootstrap.probes.worker_replica_count import WorkerReplicaCountWarnProbe
+from gubbi.bootstrap.probes.replica_count import ReplicaCountWarnProbe
 from gubbi.extraction import worker as worker_module
 
 # Stub app-pool max size returned by ``pool.get_max_size()``. The replica
@@ -181,7 +181,7 @@ def _stub_runner_with_capture(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]
 
 
 # ---------------------------------------------------------------------------
-# Probe wiring: the worker constructs PgLogProbe + WorkerReplicaCountWarnProbe
+# Probe wiring: the worker constructs PgLogProbe + ReplicaCountWarnProbe(role="worker")
 # ---------------------------------------------------------------------------
 
 
@@ -267,7 +267,7 @@ async def test_worker_startup_probe_order_is_pg_log_redis_ping_then_replica_coun
     assert len(probes) == 3
     assert isinstance(probes[0], PgLogProbe)
     assert isinstance(probes[1], RedisPingProbe)
-    assert isinstance(probes[2], WorkerReplicaCountWarnProbe)
+    assert isinstance(probes[2], ReplicaCountWarnProbe)
 
     get_settings.cache_clear()
 
@@ -428,7 +428,7 @@ async def test_worker_startup_warns_and_increments_counter_when_replicas_gt_1(
     The worker is fixed at a single replica by deploy convention. Replica
     count > 1 multiplies the per-pod extraction-budget logic + DB pool
     N-fold AND violates the single-worker policy. After T3 the
-    WorkerReplicaCountWarnProbe emits both signals through the runner.
+    ReplicaCountWarnProbe(role="worker") emits both signals through the runner.
 
     Emitter distinction across services (gubbi HTTP / worker / cloud-api)
     is via the ``service.name`` RESOURCE attribute set at OTel init, not
@@ -446,7 +446,7 @@ async def test_worker_startup_warns_and_increments_counter_when_replicas_gt_1(
     # signal can be asserted without standing up a real OTel meter.
     record_mock = MagicMock()
     monkeypatch.setattr(
-        "gubbi.bootstrap.probes.worker_replica_count.record_replica_count_warning",
+        "gubbi.bootstrap.probes.replica_count.record_replica_count_warning",
         record_mock,
     )
 
@@ -457,7 +457,7 @@ async def test_worker_startup_warns_and_increments_counter_when_replicas_gt_1(
     record_mock.assert_called_once_with(replica_count=2)
 
     # The runner's structured WARN event carries the policy-violation
-    # diagnostic the WorkerReplicaCountWarnProbe builds.
+    # diagnostic the ReplicaCountWarnProbe(role="worker") builds.
     warnings = [
         log
         for log in logs
@@ -493,7 +493,7 @@ async def test_worker_startup_silent_at_default_replica_count(
 
     record_mock = MagicMock()
     monkeypatch.setattr(
-        "gubbi.bootstrap.probes.worker_replica_count.record_replica_count_warning",
+        "gubbi.bootstrap.probes.replica_count.record_replica_count_warning",
         record_mock,
     )
 
