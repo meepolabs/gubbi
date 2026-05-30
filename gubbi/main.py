@@ -243,7 +243,6 @@ async def _build_app_ctx(
     embedding_service = EmbeddingService()
     await logger.info("EmbeddingService ready")
 
-    settings.knowledge_dir.mkdir(parents=True, exist_ok=True)
     settings.conversations_json_dir.mkdir(parents=True, exist_ok=True)
 
     if admin_pool is None and settings.auth.operator_email:
@@ -426,6 +425,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
         # compare in the middleware can never match (every token is >= one char).
         effective_api_key = "" if introspector is not None else settings.auth.api_key
+
+        # Trust-gateway mode authenticates via gateway-signed headers only --
+        # an API key left in env is dead config. Fail-fast so a Mode-2 -> Mode-3
+        # cutover that forgot to unset JOURNAL_API_KEY surfaces at boot rather
+        # than silently dropping the key and confusing operators.
+        if settings.auth.trust_gateway and effective_api_key:
+            await logger.error("auth_strategy_conflict")
+            raise ValueError(
+                "JOURNAL_API_KEY is set but JOURNAL_TRUST_GATEWAY is enabled. "
+                "API key auth is disabled in trust-gateway mode. "
+                "Either unset JOURNAL_API_KEY or unset JOURNAL_TRUST_GATEWAY."
+            )
 
         # Point clients at the OAuth protected-resource metadata doc so they can
         # discover the authorization server (MCP spec 2025-11-25). Only surface
