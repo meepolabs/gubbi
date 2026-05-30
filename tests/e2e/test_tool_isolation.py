@@ -128,7 +128,6 @@ async def rls_tools(app_pool: asyncpg.Pool, tmp_path_factory: Any) -> dict:
         logger=structlog.get_logger("test"),
         cipher=_cipher,
     )
-    (tmp_dir / "knowledge").mkdir(exist_ok=True)
     (tmp_dir / "conversations_json").mkdir(exist_ok=True)
 
     mcp = FastMCP("test-gubbi-isolation")

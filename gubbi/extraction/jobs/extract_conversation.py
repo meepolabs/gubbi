@@ -660,6 +660,24 @@ async def extract_conversation(
                 if topic_path is None:
                     # No usable topic -- mark processed via a short dedicated connection.
                     await _mark_skipped_no_topic(pool, user_uuid, conversation_id, job_id)
+                    # Pre-charge refund: the worker spent zero cents on this
+                    # conversation (no extraction ran), so the PRE_CHARGE_CENTS
+                    # debited at ingest must be returned to the user's bucket.
+                    # Mirrors the failure-path refund pattern below; uses
+                    # effective_period_start so the credit lands in the same
+                    # bucket ingest pre-charged. Best-effort: a Redis failure
+                    # here must not break the no-topic exit.
+                    helper = ctx.get("budget_helper")
+                    if helper is not None:
+                        try:
+                            await helper.record_actual_cost(
+                                user_id=user_uuid,
+                                period_start=effective_period_start,
+                                actual_cents=0,
+                                estimated_cents=PRE_CHARGE_CENTS,
+                            )
+                        except Exception:  # broad: redis errors come in many shapes
+                            await log.warning("budget_refund_failed", exc_info=True)
                     return {
                         "topic_path": None,
                         "entries_created": 0,

@@ -25,6 +25,7 @@ from gubbi_common.audit.targets import TargetKind
 from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
+from redis.exceptions import RedisError
 
 from gubbi.api.v1.auth import require_scope
 from gubbi.app_state import get_optional_arq_pool, require_app_ctx
@@ -387,13 +388,27 @@ async def ingest_conversations(
     # leaving ``extraction_jobs.status`` stuck at ``'pending'``.
     arq_pool = get_optional_arq_pool(request)
     if arq_pool is not None:
-        for job_uuid, conversation_id in enqueue_tasks:
-            await arq_pool.enqueue_job(
-                "extract_conversation",
-                conversation_id,
-                str(user_id),
-                str(job_uuid),
-                _job_id=str(job_uuid),
+        # Wrap the enqueue loop: a Redis blip between TX2 commit and
+        # enqueue would otherwise leak the extraction_jobs row into the
+        # 'pending' state with PRE_CHARGE_CENTS already debited. The
+        # conversation IS saved (TX2 already committed); orphan_cleanup's
+        # pending sweep will mark these rows failed and refund the
+        # pre-charge so the user is not over-billed.
+        try:
+            for job_uuid, conversation_id in enqueue_tasks:
+                await arq_pool.enqueue_job(
+                    "extract_conversation",
+                    conversation_id,
+                    str(user_id),
+                    str(job_uuid),
+                    _job_id=str(job_uuid),
+                )
+        except (RedisError, OSError, TimeoutError) as exc:
+            await log.warning(
+                "ingest_enqueue_failed",
+                error_class=type(exc).__name__,
+                pending_jobs=len(enqueue_tasks),
+                exc_info=True,
             )
 
     for path in superseded_json_paths:

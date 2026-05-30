@@ -52,7 +52,7 @@ One repo on the server:
 ~/gubbi/           # This repo -- server code, docker-compose.yml, Dockerfile, data/
     +-- data/           # Bind-mounted persistent data (see below)
         +-- postgres/   #   PostgreSQL WAL + tablespaces  -> /var/lib/postgresql/data
-        +-- journal/    #   oauth.db, knowledge/, conversations_json/  -> /app/journal
+        +-- journal/    #   oauth.db, conversations_json/  -> /app/journal
         +-- onnx/       #   Cached ONNX embedding model  -> /home/appuser/.cache/gubbi
 ```
 
@@ -74,7 +74,7 @@ All configuration is via `JOURNAL_*` environment variables. In production, use a
 | `JOURNAL_SERVER_URL` | for self-host OAuth | Public HTTPS URL advertised in the OAuth + RFC 7591 DCR metadata endpoints | `https://journal.yourdomain.com` |
 | `JOURNAL_PASSWORD_HASH` | for self-host OAuth (Mode 2 only) | Bcrypt hash of the single operator's password. Setting this activates the self-host OAuth server (authorize/token/register/revoke + login form). Empty keeps the server API-key-only (Mode 1). | `$2b$12$...` |
 
-`JOURNAL_DB_APP_URL`, `JOURNAL_DB_ADMIN_URL`, and `JOURNAL_DB_MIGRATION_URL` are composed inside `docker-compose.yml` from the three password values above -- configure those in your secrets manager, not the full DSNs. The runtime pool uses `journal_app` (RLS-enforced, no DDL); alembic resolves its DSN from `JOURNAL_DB_MIGRATION_URL` (preferred) or `JOURNAL_DB_ADMIN_URL`, both pointing at the privileged `journal_admin` role. The OAuth SQLite file lives at `<JOURNAL_DATA_DIR>/oauth.db` and needs no separate config. Edit `data/journal/knowledge/user-profile.md` to set your identity profile.
+`JOURNAL_DB_APP_URL`, `JOURNAL_DB_ADMIN_URL`, and `JOURNAL_DB_MIGRATION_URL` are composed inside `docker-compose.yml` from the three password values above -- configure those in your secrets manager, not the full DSNs. The runtime pool uses `journal_app` (RLS-enforced, no DDL); alembic resolves its DSN from `JOURNAL_DB_MIGRATION_URL` (preferred) or `JOURNAL_DB_ADMIN_URL`, both pointing at the privileged `journal_admin` role. The OAuth SQLite file lives at `<JOURNAL_DATA_DIR>/oauth.db` and needs no separate config.
 
 Generate a bcrypt password hash via the built-in CLI:
 

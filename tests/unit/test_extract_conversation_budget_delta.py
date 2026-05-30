@@ -666,3 +666,189 @@ async def test_refund_skipped_with_metric_when_job_period_lookup_returns_none() 
     helper.record_actual_cost.assert_not_called()
     unknown_period_calls = [c for c in add_calls if c[1].get("reason") == "unknown_period"]
     assert len(unknown_period_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Pre-charge refund on no-topic skip path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_no_topic_path_refunds_pre_charge() -> None:
+    """When categorization yields no usable topic_path, the pre-charge is refunded.
+
+    The worker reaches Phase 2, the LLM returns a topic_path that
+    ``harden_llm_topic_path`` rejects (or returns None), and the worker exits
+    via ``_mark_skipped_no_topic`` without spending any cents on the user's
+    bucket. The pre-charge debited at ingest must therefore be refunded with
+    ``actual_cents=0, estimated_cents=PRE_CHARGE_CENTS`` against the
+    pre-charge period (loaded from the job row in Phase 1).
+
+    Catches: a regression that drops the refund call from the no-topic exit,
+    leaving PRE_CHARGE_CENTS as a phantom debit on the user's bucket -- the
+    operator over-bills the user for a categorization that produced nothing.
+    """
+    from gubbi_common.budget import PRE_CHARGE_CENTS
+
+    redis = AsyncMock()
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        # Phase 2 returns topic_path=None -- the no-topic exit fires.
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            return_value=(_FAKE_CATEGORIZATION, None),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_skipped_no_topic",
+            new=AsyncMock(),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        result = await extract_conversation(
+            ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID
+        )
+
+    assert result["skipped"] is True
+    assert result["topic_path"] is None
+    helper.record_actual_cost.assert_called_once()
+    kwargs = helper.record_actual_cost.call_args.kwargs
+    assert kwargs["actual_cents"] == 0
+    assert kwargs["estimated_cents"] == PRE_CHARGE_CENTS
+    # Refund routes against the pre-charge bucket loaded from the job row.
+    assert kwargs["period_start"] == date(2026, 5, 1)
+
+
+@pytest.mark.asyncio
+async def test_no_topic_path_refund_failure_logged_and_swallowed() -> None:
+    """A Redis failure during the no-topic refund must not break the skip exit.
+
+    Mirrors the success-path delta tolerance: extraction-side persistence
+    decisions are durable in Postgres; the budget refund is best-effort.
+    A Redis blip cannot turn the no-topic skip into a hard failure that
+    triggers the outer-except path (which would then mark the job failed
+    rather than completed).
+    """
+    redis = AsyncMock()
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock(side_effect=ConnectionError("redis is down"))
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=helper)
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            return_value=(_FAKE_CATEGORIZATION, None),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_skipped_no_topic",
+            new=AsyncMock(),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        # Must NOT raise -- Redis failure is swallowed and the no-topic
+        # skip envelope returns cleanly.
+        result = await extract_conversation(
+            ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID
+        )
+
+    assert result["skipped"] is True
+    helper.record_actual_cost.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_no_topic_path_skips_refund_when_helper_missing() -> None:
+    """Self-host (helper=None) takes the no-topic exit cleanly with no refund call."""
+    redis = AsyncMock()
+    ctx = _make_minimal_ctx(redis=redis, budget_helper=None)
+
+    patches = [
+        patch("gubbi.extraction.jobs.extract_conversation.user_scoped_connection"),
+        patch("gubbi.extraction.jobs.extract_conversation._check_idempotent", return_value=False),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._load_conversation_for_extraction",
+            return_value=(MagicMock(), [], []),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._categorize_and_resolve_topic",
+            return_value=(_FAKE_CATEGORIZATION, None),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation._mark_skipped_no_topic",
+            new=AsyncMock(),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.current_period_start",
+            return_value=date(2026, 5, 1),
+        ),
+        patch(
+            "gubbi.extraction.jobs.extract_conversation.extraction_jobs.get_period_start",
+            new=AsyncMock(return_value=date(2026, 5, 1)),
+        ),
+    ]
+
+    with (
+        patches[0] as mock_conn_cm,
+        patches[1],
+        patches[2],
+        patches[3],
+        patches[4],
+        patches[5],
+        patches[6],
+    ):
+        _setup_conn_mock(mock_conn_cm)
+        result = await extract_conversation(
+            ctx, conversation_id=1, user_id=_USER_ID_STR, job_id=_JOB_ID
+        )
+
+    assert result["skipped"] is True
+    assert result["topic_path"] is None

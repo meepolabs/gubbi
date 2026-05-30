@@ -475,11 +475,6 @@ class Settings(BaseSettings):
         return self.app_env in ("staging", "production")
 
     @property
-    def knowledge_dir(self) -> Path:
-        """Filesystem location of user-knowledge markdown (profile, key facts)."""
-        return self.data_dir / "knowledge"
-
-    @property
     def conversations_json_dir(self) -> Path:
         """Filesystem location of archived conversation JSON blobs."""
         return self.data_dir / "conversations_json"

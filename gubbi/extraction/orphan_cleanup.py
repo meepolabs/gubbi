@@ -110,27 +110,38 @@ async def run_orphan_cleanup(
         await asyncio.sleep(sleep_seconds)
         try:
             # ---- pending sweep (enqueue_lost) -------------------------------
-            result = await admin_pool.fetchval(
+            pending_rows = await admin_pool.fetch(
                 """
-                WITH updated AS (
-                    UPDATE extraction_jobs
-                    SET status = 'failed',
-                        error_code = 'enqueue_lost',
-                        completed_at = now()
-                    WHERE status = 'pending'
-                      AND created_at < now() - ($1 * interval '1 minute')
-                    RETURNING id
-                )
-                SELECT count(*) FROM updated
+                UPDATE extraction_jobs
+                SET status = 'failed',
+                    error_code = 'enqueue_lost',
+                    completed_at = now()
+                WHERE status = 'pending'
+                  AND created_at < now() - ($1 * interval '1 minute')
+                RETURNING id, user_id, period_start
                 """,
                 threshold_minutes,
             )
-            swept_pending = int(result or 0)
+            swept_pending = len(pending_rows)
             if swept_pending > 0:
                 await log.info("orphan_cleanup_swept", swept=swept_pending, state="pending")
                 _get_orphan_cleanup_swept_counter().add(
                     swept_pending, attributes={"result": "swept", "state": "pending"}
                 )
+                # Best-effort refund per swept row -- logged + swallowed on failure.
+                # Mirrors the running-sweep refund loop below: a row stuck in
+                # pending got a successful pre-charge debit at ingest but the
+                # arq enqueue never reached the worker, so the cents were
+                # never spent. Refund returns PRE_CHARGE_CENTS to the user's
+                # bucket using the same period_start ingest debited.
+                if budget_helper is not None:
+                    for row in pending_rows:
+                        await _refund_swept_row(
+                            budget_helper,
+                            row["user_id"],
+                            row["period_start"],
+                            log,
+                        )
             else:
                 _get_orphan_cleanup_swept_counter().add(
                     1, attributes={"result": "none", "state": "pending"}
