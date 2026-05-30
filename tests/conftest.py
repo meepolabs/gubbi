@@ -53,7 +53,6 @@ TEST_DATABASE_URL = os.environ.get("TEST_DATABASE_URL", _DEFAULT_TEST_DB)
 @pytest.fixture
 def tmp_journal(tmp_path: Path) -> Path:
     """Create a temporary journal directory structure."""
-    (tmp_path / "knowledge").mkdir()
     (tmp_path / "conversations_json").mkdir()
     return tmp_path
 

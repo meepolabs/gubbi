@@ -71,10 +71,8 @@ data/
 |-- onnx/                            # Cached ONNX embedding model (~/.cache/gubbi)
 +-- journal/
     |-- oauth.db                     # OAuth tokens/clients (SQLite, separate from PG)
-    |-- conversations_json/          # Archived conversation transcripts (JSON)
-    |   +-- {uuid}.json
-    +-- knowledge/
-        +-- user-profile.md          # Your identity profile, loaded by journal_briefing
+    +-- conversations_json/          # Archived conversation transcripts (JSON)
+        +-- {uuid}.json
 ```
 
 All journal data lives in PostgreSQL 17 (`topics`, `conversations`, `entries`, `messages`, `entry_embeddings`). Full-text search is a `tsvector` generated column with a GIN index -- auto-maintained by the database, no reindex needed. Semantic search is a `pgvector` HNSW index keyed to `entries.id` via `ON DELETE CASCADE`. A local ONNX model (`all-MiniLM-L6-v2`, ~24MB quantized) generates embeddings on the CPU. Rebuilding semantic embeddings is a recovery operation available through internal primitives -- `tsvector` stays in sync automatically.

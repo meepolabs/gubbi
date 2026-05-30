@@ -161,7 +161,7 @@ Message count validated (max 1000) -> conversation JSON archived to `conversatio
 
 ### Briefing path (journal_briefing)
 
-User profile is read from `knowledge/user-profile.md` -> a canned key-facts query embedding is pre-encoded outside the pool -> one user-scoped connection fetches this week's entries (most-recent-first, capped at 25), the top 20 recently-updated topics, topic count, entry stats, and semantic key-fact matches via `embedding_service.search_by_vector`. All prose is decrypted before return.
+A canned key-facts query embedding is pre-encoded outside the pool -> one user-scoped connection fetches this week's entries (most-recent-first, capped at 25), the top 20 recently-updated topics, topic count, entry stats, and semantic key-fact matches via `embedding_service.search_by_vector`. All prose is decrypted before return.
 
 ## Concurrency model
 

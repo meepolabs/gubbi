@@ -80,7 +80,7 @@ service, settings, cipher, operator UUID).
 | `crypto/` | App-layer AES-256-GCM. `cipher.py` (`ContentCipher`, key-version-in-nonce, `load_master_keys_from_env`). `guard.py` (`require_cipher` fail-fast for tool entry points). |
 | `core/` | PEP 562 deprecation shim. Old import paths under `core/*` still work but new code uses the canonical homes (`audit/`, `crypto/`, top-level `auth_context.py` etc). Will be removed; do not add new symbols here. |
 | `users/bootstrap.py` | `scaffold_operator(admin_pool, email, tz)` -- idempotent operator users row in Modes 1/2. |
-| `storage/` | `pg_setup.py` (asyncpg pool init + advisory locks), `embedding_service.py` (ONNX MiniLM-L6-v2 + pgvector), `knowledge.py` (filesystem reader for user-profile.md), `repositories/` (all SQL: topics, entries, conversations, search). Repo functions take `conn: asyncpg.Connection` first, encrypt/decrypt via injected cipher. |
+| `storage/` | `pg_setup.py` (asyncpg pool init + advisory locks), `embedding_service.py` (ONNX MiniLM-L6-v2 + pgvector), `repositories/` (all SQL: topics, entries, conversations, search). Repo functions take `conn: asyncpg.Connection` first, encrypt/decrypt via injected cipher. |
 | `models/` | Plain dataclasses: `TopicMeta`, `Entry`, `Message`, `ConversationMeta`, `SearchResult`. |
 | `tools/` | MCP tool handlers grouped by surface. Each module exports `register(mcp, app_ctx)`. `registry.py` calls them in order: topics -> entries -> search -> conversations -> context. `admin.py` is a library function (not registered), used by future admin API. |
 | `api/v1/` | REST endpoints for cloud-side gateway forwarding: `auth.py`, `ingest.py`, `extraction.py`. |

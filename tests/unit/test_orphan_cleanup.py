@@ -58,10 +58,13 @@ async def _run_one_cycle(
 
 
 def _empty_pool(swept_count: int = 0) -> AsyncMock:
-    """Build a pool whose pending sweep returns ``swept_count`` and running sweep returns []."""
+    """Build a pool whose pending sweep returns ``swept_count`` rows and running sweep returns []."""
     pool = AsyncMock(spec=asyncpg.Pool)
-    pool.fetchval = AsyncMock(return_value=swept_count)
-    pool.fetch = AsyncMock(return_value=[])
+    pending_rows = [
+        {"id": f"p{i}", "user_id": f"u{i}", "period_start": "2026-05-01"}
+        for i in range(swept_count)
+    ]
+    pool.fetch = AsyncMock(side_effect=[pending_rows, []])
     return pool
 
 
@@ -72,9 +75,9 @@ async def test_stale_rows_updated() -> None:
 
     await _run_one_cycle(pool, threshold_minutes=30)
 
-    assert pool.fetchval.called
-    # Verify the SQL contains the right clauses
-    sql_arg = pool.fetchval.call_args[0][0]
+    assert pool.fetch.called
+    # Verify the SQL contains the right clauses (first call is pending lane).
+    sql_arg = pool.fetch.call_args_list[0].args[0]
     assert "enqueue_lost" in sql_arg
     assert "pending" in sql_arg
     assert "failed" in sql_arg
@@ -87,19 +90,18 @@ async def test_young_rows_untouched() -> None:
 
     await _run_one_cycle(pool, threshold_minutes=30)
 
-    # Threshold passed as parameter to the DB call
-    call_args = pool.fetchval.call_args
-    assert call_args is not None
-    assert call_args[0][1] == 30
+    # Threshold passed as parameter to the pending-lane DB call (first fetch).
+    pending_call = pool.fetch.call_args_list[0]
+    assert pending_call is not None
+    assert pending_call.args[1] == 30
 
 
 @pytest.mark.asyncio
 async def test_postgres_error_caught_loop_continues() -> None:
     """PostgresError must be caught and the loop must continue (not propagate)."""
     pool = AsyncMock(spec=asyncpg.Pool)
-    # First call raises, second returns 0
-    pool.fetchval = AsyncMock(side_effect=[asyncpg.PostgresError("db gone"), 0])
-    pool.fetch = AsyncMock(return_value=[])
+    # First pending-lane call raises, then alternating empty pending + empty running.
+    pool.fetch = AsyncMock(side_effect=[asyncpg.PostgresError("db gone"), [], []])
 
     call_count = 0
 
@@ -115,16 +117,16 @@ async def test_postgres_error_caught_loop_continues() -> None:
         with suppress(asyncio.CancelledError):
             await task
 
-    # Should have called fetchval twice (once raised, once succeeded)
-    assert pool.fetchval.call_count == 2
+    # First cycle: pending raises (running not reached). Second cycle: pending + running both
+    # empty. Total fetch calls: 1 (failed pending) + 2 (second cycle pending + running) = 3.
+    assert pool.fetch.call_count == 3
 
 
 @pytest.mark.asyncio
 async def test_os_error_caught_loop_continues() -> None:
     """OSError must be caught, logged, and the loop must continue."""
     pool = AsyncMock(spec=asyncpg.Pool)
-    pool.fetchval = AsyncMock(side_effect=[OSError("socket reset"), 0])
-    pool.fetch = AsyncMock(return_value=[])
+    pool.fetch = AsyncMock(side_effect=[OSError("socket reset"), [], []])
     mock_log = AsyncMock()
     call_count = 0
 
@@ -142,7 +144,8 @@ async def test_os_error_caught_loop_continues() -> None:
         with suppress(asyncio.CancelledError):
             await task
 
-    assert pool.fetchval.call_count == 2
+    # See test_postgres_error_caught_loop_continues for the call-count breakdown.
+    assert pool.fetch.call_count == 3
     mock_log.warning.assert_awaited_once_with("orphan_cleanup_failed", exc_info=True)
 
 
@@ -217,12 +220,14 @@ async def test_running_sweep_calls_correct_query() -> None:
 async def test_running_sweep_emits_state_running_counter() -> None:
     """Counter has state=running for the second lane and result=swept when rows flip."""
     pool = AsyncMock(spec=asyncpg.Pool)
-    pool.fetchval = AsyncMock(return_value=0)  # no pending sweep
-    # Two stuck running rows
+    # First fetch() = empty pending; second fetch() = two stuck running rows.
     pool.fetch = AsyncMock(
-        return_value=[
-            {"id": "row-1", "user_id": "u1", "period_start": "2026-05-01"},
-            {"id": "row-2", "user_id": "u2", "period_start": "2026-05-01"},
+        side_effect=[
+            [],
+            [
+                {"id": "row-1", "user_id": "u1", "period_start": "2026-05-01"},
+                {"id": "row-2", "user_id": "u2", "period_start": "2026-05-01"},
+            ],
         ]
     )
 
@@ -248,11 +253,13 @@ async def test_running_sweep_refunds_each_row() -> None:
     from gubbi_common.budget import PRE_CHARGE_CENTS
 
     pool = AsyncMock(spec=asyncpg.Pool)
-    pool.fetchval = AsyncMock(return_value=0)
     pool.fetch = AsyncMock(
-        return_value=[
-            {"id": "r1", "user_id": "u1", "period_start": "2026-05-01"},
-            {"id": "r2", "user_id": "u2", "period_start": "2026-05-01"},
+        side_effect=[
+            [],
+            [
+                {"id": "r1", "user_id": "u1", "period_start": "2026-05-01"},
+                {"id": "r2", "user_id": "u2", "period_start": "2026-05-01"},
+            ],
         ]
     )
 
@@ -272,11 +279,13 @@ async def test_running_sweep_refunds_each_row() -> None:
 async def test_running_sweep_refund_failure_logged_and_swallowed() -> None:
     """A Redis failure in the refund path must not abort the rest of the sweep loop."""
     pool = AsyncMock(spec=asyncpg.Pool)
-    pool.fetchval = AsyncMock(return_value=0)
     pool.fetch = AsyncMock(
-        return_value=[
-            {"id": "r1", "user_id": "u1", "period_start": "2026-05-01"},
-            {"id": "r2", "user_id": "u2", "period_start": "2026-05-01"},
+        side_effect=[
+            [],
+            [
+                {"id": "r1", "user_id": "u1", "period_start": "2026-05-01"},
+                {"id": "r2", "user_id": "u2", "period_start": "2026-05-01"},
+            ],
         ]
     )
 
@@ -294,11 +303,113 @@ async def test_running_sweep_refund_failure_logged_and_swallowed() -> None:
 async def test_no_refund_when_helper_missing() -> None:
     """When budget_helper=None (self-host) the sweep still flips rows but does not refund."""
     pool = AsyncMock(spec=asyncpg.Pool)
-    pool.fetchval = AsyncMock(return_value=0)
     pool.fetch = AsyncMock(
-        return_value=[{"id": "r1", "user_id": "u1", "period_start": "2026-05-01"}]
+        side_effect=[
+            [],
+            [{"id": "r1", "user_id": "u1", "period_start": "2026-05-01"}],
+        ]
     )
 
     # No exception expected.
     await _run_one_cycle(pool, budget_helper=None)
     pool.fetch.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Stuck-pending reaper -- refund coverage (mirrors stuck-running tests above)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pending_sweep_calls_correct_query() -> None:
+    """Pending-sweep UPDATE returns id, user_id, period_start so per-row refund can fire.
+
+    The sweep was previously a count-only fetchval; budget refunds were
+    only wired on the running lane. After the contract change, a stuck
+    pending row (ingest pre-charged but enqueue lost) must produce the
+    same refund as a stuck running row.
+    """
+    pool = AsyncMock(spec=asyncpg.Pool)
+    # Both lanes must return iterables now: the pending lane is fetch(),
+    # the running lane is also fetch().
+    pool.fetch = AsyncMock(return_value=[])
+
+    await _run_one_cycle(pool, threshold_minutes=30)
+
+    # The first fetch() call is the pending lane; second is the running lane.
+    assert pool.fetch.await_count == 2
+    pending_sql, pending_threshold = pool.fetch.await_args_list[0].args
+    assert "enqueue_lost" in pending_sql
+    assert "pending" in pending_sql
+    assert "RETURNING id, user_id, period_start" in pending_sql
+    assert pending_threshold == 30
+
+
+@pytest.mark.asyncio
+async def test_pending_sweep_refunds_each_row() -> None:
+    """For every pending row swept, record_actual_cost fires with actual=0 + PRE_CHARGE_CENTS."""
+    from gubbi_common.budget import PRE_CHARGE_CENTS
+
+    pending_rows = [
+        {"id": "p1", "user_id": "u1", "period_start": "2026-05-01"},
+        {"id": "p2", "user_id": "u2", "period_start": "2026-05-01"},
+    ]
+    pool = AsyncMock(spec=asyncpg.Pool)
+    pool.fetch = AsyncMock(side_effect=[pending_rows, []])
+
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+
+    await _run_one_cycle(pool, budget_helper=helper)
+
+    assert helper.record_actual_cost.await_count == 2
+    for call in helper.record_actual_cost.await_args_list:
+        kwargs = call.kwargs
+        assert kwargs["actual_cents"] == 0
+        assert kwargs["estimated_cents"] == PRE_CHARGE_CENTS
+
+
+@pytest.mark.asyncio
+async def test_pending_sweep_refund_failure_logged_and_swallowed() -> None:
+    """A Redis failure in the pending-lane refund path must not abort the rest of the cycle."""
+    pending_rows = [
+        {"id": "p1", "user_id": "u1", "period_start": "2026-05-01"},
+        {"id": "p2", "user_id": "u2", "period_start": "2026-05-01"},
+    ]
+    pool = AsyncMock(spec=asyncpg.Pool)
+    pool.fetch = AsyncMock(side_effect=[pending_rows, []])
+
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock(side_effect=ConnectionError("redis dead"))
+
+    # Must NOT raise -- the loop continues.
+    await _run_one_cycle(pool, budget_helper=helper)
+
+    # Both rows attempted (refund failure on row1 didn't stop row2).
+    assert helper.record_actual_cost.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_pending_sweep_emits_state_pending_counter_when_swept() -> None:
+    """Counter has state=pending and result=swept for the pending lane when rows flip."""
+    pending_rows = [
+        {"id": "p1", "user_id": "u1", "period_start": "2026-05-01"},
+        {"id": "p2", "user_id": "u2", "period_start": "2026-05-01"},
+    ]
+    pool = AsyncMock(spec=asyncpg.Pool)
+    pool.fetch = AsyncMock(side_effect=[pending_rows, []])
+
+    add_calls: list[tuple[int, dict[str, str]]] = []
+
+    def _capture_add(amount: int, attributes: dict[str, str] | None = None) -> None:
+        add_calls.append((amount, attributes or {}))
+
+    counter = _get_orphan_cleanup_swept_counter()
+    with patch.object(counter, "add", side_effect=_capture_add):
+        await _run_one_cycle(pool)
+
+    swept_pending = [
+        a for a in add_calls if a[1].get("state") == "pending" and a[1].get("result") == "swept"
+    ]
+    assert len(swept_pending) == 1
+    assert swept_pending[0][0] == 2

@@ -16,7 +16,6 @@ from gubbi.auth.scope import require_scope
 from gubbi.auth_context import current_user_id
 from gubbi.crypto.cipher import DecryptionError
 from gubbi.crypto.guard import require_cipher
-from gubbi.storage import knowledge
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import search as search_repo
@@ -140,13 +139,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         Call this FIRST in every new conversation before responding.
         Without calling this, you have no memory of who this person is or what they care about.
 
-        Returns who this person is (profile, key facts), what happened recently
-        (this week's entries), and what topics they track.
+        Returns what topics this person tracks and what happened recently
+        (this week's entries), with a key-facts probe for identity hints.
 
         Returns:
-            user_profile (str | None): None when knowledge/user-profile.md is missing,
-                "" when present but empty, populated str when configured.
-            user_profile_status (str): one of "configured", "missing", "empty".
             key_facts (list | None): None when no embeddings exist for this user at all,
                 [] when embeddings exist but query returned no matches,
                 list of dicts when results found.
@@ -155,18 +151,6 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             topics (list of topic objects), topic_count,
             stats (total counts: topics, entries, conversations).
         """
-
-        # User profile -- tri-state: missing / empty / configured
-        profile = knowledge.read(app_ctx.settings.data_dir, "user-profile")
-        if profile is None:
-            user_profile_status = "missing"
-            user_profile = None
-        elif profile == "":
-            user_profile_status = "empty"
-            user_profile = ""
-        else:
-            user_profile_status = "configured"
-            user_profile = profile
 
         # This week's timeline
         _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
@@ -275,8 +259,6 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             clean_entries.append(entry)
 
         briefing_payload = {
-            "user_profile": user_profile,
-            "user_profile_status": user_profile_status,
             "key_facts": key_facts,
             "key_facts_status": key_facts_status,
             "this_week": {
