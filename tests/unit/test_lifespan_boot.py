@@ -642,4 +642,42 @@ def test_settings_rejects_invalid_replica_count(
     with pytest.raises(pydantic.ValidationError, match=expected_match):
         Settings()
 
+
+# ---------------------------------------------------------------------------
+# Auth-strategy fail-fast: JOURNAL_API_KEY + JOURNAL_TRUST_GATEWAY conflict.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_lifespan_raises_when_api_key_and_trust_gateway_both_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trust-gateway deploy with JOURNAL_API_KEY still set must fail-fast.
+
+    Trust-gateway mode authenticates via gateway-signed headers only; an
+    API key in env is dead config. The lifespan guard raises ``ValueError``
+    at startup so a Mode-2 -> Mode-3 cutover that forgot to unset
+    ``JOURNAL_API_KEY`` exits non-zero rather than silently dropping the
+    key (Kamal's deploy-fails-fast contract).
+    """
+    from gubbi.config import get_settings
+
+    _drop_optional_env(monkeypatch)
+    _patch_lifespan_dependencies(monkeypatch)
+
+    # JOURNAL_API_KEY is set by the autouse conftest fixture; pin trust_gateway
+    # on. Defaults: app_env=dev (non-deployed) so the Settings-level
+    # gateway_require_signature validator stays permissive.
+    monkeypatch.setenv("JOURNAL_TRUST_GATEWAY", "true")
+    monkeypatch.setenv("JOURNAL_GATEWAY_REQUIRE_SIGNATURE", "false")
+    get_settings.cache_clear()
+
+    app = FastAPI(lifespan=gubbi.main.lifespan)
+
+    with pytest.raises(ValueError, match="JOURNAL_API_KEY is set but JOURNAL_TRUST_GATEWAY"):
+        async with LifespanManager(app):
+            pass
+
+    get_settings.cache_clear()
+
     get_settings.cache_clear()
