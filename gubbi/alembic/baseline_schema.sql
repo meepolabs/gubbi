@@ -3,22 +3,24 @@
 --
 -- Mechanically derived 2026-05-23 from a pg_dump --schema-only of a
 -- testbench DB at gubbi=0031 + gubbi-cloud=0020. Captures the gubbi-owned
--- subset: pgvector extension; audit_log functions; otel_ro role; the 8
--- gubbi tables (users, topics, conversations, entries, messages,
--- entry_embeddings, audit_log, extraction_jobs); their PKs / UKs / CHECK
--- constraints / indexes / triggers / FKs / RLS / policies / GRANTs;
--- schema public ACL; default privileges for the journal superuser.
+-- subset: pgvector extension; audit_log functions; the 8 gubbi tables
+-- (users, topics, conversations, entries, messages, entry_embeddings,
+-- audit_log, extraction_jobs); their PKs / UKs / CHECK constraints /
+-- indexes / triggers / FKs / RLS / policies / GRANTs; default privileges
+-- for the journal_admin migration role.
 --
 -- Cloud-owned objects (tenants, subscriptions, llm_budgets, outbox_events,
 -- stripe_events) live in the gubbi-cloud baseline and depend on this one
 -- having run first (FK to users(id)).
 --
--- Roles journal_app + journal_admin are pre-created with passwords by
--- testbench config/postgres/init.sh and prod gubbi-stack/postgres-init.sh.
--- This migration creates otel_ro: LOGIN, read-only monitoring role for the
--- OTel collector's postgresql receiver, pg_monitor-only (no data access).
--- The password is set out-of-band at deploy time (a LOGIN role with no
--- password cannot authenticate, so the role is inert until then).
+-- Roles journal_app, journal_admin, and otel_ro are pre-created with
+-- passwords by testbench config/postgres/init.sh and prod
+-- gubbi-stack/postgres-init.sh as the cluster superuser. The CREATE ROLE
+-- + GRANT pg_monitor statements that upstream pg_dump emitted for otel_ro
+-- have been stripped from this baseline because they require privileges
+-- (CREATEROLE plus pg_monitor admin) that the migration role
+-- (journal_admin per JOURNAL_DB_MIGRATION_URL) does not hold; init.sh
+-- handles them as the superuser instead.
 --
 -- The old chain (0001-0031) lives at _archive/ for dev-DB forward
 -- migration; it is not loaded by alembic.
@@ -32,30 +34,14 @@ SET default_table_access_method = heap;
 
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
-
-COMMENT ON EXTENSION vector IS 'vector data type and ivfflat and hnsw access methods';
-
-
---
--- Name: otel_ro role; Type: ROLE; Schema: -; Owner: -
---
--- pg_dump --schema-only does not capture cluster-global roles, so we
--- recreate the role declaration from the original migration 0026 here.
--- LOGIN + pg_monitor is the read-only monitoring role for the OTel
--- collector's postgresql receiver; pg_monitor is the standard built-in
--- role for read-only observability scrapers (no data-table grants). The
--- login password is set out-of-band at deploy time (kept out of source).
---
-
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'otel_ro') THEN
-        CREATE ROLE otel_ro LOGIN;
-    END IF;
-END $$;
-
-GRANT pg_monitor TO otel_ro;
-
+-- The pgvector extension comment + otel_ro role bootstrap that
+-- upstream pg_dump emitted here are intentionally NOT re-applied by
+-- this baseline: both require privileges the migration role
+-- (journal_admin per JOURNAL_DB_MIGRATION_URL) lacks (extension
+-- ownership for COMMENT ON EXTENSION; CREATEROLE plus pg_monitor
+-- admin for the otel_ro role). The role is pre-created by
+-- postgres-init.sh as the cluster superuser; the extension comment
+-- ships with the upstream extension itself.
 
 --
 -- Name: audit_log_admin_no_user_actor(); Type: FUNCTION; Schema: public; Owner: -
@@ -900,8 +886,12 @@ CREATE POLICY users_self_update ON public.users FOR UPDATE TO journal_app USING 
 -- Name: SCHEMA public; Type: ACL; Schema: -; Owner: -
 --
 
-GRANT ALL ON SCHEMA public TO journal_admin;
-GRANT USAGE ON SCHEMA public TO journal_app;
+-- public schema grants for journal_admin + journal_app are applied
+-- out-of-band by postgres-init.sh as the cluster superuser. They were
+-- captured by upstream pg_dump but cannot be re-applied here:
+-- journal_admin does not own schema public (Postgres 15+ default
+-- owner is pg_database_owner = the cluster superuser), so it lacks
+-- the privilege required to grant on it.
 
 
 --
@@ -1012,8 +1002,8 @@ GRANT ALL ON TABLE public.users TO journal_admin;
 -- Name: DEFAULT PRIVILEGES FOR SEQUENCES; Type: DEFAULT ACL; Schema: public; Owner: -
 --
 
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public GRANT SELECT,USAGE ON SEQUENCES TO journal_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public GRANT ALL ON SEQUENCES TO journal_admin;
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public GRANT SELECT,USAGE ON SEQUENCES TO journal_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public GRANT ALL ON SEQUENCES TO journal_admin;
 
 
 --
@@ -1025,5 +1015,5 @@ ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public GRANT ALL ON SEQUENCE
 -- DELETE opt-in (via explicit GRANT in the migration that owns the table)
 -- eliminates that class of footgun. journal_admin keeps ALL by default.
 
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public GRANT SELECT,INSERT,UPDATE ON TABLES TO journal_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public GRANT ALL ON TABLES TO journal_admin;
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public GRANT SELECT,INSERT,UPDATE ON TABLES TO journal_app;
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public GRANT ALL ON TABLES TO journal_admin;
