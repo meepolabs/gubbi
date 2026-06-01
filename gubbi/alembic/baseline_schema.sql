@@ -899,6 +899,8 @@ CREATE POLICY users_self_update ON public.users FOR UPDATE TO journal_app USING 
 --
 
 GRANT INSERT ON TABLE public.audit_log TO journal_app;
+
+REVOKE ALL ON TABLE public.audit_log FROM journal_admin;
 GRANT SELECT,INSERT ON TABLE public.audit_log TO journal_admin;
 
 

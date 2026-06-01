@@ -23,7 +23,15 @@ set -euo pipefail
 #   - role grants per gubbi table match the audited end-state, INCLUDING:
 #       * journal_app on users     -> SELECT, UPDATE only (no INSERT/DELETE)
 #       * journal_app on audit_log -> INSERT only
-#       * journal_admin on audit_log -> SELECT, INSERT only (no UPDATE/DELETE)
+#       * journal_admin on audit_log -> SELECT + INSERT (explicit grants);
+#         NO explicit UPDATE/DELETE in pg_class.relacl. Ownership-implicit
+#         UPDATE/DELETE is NOT blocked at the ACL level (cannot be --
+#         journal_admin owns the table per the migration role contract);
+#         runtime enforcement is via the BEFORE UPDATE/DELETE triggers
+#         verified in section 6. This invariant check keeps the contract
+#         VERIFIABLE post-deploy; it does NOT make audit_log tamper-
+#         resistant against a compromised journal_admin DSN (out of scope
+#         here; would require an external WORM sink).
 #   - otel_ro role exists, LOGIN, member of pg_monitor, no data-table grants
 #   - alembic_version + alembic_version_cloud are journal_admin-only
 #   - default privileges for ROLE journal_admin in schema public have the
@@ -143,8 +151,8 @@ done
 # 6. Triggers (3 on audit_log)
 # ---------------------------------------------------------------------------
 for trg in trg_audit_log_admin_no_user_actor trg_audit_log_no_delete trg_audit_log_no_update; do
-    assert_true "trigger_${trg}" \
-        "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON t.tgrelid=c.oid WHERE c.relname='audit_log' AND t.tgname='${trg}' AND NOT t.tgisinternal)"
+    assert_true "trigger_${trg}_exists_and_enabled" \
+        "SELECT EXISTS (SELECT 1 FROM pg_trigger t JOIN pg_class c ON t.tgrelid=c.oid WHERE c.relname='audit_log' AND t.tgname='${trg}' AND NOT t.tgisinternal AND t.tgenabled = 'O')"
 done
 
 # ---------------------------------------------------------------------------
@@ -164,6 +172,38 @@ assert_priv() {
     if [[ "$result" != "$expected" ]]; then
         fail "grant ${table}: ${role} ${priv} expected=${expected} got=${result}"
     fi
+}
+
+# ---------------------------------------------------------------------------
+# Helper note on owner-implicit privileges:
+# has_table_privilege() returns true for the table owner regardless of any
+# explicit REVOKE -- ownership grants implicit ALL, and that cannot be
+# revoked. journal_admin OWNS the 8 gubbi tables (per the squashed baseline
+# running under JOURNAL_DB_MIGRATION_URL; locked by
+# gubbi-testbench/tests/test_alembic_role_contract.py). So when verifying
+# "journal_admin should NOT have UPDATE/DELETE on audit_log",
+# assert_priv (has_table_privilege) is the WRONG tool: it would silently
+# pass because of ownership, masking real ACL drift.
+#
+# Decision tree:
+#   role is NOT the table owner            -> assert_priv (has_table_privilege)
+#   role IS the table owner, expecting t   -> assert_priv (passes via ownership)
+#   role IS the table owner, expecting f   -> assert_no_explicit_priv (relacl)
+#
+# Runtime enforcement of audit_log append-only is via the BEFORE UPDATE /
+# BEFORE DELETE triggers (verified in section 6 above).
+# ---------------------------------------------------------------------------
+assert_no_explicit_priv() {
+    local role=$1 table=$2 priv=$3
+    assert_true "no_explicit_priv ${table}: ${role} ${priv}" \
+        "SELECT NOT EXISTS (
+            SELECT 1 FROM pg_class c, aclexplode(c.relacl) AS a
+            WHERE c.relname = '${table}'
+              AND c.relnamespace = 'public'::regnamespace
+              AND c.relkind = 'r'
+              AND a.grantee = '${role}'::regrole
+              AND a.privilege_type = '${priv}'
+         )"
 }
 
 # Tables where journal_app gets full CRUD.
@@ -189,11 +229,15 @@ for p in SELECT UPDATE DELETE; do
 done
 
 # audit_log: journal_admin has SELECT + INSERT only.
+# SELECT/INSERT pass via ownership AND via explicit grants in grants.sql /
+# baseline. UPDATE/DELETE are NOT explicitly granted -- but ownership
+# returns has_table_privilege=t regardless, so we introspect relacl via
+# assert_no_explicit_priv (see fork-point note above).
 for p in SELECT INSERT; do
     assert_priv journal_admin audit_log "$p" t
 done
 for p in UPDATE DELETE; do
-    assert_priv journal_admin audit_log "$p" f
+    assert_no_explicit_priv journal_admin audit_log "$p"
 done
 
 # All other gubbi tables: journal_admin has full access.
