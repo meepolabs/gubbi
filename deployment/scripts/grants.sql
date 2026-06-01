@@ -37,13 +37,13 @@ GRANT journal_app TO journal_admin WITH ADMIN OPTION;
 -- "forgot to REVOKE DELETE" failure mode on admin-only tables.
 -- ---------------------------------------------------------------------------
 
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE ON TABLES TO journal_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public
     GRANT ALL ON TABLES TO journal_admin;
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public
     GRANT SELECT, USAGE ON SEQUENCES TO journal_app;
-ALTER DEFAULT PRIVILEGES FOR ROLE journal IN SCHEMA public
+ALTER DEFAULT PRIVILEGES FOR ROLE journal_admin IN SCHEMA public
     GRANT ALL ON SEQUENCES TO journal_admin;
 
 -- ---------------------------------------------------------------------------
