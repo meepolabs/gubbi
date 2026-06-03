@@ -67,7 +67,7 @@ List all topics with metadata. Supports pagination and prefix filtering.
 | `limit` | integer | no | 50 | Max topics to return |
 | `offset` | integer | no | 0 | Skip first N topics for pagination |
 
-**Returns:** List of topics with title, description, tags, entry count, created/updated dates. Also returns total count for pagination.
+**Returns:** List of topics with title, description, tags, entry count, created/updated dates. Also returns total count for pagination. Topics are ordered most-recently-updated first, with a stable `id` tie-break so pagination stays deterministic when update times tie.
 
 ---
 
@@ -93,7 +93,7 @@ Add a dated entry to a topic. This is the primary write operation -- most journa
 
 ### journal_read_topic
 
-Read a topic's metadata and content.
+Read a topic's metadata and content. Entries come back newest-first (reverse-chronological).
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
@@ -101,9 +101,9 @@ Read a topic's metadata and content.
 | `limit` | integer | no | 10 | Max entries to return (max 500). |
 | `date_from` | string | no | -- | Filter from this date (`YYYY-MM-DD`). |
 | `date_to` | string | no | -- | Filter to this date (`YYYY-MM-DD`). |
-| `offset` | integer | no | 0 | Skip first N entries for pagination. |
+| `offset` | integer | no | 0 | Skip the N most-recent entries for pagination. Page 0 (offset 0) is the most recent `limit` entries. |
 
-**Returns:** `{ metadata, entries[], total, limit, offset }` -- structured entry objects with id, date, decrypted content, decrypted reasoning, and tags. Each entry includes its database ID for use with `journal_update_entry`.
+**Returns:** `{ metadata, entries[], total, limit, offset }` -- structured entry objects with id, date, decrypted content, decrypted reasoning, and tags, ordered newest-first. Each entry includes its database ID for use with `journal_update_entry`.
 
 ---
 
@@ -203,7 +203,7 @@ List all archived conversations, optionally filtered by topic.
 | `limit` | integer | no | 50 | Max conversations to return (max 200). |
 | `offset` | integer | no | 0 | Skip first N conversations for pagination. |
 
-**Returns:** List of conversations with id, title (decrypted), topic, tags, date, summary (decrypted), and message count, plus total/limit/offset.
+**Returns:** List of conversations with id, title (decrypted), topic, tags, date, summary (decrypted), and message count, plus total/limit/offset. Conversations are ordered newest-first by creation date, with a stable `id` tie-break for deterministic pagination.
 
 ---
 

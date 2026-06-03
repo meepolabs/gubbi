@@ -141,7 +141,7 @@ Input is validated (path traversal prevention, topic/date format, freetext sanit
 
 ### Read path (journal_read_topic)
 
-The tool queries the `entries` table for the given topic (pre-filtered by `WHERE deleted_at IS NULL`), sorted by date -> optionally filters by `date_from`/`date_to` -> uses a window function (`COUNT(*) OVER()`) to return total and data rows in one query -> capped at 500 entries with offset pagination -> decrypts each row's content and reasoning -> returns structured objects with id, date, content, reasoning, tags.
+The tool queries the `entries` table for the given topic (pre-filtered by `WHERE deleted_at IS NULL`), sorted newest-first (`date DESC, created_at DESC, id DESC` -- the trailing `id DESC` is a stable total order so offset pagination is deterministic when dates tie) -> optionally filters by `date_from`/`date_to` -> uses a window function (`COUNT(*) OVER()`) to return total and data rows in one query -> capped at 500 entries with offset pagination (`offset` skips the N most-recent entries) -> decrypts each row's content and reasoning -> returns structured objects with id, date, content, reasoning, tags.
 
 ### Update path (journal_update_entry)
 
