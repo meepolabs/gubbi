@@ -139,7 +139,7 @@ async def list_all(
         LEFT JOIN entries e ON e.topic_id = t.id AND e.deleted_at IS NULL
         {where}
         GROUP BY t.id
-        ORDER BY t.updated_at DESC
+        ORDER BY t.updated_at DESC, t.id DESC
         {pagination}
     """
     rows = await conn.fetch(sql, *params)

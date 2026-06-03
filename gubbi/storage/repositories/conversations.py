@@ -537,7 +537,7 @@ async def list_conversations(
         FROM conversations c
         JOIN topics t ON t.id = c.topic_id
         {where}
-        ORDER BY c.created_at DESC
+        ORDER BY c.created_at DESC, c.id DESC
         {pagination}
     """
     rows = await conn.fetch(sql, *params)
