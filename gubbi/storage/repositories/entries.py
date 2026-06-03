@@ -147,9 +147,11 @@ async def read(
     date_to: str | None = None,
     offset: int = 0,
 ) -> tuple[TopicMeta, list[Entry], int]:
-    """Read entries for a topic, oldest-first.
+    """Read entries for a topic, newest-first (reverse-chronological).
 
     Returns (TopicMeta, entries, total_matching).
+    Page 0 (offset 0) is the most recent ``limit`` entries; ``offset`` skips
+    the N most-recent entries before the page.
     Raises TopicNotFoundError if topic missing.
     """
     assert conn.is_in_transaction(), "entries.read: caller must wrap in conn.transaction()"  # noqa: S101
@@ -204,23 +206,28 @@ async def read(
             tags=list(r["tags"] or []),
         )
 
-    if limit is not None and limit > 0 and offset == 0 and not date_from:
-        # "Last N" case: ORDER BY DESC + LIMIT avoids COUNT + OFFSET scan.
-        # Window function gives total in the same pass.
-        data_params = list(params)
-        limit_ph = _add_param(data_params, limit)
-        rows = await conn.fetch(
-            f"SELECT id, date, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
-            f" reasoning_encrypted, reasoning_nonce, conversation_id, tags,"
-            f" COUNT(*) OVER() AS total_count"
-            f" FROM entries WHERE {where}"
-            f" ORDER BY date DESC, created_at DESC LIMIT {limit_ph}",
-            *data_params,
-        )
-        total = int(rows[0]["total_count"]) if rows else 0
-        return meta, [_build_entry(r) for r in reversed(rows)], total
-
-    # Explicit offset or date filter - window function gives total without extra query.
+    # All reads share one newest-first ordering so page N is the Nth slice
+    # of the same reverse-chronological sequence. Page 0 is the most-recent
+    # ``limit`` rows; ``offset`` skips the N most-recent before the page.
+    # A prior "offset==0 fast path" also ordered DESC + LIMIT, but then
+    # ``reversed()``-flipped that page to ascending; the offset>0 branch
+    # ordered ASC. The two paths were anchored at OPPOSITE ends of the
+    # sequence, so limit/offset paging double-returned the newest rows
+    # and never reached the oldest. Unifying on a single DESC ordering
+    # makes page 0/N/2N a real partition. The window-function COUNT
+    # below gives ``total`` in the same round-trip, so removing the fast
+    # path adds no extra query for the offset==0 case.
+    #
+    # ORDER BY tie-break: ``date`` and ``created_at`` can both tie -- the
+    # caller may seed multiple entries on one date, and ``created_at`` is
+    # caller-supplied ($8 in the INSERT) so it is not guaranteed to be
+    # unique either. Without ``id DESC`` as the tail tie-break, OFFSET
+    # pagination is non-deterministic for tied rows: Postgres is free to
+    # reorder ties between calls, so the same row can land in two pages
+    # or be skipped entirely. ``id`` is the INSERT-returned serial,
+    # monotonic with insertion, and ``id DESC`` is the natural newest-
+    # first tie-break (highest id = most recent insertion) AND a stable
+    # total order on the unique column.
     sql_limit: int | None = limit if (limit is not None and limit > 0) else None
     sql_offset: int = offset if offset > 0 else 0
     data_params = list(params)
@@ -228,7 +235,7 @@ async def read(
         f"SELECT id, date, content_encrypted, content_nonce,"  # noqa: S608 - safe: see above
         f" reasoning_encrypted, reasoning_nonce, conversation_id, tags,"
         f" COUNT(*) OVER() AS total_count"
-        f" FROM entries WHERE {where} ORDER BY date ASC, created_at ASC"
+        f" FROM entries WHERE {where} ORDER BY date DESC, created_at DESC, id DESC"
     )
     if sql_limit is not None:
         limit_ph = _add_param(data_params, sql_limit)

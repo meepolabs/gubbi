@@ -462,7 +462,8 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         """Read entries from a topic -- "show me my notes" / "what did I write".
 
         Use when the user wants to review a specific topic's entries.
-        Returns entries in chronological order with content and reasoning.
+        Returns entries in reverse-chronological order (newest first), with
+        content and reasoning.
 
         Do NOT use for keyword search across topics -- use journal_search instead.
         Do NOT use for time-based browsing -- use journal_timeline instead.
@@ -473,7 +474,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             limit: Max entries to return (default 10). Use a large number for more history.
             date_from: Only entries on or after this date (YYYY-MM-DD).
             date_to: Only entries on or before this date (YYYY-MM-DD).
-            offset: Skip first N entries for pagination (default 0).
+            offset: Skip the N most-recent entries for pagination (default 0).
 
         Returns:
             metadata (topic info), entries (list with content and reasoning),
