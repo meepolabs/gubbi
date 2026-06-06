@@ -19,6 +19,7 @@ paths so concurrent tests do not collide even without per-test truncation.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -31,10 +32,11 @@ import structlog
 from mcp.server.fastmcp import FastMCP
 
 from gubbi.app_context import AppContext
-from gubbi.auth_context import current_user_id
+from gubbi.auth_context import current_token_scopes, current_user_id
 from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.tools.registry import register_tools
+from tests.conftest import TEST_DATABASE_URL
 from tests.fixtures.tenants import TenantSeed, seed_for
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -83,12 +85,20 @@ class DualUsers:
 
 
 async def _with_user(user_id: UUID, coro: Any) -> Any:
-    """Set current_user_id, await coro, reset on exit."""
-    token = current_user_id.set(user_id)
+    """Set current_user_id + current_token_scopes, await coro, reset on exit.
+
+    The tool handlers are wrapped by ``require_scope`` (defense-in-depth scope
+    gate); production sets ``current_token_scopes`` in BearerAuthMiddleware after
+    token validation, so the test must do the same or every call returns an
+    insufficient-scope error result instead of running the handler.
+    """
+    user_token = current_user_id.set(user_id)
+    scope_token = current_token_scopes.set(frozenset({"journal"}))
     try:
         return await coro
     finally:
-        current_user_id.reset(token)
+        current_token_scopes.reset(scope_token)
+        current_user_id.reset(user_token)
 
 
 async def _insert_user(admin_pool: asyncpg.Pool, email: str) -> UUID:
@@ -119,6 +129,18 @@ async def rls_tools(app_pool: asyncpg.Pool, tmp_path_factory: Any) -> dict:
     session-compatible alternative to tmp_path for session fixtures.
     """
     tmp_dir: Path = tmp_path_factory.mktemp("rls_tool_tests")
+    # rls_tools is session-scoped, so it is constructed before the
+    # function-scoped autouse ``_set_env`` populates JOURNAL_DB_APP_URL.
+    # DbConfig.app_url is a required field bound to the JOURNAL_DB_APP_URL
+    # env alias, so Settings() / get_settings() raises here without it. Seed
+    # the minimal env the loader needs (the pool is injected directly, so the
+    # DB URL in settings is unused for tool dispatch), then clear the
+    # get_settings cache so it re-reads.
+    os.environ.setdefault("JOURNAL_DB_APP_URL", TEST_DATABASE_URL)
+    os.environ.setdefault("JOURNAL_OPERATOR_EMAIL", "operator@test.local")
+    os.environ.setdefault("JOURNAL_API_KEY", "test-api-key-for-unit-tests-only")
+    os.environ.setdefault("JOURNAL_SERVER_URL", "http://localhost:8100")
+    get_settings.cache_clear()
     settings = get_settings()
     _cipher = ContentCipher({1: bytes([1]) * 32})  # safe test-only key
     app_ctx = AppContext(

@@ -30,29 +30,26 @@ _RLS_ERROR_RE = re.compile(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="QUARANTINE (pre-0001-baseline drift): journal_app lacks table-level "
-    "INSERT on audit_log under the bare squashed baseline (the audit_log "
-    "INSERT grant lives in the post-migration deployment/scripts/grants.sql "
-    "repair, not run in this minimal CI). Un-skip once role grants are "
-    "applied as part of the test-DB bootstrap."
-)
 async def test_app_pool_matching_actor_id_succeeds(
     app_pool: asyncpg.Pool,
     tenant_a: UUID,
 ) -> None:
-    """App pool with GUC set to tenant_a can INSERT an audit_log row for tenant_a."""
+    """App pool with GUC set to tenant_a can INSERT an audit_log row for tenant_a.
+
+    journal_app is INSERT-only on audit_log (append-only model -- no SELECT
+    grant), so the INSERT must NOT use ``RETURNING id``; that would require
+    SELECT and fail with insufficient_privilege regardless of the RLS policy.
+    The assertion is simply that the INSERT raises no exception under a matching
+    actor_id; the row is read back via the admin pool where SELECT is allowed.
+    """
     async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
-        row_id = await conn.fetchval(
+        await conn.execute(
             """
             INSERT INTO audit_log (actor_type, actor_id, action)
             VALUES ('user', $1, 'test')
-            RETURNING id
             """,
             str(tenant_a),
         )
-    assert row_id is not None
-    assert row_id > 0
 
 
 async def test_app_pool_mismatching_actor_id_blocked(

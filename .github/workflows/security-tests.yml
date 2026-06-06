@@ -26,13 +26,13 @@
 # Branch protection on `main` + `develop`: require `security-tests` to pass
 # before merge.
 #
-# QUARANTINE (see the `--ignore` block in the integration job): a set of
-# never-CI-gated tests pre-date the 0001 squashed baseline and currently fail
-# against it (MCP-client API drift, dropped plaintext conversations columns,
-# audit-trigger contract, gubbi-cloud-only tables, event-loop fixture bugs).
-# They are excluded file-by-file with a flagged reason so the debt is visible
-# here -- un-ignore each file as it is rewritten. None are live-stack tests;
-# they are Postgres-only and SHOULD return to this gate once fixed.
+# QUARANTINE (historical): a set of tests pre-dated the 0001 squashed baseline
+# and were temporarily excluded via an `--ignore` block here while they were
+# rewritten against it. That block has been retired -- the tests now gate in
+# the integration job below. A few individual tests remain `@pytest.mark.skip`
+# in-file with documented reasons (concurrent-conflict recovery pending a
+# prod-side SAVEPOINT, the squashed baseline's by-design lack of a per-step
+# downgrade, and otel_ro posture which is bootstrapped only in Tier-2).
 
 name: security-tests
 
@@ -214,26 +214,17 @@ jobs:
         # `-m "not hosted_live"` excludes the live-stack E2E (Hydra + Kratos +
         # cloud-api) that runs in Tier-2 on the testbench.
         #
-        # QUARANTINE --ignore block: never-CI-gated tests that fail against the
-        # 0001 squashed baseline. Each line carries its root-cause flag. These
-        # are Postgres-only (not live-stack) and SHOULD return to this gate once
-        # rewritten. Remove the matching --ignore as each file is fixed.
+        # The pre-0001-baseline quarantine --ignore block has been retired: the
+        # affected tests were rewritten against the squashed baseline and now
+        # gate here. A handful of individual tests remain skipped in-file with a
+        # documented reason (concurrent-conflict recovery that needs a prod-side
+        # SAVEPOINT, the by-design no-downgrade on the squashed baseline, and
+        # otel_ro posture which is bootstrapped only in Tier-2).
         run: |
           poetry run pytest \
             tests/integration tests/e2e tests/api tests/extraction tests/security tests/storage \
             -m "not hosted_live" \
-            --tb=short \
-            --ignore=tests/e2e/test_tools.py `# MCP-client API drift: CallToolResult no longer subscriptable (mcp >=1.26)` \
-            --ignore=tests/e2e/test_tool_isolation.py `# same MCP-client API drift via shared tool-call helper` \
-            --ignore=tests/integration/test_ingest_endpoint.py `# app lifespan wiring: auth_strategies not initialised` \
-            --ignore=tests/integration/test_extract_conversation_resilience.py `# app lifespan wiring + conversations schema drift` \
-            --ignore=tests/integration/test_rotate_encryption_key.py `# stale _seed_v1_rows: 9 args vs 10-col conversations INSERT` \
-            --ignore=tests/integration/test_grants_contract.py `# gubbi-cloud-only tables (tenants/outbox) + event-loop fixture bug; belongs in Tier-2 combined-schema` \
-            --ignore=tests/integration/test_extraction_summary_audit.py `# audit-trigger contract: admin pool cannot insert actor_type=user` \
-            --ignore=tests/integration/test_audit_log_target_kind.py `# audit-trigger contract: admin pool cannot insert actor_type=user` \
-            --ignore=tests/api/v1/test_extraction_me.py `# extraction_jobs fixture schema drift` \
-            --ignore=tests/security/test_extraction_jobs_rls.py `# extraction_jobs fixture: ON CONFLICT constraint absent in baseline` \
-            --ignore=tests/storage/repositories/test_extraction_jobs.py `# extraction_jobs fixture: ON CONFLICT constraint absent in baseline`
+            --tb=short
 
       - name: Coverage gate - crypto + RLS primitives must stay >= 80%
         run: |

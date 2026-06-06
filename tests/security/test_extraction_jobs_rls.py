@@ -43,7 +43,7 @@ async def rls_test_users(admin_pool: asyncpg.Pool) -> tuple[UUID, UUID]:
             VALUES
                 ($1, 'rls-extraction-a@test.local', 'UTC', now(), now()),
                 ($2, 'rls-extraction-b@test.local', 'UTC', now(), now())
-            ON CONFLICT (email) DO NOTHING
+            ON CONFLICT (id) DO NOTHING
             """,
             _USER_A,
             _USER_B,
@@ -78,8 +78,8 @@ async def conversation_for_a(admin_pool: asyncpg.Pool, rls_test_users: tuple[UUI
                  summary_encrypted, summary_nonce, tags, participants,
                  message_count, created_at, updated_at, json_path, search_vector)
             VALUES ($1, $2,
-                    'dummytitle'::bytea, 'dummynonce'::bytea,
-                    'rls-test-conv', 'chatgpt', 'dummysum'::bytea, 'dummynonce2'::bytea,
+                    'dummytitle'::bytea, 'nonce_title1'::bytea,
+                    'rls-test-conv', 'chatgpt', 'dummysum'::bytea, 'nonce_summ12'::bytea,
                     '{}', '{}', 0, now(), now(), 'rls-test.json',
                     to_tsvector('english', 'rls test conversation'))
             RETURNING id

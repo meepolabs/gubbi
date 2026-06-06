@@ -6,6 +6,7 @@ verify dedupe skips a re-send of the same payload.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,7 @@ from httpx import ASGITransport, AsyncClient
 from gubbi.api.v1.ingest import IngestConversationResponse
 from gubbi.api.v1.ingest import router as ingest_router
 from gubbi.app_context import AppContext
+from gubbi.auth.strategies import TrustGatewayStrategy
 from gubbi.config import Settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.storage.embedding_service import EmbeddingService
@@ -60,8 +62,20 @@ async def test_app(
     pool: asyncpg.Pool,
     clean_pool: asyncpg.Pool,
     tmp_path: Path,
-) -> FastAPI:
+) -> AsyncIterator[FastAPI]:
     """Create a minimal FastAPI app with AppContext backed by the test pool."""
+    # The ingest flow auto-creates the "inbox" topic for the authenticated
+    # user; topics.user_id FKs to users, so TEST_USER_ID must exist. clean_pool
+    # does not TRUNCATE users, so a single idempotent insert is enough.
+    async with clean_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO users (id, email, timezone, created_at, updated_at)
+            VALUES ($1, 'ingest-e2e@test.local', 'UTC', now(), now())
+            ON CONFLICT (id) DO NOTHING
+            """,
+            TEST_USER_ID,
+        )
     settings = Settings(
         db={"app_url": ""},
         auth={
@@ -84,13 +98,22 @@ async def test_app(
     )
     app = FastAPI()
     app.state.app_ctx = app_ctx
+    app.state.auth_strategies = [
+        TrustGatewayStrategy(gateway_secret=None, gateway_require_signature=False),
+    ]
     app.include_router(ingest_router, prefix=API_PREFIX)
 
     @app.exception_handler(Exception)
     async def _handler(request: Request, exc: Exception) -> JSONResponse:
         raise exc
 
-    return app
+    yield app
+
+    # clean_pool does NOT TRUNCATE users; remove the seeded user so a later test
+    # that asserts an empty users table (e.g. the Mode 3 fresh-DB migration test)
+    # is not polluted by this fixture's seed.
+    async with clean_pool.acquire() as conn:
+        await conn.execute("DELETE FROM users WHERE id = $1", TEST_USER_ID)
 
 
 @pytest_asyncio.fixture
