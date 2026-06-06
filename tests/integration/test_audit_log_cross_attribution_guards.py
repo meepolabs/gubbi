@@ -146,6 +146,12 @@ def _run_alembic(bootstrap_dsn: str, *args: str) -> subprocess.CompletedProcess[
     )
 
 
+@pytest.mark.skip(
+    reason="QUARANTINE (pre-0001-baseline drift): asserts `alembic downgrade -1` "
+    "removes just the cross-attribution policy + trigger, but the 0001 squashed "
+    "baseline has no per-step downgrade (downgrade() raises NotImplementedError "
+    "by design). Un-skip only if a granular downgrade path is reintroduced."
+)
 async def test_downgrade_removes_policy_and_trigger(
     admin_pool: asyncpg.Pool,
 ) -> None:

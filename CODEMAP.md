@@ -137,3 +137,12 @@ its tables.
   + e2e require `TEST_DATABASE_URL` (default
   `postgresql://journal:testpass@localhost:5433/journal_test`); skip
   gracefully if unreachable.
+- CI gate (`.github/workflows/security-tests.yml`): Tier-1 fast gate on
+  every push to `develop` + PRs. Split into a no-service unit job and a
+  Postgres-only integration job. Selection is marker-driven --
+  `-m "not hosted_live"` over all test dirs; `hosted_live` tests
+  (live Hydra + Kratos + cloud-api) run in Tier-2 on the testbench, not
+  here. A file-level `--ignore` block quarantines never-gated tests that
+  fail against the 0001 squashed baseline (un-ignore each as rewritten).
+  The job bootstraps `journal_app` + `journal_admin` roles (the baseline
+  assumes they pre-exist).

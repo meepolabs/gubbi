@@ -1,26 +1,38 @@
-# Security-critical test gate.
+# Tier-1 fast gate (every push to develop + every PR).
 #
-# Runs the three invariants that the multi-tenant / encryption model depends on:
-#   1. RLS cross-tenant isolation (tests/integration/test_rls_isolation.py)
-#   2. Encryption round-trip + contract (test_entries_encryption.py,
-#      test_encryption_contract.py, test_repo_inserts_under_rls.py)
-#   3. Unit test suite (crypto, db_context, cipher_guard, etc.)
+# Runs lint-adjacent security invariants plus the full Postgres-only test
+# surface:
+#   1. Unit suite (crypto, db_context, cipher_guard, oauth, auth middleware,
+#      ...) -- no service container needed.
+#   2. Integration + e2e + api + extraction + security + storage tests that
+#      need ONLY a single Postgres (pgvector/pg17) service. Selected by
+#      marker: everything that is NOT `hosted_live`.
 #
-# A Postgres 17 + pgvector service container is provisioned per run; the conftest
-# bootstraps the RLS test DB via `alembic upgrade head` (triggered by
-# pytest-asyncio session fixtures), so no separate setup step is needed.
+# Tier-2 (full cross-service live E2E against live Hydra + Kratos + cloud-api)
+# runs separately on the operator's dev server via gubbi-testbench. Tests that
+# need the full multi-service stack are marked `hosted_live` and are excluded
+# here via `-m "not hosted_live"`.
+#
+# Test selection is MARKER-DRIVEN, not a hand-maintained file list: new
+# Postgres-only integration tests are gated automatically the moment they land.
 #
 # Coverage gate: the security-critical crypto + RLS primitives
-# (gubbi/core/crypto.py, cipher_guard.py, db_context.py) must keep
-# combined coverage >= 80%. The repository-layer modules
-# (storage/repositories/entries.py, conversations.py, search.py) are
-# intentionally NOT on this gate: pre-02.06.1 legacy tests in
-# test_database.py previously drove their coverage above 80% but are
-# currently skipped pending rewrite. Their
-# correctness is exercised end-to-end by the integration suite; narrow
-# line-coverage will return to the gate once those tests are rewritten.
+# (gubbi/core/crypto.py, cipher_guard.py, db_context.py) must keep combined
+# coverage >= 80%. The repository-layer modules (storage/repositories/*) are
+# intentionally NOT on this gate; their correctness is exercised end-to-end by
+# the integration suite, and narrow line-coverage will return to the gate when
+# their dedicated tests are rewritten against the squashed baseline.
 #
-# Branch protection on `main`: require `security-tests` to pass before merge.
+# Branch protection on `main` + `develop`: require `security-tests` to pass
+# before merge.
+#
+# QUARANTINE (see the `--ignore` block in the integration job): a set of
+# never-CI-gated tests pre-date the 0001 squashed baseline and currently fail
+# against it (MCP-client API drift, dropped plaintext conversations columns,
+# audit-trigger contract, gubbi-cloud-only tables, event-loop fixture bugs).
+# They are excluded file-by-file with a flagged reason so the debt is visible
+# here -- un-ignore each file as it is rewritten. None are live-stack tests;
+# they are Postgres-only and SHOULD return to this gate once fixed.
 
 name: security-tests
 
@@ -30,6 +42,11 @@ on:
     branches:
       - main
       - develop
+
+# Cancel redundant runs on the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   env-contract-lint:
@@ -49,6 +66,50 @@ jobs:
       # public gubbi), so Environment Literal drift is still caught on PRs that touch
       # either side of the parity contract.
       - run: python tools/check_env_contract.py --cloud-config ""
+
+  unit-tests:
+    name: Unit suite (no service container)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    env:
+      JOURNAL_OPERATOR_EMAIL: operator@test.local
+      # Pre-encoded 32-byte key that base64-decodes to 32 bytes of 0x01 --
+      # reproducible, not secret. Only matters for tests that build a real
+      # cipher from the env loader; the fixture cipher uses a fixed key.
+      JOURNAL_ENCRYPTION_MASTER_KEY_V1: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 1.8.5
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Cache Poetry virtualenv
+        uses: actions/cache@v4
+        with:
+          path: .venv
+          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
+
+      - name: Install dependencies
+        run: poetry install --no-interaction --no-root
+
+      - name: Unit tests (no DB)
+        # tests/unit is service-free; -m "not hosted_live" is defensive (the
+        # unit dir carries no live-stack tests today).
+        run: poetry run pytest tests/unit -m "not hosted_live" --tb=short
 
   security-tests:
     name: Security invariants (RLS + encryption + unit)
@@ -124,20 +185,55 @@ jobs:
           echo "Postgres did not become ready in 30 seconds"
           exit 1
 
-      - name: Unit tests (crypto, db_context, cipher_guard, ...)
-        run: poetry run pytest tests/unit -v --tb=short
+      - name: Bootstrap database roles
+        # The 0001 squashed baseline ASSUMES journal_app + journal_admin already
+        # exist (in testbench/prod they are pre-created by an init script). The
+        # raw GitHub Postgres service has neither, so the conftest `pool` /
+        # `_rls_provisioned` fixtures would silently skip on a GRANT failure.
+        # Create the two roles here so the RLS + encryption integration tests
+        # actually run. otel_ro is created by the baseline migration itself.
+        # journal_app/journal_admin passwords are set by the RLS conftest via
+        # ALTER ROLE, so no password is needed at creation time.
+        env:
+          PGPASSWORD: testpass
+        run: |
+          psql -h localhost -p 5433 -U journal -d journal_test -v ON_ERROR_STOP=1 <<'SQL'
+          DO $$
+          BEGIN
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'journal_app') THEN
+                  CREATE ROLE journal_app LOGIN;
+              END IF;
+              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'journal_admin') THEN
+                  CREATE ROLE journal_admin LOGIN BYPASSRLS CREATEROLE;
+              END IF;
+          END $$;
+          SQL
 
-      - name: Integration tests - RLS isolation
-        run: poetry run pytest tests/integration/test_rls_isolation.py -v --tb=short
-
-      - name: Integration tests - encryption round-trip + contract
+      - name: Integration tests (Postgres-only; excludes hosted_live live-stack)
+        # MARKER-DRIVEN: every Postgres-only test under these dirs gates here.
+        # `-m "not hosted_live"` excludes the live-stack E2E (Hydra + Kratos +
+        # cloud-api) that runs in Tier-2 on the testbench.
+        #
+        # QUARANTINE --ignore block: never-CI-gated tests that fail against the
+        # 0001 squashed baseline. Each line carries its root-cause flag. These
+        # are Postgres-only (not live-stack) and SHOULD return to this gate once
+        # rewritten. Remove the matching --ignore as each file is fixed.
         run: |
           poetry run pytest \
-            tests/integration/test_entries_encryption.py \
-            tests/integration/test_encryption_contract.py \
-            tests/integration/test_encryption_correctness.py \
-            tests/integration/test_repo_inserts_under_rls.py \
-            -v --tb=short
+            tests/integration tests/e2e tests/api tests/extraction tests/security tests/storage \
+            -m "not hosted_live" \
+            --tb=short \
+            --ignore=tests/e2e/test_tools.py `# MCP-client API drift: CallToolResult no longer subscriptable (mcp >=1.26)` \
+            --ignore=tests/e2e/test_tool_isolation.py `# same MCP-client API drift via shared tool-call helper` \
+            --ignore=tests/integration/test_ingest_endpoint.py `# app lifespan wiring: auth_strategies not initialised` \
+            --ignore=tests/integration/test_extract_conversation_resilience.py `# app lifespan wiring + conversations schema drift` \
+            --ignore=tests/integration/test_rotate_encryption_key.py `# stale _seed_v1_rows: 9 args vs 10-col conversations INSERT` \
+            --ignore=tests/integration/test_grants_contract.py `# gubbi-cloud-only tables (tenants/outbox) + event-loop fixture bug; belongs in Tier-2 combined-schema` \
+            --ignore=tests/integration/test_extraction_summary_audit.py `# audit-trigger contract: admin pool cannot insert actor_type=user` \
+            --ignore=tests/integration/test_audit_log_target_kind.py `# audit-trigger contract: admin pool cannot insert actor_type=user` \
+            --ignore=tests/api/v1/test_extraction_me.py `# extraction_jobs fixture schema drift` \
+            --ignore=tests/security/test_extraction_jobs_rls.py `# extraction_jobs fixture: ON CONFLICT constraint absent in baseline` \
+            --ignore=tests/storage/repositories/test_extraction_jobs.py `# extraction_jobs fixture: ON CONFLICT constraint absent in baseline`
 
       - name: Coverage gate - crypto + RLS primitives must stay >= 80%
         run: |
