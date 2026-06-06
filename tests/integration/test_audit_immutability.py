@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncpg
 import pytest
+from gubbi_common.audit.targets import TargetKind
 
 from gubbi.audit import Action, record_audit
 
@@ -78,14 +79,9 @@ async def test_delete_raises_append_only(admin_pool: asyncpg.Pool) -> None:
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="QUARANTINE (pre-0001-baseline drift): gubbi_common.audit TargetKind "
-    "enum rejects 'secret'; valid members are conversation/entry/extraction_job/"
-    "oauth_client/subscription/tenant/topic/user. Test predates the enum "
-    "tightening. Un-skip once the test (or the library enum) is reconciled."
-)
 async def test_record_audit_inserts_row(admin_pool: asyncpg.Pool) -> None:
     """record_audit() produces a readable row via journal_admin SELECT."""
+    target_id = "00000000-0000-0000-0000-00000000c0de"
     async with admin_pool.acquire() as conn:
         before_count: int = await conn.fetchval("SELECT count(*) FROM audit_log")
 
@@ -94,9 +90,9 @@ async def test_record_audit_inserts_row(admin_pool: asyncpg.Pool) -> None:
             actor_type="admin",
             actor_id="system:test-admin",
             action=Action.SECRET_ROTATED,
-            target_type="secret",
-            target_id="00000000-0000-0000-0000-00000000c0de",
-            target_kind="secret",
+            target_type="user",
+            target_id=target_id,
+            target_kind=TargetKind.USER,
             reason="scheduled rotation",
             metadata={"version": "v2"},
         )
@@ -111,9 +107,9 @@ async def test_record_audit_inserts_row(admin_pool: asyncpg.Pool) -> None:
         assert row is not None
         assert row["actor_type"] == "admin"
         assert row["action"] == Action.SECRET_ROTATED
-        assert row["target_type"] == "secret"
-        assert row["target_id"] == "00000000-0000-0000-0000-00000000c0de"
-        assert row["target_kind"] == "secret"
+        assert row["target_type"] == "user"
+        assert row["target_id"] == target_id
+        assert row["target_kind"] == str(TargetKind.USER)
         assert row["reason"] == "scheduled rotation"
 
 

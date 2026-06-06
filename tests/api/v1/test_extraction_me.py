@@ -104,14 +104,37 @@ async def _seed_user(conn: asyncpg.Connection, user_id: UUID, email: str) -> Non
 
 
 async def _seed_conversation(admin_conn: asyncpg.Connection, user_id: UUID) -> int:
-    """INSERT a minimal conversation row; return conversation_id."""
+    """INSERT a minimal conversation row (encrypted schema); return conversation_id.
+
+    Seeds a topic first to satisfy the NOT NULL topic_id FK, then inserts a
+    conversation with the encrypted title/summary columns. A per-call UUID slug
+    keeps repeated seeds for the same user from colliding on (user_id, slug).
+    """
+    topic_id = await admin_conn.fetchval(
+        """
+        INSERT INTO topics (path, title, description, user_id, created_at, updated_at)
+        VALUES ('inbox-' || gen_random_uuid()::text, 'Inbox', '', $1, now(), now())
+        RETURNING id
+        """,
+        user_id,
+    )
     row = await admin_conn.fetchrow(
         """
         INSERT INTO conversations
-            (user_id, platform, platform_id, title, created_at, updated_at)
-        VALUES ($1, 'chatgpt', gen_random_uuid()::text, 'Test', now(), now())
+            (topic_id, user_id, title_encrypted, title_nonce, slug, source,
+             summary_encrypted, summary_nonce, tags, participants,
+             message_count, created_at, updated_at, json_path, search_vector,
+             platform, platform_id)
+        VALUES ($1, $2,
+                'dummytitle'::bytea, 'nonce_title1'::bytea,
+                gen_random_uuid()::text, 'chatgpt',
+                'dummysum'::bytea, 'nonce_summ12'::bytea,
+                '{}', '{}', 0, now(), now(), 'test.json',
+                to_tsvector('english', 'test conversation'),
+                'chatgpt', gen_random_uuid()::text)
         RETURNING id
         """,
+        topic_id,
         user_id,
     )
     assert row is not None

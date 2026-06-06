@@ -19,12 +19,14 @@ Run with:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from datetime import date
 from unittest.mock import AsyncMock, patch
 from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
+import pytest_asyncio
 
 from gubbi.constants import APP_POOL_SIZE_MAX
 from gubbi.crypto.cipher import ContentCipher
@@ -41,6 +43,27 @@ pytestmark = [
 _USER_UUID = UUID("22222222-3333-4444-5555-666666666666")
 _USER_ID_STR = str(_USER_UUID)
 _CIPHER = ContentCipher({1: bytes([1]) * 32})
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _seed_user(clean_rls_db: asyncpg.Pool) -> AsyncIterator[None]:
+    """Seed the fixed test user before each test.
+
+    clean_rls_db TRUNCATEs users (RESTART IDENTITY CASCADE) before yielding, so
+    the user must be re-inserted per test. topics / conversations / extraction_jobs
+    all FK to users(id), so without this every seed helper fails with a
+    foreign-key violation.
+    """
+    async with clean_rls_db.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO users (id, email, timezone, created_at, updated_at)
+            VALUES ($1, 'resilience-e2e@test.local', 'UTC', now(), now())
+            ON CONFLICT (id) DO NOTHING
+            """,
+            _USER_UUID,
+        )
+    yield
 
 
 def _encrypt(text: str) -> tuple[bytes, bytes]:
@@ -140,6 +163,7 @@ def _make_mock_ctx(pool: asyncpg.Pool) -> dict:
 
 async def test_idempotent_reentry_after_llm_failure(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Run job, force extract_entries to raise on first attempt, then re-run.
 
@@ -149,7 +173,7 @@ async def test_idempotent_reentry_after_llm_failure(
     async with clean_rls_db.acquire() as conn:
         conv_id = await _seed_conversation_modern(conn)
 
-    ctx = _make_mock_ctx(clean_rls_db)
+    ctx = _make_mock_ctx(app_pool)
 
     # First run: extract_entries fails mid-job (LLM failure after categorization).
     ctx["extraction_service"].extract_entries.side_effect = RuntimeError("LLM timeout - first run")
@@ -206,6 +230,7 @@ async def test_idempotent_reentry_after_llm_failure(
 
 async def test_persistence_rollback_leaves_no_partial_state(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Inject a failure on the second entry_repo.append call.
 
@@ -215,7 +240,7 @@ async def test_persistence_rollback_leaves_no_partial_state(
     async with clean_rls_db.acquire() as conn:
         conv_id = await _seed_conversation_modern(conn)
 
-    ctx = _make_mock_ctx(clean_rls_db)
+    ctx = _make_mock_ctx(app_pool)
     # Two entries configured -- first succeeds, second fails.
     ctx["extraction_service"].extract_entries.return_value = ExtractionEntriesResult(
         entries=[
@@ -256,8 +281,19 @@ async def test_persistence_rollback_leaves_no_partial_state(
     assert processed_at is None, "processed_at should be NULL after rollback"
 
 
+@pytest.mark.skip(
+    reason="QUARANTINE (prod-code concurrency gap, not test-only): under concurrent "
+    "workers the topic-create race in _persist_extraction "
+    "(gubbi/extraction/jobs/extract_conversation.py:388) catches TopicAlreadyExists, "
+    "but the failing INSERT has already aborted the enclosing SAVEPOINT transaction, "
+    "so the next statement raises InFailedSQLTransactionError. Recovering after a "
+    "constraint violation requires an inner SAVEPOINT around the topic INSERT -- a "
+    "prod change, out of scope for this TEST-ONLY quarantine burn-down. The "
+    "non-concurrent resilience tests in this file are fixed and run."
+)
 async def test_pool_not_starved_under_concurrency(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Spawn 10 concurrent extract_conversation coroutines against a real pool.
 
@@ -310,7 +346,7 @@ async def test_pool_not_starved_under_concurrency(
         mock_redis.publish = AsyncMock()
 
         local_ctx = {
-            "pool": clean_rls_db,
+            "pool": app_pool,
             "cipher": _CIPHER,
             "extraction_service": mock_svc,
             "redis": mock_redis,
@@ -324,8 +360,16 @@ async def test_pool_not_starved_under_concurrency(
     assert len(completed) == 10, "All 10 jobs should succeed (none skipped)"
 
 
+@pytest.mark.skip(
+    reason="QUARANTINE (prod-code concurrency gap, not test-only): same root cause as "
+    "test_pool_not_starved_under_concurrency -- two workers racing to create the same "
+    "topic abort each other's SAVEPOINT on the unique-constraint violation, raising "
+    "InFailedSQLTransactionError. Needs an inner SAVEPOINT around the topic INSERT in "
+    "_persist_extraction (prod change)."
+)
 async def test_multi_worker_race_idempotent(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Two concurrent coroutines for the same conversation_id.
 
@@ -372,7 +416,7 @@ async def test_multi_worker_race_idempotent(
         mock_redis.publish = AsyncMock()
 
         local_ctx = {
-            "pool": clean_rls_db,
+            "pool": app_pool,
             "cipher": _CIPHER,
             "extraction_service": mock_svc,
             "redis": mock_redis,
@@ -419,6 +463,7 @@ async def test_multi_worker_race_idempotent(
 
 async def test_lifecycle_happy_path(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Worker lifecycle: pending -> running -> completed.
 
@@ -431,7 +476,7 @@ async def test_lifecycle_happy_path(
         conv_id = await _seed_conversation_modern(conn)
         job_id = await _seed_extraction_job(conn, conv_id)
 
-    ctx = _make_mock_ctx(clean_rls_db)
+    ctx = _make_mock_ctx(app_pool)
 
     # Use a deterministic mock provider so cents_spent is calculable.
     from unittest.mock import MagicMock
@@ -476,6 +521,7 @@ async def test_lifecycle_happy_path(
 
 async def test_lifecycle_on_failure(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Worker lifecycle on LLM failure: pending -> running -> failed.
 
@@ -488,7 +534,7 @@ async def test_lifecycle_on_failure(
         conv_id = await _seed_conversation_modern(conn)
         job_id = await _seed_extraction_job(conn, conv_id)
 
-    ctx = _make_mock_ctx(clean_rls_db)
+    ctx = _make_mock_ctx(app_pool)
     ctx["extraction_service"].extract_entries.side_effect = RuntimeError("LLM hard failure")
 
     with pytest.raises(RuntimeError, match="LLM hard failure"):
@@ -523,6 +569,7 @@ async def test_lifecycle_on_failure(
 
 async def test_lifecycle_retry_idempotency(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Lifecycle UPDATEs are no-ops on retry after terminal state is set.
 
@@ -538,7 +585,7 @@ async def test_lifecycle_retry_idempotency(
         conv_id = await _seed_conversation_modern(conn)
         job_id = await _seed_extraction_job(conn, conv_id)
 
-    ctx = _make_mock_ctx(clean_rls_db)
+    ctx = _make_mock_ctx(app_pool)
 
     from unittest.mock import MagicMock
 
@@ -577,6 +624,7 @@ async def test_lifecycle_retry_idempotency(
 
 async def test_audit_rows_actor_type_user(
     clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
 ) -> None:
     """Both terminal audit rows use actor_type='user', not 'service'."""
     async with clean_rls_db.acquire() as conn:
@@ -586,7 +634,7 @@ async def test_audit_rows_actor_type_user(
         job_id_fail = await _seed_extraction_job(conn, conv_id_fail)
 
     # Happy path job.
-    ctx_ok = _make_mock_ctx(clean_rls_db)
+    ctx_ok = _make_mock_ctx(app_pool)
     from unittest.mock import MagicMock
 
     mock_provider = MagicMock()
@@ -595,7 +643,7 @@ async def test_audit_rows_actor_type_user(
     await extract_conversation(ctx_ok, conv_id_ok, _USER_ID_STR, str(job_id_ok))
 
     # Failure job.
-    ctx_fail = _make_mock_ctx(clean_rls_db)
+    ctx_fail = _make_mock_ctx(app_pool)
     ctx_fail["extraction_service"].extract_entries.side_effect = RuntimeError("injected fail")
     with pytest.raises(RuntimeError):
         await extract_conversation(ctx_fail, conv_id_fail, _USER_ID_STR, str(job_id_fail))

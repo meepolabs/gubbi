@@ -125,6 +125,7 @@ async def _seed_v1_rows(
             conv_summary_ct,
             conv_summary_nc,
             ["rotate-test"],
+            [],
             now,
         )
 
@@ -198,7 +199,7 @@ async def _verify_all_at_version(
                 nonce[0] == target_version
             ), f"{table}.{col_nonce}[0]={nonce[0]} expected {target_version}"
             # Round-trip decrypt must succeed under V2-only cipher.
-            cipher_v2.decrypt(bytes(row[col_enc]), nonce)
+            cipher_v2.decrypt(bytes(row["ct"]), nonce)
 
 
 # ---------------------------------------------------------------------------
@@ -256,10 +257,11 @@ async def test_rotate_dry_run_writes_nothing(
     args = argparse.Namespace(from_version=1, to_version=2, dry_run=True, verify=False)
     await _run(admin_pool, dual_cipher, args)
 
-    # Post-dry-run: V1 counts unchanged.
+    # Post-dry-run: total V1 count unchanged (dry-run writes nothing).
+    v1_post = 0
     for table, col_enc, col_nonce in _ROTATION_SCREENS:
-        v1_post = await _count_rows_at_version(admin_pool, table, col_enc, col_nonce, 1)
-        assert v1_post == v1_pre
+        v1_post += await _count_rows_at_version(admin_pool, table, col_enc, col_nonce, 1)
+    assert v1_post == v1_pre
 
 
 async def test_decrypt_with_v1_only_cipher_after_rotation_raises(

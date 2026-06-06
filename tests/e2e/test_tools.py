@@ -1,17 +1,26 @@
 """Integration tests for MCP tools -- end-to-end through the tool layer."""
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 import asyncpg
 import pytest
+import pytest_asyncio
 import structlog
 from mcp.server.fastmcp import FastMCP
 
 from gubbi.app_context import AppContext
+from gubbi.auth_context import current_token_scopes, current_user_id
 from gubbi.config import get_settings
+from gubbi.crypto.cipher import ContentCipher
 from gubbi.tools.constants import LIST_SUMMARY_PREVIEW_CHARS
 from gubbi.tools.registry import register_tools
+
+pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+_TOOLS_USER_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 
 
 class _StubEmbeddingService:
@@ -57,6 +66,7 @@ def mcp_server(clean_pool: asyncpg.Pool, tmp_journal: Path) -> FastMCP:
         embedding_service=_StubEmbeddingService(),  # type: ignore[arg-type]
         settings=settings,
         logger=structlog.get_logger("test"),
+        cipher=ContentCipher({1: bytes([1]) * 32}),
     )
     mcp = FastMCP("test-gubbi")
     register_tools(mcp, app_ctx)
@@ -70,6 +80,39 @@ def tools(mcp_server: FastMCP) -> dict:
     for name, tool in mcp_server._tool_manager._tools.items():
         tool_map[name] = tool.fn
     return tool_map
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _auth_context(clean_pool: asyncpg.Pool) -> AsyncIterator[None]:
+    """Set the ContextVars BearerAuthMiddleware would install in production.
+
+    Each tool handler is wrapped by ``require_scope`` (defense-in-depth scope
+    gate); without ``current_token_scopes`` set, every call returns an
+    insufficient-scope ``CallToolResult`` instead of running the handler. The
+    handlers also read ``current_user_id`` for user-scoped queries, so seed a
+    real users row (clean_pool does not TRUNCATE users) to satisfy the FK on
+    topics / entries / conversations.
+    """
+    async with clean_pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO users (id, email, timezone, created_at, updated_at)
+            VALUES ($1, 'tools-e2e@test.local', 'UTC', now(), now())
+            ON CONFLICT (id) DO NOTHING
+            """,
+            _TOOLS_USER_ID,
+        )
+    user_token = current_user_id.set(_TOOLS_USER_ID)
+    scope_token = current_token_scopes.set(frozenset({"journal"}))
+    try:
+        yield
+    finally:
+        current_token_scopes.reset(scope_token)
+        current_user_id.reset(user_token)
+        # clean_pool does NOT TRUNCATE users; remove the seeded user so a later
+        # test that asserts an empty users table is not polluted by this seed.
+        async with clean_pool.acquire() as conn:
+            await conn.execute("DELETE FROM users WHERE id = $1", _TOOLS_USER_ID)
 
 
 class TestAppendAndRead:
