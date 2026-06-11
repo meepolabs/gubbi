@@ -10,12 +10,15 @@ from __future__ import annotations
 from fastapi import HTTPException
 
 __all__: list[str] = [
+    "CONVERSATION_NOT_FOUND",
     "TOPIC_NOT_FOUND",
+    "conversation_not_found",
     "topic_not_found",
 ]
 
 # Stable machine-readable detail codes. Clients match on these, not on prose.
 TOPIC_NOT_FOUND: str = "topic_not_found"
+CONVERSATION_NOT_FOUND: str = "conversation_not_found"
 
 
 def topic_not_found() -> HTTPException:
@@ -26,3 +29,13 @@ def topic_not_found() -> HTTPException:
     which is the intended behavior (no cross-tenant existence signal).
     """
     return HTTPException(status_code=404, detail=TOPIC_NOT_FOUND)
+
+
+def conversation_not_found() -> HTTPException:
+    """Return a 404 ``HTTPException`` with ``{"detail": "conversation_not_found"}``.
+
+    Raised when a conversation id does not resolve for the authenticated user.
+    Under RLS another user's conversation is indistinguishable from a missing
+    one -- the intended behavior (no cross-tenant existence signal).
+    """
+    return HTTPException(status_code=404, detail=CONVERSATION_NOT_FOUND)
