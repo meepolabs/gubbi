@@ -1,46 +1,11 @@
-# gitleaks config -- adopted from meepo-conventions baseline.
+# gitleaks config -- default ruleset, NO allowlist.
 #
-# Inherits the default ruleset and adds project-specific allowlist
-# patterns for files that legitimately contain hex/base64-looking
-# strings (lockfiles, generated types, content snapshots).
+# Every path is scanned: source, tests, docs, CI workflows, lockfiles, and
+# .env templates. There is deliberately no [allowlist] -- no directory or file
+# is blanket-trusted, so a real secret committed anywhere is surfaced, not
+# silently passed. Test fixtures MUST use values that do not match the default
+# rules (e.g. no `sk_test_<24+ chars>` shapes, no high-entropy key strings); a
+# match is a bug to fix at the source, never an entry to allow.
 
 [extend]
 useDefault = true
-
-[allowlist]
-description = "Build outputs, lockfiles, and generated types -- not source"
-
-# Anchor patterns to repo root with `^` so a stray nested path
-# (e.g. submodule, backup dir) with the same name doesn't auto-bypass
-# scanning. EVERY directory pattern below MUST be anchored.
-paths = [
-  # Lockfiles
-  '''poetry\.lock''',
-  '''package-lock\.json''',
-  '''pnpm-lock\.yaml''',
-  '''yarn\.lock''',
-  '''uv\.lock''',
-  '''Cargo\.lock''',
-
-  # Python build / cache artifacts -- ANCHORED
-  '''^__pycache__/''',
-  '''^\.mypy_cache/''',
-  '''^\.pytest_cache/''',
-  '''^\.ruff_cache/''',
-  '''^dist/''',
-  '''^\.eggs/''',
-
-  # Node generated artifacts -- ANCHORED
-  '''^node_modules/''',
-  '''^build/''',
-]
-
-# .env.example by name -- it's a template; should never contain real
-# values. Same discipline applies to .env.test: even test-scoped
-# credentials are credentials. Use clearly fake placeholder values
-# (e.g. `test-key-not-real`) in BOTH files. If a real value ever
-# appears, that's the bug we want to surface, not allow.
-files = [
-  '''^\.env\.example$''',
-  '''^\.env\.test$''',
-]
