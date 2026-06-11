@@ -366,3 +366,42 @@ class TestTimeline:
         result = await tools["journal_briefing"]()
         assert result["topic_count"] >= 1
         assert "stats" in result
+
+    async def test_briefing_nonempty_omits_seed_instructions(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="work/acme", title="Acme Corp Notes")
+        await tools["journal_append_entry"](topic="work/acme", content="Working on the project.")
+
+        result = await tools["journal_briefing"]()
+
+        assert "seed_instructions" not in result
+
+    async def test_briefing_empty_adds_seed_instructions(self, tools: dict) -> None:
+        result = await tools["journal_briefing"]()
+
+        assert result["topic_count"] == 0
+        assert result["stats"]["total_documents"] == 0
+        seed = result.get("seed_instructions")
+        assert isinstance(seed, str)
+        assert seed.strip()
+        assert "journal_create_topic" in seed
+        assert "journal_append_entry" in seed
+        assert seed.isascii()
+
+        banned = [
+            "journey",
+            "reflection",
+            "seamlessly",
+            "effortlessly",
+            "empower",
+            "intelligent",
+            "ai-powered",
+            "unleash",
+            "revolutionize",
+            "magical",
+            "curate",
+            "insights",
+            "your thoughts",
+        ]
+        lowered = seed.lower()
+        for word in banned:
+            assert word not in lowered, f"banned word in seed_instructions: {word}"

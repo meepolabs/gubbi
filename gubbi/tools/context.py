@@ -25,6 +25,7 @@ from gubbi.tools.constants import (
     BRIEFING_KEY_FACTS_QUERY,
     BRIEFING_MAX_TOPICS,
     BRIEFING_MAX_WEEK_ENTRIES,
+    BRIEFING_SEED_INSTRUCTIONS,
     DEFAULT_TIMELINE_LIMIT,
     MAX_SEARCH_CONTENT_CHARS,
     MAX_TIMELINE_ENTRIES,
@@ -271,6 +272,9 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             "topic_count": topic_count,
             "stats": stats,
         }
+        # total_documents is entries + conversations; zero means no entries at all.
+        if topic_count == 0 and stats.get("total_documents", 0) == 0:
+            briefing_payload["seed_instructions"] = BRIEFING_SEED_INSTRUCTIONS
         err = check_response_size(briefing_payload, tool_name="journal_briefing")
         if err:
             await _report_oversized("journal_briefing", err)

@@ -23,6 +23,17 @@ BRIEFING_MAX_WEEK_ENTRIES: Final = 25
 BRIEFING_KEY_FACTS_QUERY: Final = "user identity preferences habits goals current status"
 BRIEFING_KEY_FACTS_COUNT: Final = 7
 
+# Added to a briefing only when the journal is empty (no topics, no entries).
+# Tells the calling model to bootstrap the journal from what it already knows.
+BRIEFING_SEED_INSTRUCTIONS: Final = (
+    "This journal is empty. Build the user's starting journal from what you already "
+    "know about them -- your own memory, their profile and preferences, and prior "
+    "context. If you know little, briefly ask 2-3 questions first. Create a handful of "
+    "starting topics with journal_create_topic and record what you learn with "
+    "journal_append_entry. This is a diary, not a dashboard: Gubbi acts, the journal "
+    "stores what matters."
+)
+
 # Upper-bound cap for journal_read_topic n parameter -- prevents loading entire journal into memory
 MAX_READ_ENTRIES: Final = 20
 
