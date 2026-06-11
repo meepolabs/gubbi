@@ -26,7 +26,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0001_squashed_baseline"
+_EXPECTED_HEAD = "0002_add_onboarding_completed_at"
 
 
 def _alembic_config() -> Config:
@@ -48,7 +48,7 @@ def test_alembic_has_single_head() -> None:
     assert len(heads) == 1, f"expected exactly one alembic head, got: {heads!r}"
 
 
-def test_alembic_head_is_squashed_baseline() -> None:
+def test_alembic_head_is_expected() -> None:
     # Arrange
     cfg = _alembic_config()
     script_dir = ScriptDirectory.from_config(cfg)
