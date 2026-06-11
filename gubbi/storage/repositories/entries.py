@@ -20,10 +20,11 @@ from gubbi.crypto.cipher import (
 from gubbi.models.journal import Entry, TopicMeta
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
-from gubbi.storage.repositories.base import _add_param
+from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.storage.repositories.topics import get as get_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_date as _validate_date
+from gubbi.validation import validate_topic as _validate_topic
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -503,6 +504,7 @@ async def get_by_date_range(
     ascending: bool = True,
     offset: int = 0,
     title_only: bool = False,
+    topic_prefix: str | None = None,
 ) -> list[dict[str, Any]]:
     """Get entries and conversations updated within a date range.
 
@@ -524,12 +526,21 @@ async def get_by_date_range(
         title_only: When True, return only IDs/titles/fields -- skips decryption
                     entirely. Use for timeline index views.  Briefing uses
                     title_only=False so it retains full content previews.
+        topic_prefix: When set, restrict to rows whose topic path starts with
+                    this prefix. None (default) returns all topics, so existing
+                    callers are unaffected.
     """
     order = "ASC" if ascending else "DESC"
     params: list[Any] = [
         date_cls.fromisoformat(date_from),
         date_cls.fromisoformat(date_to),
     ]
+    prefix_clause = ""
+    if topic_prefix:
+        topic_prefix = _validate_topic(topic_prefix)
+        placeholder = _add_param(params, _escape_like(topic_prefix) + "%")
+        prefix_clause = f" AND t.path LIKE {placeholder} ESCAPE '!'"
+
     limit_clause = ""
     offset_clause = ""
     if limit is not None:
@@ -558,6 +569,7 @@ async def get_by_date_range(
         WHERE e.date >= $1 AND e.date <= $2
           AND e.deleted_at IS NULL
           AND e.conversation_id IS NULL
+          {prefix_clause}
 
         UNION ALL
 
@@ -578,6 +590,7 @@ async def get_by_date_range(
         FROM conversations c
         JOIN topics t ON t.id = c.topic_id
         WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
+          {prefix_clause}
 
         ORDER BY date {order}, doc_type ASC, doc_id {order}
         {limit_clause}{offset_clause}
