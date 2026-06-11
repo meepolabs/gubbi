@@ -48,7 +48,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "ce7e2a4", extras = ["db"] }  # starlette pin relaxed to >=1.0.1,<2.0 (closes CVE-2026-48710 BadHost + CVE-2025-62727 Range DoS).
+gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "ec2e7ff", extras = ["db"] }  # journal scope constants + topic/entry audit actions (v0.16.0).
 
 # LLM extraction -- Arq worker + Anthropic API
 arq = "^0.26.0"
