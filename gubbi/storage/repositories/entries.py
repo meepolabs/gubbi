@@ -9,6 +9,9 @@ from datetime import datetime as datetime_cls
 from typing import TYPE_CHECKING, Any, cast
 
 import structlog
+from gubbi_common.audit.actions import Action
+from gubbi_common.audit.sql import record_audit_async as record_audit
+from gubbi_common.audit.targets import TargetKind
 
 from gubbi.crypto.cipher import (
     ContentCipher,
@@ -32,20 +35,42 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__: list[str] = [
+    "MAX_MOVE_IDS",
+    "EntriesMoveNotFound",
     "append",
     "delete",
     "get_by_date_range",
+    "get_entry_by_id",
     "get_max_indexed_at",
     "get_stats",
     "get_text",
     "get_texts",
     "get_unindexed",
+    "list_entries",
     "mark_indexed",
     "mark_indexed_batch",
+    "move_entries_to_topic",
     "read",
     "reset_indexed_at",
     "update",
 ]
+
+# Upper bound on a single bulk move; matches the multi-select UI contract.
+MAX_MOVE_IDS: int = 100
+
+
+class EntriesMoveNotFound(LookupError):
+    """Raised by ``move_entries_to_topic`` when some entry ids do not resolve.
+
+    Carries the unresolved ids so the API can list them in the 404 detail. Under
+    RLS another user's entry is indistinguishable from a missing one, so it lands
+    here too (no cross-tenant existence signal).
+    """
+
+    def __init__(self, missing_ids: list[int]) -> None:
+        self.missing_ids = missing_ids
+        super().__init__(f"Entry ids not found: {missing_ids}")
+
 
 logger = structlog.get_logger(__name__)
 # Sync stdlib logger -- used inside the sync ``_build_entry`` closure where we
@@ -234,6 +259,103 @@ async def read(
             or 0
         )
     return meta, [_build_entry(r) for r in rows], total
+
+
+async def list_entries(
+    conn: asyncpg.Connection,
+    *,
+    topic: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    tags: Sequence[str] | None = None,
+    source: str | None = None,
+    sort: str = "newest",
+    limit: int | None = None,
+    offset: int = 0,
+) -> tuple[list[asyncpg.Record], int]:
+    """List entries across topics (or one topic), with filters. Returns (rows, total).
+
+    Returns raw rows carrying the encrypted content columns; the caller decrypts
+    via the web ``decrypt_field`` helper so a corrupt row yields the sentinel +
+    ``decryption_failed`` flag rather than raising. ``reasoning`` is intentionally
+    NOT selected -- it is detail-only.
+
+    Filters:
+      * ``topic``      -- exact topic path (not a prefix).
+      * ``date_from`` / ``date_to`` -- inclusive date bounds (YYYY-MM-DD).
+      * ``tags``       -- AND semantics via ``tags @> $n::text[]`` (row must carry
+                          all given tags).
+      * ``source``     -- the source of the entry's originating conversation;
+                          entries with no conversation are excluded when set.
+      * ``sort``       -- ``newest`` (default) or ``oldest``.
+
+    ``total`` is the full filtered count before LIMIT via ``COUNT(*) OVER()``.
+    """
+    if date_from:
+        _validate_date(date_from)
+    if date_to:
+        _validate_date(date_to)
+    if sort not in ("newest", "oldest"):
+        msg = f"Invalid sort '{sort}'. Use 'newest' or 'oldest'."
+        raise ValueError(msg)
+
+    where_parts = ["e.deleted_at IS NULL"]
+    params: list[Any] = []
+    if topic:
+        topic = _validate_topic(topic)
+        where_parts.append(f"t.path = {_add_param(params, topic)}")
+    if date_from:
+        where_parts.append(f"e.date >= {_add_param(params, date_cls.fromisoformat(date_from))}")
+    if date_to:
+        where_parts.append(f"e.date <= {_add_param(params, date_cls.fromisoformat(date_to))}")
+    if tags:
+        where_parts.append(f"e.tags @> {_add_param(params, list(tags))}::text[]")
+    if source:
+        where_parts.append(f"c.source = {_add_param(params, source)}")
+    where = " AND ".join(where_parts)
+
+    direction = "DESC" if sort == "newest" else "ASC"
+    pagination = ""
+    if limit is not None:
+        pagination = f"LIMIT {_add_param(params, limit)} OFFSET {_add_param(params, offset)}"
+    elif offset > 0:
+        pagination = f"OFFSET {_add_param(params, offset)}"
+
+    sql = (
+        f"SELECT e.id, t.path AS topic_path, e.date::text AS date,"  # noqa: S608 - all user values bound via _add_param; identifiers literal
+        f" e.content_encrypted, e.content_nonce, e.tags, e.conversation_id,"
+        f" e.created_at, e.updated_at, COUNT(*) OVER() AS total_count"
+        f" FROM entries e"
+        f" JOIN topics t ON t.id = e.topic_id"
+        f" LEFT JOIN conversations c ON c.id = e.conversation_id"
+        f" WHERE {where}"
+        f" ORDER BY e.date {direction}, e.created_at {direction}, e.id {direction}"
+        f" {pagination}"
+    )
+    rows = await conn.fetch(sql, *params)
+    total = int(rows[0]["total_count"]) if rows else 0
+    return list(rows), total
+
+
+async def get_entry_by_id(
+    conn: asyncpg.Connection,
+    entry_id: int,
+) -> asyncpg.Record | None:
+    """Return one active entry's row (content + reasoning) by id, or None.
+
+    Returns the raw row carrying both encrypted column pairs; the caller decrypts
+    via the web ``decrypt_field`` helper. Soft-deleted or other-user (RLS) rows
+    return None.
+    """
+    return await conn.fetchrow(
+        "SELECT e.id, t.path AS topic_path, e.date::text AS date,"
+        " e.content_encrypted, e.content_nonce,"
+        " e.reasoning_encrypted, e.reasoning_nonce,"
+        " e.tags, e.conversation_id, e.created_at, e.updated_at"
+        " FROM entries e JOIN topics t ON t.id = e.topic_id"
+        " WHERE e.id = $1 AND e.deleted_at IS NULL",
+        entry_id,
+    )
 
 
 async def update(
@@ -431,6 +553,78 @@ async def delete(conn: asyncpg.Connection, entry_id: int) -> int:
         msg = f"Entry id {entry_id} not found"
         raise EntryNotFoundError(msg)
     return int(row["topic_id"])
+
+
+async def move_entries_to_topic(
+    conn: asyncpg.Connection,
+    entry_ids: Sequence[int],
+    dest_topic_id: int,
+    *,
+    actor_id: str,
+) -> int:
+    """Bulk-move entries to a destination topic in one transaction. Returns count.
+
+    All-or-nothing: validates every id resolves (active, this user) AND the
+    destination topic exists before moving any row. Raises ``EntriesMoveNotFound``
+    (carrying the unresolved ids) when any entry id is missing, and
+    ``TopicNotFoundError`` when the destination topic does not resolve. Writes one
+    ``ENTRY_MOVED`` audit row (dest path + count; no content/PII) in the caller's
+    transaction.
+
+    The caller MUST wrap this in ``conn.transaction()`` so the move and its audit
+    row commit together.
+    """
+    assert conn.is_in_transaction(), (  # noqa: S101
+        "entries.move_entries_to_topic: caller must wrap in conn.transaction()"
+    )
+    ids = list(dict.fromkeys(entry_ids))  # de-dupe, preserve order
+    if not ids:
+        msg = "No entry ids supplied"
+        raise ValueError(msg)
+    if len(ids) > MAX_MOVE_IDS:
+        msg = f"Cannot move more than {MAX_MOVE_IDS} entries at once"
+        raise ValueError(msg)
+
+    dest_row = await conn.fetchrow("SELECT path FROM topics WHERE id = $1", dest_topic_id)
+    if dest_row is None:
+        msg = f"Topic id {dest_topic_id} not found"
+        raise TopicNotFoundError(msg)
+    dest_path = str(dest_row["path"])
+
+    present = await conn.fetch(
+        "SELECT id FROM entries WHERE id = ANY($1) AND deleted_at IS NULL",
+        ids,
+    )
+    present_ids = {int(r["id"]) for r in present}
+    missing = [eid for eid in ids if eid not in present_ids]
+    if missing:
+        raise EntriesMoveNotFound(missing)
+
+    now = datetime_cls.now(UTC)
+    await conn.execute(
+        """
+        WITH moved AS (
+            UPDATE entries SET topic_id = $1, updated_at = $2
+            WHERE id = ANY($3) AND deleted_at IS NULL
+            RETURNING id
+        )
+        UPDATE topics SET updated_at = $2 WHERE id = $1
+        """,
+        dest_topic_id,
+        now,
+        ids,
+    )
+
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id=actor_id,
+        action=Action.ENTRY_MOVED,
+        target_kind=TargetKind.TOPIC,
+        target_id=str(dest_topic_id),
+        metadata={"dest_path": dest_path, "entries_moved": len(ids)},
+    )
+    return len(ids)
 
 
 async def mark_indexed(conn: asyncpg.Connection, entry_id: int) -> None:

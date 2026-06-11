@@ -11,14 +11,17 @@ from fastapi import HTTPException
 
 __all__: list[str] = [
     "CONVERSATION_NOT_FOUND",
+    "ENTRY_NOT_FOUND",
     "TOPIC_NOT_FOUND",
     "conversation_not_found",
+    "entry_not_found",
     "topic_not_found",
 ]
 
 # Stable machine-readable detail codes. Clients match on these, not on prose.
 TOPIC_NOT_FOUND: str = "topic_not_found"
 CONVERSATION_NOT_FOUND: str = "conversation_not_found"
+ENTRY_NOT_FOUND: str = "entry_not_found"
 
 
 def topic_not_found() -> HTTPException:
@@ -39,3 +42,13 @@ def conversation_not_found() -> HTTPException:
     one -- the intended behavior (no cross-tenant existence signal).
     """
     return HTTPException(status_code=404, detail=CONVERSATION_NOT_FOUND)
+
+
+def entry_not_found() -> HTTPException:
+    """Return a 404 ``HTTPException`` with ``{"detail": "entry_not_found"}``.
+
+    Raised when an entry id does not resolve for the authenticated user -- absent,
+    soft-deleted, or (under RLS) owned by another user, which is indistinguishable
+    from missing (no cross-tenant existence signal).
+    """
+    return HTTPException(status_code=404, detail=ENTRY_NOT_FOUND)
