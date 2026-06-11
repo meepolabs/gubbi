@@ -10,7 +10,13 @@ from typing import TYPE_CHECKING, Any, cast
 
 import structlog
 
-from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
+from gubbi.crypto.cipher import (
+    ContentCipher,
+    DecryptionError,
+)
+from gubbi.crypto.cipher import (
+    decrypt_content_field as _decrypt_content_field,
+)
 from gubbi.models.journal import Entry, TopicMeta
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
@@ -20,7 +26,7 @@ from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_date as _validate_date
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     import asyncpg
 
@@ -44,36 +50,6 @@ logger = structlog.get_logger(__name__)
 # Sync stdlib logger -- used inside the sync ``_build_entry`` closure where we
 # cannot ``await`` an AsyncBoundLogger. Mirrors the embedding_service.py pattern.
 _sync_logger = logging.getLogger(__name__)
-
-
-# -- module-private helpers ----------------------------------------------------
-
-
-def _decrypt_content_field(
-    cipher: ContentCipher,
-    row: asyncpg.Record | Mapping[str, Any],
-    encrypted_key: str,
-    nonce_key: str,
-) -> str | None:
-    """Return decrypted content for a row, or ``None`` if no value is stored.
-
-    ``row`` may be an asyncpg.Record or a dict. Three cases:
-
-    * Both ciphertext and nonce present -- decrypt via ``decrypt_or_raise``
-      which flattens any cipher failure into an opaque ``DecryptionError``.
-    * Both NULL -- legitimately "no value" (reasoning is nullable, so an
-      entry with no reasoning has both encrypted/nonce as NULL). Return
-      ``None``; callers that require a value (e.g. ``content``) must
-      verify the result is not None themselves.
-    * Exactly one NULL -- corruption signal, raises ``DecryptionError``.
-    """
-    ct = row[encrypted_key]
-    nonce = row[nonce_key]
-    if ct is not None and nonce is not None:
-        return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
-    if ct is None and nonce is None:
-        return None
-    raise DecryptionError("encrypted column and nonce must both be present")
 
 
 async def append(

@@ -17,7 +17,14 @@ from uuid import UUID, uuid4
 
 import structlog
 
-from gubbi.crypto.cipher import ContentCipher, DecryptionError, decrypt_or_raise
+from gubbi.crypto.cipher import (
+    ContentCipher,
+    DecryptionError,
+    decrypt_or_raise,
+)
+from gubbi.crypto.cipher import (
+    decrypt_content_field as _decrypt_content_field,
+)
 from gubbi.models.conversation import ConversationMeta, Message
 from gubbi.storage.exceptions import ConversationNotFoundError
 from gubbi.storage.repositories.base import _add_param, _escape_like
@@ -25,7 +32,7 @@ from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import slugify, validate_title, validate_topic
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Sequence
 
     import asyncpg
 
@@ -87,21 +94,6 @@ def _write_conversation_json(
     }
     out_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     return f"conversations_json/{file_id}.json"
-
-
-def _decrypt_content_field(
-    cipher: ContentCipher,
-    row: asyncpg.Record | Mapping[str, Any],
-    encrypted_key: str,
-    nonce_key: str,
-) -> str | None:
-    ct = row[encrypted_key]
-    nonce = row[nonce_key]
-    if ct is not None and nonce is not None:
-        return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
-    if ct is None and nonce is None:
-        return None
-    raise DecryptionError("encrypted column and nonce must both be present")
 
 
 def _row_to_meta(cipher: ContentCipher, row: asyncpg.Record) -> ConversationMeta:

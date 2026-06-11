@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 __all__: list[str] = [
     "ContentCipher",
     "DecryptionError",
+    "decrypt_content_field",
     "decrypt_or_raise",
     "load_master_keys_from_env",
 ]
@@ -287,3 +288,32 @@ def decrypt_or_raise(cipher: ContentCipher, ciphertext: bytes, nonce: bytes) -> 
         return cipher.decrypt(ciphertext, nonce)
     except (ValueError, InvalidTag) as exc:
         raise DecryptionError("decryption failed") from exc
+
+
+def decrypt_content_field(
+    cipher: ContentCipher,
+    row: Mapping[str, Any],
+    encrypted_key: str,
+    nonce_key: str,
+) -> str | None:
+    """Decrypt one ciphertext/nonce column pair from a DB row.
+
+    ``row`` may be an ``asyncpg.Record`` or a dict. Three cases:
+
+    * Both ciphertext and nonce present -- decrypt via ``decrypt_or_raise``,
+      which flattens any cipher failure into ``DecryptionError``.
+    * Both NULL -- legitimately "no value" (a nullable column such as an
+      entry's ``reasoning``). Returns ``None``; callers that require a value
+      must check the result themselves.
+    * Exactly one NULL -- a corruption signal; raises ``DecryptionError``.
+
+    Canonical helper shared by the repository modules and the web API
+    decryption mapper so the column-pair decode semantics live in one place.
+    """
+    ct = row[encrypted_key]
+    nonce = row[nonce_key]
+    if ct is not None and nonce is not None:
+        return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
+    if ct is None and nonce is None:
+        return None
+    raise DecryptionError("encrypted column and nonce must both be present")
