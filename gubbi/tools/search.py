@@ -1,10 +1,14 @@
-"""MCP tool: journal_search (tsvector FTS + pgvector semantic)."""
+"""MCP tool: journal_search (tsvector FTS + pgvector semantic).
 
-import asyncio
-from datetime import date as date_cls
+The hybrid search pipeline (dual search -> hydrate -> sort/slice/shape) lives in
+``gubbi.services.search`` so the web REST surface can reuse it unchanged. This
+module owns only the tool-layer contract: argument validation, the 1..20 limit
+clamp, user/cipher resolution, the user-scoped connection, and the
+response-size guard.
+"""
+
 from typing import Any
 
-import asyncpg
 import structlog
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 from mcp.server.fastmcp import FastMCP
@@ -13,16 +17,11 @@ from mcp.types import ToolAnnotations
 from gubbi.app_context import AppContext
 from gubbi.auth.scope import require_scope
 from gubbi.auth_context import current_user_id
-from gubbi.crypto.cipher import ContentCipher
 from gubbi.crypto.guard import require_cipher
-from gubbi.models.search import SearchResult
-from gubbi.storage.repositories import conversations as conv_repo
-from gubbi.storage.repositories import entries as entry_repo
-from gubbi.storage.repositories import search as search_repo
+from gubbi.services.search import run_journal_search
 from gubbi.tools.constants import (
     DEFAULT_SEARCH_LIMIT,
     MAX_QUERY_LEN,
-    MAX_SEARCH_CONTENT_CHARS,
     MAX_SEARCH_RESULTS,
 )
 from gubbi.tools.errors import invalid_date, invalid_topic, validation_error
@@ -32,194 +31,6 @@ from gubbi.validation import validate_date, validate_topic
 __all__: list[str] = ["register"]
 
 logger = structlog.get_logger(__name__)
-
-
-def _truncate_text(value: str) -> str:
-    return value[:MAX_SEARCH_CONTENT_CHARS]
-
-
-def _truncate_title_summary(title: str, summary: str) -> tuple[str, str]:
-    budget = MAX_SEARCH_CONTENT_CHARS
-    if len(title) + len(summary) <= budget:
-        return title, summary
-    if len(title) >= budget:
-        return title[:budget], ""
-    remaining = budget - len(title)
-    return title, summary[:remaining]
-
-
-async def _run_dual_search(
-    conn: asyncpg.Connection,
-    app_ctx: AppContext,
-    query: str,
-    query_embedding: list[float] | None,
-    topic_prefix: str | None,
-    date_from: str | None,
-    date_to: str | None,
-    df: date_cls | None,
-    dt: date_cls | None,
-    limit: int,
-) -> list[SearchResult]:
-    """Run FTS + semantic search backends and merge with dedup."""
-    fts_results: list[SearchResult] = await search_repo.fts_search(
-        conn, query, topic_prefix, date_from, date_to, limit
-    )
-
-    semantic_results: list[SearchResult] = []
-    if query_embedding is not None:
-        try:
-            raw = await app_ctx.embedding_service.search_by_vector(
-                conn,
-                query_embedding,
-                limit=limit,
-                topic_prefix=topic_prefix,
-                date_from=df,
-                date_to=dt,
-            )
-            semantic_results = [
-                SearchResult(
-                    source_key=f"entry:{r.get('entry_id')}",
-                    doc_type="entry",
-                    topic=str(r.get("topic", "")),
-                    rank=-float(r.get("similarity", 0.0)),
-                    date=str(r.get("date", "")),
-                    entry_id=r.get("entry_id"),
-                    conversation_id=None,
-                )
-                for r in raw
-                if r.get("entry_id") is not None
-            ]
-        except asyncpg.PostgresError:
-            await logger.warning("Semantic search failed, using FTS only", exc_info=True)
-        except Exception:
-            await logger.exception("Semantic search failed unexpectedly")
-            raise
-
-    # Merge with seen_keys dedup -- FTS first, semantic second preserves order.
-    seen_keys: set[str] = set()
-    merged: list[SearchResult] = []
-    for result in fts_results:
-        if result.source_key not in seen_keys:
-            seen_keys.add(result.source_key)
-            merged.append(result)
-    for result in semantic_results:
-        if result.source_key not in seen_keys:
-            seen_keys.add(result.source_key)
-            merged.append(result)
-
-    return merged
-
-
-async def _hydrate_results(
-    conn: asyncpg.Connection,
-    cipher: ContentCipher,
-    merged: list[SearchResult],
-) -> list[SearchResult]:
-    """Decrypt+truncation hydration for merged search results."""
-    # Batch-collect unique IDs for a single round-trip per entity type.
-    entry_ids: set[int] = set()
-    conv_ids: set[int] = set()
-    for result in merged:
-        if result.doc_type == "entry" and result.entry_id is not None:
-            entry_ids.add(result.entry_id)
-        elif result.doc_type == "conversation" and result.conversation_id is not None:
-            conv_ids.add(result.conversation_id)
-
-    # Batched fetches -- one query per entity type instead of N.
-    entry_id_list = list(entry_ids)
-    conv_id_list = list(conv_ids)
-
-    decrypted_entries: dict[int, tuple[str, str | None]] = {}
-    try:
-        decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
-    except asyncpg.PostgresError:
-        await logger.exception(
-            "Entry batch query failed, skipping entries",
-            entry_count=len(entry_id_list),
-            entry_ids=repr(entry_id_list),
-        )
-
-    decrypted_convs: dict[int, tuple[str, str]] = {}
-    try:
-        decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
-    except asyncpg.PostgresError:
-        await logger.exception(
-            "Conversation batch query failed, skipping conversations",
-            conv_count=len(conv_id_list),
-            conv_ids=repr(conv_id_list),
-        )
-
-    hydrated: list[SearchResult] = []
-    for result in merged:
-        if (
-            result.doc_type == "entry"
-            and result.entry_id is not None
-            and result.entry_id in decrypted_entries
-        ):
-            content, _reasoning = decrypted_entries[result.entry_id]
-            decryption_failed = content == "[decryption-failed]"  # sentinel
-            update: dict[str, Any] = {
-                "content": (
-                    "[decryption failed]" if decryption_failed else _truncate_text(content)
-                ),
-                "decryption_failed": decryption_failed,
-            }
-            hydrated.append(result.model_copy(update=update))
-        elif (
-            result.doc_type == "conversation"
-            and result.conversation_id is not None
-            and result.conversation_id in decrypted_convs
-        ):
-            title, summary = decrypted_convs[result.conversation_id]
-            truncated_title, truncated_summary = _truncate_title_summary(title, summary)
-            hydrated.append(
-                result.model_copy(
-                    update={
-                        "title": truncated_title,
-                        "summary": truncated_summary,
-                    }
-                )
-            )
-
-    return hydrated
-
-
-def _build_payload(hydrated: list[SearchResult], query: str, limit: int) -> dict[str, Any]:
-    """Sort, slice, and shape hydrated results into the MCP response dict."""
-    sorted_results = sorted(hydrated, key=lambda x: x.rank)[:limit]
-
-    payload: list[dict[str, Any]] = []
-    for result in sorted_results:
-        if result.doc_type == "entry":
-            payload.append(
-                {
-                    "doc_type": "entry",
-                    "topic": result.topic,
-                    "date": result.date,
-                    "entry_id": result.entry_id,
-                    "conversation_id": None,
-                    "content": result.content or "",
-                    "decryption_failed": result.decryption_failed,
-                }
-            )
-        elif result.doc_type == "conversation":
-            payload.append(
-                {
-                    "doc_type": "conversation",
-                    "topic": result.topic,
-                    "date": result.date,
-                    "entry_id": None,
-                    "conversation_id": result.conversation_id,
-                    "title": result.title or "",
-                    "summary": result.summary or "",
-                }
-            )
-
-    return {
-        "results": payload,
-        "total": len(payload),
-        "query": query,
-    }
 
 
 def register(mcp: FastMCP, app_ctx: AppContext) -> None:
@@ -286,35 +97,22 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             except ValueError:
                 return invalid_date(date_to)
 
-        query_embedding: list[float] | None = None
-        try:
-            query_embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, query)
-        except Exception:
-            await logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
-
-        df = date_cls.fromisoformat(date_from) if date_from else None
-        dt = date_cls.fromisoformat(date_to) if date_to else None
         user_id = current_user_id.get()
         if user_id is None:
             raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
 
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-            merged = await _run_dual_search(
+            search_result = await run_journal_search(
                 conn,
+                cipher,
                 app_ctx,
-                query,
-                query_embedding,
-                topic_prefix,
-                date_from,
-                date_to,
-                df,
-                dt,
-                limit,
+                query=query,
+                topic_prefix=topic_prefix,
+                date_from=date_from,
+                date_to=date_to,
+                limit=limit,
             )
-            hydrated = await _hydrate_results(conn, cipher, merged)
-
-        search_result = _build_payload(hydrated, query, limit)
 
         err = check_response_size(search_result, tool_name="journal_search")
         if err:
