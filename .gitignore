@@ -36,6 +36,7 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
-/scripts/
+/scripts/*
+!/scripts/dump_openapi.py
 *.dump
 *.dmp

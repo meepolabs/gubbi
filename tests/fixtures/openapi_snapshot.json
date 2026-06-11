@@ -1,0 +1,2270 @@
+{
+  "components": {
+    "schemas": {
+      "ConversationDetailResponse": {
+        "description": "``GET /api/v1/conversations/{id}`` body.\n\n``conversation`` is the same meta shape as the list item. ``messages`` is\none page of the transcript; ``messages_total`` is the full message count so\nthe client can page without re-deriving it.",
+        "properties": {
+          "conversation": {
+            "$ref": "#/components/schemas/ConversationItem"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessageItem"
+            },
+            "title": "Messages",
+            "type": "array"
+          },
+          "messages_limit": {
+            "title": "Messages Limit",
+            "type": "integer"
+          },
+          "messages_offset": {
+            "title": "Messages Offset",
+            "type": "integer"
+          },
+          "messages_total": {
+            "title": "Messages Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversation",
+          "messages",
+          "messages_total",
+          "messages_limit",
+          "messages_offset"
+        ],
+        "title": "ConversationDetailResponse",
+        "type": "object"
+      },
+      "ConversationItem": {
+        "description": "A single conversation's metadata, mapped from ``ConversationMeta``.\n\n``title`` and ``summary`` arrive decrypted from the repository. ``summary``\nis truncated to :data:`SUMMARY_PREVIEW_CHARS` in the list view. ``platform``\nis the originating platform when recorded; the repo's ``ConversationMeta``\ndoes not surface it, so it is ``None`` on this surface. ``created_at`` /\n``updated_at`` are date strings (YYYY-MM-DD) as the repository returns them.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "decryption_failed": {
+            "default": false,
+            "title": "Decryption Failed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "message_count": {
+            "title": "Message Count",
+            "type": "integer"
+          },
+          "platform": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Platform"
+          },
+          "source": {
+            "title": "Source",
+            "type": "string"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic_path": {
+            "title": "Topic Path",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic_path",
+          "title",
+          "summary",
+          "source",
+          "platform",
+          "message_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "ConversationItem",
+        "type": "object"
+      },
+      "ConversationListResponse": {
+        "description": "``GET /api/v1/conversations`` body: ``{conversations, total, ...}``.",
+        "properties": {
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationItem"
+            },
+            "title": "Conversations",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversations",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "ConversationListResponse",
+        "type": "object"
+      },
+      "ConversationPayload": {
+        "description": "A single conversation payload from the ingest request.",
+        "properties": {
+          "created_at": {
+            "format": "date-time",
+            "title": "Created At",
+            "type": "string"
+          },
+          "messages": {
+            "items": {
+              "$ref": "#/components/schemas/MessagePayload"
+            },
+            "minItems": 1,
+            "title": "Messages",
+            "type": "array"
+          },
+          "platform": {
+            "enum": [
+              "chatgpt",
+              "claude"
+            ],
+            "title": "Platform",
+            "type": "string"
+          },
+          "platform_id": {
+            "maxLength": 512,
+            "minLength": 1,
+            "title": "Platform Id",
+            "type": "string"
+          },
+          "title": {
+            "default": "",
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Updated At"
+          }
+        },
+        "required": [
+          "platform",
+          "platform_id",
+          "created_at",
+          "messages"
+        ],
+        "title": "ConversationPayload",
+        "type": "object"
+      },
+      "ConversationSearchResult": {
+        "description": "A search hit backed by a saved conversation.",
+        "properties": {
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "doc_type": {
+            "const": "conversation",
+            "default": "conversation",
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "entry_id": {
+            "title": "Entry Id",
+            "type": "null"
+          },
+          "summary": {
+            "title": "Summary",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "date",
+          "conversation_id",
+          "title",
+          "summary"
+        ],
+        "title": "ConversationSearchResult",
+        "type": "object"
+      },
+      "EntryDetailResponse": {
+        "description": "``GET /api/v1/entries/{id}`` body: the list item plus ``reasoning``.\n\n``reasoning`` is the decrypted reasoning text, or ``null`` when the entry has\nnone. A reasoning decryption failure surfaces the sentinel and flips\n``decryption_failed`` (shared with the content flag -- one bad column marks\nthe item).",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "decryption_failed": {
+            "default": false,
+            "title": "Decryption Failed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "topic_path": {
+            "title": "Topic Path",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic_path",
+          "date",
+          "content",
+          "tags",
+          "conversation_id",
+          "created_at",
+          "updated_at",
+          "reasoning"
+        ],
+        "title": "EntryDetailResponse",
+        "type": "object"
+      },
+      "EntryItem": {
+        "description": "A single entry's list-view shape (no ``reasoning``).\n\n``content`` arrives decrypted; on a decryption failure it holds the\n``[decryption failed]`` sentinel and ``decryption_failed`` is ``True``.\n``date`` is a YYYY-MM-DD string; ``created_at`` / ``updated_at`` are ISO\ntimestamps as the repository returns them.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "conversation_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Conversation Id"
+          },
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "decryption_failed": {
+            "default": false,
+            "title": "Decryption Failed",
+            "type": "boolean"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "tags": {
+            "items": {
+              "type": "string"
+            },
+            "title": "Tags",
+            "type": "array"
+          },
+          "topic_path": {
+            "title": "Topic Path",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "topic_path",
+          "date",
+          "content",
+          "tags",
+          "conversation_id",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "EntryItem",
+        "type": "object"
+      },
+      "EntryListResponse": {
+        "description": "``GET /api/v1/entries`` body: ``{entries, total, limit, offset}``.",
+        "properties": {
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/EntryItem"
+            },
+            "title": "Entries",
+            "type": "array"
+          },
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "EntryListResponse",
+        "type": "object"
+      },
+      "EntryMoveRequest": {
+        "description": "``POST /entries/move`` body: ids to move and the destination topic id.",
+        "properties": {
+          "entry_ids": {
+            "items": {
+              "type": "integer"
+            },
+            "title": "Entry Ids",
+            "type": "array"
+          },
+          "topic_id": {
+            "title": "Topic Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entry_ids",
+          "topic_id"
+        ],
+        "title": "EntryMoveRequest",
+        "type": "object"
+      },
+      "EntryMoveResponse": {
+        "description": "Result of a bulk move: how many entries were reassigned.",
+        "properties": {
+          "entries_moved": {
+            "title": "Entries Moved",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries_moved"
+        ],
+        "title": "EntryMoveResponse",
+        "type": "object"
+      },
+      "EntrySearchResult": {
+        "description": "A search hit backed by a journal entry.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "conversation_id": {
+            "title": "Conversation Id",
+            "type": "null"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "decryption_failed": {
+            "default": false,
+            "title": "Decryption Failed",
+            "type": "boolean"
+          },
+          "doc_type": {
+            "const": "entry",
+            "default": "entry",
+            "title": "Doc Type",
+            "type": "string"
+          },
+          "entry_id": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Entry Id"
+          },
+          "topic": {
+            "title": "Topic",
+            "type": "string"
+          }
+        },
+        "required": [
+          "topic",
+          "date",
+          "entry_id",
+          "content"
+        ],
+        "title": "EntrySearchResult",
+        "type": "object"
+      },
+      "EntryUpdateRequest": {
+        "description": "``PATCH /entries/{id}`` body. All fields optional; at least one required.\n\n``topic_path`` moves the entry to that topic. Replace semantics throughout:\na present field overwrites; ``tags: []`` clears all tags.",
+        "properties": {
+          "content": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Content"
+          },
+          "date": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Date"
+          },
+          "reasoning": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Reasoning"
+          },
+          "tags": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Tags"
+          },
+          "topic_path": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Topic Path"
+          }
+        },
+        "title": "EntryUpdateRequest",
+        "type": "object"
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "title": "Detail",
+            "type": "array"
+          }
+        },
+        "title": "HTTPValidationError",
+        "type": "object"
+      },
+      "IngestConversationRequest": {
+        "description": "Top-level ingest request body.",
+        "properties": {
+          "conversations": {
+            "items": {
+              "$ref": "#/components/schemas/ConversationPayload"
+            },
+            "maxItems": 50,
+            "title": "Conversations",
+            "type": "array"
+          },
+          "source": {
+            "enum": [
+              "extension_chatgpt",
+              "extension_claude",
+              "paste_memories",
+              "zip_upload"
+            ],
+            "title": "Source",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source",
+          "conversations"
+        ],
+        "title": "IngestConversationRequest",
+        "type": "object"
+      },
+      "IngestConversationResponse": {
+        "description": "Response with per-batch save + extraction-enqueue counters.\n\nconversations_saved        -- rows committed to ``conversations``.\nconversations_skipped_dedupe -- rows skipped because the user already had\n                              this (platform, platform_id) pair.\nextractions_enqueued       -- arq jobs enqueued for new saves.\nextractions_skipped_budget -- saves where pre_charge denied (budget cap hit).\nextractions_skipped_error  -- saves where TXN 2 (extraction_jobs INSERT) failed;\n                              conversation row is durable, pre-charge refunded.\nbudget_exhausted           -- True if any conversation hit the cap in this batch.\n\nInvariant:\nconversations_saved == extractions_enqueued + extractions_skipped_budget\n                    + extractions_skipped_error",
+        "properties": {
+          "budget_exhausted": {
+            "title": "Budget Exhausted",
+            "type": "boolean"
+          },
+          "conversations_saved": {
+            "title": "Conversations Saved",
+            "type": "integer"
+          },
+          "conversations_skipped_dedupe": {
+            "title": "Conversations Skipped Dedupe",
+            "type": "integer"
+          },
+          "extractions_enqueued": {
+            "title": "Extractions Enqueued",
+            "type": "integer"
+          },
+          "extractions_skipped_budget": {
+            "title": "Extractions Skipped Budget",
+            "type": "integer"
+          },
+          "extractions_skipped_error": {
+            "title": "Extractions Skipped Error",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "conversations_saved",
+          "conversations_skipped_dedupe",
+          "extractions_enqueued",
+          "extractions_skipped_budget",
+          "extractions_skipped_error",
+          "budget_exhausted"
+        ],
+        "title": "IngestConversationResponse",
+        "type": "object"
+      },
+      "MeResponse": {
+        "description": "Snapshot response for GET /v1/extraction/me.\n\nin_flight_count : jobs currently pending or running\nsynced_count    : jobs that completed successfully\nlast_sync_at    : completed_at of the most recent completed job, or None",
+        "properties": {
+          "in_flight_count": {
+            "title": "In Flight Count",
+            "type": "integer"
+          },
+          "last_sync_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Sync At"
+          },
+          "synced_count": {
+            "title": "Synced Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "in_flight_count",
+          "synced_count",
+          "last_sync_at"
+        ],
+        "title": "MeResponse",
+        "type": "object"
+      },
+      "MergeRequest": {
+        "description": "``POST /topics/{id}/merge`` body: the destination topic id.",
+        "properties": {
+          "into_topic_id": {
+            "title": "Into Topic Id",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "into_topic_id"
+        ],
+        "title": "MergeRequest",
+        "type": "object"
+      },
+      "MessageItem": {
+        "description": "One message in a conversation, mapped from ``Message``.\n\n``content`` arrives decrypted from the repository. ``position`` is the\nmessage's zero-based index in the full conversation (derived from the page\noffset), so a client can place a page within the whole transcript.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "decryption_failed": {
+            "default": false,
+            "title": "Decryption Failed",
+            "type": "boolean"
+          },
+          "position": {
+            "title": "Position",
+            "type": "integer"
+          },
+          "role": {
+            "title": "Role",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "role",
+          "content",
+          "timestamp",
+          "position"
+        ],
+        "title": "MessageItem",
+        "type": "object"
+      },
+      "MessagePayload": {
+        "description": "A single message in a conversation payload.",
+        "properties": {
+          "content": {
+            "title": "Content",
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "user",
+              "assistant",
+              "system"
+            ],
+            "title": "Role",
+            "type": "string"
+          },
+          "timestamp": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Timestamp"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ],
+        "title": "MessagePayload",
+        "type": "object"
+      },
+      "MostActiveTopicItem": {
+        "description": "A top-active topic: path, title, and entry count over the last 30 days.",
+        "properties": {
+          "entries_last_30d": {
+            "title": "Entries Last 30D",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "title",
+          "entries_last_30d"
+        ],
+        "title": "MostActiveTopicItem",
+        "type": "object"
+      },
+      "RenameRequest": {
+        "description": "``POST /topics/{id}/rename`` body: new path and optional new title.",
+        "properties": {
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "title": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Title"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "title": "RenameRequest",
+        "type": "object"
+      },
+      "SearchResponse": {
+        "description": "``GET /api/v1/search`` body: ``{results, total, query}``.",
+        "properties": {
+          "query": {
+            "title": "Query",
+            "type": "string"
+          },
+          "results": {
+            "items": {
+              "discriminator": {
+                "mapping": {
+                  "conversation": "#/components/schemas/ConversationSearchResult",
+                  "entry": "#/components/schemas/EntrySearchResult"
+                },
+                "propertyName": "doc_type"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/components/schemas/EntrySearchResult"
+                },
+                {
+                  "$ref": "#/components/schemas/ConversationSearchResult"
+                }
+              ]
+            },
+            "title": "Results",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "results",
+          "total",
+          "query"
+        ],
+        "title": "SearchResponse",
+        "type": "object"
+      },
+      "SetupSignalsResponse": {
+        "description": "``GET /api/v1/user/setup-signals`` body.\n\nhas_entries               : the user has at least one non-deleted entry.\nhas_synced_conversations  : the user has at least one conversation that\n                            arrived via the extension/zip ingest path.",
+        "properties": {
+          "has_entries": {
+            "title": "Has Entries",
+            "type": "boolean"
+          },
+          "has_synced_conversations": {
+            "title": "Has Synced Conversations",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "has_entries",
+          "has_synced_conversations"
+        ],
+        "title": "SetupSignalsResponse",
+        "type": "object"
+      },
+      "StatsResponse": {
+        "description": "``GET /api/v1/stats`` body.\n\n``last_entry_at`` is null when the journal has no entries. ``entries_this_week``\ncounts entries dated within the current Monday-start week in the user's\ntimezone.",
+        "properties": {
+          "conversations_total": {
+            "title": "Conversations Total",
+            "type": "integer"
+          },
+          "entries_this_week": {
+            "title": "Entries This Week",
+            "type": "integer"
+          },
+          "entries_total": {
+            "title": "Entries Total",
+            "type": "integer"
+          },
+          "last_entry_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Last Entry At"
+          },
+          "most_active_topics": {
+            "items": {
+              "$ref": "#/components/schemas/MostActiveTopicItem"
+            },
+            "title": "Most Active Topics",
+            "type": "array"
+          },
+          "topics_total": {
+            "title": "Topics Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "topics_total",
+          "entries_total",
+          "entries_this_week",
+          "conversations_total",
+          "last_entry_at",
+          "most_active_topics"
+        ],
+        "title": "StatsResponse",
+        "type": "object"
+      },
+      "TimelineBucket": {
+        "description": "Counts for one calendar bucket (a day ``YYYY-MM-DD`` or a month ``YYYY-MM``).",
+        "properties": {
+          "conversation_count": {
+            "title": "Conversation Count",
+            "type": "integer"
+          },
+          "date": {
+            "title": "Date",
+            "type": "string"
+          },
+          "entry_count": {
+            "title": "Entry Count",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "date",
+          "entry_count",
+          "conversation_count"
+        ],
+        "title": "TimelineBucket",
+        "type": "object"
+      },
+      "TimelineResponse": {
+        "description": "``GET /api/v1/timeline`` body.\n\n``buckets`` is sorted ascending by ``date``; ``bucket`` echoes the grouping\ngranularity so the caller can label the axis without re-deriving it.",
+        "properties": {
+          "bucket": {
+            "enum": [
+              "day",
+              "month"
+            ],
+            "title": "Bucket",
+            "type": "string"
+          },
+          "buckets": {
+            "items": {
+              "$ref": "#/components/schemas/TimelineBucket"
+            },
+            "title": "Buckets",
+            "type": "array"
+          },
+          "date_from": {
+            "title": "Date From",
+            "type": "string"
+          },
+          "date_to": {
+            "title": "Date To",
+            "type": "string"
+          }
+        },
+        "required": [
+          "buckets",
+          "date_from",
+          "date_to",
+          "bucket"
+        ],
+        "title": "TimelineResponse",
+        "type": "object"
+      },
+      "TopicItem": {
+        "description": "A single topic's metadata, mapped from ``TopicMeta``.\n\n``path`` is the topic's slash-path; ``entry_count`` excludes soft-deleted\nentries. ``created_at`` / ``updated_at`` are date strings (YYYY-MM-DD) as\nthe repository returns them.",
+        "properties": {
+          "created_at": {
+            "title": "Created At",
+            "type": "string"
+          },
+          "description": {
+            "title": "Description",
+            "type": "string"
+          },
+          "entry_count": {
+            "title": "Entry Count",
+            "type": "integer"
+          },
+          "id": {
+            "title": "Id",
+            "type": "integer"
+          },
+          "path": {
+            "title": "Path",
+            "type": "string"
+          },
+          "title": {
+            "title": "Title",
+            "type": "string"
+          },
+          "updated_at": {
+            "title": "Updated At",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "path",
+          "title",
+          "description",
+          "entry_count",
+          "created_at",
+          "updated_at"
+        ],
+        "title": "TopicItem",
+        "type": "object"
+      },
+      "TopicListResponse": {
+        "description": "``GET /api/v1/topics`` body: ``{topics, total, limit, offset}``.",
+        "properties": {
+          "limit": {
+            "title": "Limit",
+            "type": "integer"
+          },
+          "offset": {
+            "title": "Offset",
+            "type": "integer"
+          },
+          "topics": {
+            "items": {
+              "$ref": "#/components/schemas/TopicItem"
+            },
+            "title": "Topics",
+            "type": "array"
+          },
+          "total": {
+            "title": "Total",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "topics",
+          "total",
+          "limit",
+          "offset"
+        ],
+        "title": "TopicListResponse",
+        "type": "object"
+      },
+      "TopicMutationResponse": {
+        "description": "Result of a topic mutation: how many rows moved, by kind.",
+        "properties": {
+          "conversations_moved": {
+            "title": "Conversations Moved",
+            "type": "integer"
+          },
+          "entries_moved": {
+            "title": "Entries Moved",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "entries_moved",
+          "conversations_moved"
+        ],
+        "title": "TopicMutationResponse",
+        "type": "object"
+      },
+      "ValidationError": {
+        "properties": {
+          "ctx": {
+            "title": "Context",
+            "type": "object"
+          },
+          "input": {
+            "title": "Input"
+          },
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "title": "Location",
+            "type": "array"
+          },
+          "msg": {
+            "title": "Message",
+            "type": "string"
+          },
+          "type": {
+            "title": "Error Type",
+            "type": "string"
+          }
+        },
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError",
+        "type": "object"
+      }
+    }
+  },
+  "info": {
+    "description": "Personal journal MCP server",
+    "title": "gubbi",
+    "version": "0.2.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/api/v1/conversations": {
+      "get": {
+        "description": "GET /api/v1/conversations.\n\nLists the authenticated user's conversations, newest-created first,\noptionally filtered to those whose topic path starts with ``topic_prefix``.\n``total`` is the full filtered count before paging. Each item's ``summary``\nis truncated to a preview length; the detail endpoint returns the full text.\n\nCache-Control is ``private, no-store``: conversation content is per-user.",
+        "operationId": "list_conversations_api_v1_conversations_get",
+        "parameters": [
+          {
+            "description": "Page size (max 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Page size (max 100).",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Number of items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "topic_prefix",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Topic Prefix"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Conversations",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/conversations/{conversation_id}": {
+      "get": {
+        "description": "GET /api/v1/conversations/{id}.\n\nReturns one conversation's metadata plus a page of its messages. Only the\nrequested page is decrypted -- the repo pushes LIMIT/OFFSET into SQL.\n``position`` on each message is its index in the full transcript.\n\n404 ``{\"detail\": \"conversation_not_found\"}`` when the id does not resolve\nfor this user -- which, under RLS, also covers another user's conversation\n(no cross-tenant existence signal).\n\nCache-Control is ``private, no-store``: conversation content is per-user.",
+        "operationId": "get_conversation_api_v1_conversations__conversation_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "conversation_id",
+            "required": true,
+            "schema": {
+              "title": "Conversation Id",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Messages per page (max 200).",
+            "in": "query",
+            "name": "messages_limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Messages per page (max 200).",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Messages Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of items to skip.",
+            "in": "query",
+            "name": "messages_offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Number of items to skip.",
+              "minimum": 0,
+              "title": "Messages Offset",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Conversation",
+        "tags": [
+          "conversations"
+        ]
+      }
+    },
+    "/api/v1/entries": {
+      "get": {
+        "description": "GET /api/v1/entries.\n\nLists the authenticated user's entries across topics (or one ``topic``),\nfiltered by date range, tags (AND), and conversation ``source``, ordered by\n``sort``. ``total`` is the full filtered count before paging. List items omit\n``reasoning`` -- it loads only on the detail endpoint.\n\nCache-Control is ``private, no-store``: entry content is per-user.",
+        "operationId": "list_entries_api_v1_entries_get",
+        "parameters": [
+          {
+            "description": "Page size (max 100).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 20,
+              "description": "Page size (max 100).",
+              "maximum": 100,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Number of items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "topic",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Topic"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date To"
+            }
+          },
+          {
+            "description": "Repeat to AND-filter: a row must carry every given tag.",
+            "in": "query",
+            "name": "tags",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Repeat to AND-filter: a row must carry every given tag.",
+              "title": "Tags"
+            }
+          },
+          {
+            "in": "query",
+            "name": "source",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Source"
+            }
+          },
+          {
+            "description": "newest (default) | oldest.",
+            "in": "query",
+            "name": "sort",
+            "required": false,
+            "schema": {
+              "default": "newest",
+              "description": "newest (default) | oldest.",
+              "pattern": "^(newest|oldest)$",
+              "title": "Sort",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Entries",
+        "tags": [
+          "entries"
+        ]
+      }
+    },
+    "/api/v1/entries/move": {
+      "post": {
+        "description": "POST /api/v1/entries/move.\n\nBulk-moves up to 100 entries to ``topic_id`` in one transaction (all-or-\nnothing). 422 when more than 100 ids are supplied or the list is empty; 404\n``entries_not_found`` (detail lists the missing ids) when any entry id does\nnot resolve; 404 ``topic_not_found`` when the destination does not resolve.",
+        "operationId": "move_entries_api_v1_entries_move_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EntryMoveRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryMoveResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Move Entries",
+        "tags": [
+          "entries"
+        ]
+      }
+    },
+    "/api/v1/entries/{entry_id}": {
+      "delete": {
+        "description": "DELETE /api/v1/entries/{id}.\n\nSoft-deletes the entry (and drops its embedding). 204 on success; 404\n``entry_not_found`` when the id does not resolve or is already deleted\n(idempotent: a second delete returns 404, not 204).",
+        "operationId": "delete_entry_api_v1_entries__entry_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Entry",
+        "tags": [
+          "entries"
+        ]
+      },
+      "get": {
+        "description": "GET /api/v1/entries/{id}.\n\nReturns one entry's full detail (list shape plus decrypted ``reasoning``).\n404 ``{\"detail\": \"entry_not_found\"}`` when the id does not resolve for this\nuser -- absent, soft-deleted, or (under RLS) another user's entry.\n\nCache-Control is ``private, no-store``: entry content is per-user.",
+        "operationId": "get_entry_api_v1_entries__entry_id__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Entry",
+        "tags": [
+          "entries"
+        ]
+      },
+      "patch": {
+        "description": "PATCH /api/v1/entries/{id}.\n\nApplies a replace-mode partial update; ``topic_path`` moves the entry. 422\nwhen no field is supplied; 404 ``entry_not_found`` when the id does not\nresolve; 404 ``topic_not_found`` when ``topic_path`` does not resolve.\nReturns the updated detail shape.\n\nCache-Control is ``private, no-store``: entry content is per-user.",
+        "operationId": "update_entry_api_v1_entries__entry_id__patch",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "entry_id",
+            "required": true,
+            "schema": {
+              "title": "Entry Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EntryUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EntryDetailResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Update Entry",
+        "tags": [
+          "entries"
+        ]
+      }
+    },
+    "/api/v1/extraction/me": {
+      "get": {
+        "description": "GET /api/v1/extraction/me.\n\nReturns a point-in-time snapshot of the authenticated user's extraction\njob counts. Intended as the cold-start / refresh complement to the live\nSSE stream at /extraction/progress.\n\nResponse shape::\n\n    {\n        \"in_flight_count\": 5,\n        \"synced_count\": 270,\n        \"last_sync_at\": \"2026-05-10T18:42:00Z\"\n    }\n\n``last_sync_at`` is null when no jobs have completed. All counts are\nnon-negative integers. Cache-Control: no-store is set unconditionally\nbecause the data reflects live worker state.",
+        "operationId": "extraction_me_api_v1_extraction_me_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MeResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "missing scope"
+          }
+        },
+        "summary": "Extraction Me",
+        "tags": [
+          "extraction"
+        ]
+      }
+    },
+    "/api/v1/extraction/progress": {
+      "get": {
+        "description": "GET /api/v1/extraction/progress.\n\nReturns a Server-Sent Events stream that publishes extraction progress\nevents in real time. The client connects, receives events as they are\npublished by the extraction worker, and stays connected via heartbeats.\n\nEnforces a per-user connection cap of 5 (``SSE_PER_USER_CAP``). The 6th\nconcurrent connection from the same user receives HTTP 429.",
+        "operationId": "extraction_progress_api_v1_extraction_progress_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Extraction Progress",
+        "tags": [
+          "extraction"
+        ]
+      }
+    },
+    "/api/v1/ingest/conversations": {
+      "post": {
+        "description": "Ingest normalized conversation batches from browser extension clients.\n\nEach conversation is deduped by (user_id, platform, platform_id),\nsaved under the default \"inbox\" topic, and returns counts of saved\nvs skipped conversations.\n\nTransaction design:\n- Acquires ONE bare connection for the request via ``safe_acquire``.\n- Each independent unit of DB work opens its own ``conn.transaction()``\n  and applies the ``app.current_user_id`` RLS GUC with ``SET LOCAL``\n  inside that transaction. ``SET LOCAL`` is transaction-scoped, so the\n  GUC unwinds at COMMIT/ROLLBACK and the connection cannot return to\n  the pool carrying a session-level GUC for the prior user.\n- Dedupe pre-check, conversation save (TXN 1), and extraction_jobs\n  INSERT (TXN 2) are each their own top-level transaction. They commit\n  independently: a TXN 2 failure does NOT roll back TXN 1's\n  conversation row, and the per-conversation pre-charge happens\n  OUTSIDE any open transaction (no network IO inside an open PG txn).\n- On TXN 2 failure: refund pre-charge, count as extractions_skipped_error,\n  continue (HTTP 200).",
+        "operationId": "ingest_conversations_api_v1_ingest_conversations_post",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/IngestConversationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/IngestConversationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Ingest Conversations",
+        "tags": [
+          "ingest"
+        ]
+      }
+    },
+    "/api/v1/search": {
+      "get": {
+        "description": "GET /api/v1/search.\n\nHybrid search across the authenticated user's entries and conversations,\nrank-merged (FTS first, semantic second, dedup). ``total`` is the size of\nthe returned page (no separate unbounded count; the set is capped at\n``limit``). Invalid ``topic_prefix`` / date syntax maps to an empty result\nset rather than a 422 -- a malformed filter cannot match anything.\n\nCache-Control is ``private, no-store``: results carry decrypted content.",
+        "operationId": "search_api_v1_search_get",
+        "parameters": [
+          {
+            "description": "Search query (max 2000 chars).",
+            "in": "query",
+            "name": "q",
+            "required": true,
+            "schema": {
+              "description": "Search query (max 2000 chars).",
+              "maxLength": 2000,
+              "minLength": 1,
+              "title": "Q",
+              "type": "string"
+            }
+          },
+          {
+            "in": "query",
+            "name": "topic_prefix",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Topic Prefix"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_from",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date From"
+            }
+          },
+          {
+            "in": "query",
+            "name": "date_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Date To"
+            }
+          },
+          {
+            "description": "Maximum results (max 50).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 10,
+              "description": "Maximum results (max 50).",
+              "maximum": 50,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SearchResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Search",
+        "tags": [
+          "search"
+        ]
+      }
+    },
+    "/api/v1/stats": {
+      "get": {
+        "description": "GET /api/v1/stats.\n\nReturns the authenticated user's dashboard aggregate in one round-trip.\n\nCache-Control is ``private, no-store``: the counts are per-user content.",
+        "operationId": "get_stats_api_v1_stats_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/StatsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Get Stats",
+        "tags": [
+          "stats"
+        ]
+      }
+    },
+    "/api/v1/timeline": {
+      "get": {
+        "description": "GET /api/v1/timeline.\n\nReturns per-bucket counts of entries and conversations over the inclusive\n``[date_from, date_to]`` range, grouped by ``day`` (default) or ``month``.\n\n422 when: a date is not ``YYYY-MM-DD``; the range is inverted\n(``date_from`` after ``date_to``); the span exceeds\n``MAX_TIMELINE_SPAN_DAYS``; or ``topic_prefix`` is not a valid topic path.\n\nCache-Control is ``private, no-store``: per-day counts are per-user content.",
+        "operationId": "get_timeline_api_v1_timeline_get",
+        "parameters": [
+          {
+            "description": "Range start, YYYY-MM-DD (inclusive).",
+            "in": "query",
+            "name": "date_from",
+            "required": true,
+            "schema": {
+              "description": "Range start, YYYY-MM-DD (inclusive).",
+              "title": "Date From",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Range end, YYYY-MM-DD (inclusive).",
+            "in": "query",
+            "name": "date_to",
+            "required": true,
+            "schema": {
+              "description": "Range end, YYYY-MM-DD (inclusive).",
+              "title": "Date To",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Grouping granularity.",
+            "in": "query",
+            "name": "bucket",
+            "required": false,
+            "schema": {
+              "default": "day",
+              "description": "Grouping granularity.",
+              "enum": [
+                "day",
+                "month"
+              ],
+              "title": "Bucket",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Restrict to topics whose path starts with this prefix.",
+            "in": "query",
+            "name": "topic_prefix",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Restrict to topics whose path starts with this prefix.",
+              "title": "Topic Prefix"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TimelineResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Timeline",
+        "tags": [
+          "timeline"
+        ]
+      }
+    },
+    "/api/v1/topics": {
+      "get": {
+        "description": "GET /api/v1/topics.\n\nLists the authenticated user's topics, newest-updated first, optionally\nfiltered to those whose path starts with ``prefix``. ``total`` is the full\nfiltered count before paging.\n\nCache-Control is ``private, no-store``: topic metadata is per-user content.",
+        "operationId": "list_topics_api_v1_topics_get",
+        "parameters": [
+          {
+            "description": "Page size (max 200).",
+            "in": "query",
+            "name": "limit",
+            "required": false,
+            "schema": {
+              "default": 50,
+              "description": "Page size (max 200).",
+              "maximum": 200,
+              "minimum": 1,
+              "title": "Limit",
+              "type": "integer"
+            }
+          },
+          {
+            "description": "Number of items to skip.",
+            "in": "query",
+            "name": "offset",
+            "required": false,
+            "schema": {
+              "default": 0,
+              "description": "Number of items to skip.",
+              "minimum": 0,
+              "title": "Offset",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "prefix",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Prefix"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicListResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "List Topics",
+        "tags": [
+          "topics"
+        ]
+      }
+    },
+    "/api/v1/topics/{path}": {
+      "get": {
+        "description": "GET /api/v1/topics/{path}.\n\nReturns one topic's metadata by path. 404 ``{\"detail\": \"topic_not_found\"}``\nwhen the path does not resolve for this user -- which, under RLS, also\ncovers another user's topic (no cross-tenant existence signal). A\nsyntactically invalid path likewise cannot name an existing topic, so it\nmaps to the same 404 rather than a 422.\n\nCache-Control is ``private, no-store``: topic metadata is per-user content.",
+        "operationId": "get_topic_api_v1_topics__path__get",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "title": "Path",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicItem"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Get Topic",
+        "tags": [
+          "topics"
+        ]
+      }
+    },
+    "/api/v1/topics/{topic_id}": {
+      "delete": {
+        "description": "DELETE /api/v1/topics/{topic_id}?move_entries_to={dest_topic_id}.\n\nReassigns the topic's entries + conversations to ``move_entries_to``, then\ndeletes the topic. 400 when the topic has rows but no destination was given\n(detail states how many entries need one); 404 when the source or\ndestination does not resolve; 409 on a conversation slug collision.",
+        "operationId": "delete_topic_api_v1_topics__topic_id__delete",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "title": "Topic Id",
+              "type": "integer"
+            }
+          },
+          {
+            "in": "query",
+            "name": "move_entries_to",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "integer"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "title": "Move Entries To"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Delete Topic",
+        "tags": [
+          "topics"
+        ]
+      }
+    },
+    "/api/v1/topics/{topic_id}/merge": {
+      "post": {
+        "description": "POST /api/v1/topics/{topic_id}/merge.\n\nMoves all entries + conversations from ``topic_id`` into\n``into_topic_id``, then deletes the source. 422 on a self-merge; 404 when\neither topic does not resolve; 409 on a conversation slug collision.",
+        "operationId": "merge_topic_api_v1_topics__topic_id__merge_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "title": "Topic Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MergeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Merge Topic",
+        "tags": [
+          "topics"
+        ]
+      }
+    },
+    "/api/v1/topics/{topic_id}/rename": {
+      "post": {
+        "description": "POST /api/v1/topics/{topic_id}/rename.\n\n409 ``topic_path_exists`` when the new path collides with another of the\nuser's topics; 404 ``topic_not_found`` when the id does not resolve.",
+        "operationId": "rename_topic_api_v1_topics__topic_id__rename_post",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "topic_id",
+            "required": true,
+            "schema": {
+              "title": "Topic Id",
+              "type": "integer"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicMutationResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "summary": "Rename Topic",
+        "tags": [
+          "topics"
+        ]
+      }
+    },
+    "/api/v1/user/setup-signals": {
+      "get": {
+        "description": "GET /api/v1/user/setup-signals.\n\nReturns two onboarding booleans derived from the authenticated user's\njournal data. Both are cheap EXISTS probes under the RLS-scoped connection.\n\nCache-Control is ``private, no-store``: the signals are per-user state.",
+        "operationId": "get_setup_signals_api_v1_user_setup_signals_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SetupSignalsResponse"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "403": {
+            "description": "missing scope"
+          }
+        },
+        "summary": "Get Setup Signals",
+        "tags": [
+          "user"
+        ]
+      }
+    },
+    "/health": {
+      "get": {
+        "description": "Liveness probe for Docker health checks.\n\nAlways 200 once uvicorn is bound -- it does NOT inspect lifespan\nstate or pool reachability.  Use ``/health/ready`` for readiness\n(drained when ``app_ctx`` / pool is unset).\n\nNOTE: do NOT add @app.get(\"/mcp/\") here -- it shadows the\nFastMCP streamable-http app mounted at /mcp via app.mount(...).\nClaude.ai opens a GET to /mcp/ to start the SSE handshake; if\nthis route intercepts it, the client receives application/json\ninstead of text/event-stream and bails with \"Authorization\nfailed\" (a misleading client-side error). Bug caught during\na deploy on 2026-04-30.",
+        "operationId": "mcp_health_health_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "additionalProperties": true,
+                  "title": "Response Mcp Health Health Get",
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Mcp Health"
+      }
+    },
+    "/health/ready": {
+      "get": {
+        "description": "Readiness probe -- 200 only when the lifespan finished startup.\n\nReturns 503 during cold-start (before lifespan attaches\n``app.state.app_ctx``) and during shutdown (after the pool is\nclosed) so an upstream load balancer drains traffic off this\ninstance at the right moments.  Symmetric with cloud-api's\n``/health/ready`` so HEALTHCHECK and orchestrator readiness probes\nshare a single contract across both services.\n\nOrder of checks (each independently observable in the response):\n\n1. ``app_ctx`` not initialised -> 503 ``not_ready``.\n2. Redis PING timeout / driver error -> 503 ``redis_unreachable``.\n3. DB acquire / SELECT 1 driver error -> 503 ``db_unreachable``.\n\nEach failure envelope additionally carries an ``error_class`` field\nholding the underlying exception class name (no message text), so\npool-exhaustion vs socket-reset vs query-timeout vs connection-\nrefused are distinguishable at a glance on the on-call dashboard\nwithout leaking driver detail into the body.\n\nShort timeouts (2s acquire, 1s SELECT, 1s Redis PING) prevent a\nsingle readiness poll from holding a slot a real request wants\nunder pool saturation -- mirrors gubbi-cloud's split.",
+        "operationId": "mcp_health_ready_health_ready_get",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Successful Response"
+          }
+        },
+        "summary": "Mcp Health Ready"
+      }
+    }
+  }
+}
