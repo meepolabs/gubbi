@@ -560,6 +560,7 @@ from gubbi.api.v1.ingest import router as ingest_router  # noqa: E402
 from gubbi.api.v1.web.conversations import router as web_conversations_router  # noqa: E402
 from gubbi.api.v1.web.search import router as web_search_router  # noqa: E402
 from gubbi.api.v1.web.stats import router as web_stats_router  # noqa: E402
+from gubbi.api.v1.web.topic_admin import router as web_topic_admin_router  # noqa: E402
 from gubbi.api.v1.web.topics import router as web_topics_router  # noqa: E402
 
 app.include_router(ingest_router, prefix="/api/v1")
@@ -568,6 +569,7 @@ app.include_router(web_topics_router, prefix="/api/v1")
 app.include_router(web_conversations_router, prefix="/api/v1")
 app.include_router(web_search_router, prefix="/api/v1")
 app.include_router(web_stats_router, prefix="/api/v1")
+app.include_router(web_topic_admin_router, prefix="/api/v1")
 
 
 @app.exception_handler(DatabaseUnavailable)
