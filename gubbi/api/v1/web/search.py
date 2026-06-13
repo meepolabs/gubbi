@@ -86,6 +86,7 @@ class ConversationSearchResult(BaseModel):
     conversation_id: int | None
     title: str
     summary: str
+    decryption_failed: bool = False
 
 
 class SearchResponse(BaseModel):

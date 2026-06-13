@@ -270,6 +270,7 @@ def _build_payload(hydrated: list[SearchResult], query: str, limit: int) -> dict
                     "conversation_id": result.conversation_id,
                     "title": result.title or "",
                     "summary": result.summary or "",
+                    "decryption_failed": result.decryption_failed,
                 }
             )
 
