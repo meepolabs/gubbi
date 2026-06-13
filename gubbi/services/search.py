@@ -39,6 +39,7 @@ if TYPE_CHECKING:
 __all__: list[str] = [
     "DECRYPTION_FAILED_SENTINEL",
     "REPO_DECRYPTION_FAILED_SENTINEL",
+    "encode_query",
     "run_journal_search",
 ]
 
@@ -150,58 +151,95 @@ async def _hydrate_results(
     conv_id_list = list(conv_ids)
 
     decrypted_entries: dict[int, tuple[str, str | None]] = {}
+    entries_batch_failed = False
     try:
         decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
     except asyncpg.PostgresError:
+        entries_batch_failed = True
         await logger.exception(
-            "Entry batch query failed, skipping entries",
+            "Entry batch query failed, surfacing entries as decryption-failed",
             entry_count=len(entry_id_list),
-            entry_ids=repr(entry_id_list),
         )
 
     decrypted_convs: dict[int, tuple[str, str]] = {}
+    convs_batch_failed = False
     try:
         decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
     except asyncpg.PostgresError:
+        convs_batch_failed = True
         await logger.exception(
-            "Conversation batch query failed, skipping conversations",
+            "Conversation batch query failed, surfacing conversations as decryption-failed",
             conv_count=len(conv_id_list),
-            conv_ids=repr(conv_id_list),
         )
 
     hydrated: list[SearchResult] = []
     for result in merged:
-        if (
-            result.doc_type == "entry"
-            and result.entry_id is not None
-            and result.entry_id in decrypted_entries
-        ):
-            content, _reasoning = decrypted_entries[result.entry_id]
-            decryption_failed = content == REPO_DECRYPTION_FAILED_SENTINEL
-            update: dict[str, Any] = {
-                "content": (
-                    DECRYPTION_FAILED_SENTINEL if decryption_failed else _truncate_text(content)
-                ),
-                "decryption_failed": decryption_failed,
-            }
-            hydrated.append(result.model_copy(update=update))
-        elif (
-            result.doc_type == "conversation"
-            and result.conversation_id is not None
-            and result.conversation_id in decrypted_convs
-        ):
-            title, summary = decrypted_convs[result.conversation_id]
-            truncated_title, truncated_summary = _truncate_title_summary(title, summary)
+        if result.doc_type == "entry" and result.entry_id is not None:
             hydrated.append(
-                result.model_copy(
-                    update={
-                        "title": truncated_title,
-                        "summary": truncated_summary,
-                    }
-                )
+                _hydrate_entry(result, decrypted_entries, batch_failed=entries_batch_failed)
+            )
+        elif result.doc_type == "conversation" and result.conversation_id is not None:
+            hydrated.append(
+                _hydrate_conversation(result, decrypted_convs, batch_failed=convs_batch_failed)
             )
 
     return hydrated
+
+
+def _hydrate_entry(
+    result: SearchResult,
+    decrypted_entries: dict[int, tuple[str, str | None]],
+    *,
+    batch_failed: bool,
+) -> SearchResult:
+    """Map one entry hit to its hydrated form.
+
+    On a batch-fetch failure (or a per-row decryption sentinel) the hit is kept
+    with the client-facing sentinel and ``decryption_failed=True`` -- never
+    dropped, so the result count stays honest.
+    """
+    assert result.entry_id is not None  # noqa: S101 - narrowed by caller
+    decrypted = decrypted_entries.get(result.entry_id)
+    if batch_failed or decrypted is None:
+        return result.model_copy(
+            update={"content": DECRYPTION_FAILED_SENTINEL, "decryption_failed": True}
+        )
+    content, _reasoning = decrypted
+    decryption_failed = content == REPO_DECRYPTION_FAILED_SENTINEL
+    return result.model_copy(
+        update={
+            "content": (
+                DECRYPTION_FAILED_SENTINEL if decryption_failed else _truncate_text(content)
+            ),
+            "decryption_failed": decryption_failed,
+        }
+    )
+
+
+def _hydrate_conversation(
+    result: SearchResult,
+    decrypted_convs: dict[int, tuple[str, str]],
+    *,
+    batch_failed: bool,
+) -> SearchResult:
+    """Map one conversation hit to its hydrated form.
+
+    On a batch-fetch failure the hit is kept with the sentinel and
+    ``decryption_failed=True`` rather than dropped.
+    """
+    assert result.conversation_id is not None  # noqa: S101 - narrowed by caller
+    decrypted = decrypted_convs.get(result.conversation_id)
+    if batch_failed or decrypted is None:
+        return result.model_copy(
+            update={
+                "title": DECRYPTION_FAILED_SENTINEL,
+                "summary": DECRYPTION_FAILED_SENTINEL,
+                "decryption_failed": True,
+            }
+        )
+    title, summary = decrypted
+    truncated_title, truncated_summary = _truncate_title_summary(title, summary)
+    return result.model_copy(update={"title": truncated_title, "summary": truncated_summary})
 
 
 def _build_payload(hydrated: list[SearchResult], query: str, limit: int) -> dict[str, Any]:
@@ -242,6 +280,28 @@ def _build_payload(hydrated: list[SearchResult], query: str, limit: int) -> dict
     }
 
 
+async def encode_query(app_ctx: AppContext, query: str) -> list[float] | None:
+    """Encode a query string to an embedding vector off the event loop.
+
+    Runs the CPU-bound encode in a worker thread. Returns ``None`` (and logs a
+    warning) when encoding fails so the caller degrades to FTS-only search.
+
+    Callers should invoke this BEFORE acquiring a user-scoped DB connection so
+    the encode does not run while holding a transaction.
+    """
+    try:
+        return await asyncio.to_thread(app_ctx.embedding_service.encode, query)
+    except Exception:
+        await logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
+        return None
+
+
+# Sentinel distinguishing "caller did not precompute the embedding" from "caller
+# precomputed it as None because encoding failed". When the embedding is not
+# provided, ``run_journal_search`` encodes it itself (back-compat path).
+_ENCODE_INTERNALLY: object = object()
+
+
 async def run_journal_search(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
@@ -252,13 +312,19 @@ async def run_journal_search(
     date_from: str | None,
     date_to: str | None,
     limit: int,
+    query_embedding: list[float] | None | object = _ENCODE_INTERNALLY,
 ) -> dict[str, Any]:
     """Run the hybrid journal-search pipeline and return the payload dict.
 
-    Encodes the query (semantic search degrades to FTS-only when encoding
-    fails), runs the FTS + semantic backends, merges FTS-first with dedup,
-    hydrates (batch-decrypts) the surviving rows, then sorts by rank and slices
-    to ``limit``.
+    Runs the FTS + semantic backends, merges FTS-first with dedup, hydrates
+    (batch-decrypts) the surviving rows, then sorts by rank and slices to
+    ``limit``.
+
+    ``query_embedding`` should be precomputed by the caller via
+    :func:`encode_query` BEFORE acquiring ``conn`` so the CPU-bound encode does
+    not run while holding a transaction. When omitted, the embedding is encoded
+    internally (back-compat); semantic search degrades to FTS-only if encoding
+    failed (embedding is ``None``).
 
     Inputs must already be validated by the caller (``query`` length,
     ``topic_prefix`` / date syntax) and ``conn`` must be a user-scoped
@@ -271,11 +337,11 @@ async def run_journal_search(
         ``decryption_failed``; conversation results carry ``title`` +
         ``summary``.
     """
-    query_embedding: list[float] | None = None
-    try:
-        query_embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, query)
-    except Exception:
-        await logger.warning("Query encoding failed, semantic search disabled", exc_info=True)
+    embedding: list[float] | None
+    if query_embedding is _ENCODE_INTERNALLY:
+        embedding = await encode_query(app_ctx, query)
+    else:
+        embedding = query_embedding  # type: ignore[assignment]
 
     df = date_cls.fromisoformat(date_from) if date_from else None
     dt = date_cls.fromisoformat(date_to) if date_to else None
@@ -284,7 +350,7 @@ async def run_journal_search(
         conn,
         app_ctx,
         query,
-        query_embedding,
+        embedding,
         topic_prefix,
         date_from,
         date_to,

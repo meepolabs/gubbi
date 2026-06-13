@@ -15,6 +15,7 @@ __all__: list[str] = [
     "TOPIC_NOT_FOUND",
     "conversation_not_found",
     "entry_not_found",
+    "invalid_filter",
     "topic_not_found",
 ]
 
@@ -52,3 +53,13 @@ def entry_not_found() -> HTTPException:
     from missing (no cross-tenant existence signal).
     """
     return HTTPException(status_code=404, detail=ENTRY_NOT_FOUND)
+
+
+def invalid_filter(message: str) -> HTTPException:
+    """Return a 422 ``HTTPException`` for a malformed list filter.
+
+    Raised when a list endpoint's ``date_from`` / ``date_to`` / topic-prefix
+    filter fails repository-level validation. A malformed filter is a
+    contract-level client error (422), not an internal failure (500).
+    """
+    return HTTPException(status_code=422, detail=message)

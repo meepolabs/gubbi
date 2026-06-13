@@ -28,15 +28,18 @@ canonical type set; only the failure path changes.
 from __future__ import annotations
 
 import traceback
-from collections.abc import Sequence
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
-from mcp.types import ContentBlock
 from pydantic import ValidationError
 
 from gubbi.tools.errors import validation_error
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from mcp.types import ContentBlock
 
 __all__ = ["JournalFastMCP", "format_validation_error"]
 
@@ -85,10 +88,12 @@ class JournalFastMCP(FastMCP):
     ) -> Sequence[ContentBlock] | dict[str, Any]:
         """Dispatch a tool, mapping ValidationError to canonical envelope."""
         try:
-            result = await super().call_tool(name, arguments)
-            return cast(Sequence[ContentBlock] | dict[str, Any], result)
+            result: Sequence[ContentBlock] | dict[str, Any] = await super().call_tool(
+                name, arguments
+            )
         except ToolError as exc:
             cause = exc.__cause__
             if isinstance(cause, ValidationError) and _is_argument_validation_error(cause):
                 return validation_error(format_validation_error(cause))
             raise
+        return result

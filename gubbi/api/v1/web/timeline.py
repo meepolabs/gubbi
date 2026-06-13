@@ -5,13 +5,15 @@ day or month over a required date range. A navigation index for the calendar
 view; day click-through is served by
 ``GET /api/v1/entries?date_from=X&date_to=X``, not a separate endpoint.
 
-Counts only -- the underlying repository call runs ``title_only=True`` so no
-ciphertext is decrypted. The response still carries ``Cache-Control: private,
-no-store`` because per-day counts are themselves per-user private content.
+Counts only -- the underlying repository call (``get_timeline_counts``)
+aggregates with a Postgres ``GROUP BY`` and returns one row per bucket, so no
+ciphertext is read or decrypted and no per-row data is hydrated. The response
+still carries ``Cache-Control: private, no-store`` because per-day counts are
+themselves per-user private content.
 
 Follows the topics reference: ``require_scope("journal:read")``,
 ``safe_user_scoped_connection``, the shared validation helpers, and
-``private_no_store_response``. The bucketing is a pure helper so it can be
+``private_no_store_response``. The bucket mapping is a pure helper so it can be
 unit-tested without a database.
 """
 
@@ -19,7 +21,6 @@ from __future__ import annotations
 
 # Annotated/UUID resolve at route-registration time, so they stay runtime
 # imports despite ``from __future__ import annotations`` (see topics.py).
-from collections import defaultdict
 from datetime import date as date_cls
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID  # noqa: TC003
@@ -43,7 +44,7 @@ __all__: list[str] = [
     "MAX_TIMELINE_SPAN_DAYS",
     "TimelineBucket",
     "TimelineResponse",
-    "aggregate_buckets",
+    "count_rows_to_buckets",
     "get_timeline",
     "router",
 ]
@@ -80,51 +81,31 @@ class TimelineResponse(BaseModel):
     bucket: BucketUnit
 
 
-def _bucket_key(row_date: str, bucket: BucketUnit) -> str:
-    """Map a ``YYYY-MM-DD`` row date to its bucket key.
-
-    ``day`` keeps the full date; ``month`` truncates to ``YYYY-MM``.
-    """
-    if bucket == "month":
-        return row_date[:7]
-    return row_date
-
-
-def aggregate_buckets(
+def count_rows_to_buckets(
     rows: Sequence[dict[str, object]],
-    bucket: BucketUnit,
 ) -> list[TimelineBucket]:
-    """Group title-only date-range rows into per-bucket counts.
+    """Map ``get_timeline_counts`` rows into ``TimelineBucket`` models.
 
-    Each row is a ``get_by_date_range(..., title_only=True)`` dict carrying a
-    ``doc_type`` of ``"entry"`` or ``"conversation"`` and an ``"updated"`` date
-    string. Rows are grouped by day or month; ``entry_count`` and
-    ``conversation_count`` are tallied per bucket. Buckets with no rows do not
-    appear (the calendar view renders gaps as empty). Returns buckets sorted
-    ascending by key.
+    Each row is a ``{"bucket": str, "entry_count": int, "conversation_count":
+    int}`` dict already aggregated and ordered ascending by the repository.
+    Rows with a missing or non-string ``bucket`` key are skipped defensively.
+    Returns buckets in the order the repository supplied them (ascending).
     """
-    entry_counts: dict[str, int] = defaultdict(int)
-    conv_counts: dict[str, int] = defaultdict(int)
-
+    buckets: list[TimelineBucket] = []
     for row in rows:
-        row_date = row.get("updated")
-        if not isinstance(row_date, str) or not row_date:
+        key = row.get("bucket")
+        if not isinstance(key, str) or not key:
             continue
-        key = _bucket_key(row_date, bucket)
-        if row.get("doc_type") == "conversation":
-            conv_counts[key] += 1
-        else:
-            entry_counts[key] += 1
-
-    keys = sorted(set(entry_counts) | set(conv_counts))
-    return [
-        TimelineBucket(
-            date=key,
-            entry_count=entry_counts[key],
-            conversation_count=conv_counts[key],
+        entry_count = row.get("entry_count")
+        conv_count = row.get("conversation_count")
+        buckets.append(
+            TimelineBucket(
+                date=key,
+                entry_count=int(entry_count) if isinstance(entry_count, int) else 0,
+                conversation_count=int(conv_count) if isinstance(conv_count, int) else 0,
+            )
         )
-        for key in keys
-    ]
+    return buckets
 
 
 @router.get("", response_model=TimelineResponse)
@@ -158,17 +139,15 @@ async def get_timeline(
     validated_prefix = _parse_prefix(topic_prefix)
 
     async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-        rows = await entries_repo.get_by_date_range(
+        rows = await entries_repo.get_timeline_counts(
             conn,
-            None,
             date_from,
             date_to,
-            ascending=True,
-            title_only=True,
+            bucket=bucket,
             topic_prefix=validated_prefix,
         )
 
-    buckets = aggregate_buckets(rows, bucket)
+    buckets = count_rows_to_buckets(rows)
 
     await log.info(
         "web_timeline",

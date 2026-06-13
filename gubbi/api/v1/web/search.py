@@ -28,7 +28,7 @@ from gubbi.api.v1.auth import require_scope
 from gubbi.api.v1.web.responses import private_no_store_response
 from gubbi.app_state import require_app_ctx
 from gubbi.crypto.guard import require_cipher
-from gubbi.services.search import run_journal_search
+from gubbi.services.search import encode_query, run_journal_search
 from gubbi.storage.connection import safe_user_scoped_connection
 from gubbi.validation import validate_date, validate_topic
 
@@ -143,6 +143,10 @@ async def search(
 
     cipher = require_cipher(app_ctx)
 
+    # Encode the query before acquiring the connection so the CPU-bound encode
+    # does not run while holding a user-scoped transaction.
+    query_embedding = await encode_query(app_ctx, q)
+
     async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
         result = await run_journal_search(
             conn,
@@ -153,6 +157,7 @@ async def search(
             date_from=date_from,
             date_to=date_to,
             limit=limit,
+            query_embedding=query_embedding,
         )
 
     await log.info("web_search", result_count=result["total"])

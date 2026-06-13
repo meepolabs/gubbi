@@ -10,13 +10,13 @@ the list shape, the shared ``pagination`` builders for ``limit`` / ``offset``,
 carries decrypted content (titles, summaries, message text).
 
 Decryption note: the conversation repository functions reused here
-(``list_conversations`` / ``read_conversation_by_id_paginated``) decrypt
-title, summary, and the requested message page internally and return plaintext
-on ``ConversationMeta`` / ``Message``. They do NOT emit the entries repo's
-``[decryption-failed]`` hyphen sentinel -- a corrupt row raises inside the repo
-instead. So nothing re-runs ``decrypt_field`` here, and ``decryption_failed``
-is carried (per the web ``DecryptableItem`` convention) but stays ``False`` on
-these paths until the repo grows a soft-fail sentinel of its own.
+(``list_conversations`` / ``read_conversation_by_id_paginated``) are called
+with ``soft_fail=True`` on this surface. A row whose title, summary, or message
+content cannot be decrypted yields the ``[decryption failed]`` sentinel and sets
+``decryption_failed=True`` on the affected item (per the web ``DecryptableItem``
+convention) rather than failing the whole response -- matching the entries and
+search surfaces. The MCP-tool callers keep the default ``soft_fail=False`` and
+still raise loudly on corruption.
 """
 
 from __future__ import annotations
@@ -34,7 +34,7 @@ from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
-from gubbi.api.v1.web.errors import conversation_not_found
+from gubbi.api.v1.web.errors import conversation_not_found, invalid_filter
 from gubbi.api.v1.web.pagination import OffsetQuery  # noqa: TC001
 from gubbi.api.v1.web.responses import private_no_store_response
 from gubbi.api.v1.web.schemas import DecryptableItem, PaginatedList
@@ -154,7 +154,9 @@ def _to_item(meta: ConversationMeta, *, truncate_summary: bool) -> ConversationI
 
     ``ConversationMeta.id`` is typed ``int | None``, but every row read from the
     DB carries a primary key. A ``None`` here means a schema invariant was
-    violated, so fail loudly rather than emit a placeholder id.
+    violated, so fail loudly rather than emit a placeholder id. ``meta`` may
+    carry the soft-fail sentinel in ``title`` / ``summary`` with
+    ``decryption_failed=True``; that flag is surfaced on the item.
     """
     if meta.id is None:
         raise RuntimeError(f"Conversation '{meta.title}' has no database id")
@@ -169,6 +171,7 @@ def _to_item(meta: ConversationMeta, *, truncate_summary: bool) -> ConversationI
         message_count=meta.message_count,
         created_at=meta.created,
         updated_at=meta.updated,
+        decryption_failed=meta.decryption_failed,
     )
 
 
@@ -179,6 +182,7 @@ def _to_message(message: Message, position: int) -> MessageItem:
         content=message.content,
         timestamp=message.timestamp,
         position=position,
+        decryption_failed=message.decryption_failed,
     )
 
 
@@ -205,13 +209,17 @@ async def list_conversations(
     log = bound_logger(request)
 
     async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-        metas, total = await conv_repo.list_conversations(
-            conn,
-            cipher,
-            topic_prefix=topic_prefix,
-            limit=limit,
-            offset=offset,
-        )
+        try:
+            metas, total = await conv_repo.list_conversations(
+                conn,
+                cipher,
+                topic_prefix=topic_prefix,
+                limit=limit,
+                offset=offset,
+                soft_fail=True,
+            )
+        except ValueError as exc:
+            raise invalid_filter(str(exc)) from None
 
     await log.info("web_conversations_list", result_count=len(metas), total=total)
     body = ConversationListResponse(
@@ -256,6 +264,7 @@ async def get_conversation(
                 conversation_id,
                 messages_limit=messages_limit,
                 messages_offset=messages_offset,
+                soft_fail=True,
             )
     except ConversationNotFoundError:
         raise conversation_not_found() from None

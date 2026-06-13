@@ -176,7 +176,12 @@ async def list_all(
         {pagination}
     """
     rows = await conn.fetch(sql, *params)
-    total = int(rows[0]["total_count"]) if rows else 0
+    if rows:
+        total = int(rows[0]["total_count"])
+    else:
+        # Empty page (e.g. offset past the end): COUNT(*) OVER() yields no row,
+        # so fall back to the dedicated COUNT over the same prefix filter.
+        total = await count(conn, topic_prefix=topic_prefix)
     return [_row_to_topic_meta(r) for r in rows], total
 
 

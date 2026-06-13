@@ -45,6 +45,7 @@ __all__: list[str] = [
     "get_stats",
     "get_text",
     "get_texts",
+    "get_timeline_counts",
     "get_unindexed",
     "list_entries",
     "mark_indexed",
@@ -313,6 +314,10 @@ async def list_entries(
     if source:
         where_parts.append(f"c.source = {_add_param(params, source)}")
     where = " AND ".join(where_parts)
+    # Params bound so far cover only the WHERE predicate; pagination params are
+    # appended after this point. The fallback COUNT (empty-page path) reuses
+    # exactly this prefix.
+    where_param_count = len(params)
 
     direction = "DESC" if sort == "newest" else "ASC"
     pagination = ""
@@ -333,7 +338,20 @@ async def list_entries(
         f" {pagination}"
     )
     rows = await conn.fetch(sql, *params)
-    total = int(rows[0]["total_count"]) if rows else 0
+    if rows:
+        total = int(rows[0]["total_count"])
+    else:
+        # Empty page (e.g. offset past the end): COUNT(*) OVER() yields no row,
+        # so fall back to a dedicated COUNT over the same predicate. ``total``
+        # must always be the full filtered count, never 0 for a past-end page.
+        count_sql = (
+            f"SELECT COUNT(*)"  # noqa: S608 - all user values bound via _add_param; identifiers literal
+            f" FROM entries e"
+            f" JOIN topics t ON t.id = e.topic_id"
+            f" LEFT JOIN conversations c ON c.id = e.conversation_id"
+            f" WHERE {where}"
+        )
+        total = int(await conn.fetchval(count_sql, *params[:where_param_count]) or 0)
     return list(rows), total
 
 
@@ -591,28 +609,32 @@ async def move_entries_to_topic(
         raise TopicNotFoundError(msg)
     dest_path = str(dest_row["path"])
 
-    present = await conn.fetch(
-        "SELECT id FROM entries WHERE id = ANY($1) AND deleted_at IS NULL",
-        ids,
-    )
-    present_ids = {int(r["id"]) for r in present}
-    missing = [eid for eid in ids if eid not in present_ids]
-    if missing:
-        raise EntriesMoveNotFound(missing)
-
     now = datetime_cls.now(UTC)
-    await conn.execute(
+    # Move and validate atomically: the UPDATE itself is the existence check, so
+    # there is no TOCTOU window between a separate validation SELECT and the
+    # write. ``RETURNING id`` yields exactly the rows that were moved; any
+    # requested id absent from that set did not resolve (missing, soft-deleted,
+    # or another user's row under RLS) -> raise, which rolls back the
+    # transaction so no partial move is reported or audited.
+    moved_rows = await conn.fetch(
         """
-        WITH moved AS (
-            UPDATE entries SET topic_id = $1, updated_at = $2
-            WHERE id = ANY($3) AND deleted_at IS NULL
-            RETURNING id
-        )
-        UPDATE topics SET updated_at = $2 WHERE id = $1
+        UPDATE entries SET topic_id = $1, updated_at = $2
+        WHERE id = ANY($3) AND deleted_at IS NULL
+        RETURNING id
         """,
         dest_topic_id,
         now,
         ids,
+    )
+    moved_ids = {int(r["id"]) for r in moved_rows}
+    missing = [eid for eid in ids if eid not in moved_ids]
+    if missing:
+        raise EntriesMoveNotFound(missing)
+
+    await conn.execute(
+        "UPDATE topics SET updated_at = $1 WHERE id = $2",
+        now,
+        dest_topic_id,
     )
 
     await record_audit(
@@ -687,6 +709,93 @@ async def reset_indexed_at_for_ids(conn: asyncpg.Connection, entry_ids: Sequence
         "UPDATE entries SET indexed_at = NULL WHERE id = ANY($1) AND deleted_at IS NULL",
         list(entry_ids),
     )
+
+
+def _timeline_bucket_expr(bucket: str, date_col: str) -> str:
+    """Return the SQL expression bucketing ``date_col`` by day or month.
+
+    ``day`` keeps the full ``YYYY-MM-DD``; ``month`` truncates to ``YYYY-MM``.
+    ``date_col`` is a trusted, caller-supplied column reference (never user
+    input), so it is interpolated directly.
+    """
+    if bucket == "month":
+        return f"to_char({date_col}, 'YYYY-MM')"
+    if bucket == "day":
+        return f"{date_col}::text"
+    msg = f"Invalid bucket '{bucket}'. Use 'day' or 'month'."
+    raise ValueError(msg)
+
+
+async def get_timeline_counts(
+    conn: asyncpg.Connection,
+    date_from: str,
+    date_to: str,
+    *,
+    bucket: str,
+    topic_prefix: str | None = None,
+) -> list[dict[str, Any]]:
+    """Aggregate per-bucket entry/conversation counts in Postgres.
+
+    GROUPs entries and conversations by day or month over the inclusive
+    ``[date_from, date_to]`` range, applying the same date + topic-prefix
+    filters as :func:`get_by_date_range` but selecting only the bucket key and
+    per-type counts -- no ciphertext is read or decrypted. Use this for the
+    timeline navigation index; reserve :func:`get_by_date_range` for surfaces
+    that need per-row detail.
+
+    Returns a list of dicts ``{"bucket": str, "entry_count": int,
+    "conversation_count": int}`` sorted ascending by bucket key. Buckets with no
+    rows are absent (the calendar renders gaps as empty).
+    """
+    params: list[Any] = [
+        date_cls.fromisoformat(date_from),
+        date_cls.fromisoformat(date_to),
+    ]
+    prefix_clause = ""
+    if topic_prefix:
+        topic_prefix = _validate_topic(topic_prefix)
+        placeholder = _add_param(params, _escape_like(topic_prefix) + "%")
+        prefix_clause = f" AND t.path LIKE {placeholder} ESCAPE '!'"
+
+    entry_bucket = _timeline_bucket_expr(bucket, "e.date")
+    conv_bucket = _timeline_bucket_expr(bucket, "c.created_at::date")
+
+    rows = await conn.fetch(
+        f"""
+        WITH counts AS (
+            SELECT {entry_bucket} AS bucket, 1 AS is_entry, 0 AS is_conv
+            FROM entries e
+            JOIN topics t ON t.id = e.topic_id
+            WHERE e.date >= $1 AND e.date <= $2
+              AND e.deleted_at IS NULL
+              AND e.conversation_id IS NULL
+              {prefix_clause}
+
+            UNION ALL
+
+            SELECT {conv_bucket} AS bucket, 0 AS is_entry, 1 AS is_conv
+            FROM conversations c
+            JOIN topics t ON t.id = c.topic_id
+            WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
+              {prefix_clause}
+        )
+        SELECT bucket,
+               SUM(is_entry)::bigint AS entry_count,
+               SUM(is_conv)::bigint  AS conversation_count
+        FROM counts
+        GROUP BY bucket
+        ORDER BY bucket ASC
+        """,  # noqa: S608 - bucket exprs come from _timeline_bucket_expr (validated literals); prefix bound via _add_param
+        *params,
+    )
+    return [
+        {
+            "bucket": r["bucket"],
+            "entry_count": int(r["entry_count"]),
+            "conversation_count": int(r["conversation_count"]),
+        }
+        for r in rows
+    ]
 
 
 async def get_by_date_range(

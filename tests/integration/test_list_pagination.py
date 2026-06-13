@@ -266,3 +266,57 @@ async def test_list_conversations_pagination_yields_complete_disjoint_id_desc_pa
         f"concatenated pages do not match deterministic id-DESC order: "
         f"got {concatenated}, expected {expected}"
     )
+
+
+async def test_list_all_offset_past_end_reports_full_total(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+) -> None:
+    """``list_all`` reports the full total for an offset-past-end page, not 0.
+
+    Regression guard: ``total`` is the full filtered count regardless of page.
+    The pre-fix code read it from ``COUNT(*) OVER()`` on ``rows[0]`` and fell
+    back to 0 on an empty page, so offset-past-end pages wrongly reported
+    ``total=0``. ``list_all`` now runs a fallback COUNT on the empty page.
+    """
+    # Arrange.
+    seeded_ids = await _seed_topics_same_updated_at(admin_pool, tenant_a, N_ROWS)
+
+    # Act -- offset past the last row.
+    async with user_scoped_connection(app_pool, tenant_a) as conn:
+        metas, total = await topic_repo.list_all(conn, limit=PAGE_SIZE, offset=N_ROWS + PAGE_SIZE)
+
+    # Assert.
+    assert metas == []
+    assert total == len(seeded_ids) == N_ROWS
+
+
+async def test_list_conversations_offset_past_end_reports_full_total(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    tenant_a: UUID,
+) -> None:
+    """``list_conversations`` reports the full total for an offset-past-end page.
+
+    Same regression as the ``list_all`` sibling: an empty (past-end) page must
+    still carry the full filtered total via the fallback COUNT.
+    """
+    # Arrange.
+    topic_id = await _seed_topic_for_conversations(
+        admin_pool, tenant_a, "pagination-conv-pastend/host"
+    )
+    seeded_ids = await _seed_conversations_same_created_at(
+        admin_pool, cipher, tenant_a, topic_id, N_ROWS
+    )
+
+    # Act -- offset past the last row.
+    async with user_scoped_connection(app_pool, tenant_a) as conn:
+        metas, total = await conv_repo.list_conversations(
+            conn, cipher, limit=PAGE_SIZE, offset=N_ROWS + PAGE_SIZE
+        )
+
+    # Assert.
+    assert metas == []
+    assert total == len(seeded_ids) == N_ROWS

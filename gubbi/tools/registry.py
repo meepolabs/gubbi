@@ -152,7 +152,7 @@ def patch_tool_manager(tm: ToolManager) -> None:
     async def patched_call_tool(
         self: ToolManager,
         name: str,
-        arguments: dict[str, Any] | None = None,  # type: ignore[assignment]
+        arguments: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> Any:
         span_name = SpanNames.MCP_TOOL_CALL

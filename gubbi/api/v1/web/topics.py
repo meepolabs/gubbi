@@ -29,7 +29,7 @@ from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
-from gubbi.api.v1.web.errors import topic_not_found
+from gubbi.api.v1.web.errors import invalid_filter, topic_not_found
 from gubbi.api.v1.web.pagination import OffsetQuery  # noqa: TC001
 from gubbi.api.v1.web.responses import private_no_store_response
 from gubbi.api.v1.web.schemas import PaginatedList
@@ -126,12 +126,15 @@ async def list_topics(
     log = bound_logger(request)
 
     async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-        metas, total = await topics_repo.list_all(
-            conn,
-            topic_prefix=prefix,
-            limit=limit,
-            offset=offset,
-        )
+        try:
+            metas, total = await topics_repo.list_all(
+                conn,
+                topic_prefix=prefix,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise invalid_filter(str(exc)) from None
 
     await log.info("web_topics_list", result_count=len(metas), total=total)
     body = TopicListResponse(

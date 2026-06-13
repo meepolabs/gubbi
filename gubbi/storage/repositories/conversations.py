@@ -37,6 +37,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 __all__: list[str] = [
+    "DECRYPTION_FAILED_SENTINEL",
     "SaveConversationResult",
     "count_conversations",
     "delete_superseded_json_archive",
@@ -96,7 +97,39 @@ def _write_conversation_json(
     return f"conversations_json/{file_id}.json"
 
 
-def _row_to_meta(cipher: ContentCipher, row: asyncpg.Record) -> ConversationMeta:
+def _row_to_meta(
+    cipher: ContentCipher, row: asyncpg.Record, *, soft_fail: bool = False
+) -> ConversationMeta:
+    """Map a conversation row to ``ConversationMeta``, decrypting title/summary.
+
+    ``soft_fail=False`` (default, MCP path): a decryption failure raises
+    ``RuntimeError`` / ``DecryptionError`` so a corrupt row surfaces loudly.
+
+    ``soft_fail=True`` (web read path): a decryption failure yields the
+    ``DECRYPTION_FAILED_SENTINEL`` in place of plaintext and sets
+    ``decryption_failed=True`` on the returned meta, so one corrupt row does not
+    fail the whole response.
+    """
+    if soft_fail:
+        soft_title, title_failed = _decrypt_field_soft(
+            cipher, row, "title_encrypted", "title_nonce"
+        )
+        soft_summary, summary_failed = _decrypt_field_soft(
+            cipher, row, "summary_encrypted", "summary_nonce"
+        )
+        return ConversationMeta(
+            id=row["id"],
+            source=row["source"],
+            title=soft_title,
+            topic=row["topic"],
+            tags=list(row["tags"] or []),
+            created=row["created_at"].date().isoformat(),
+            updated=row["updated_at"].date().isoformat(),
+            summary=soft_summary,
+            participants=list(row["participants"] or []),
+            message_count=row["message_count"],
+            decryption_failed=title_failed or summary_failed,
+        )
     title = _decrypt_content_field(cipher, row, "title_encrypted", "title_nonce")
     summary = _decrypt_content_field(cipher, row, "summary_encrypted", "summary_nonce")
     if title is None or summary is None:
@@ -132,6 +165,43 @@ def _decrypt_message_content(
     if ct is not None and nonce is not None:
         return decrypt_or_raise(cipher, bytes(ct), bytes(nonce))
     raise DecryptionError("message content_encrypted and content_nonce must both be present")
+
+
+# Surfaced in place of plaintext on the soft-fail (web) read path when a row
+# cannot be decrypted. Matches the web decryption helper's sentinel so the
+# contract is uniform across resources.
+DECRYPTION_FAILED_SENTINEL: str = "[decryption failed]"
+
+
+def _decrypt_field_soft(
+    cipher: ContentCipher,
+    row: asyncpg.Record,
+    encrypted_key: str,
+    nonce_key: str,
+) -> tuple[str, bool]:
+    """Decrypt a title/summary column pair without raising on bad data.
+
+    Returns ``(plaintext, False)`` on success (treating a legitimately-empty
+    column as ``""``) and ``(DECRYPTION_FAILED_SENTINEL, True)`` when the stored
+    value cannot be decrypted.
+    """
+    try:
+        value = _decrypt_content_field(cipher, row, encrypted_key, nonce_key)
+        return (value or "", False)
+    except DecryptionError:
+        return (DECRYPTION_FAILED_SENTINEL, True)
+
+
+def _decrypt_message_content_soft(cipher: ContentCipher, row: Any) -> tuple[str, bool]:
+    """Decrypt message content without raising; returns ``(content, failed)``.
+
+    On the soft-fail (web) read path a corrupt message yields the sentinel and
+    ``failed=True`` so one bad message does not fail the whole transcript page.
+    """
+    try:
+        return (_decrypt_message_content(cipher, row), False)
+    except DecryptionError:
+        return (DECRYPTION_FAILED_SENTINEL, True)
 
 
 # -- Save ----------------------------------------------------------------------
@@ -502,11 +572,18 @@ async def list_conversations(
     topic_prefix: str | None = None,
     limit: int | None = None,
     offset: int = 0,
+    *,
+    soft_fail: bool = False,
 ) -> tuple[list[ConversationMeta], int]:
     """List conversations, optionally filtered by topic prefix.
 
     Returns (conversations, total_count).
     total_count reflects the full filtered set before LIMIT -- use for pagination.
+
+    ``soft_fail=False`` (default, MCP path) raises on a corrupt row.
+    ``soft_fail=True`` (web read path) surfaces the decryption sentinel +
+    ``decryption_failed`` per meta instead, so one bad row does not fail the
+    whole list.
     """
     params: list[Any] = []
     where = ""
@@ -533,8 +610,13 @@ async def list_conversations(
         {pagination}
     """
     rows = await conn.fetch(sql, *params)
-    total = int(rows[0]["total_count"]) if rows else 0
-    return [_row_to_meta(cipher, r) for r in rows], total
+    if rows:
+        total = int(rows[0]["total_count"])
+    else:
+        # Empty page (e.g. offset past the end): COUNT(*) OVER() yields no row,
+        # so fall back to the dedicated COUNT over the same prefix filter.
+        total = await count_conversations(conn, topic_prefix=topic_prefix)
+    return [_row_to_meta(cipher, r, soft_fail=soft_fail) for r in rows], total
 
 
 async def get_conversation(
@@ -653,6 +735,8 @@ async def read_conversation_by_id_paginated(
     conversation_id: int,
     messages_limit: int,
     messages_offset: int = 0,
+    *,
+    soft_fail: bool = False,
 ) -> tuple[ConversationMeta, list[Message], int]:
     """Read a conversation with pagination on messages (no preview).
 
@@ -663,6 +747,10 @@ async def read_conversation_by_id_paginated(
         conversation_id: Database primary key.
         messages_limit: Max messages to return.
         messages_offset: Messages to skip before returning.
+        soft_fail: When False (default, MCP path) a corrupt title/summary or
+            message raises. When True (web read path) corruption surfaces the
+            decryption sentinel + per-row ``decryption_failed`` instead, so one
+            bad row does not fail the whole response.
 
     Returns (ConversationMeta, paged_messages, total_messages).
     Raises ConversationNotFoundError if not found.
@@ -687,7 +775,7 @@ async def read_conversation_by_id_paginated(
         msg = f"Conversation id {conversation_id} not found"
         raise ConversationNotFoundError(msg)
 
-    meta = _row_to_meta(cipher, row)
+    meta = _row_to_meta(cipher, row, soft_fail=soft_fail)
     total_messages = int(row["message_count"]) if row["message_count"] is not None else 0
 
     msg_rows = await conn.fetch(
@@ -698,15 +786,21 @@ async def read_conversation_by_id_paginated(
         messages_limit,
         messages_offset,
     )
-    messages = [
-        Message(
-            role=r["role"],
-            content=_decrypt_message_content(cipher, r),
-            timestamp=r["timestamp"].isoformat() if r["timestamp"] else None,
-        )
-        for r in msg_rows
-    ]
+    messages = [_message_from_row(cipher, r, soft_fail=soft_fail) for r in msg_rows]
     return meta, messages, total_messages
+
+
+def _message_from_row(cipher: ContentCipher, row: Any, *, soft_fail: bool) -> Message:
+    """Build a ``Message`` from a row, loud or soft-fail per ``soft_fail``."""
+    timestamp = row["timestamp"].isoformat() if row["timestamp"] else None
+    if soft_fail:
+        content, failed = _decrypt_message_content_soft(cipher, row)
+        return Message(
+            role=row["role"], content=content, timestamp=timestamp, decryption_failed=failed
+        )
+    return Message(
+        role=row["role"], content=_decrypt_message_content(cipher, row), timestamp=timestamp
+    )
 
 
 async def get_title_summary(

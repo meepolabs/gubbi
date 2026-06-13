@@ -11,7 +11,8 @@ Covers:
 - Cache-Control: ``private, no-store``.
 - RLS isolation: user B's timeline excludes user A's rows.
 
-The pure ``aggregate_buckets`` helper is unit-tested separately in
+The pure ``count_rows_to_buckets`` mapper and the ``_timeline_bucket_expr`` SQL
+fragment builder are unit-tested separately in
 ``tests/unit/test_timeline_buckets.py`` (no DB).
 
 The DB-backed tests require the RLS test database and auto-skip when it is

@@ -40,7 +40,7 @@ _MODEL_URL_FALLBACK = f"{_HF_BASE}/onnx/model_O1.onnx"
 
 def _download_file(url: str, dest: Path) -> bool:
     """Download url to dest.  Returns True on success."""
-    import requests  # type: ignore[import-untyped]
+    import requests
 
     try:
         response = requests.get(url, timeout=120, stream=True)

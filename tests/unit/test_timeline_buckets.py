@@ -1,34 +1,37 @@
-"""Unit tests for the timeline bucket-aggregation helper.
+"""Unit tests for the timeline count-row mapper and the SQL bucket expression.
 
-``aggregate_buckets`` is a pure function over title-only date-range rows, so it
-is tested here without a database: day vs month grouping, the
-entry/conversation split, ascending order, and empty input.
+``count_rows_to_buckets`` maps already-aggregated Postgres ``GROUP BY`` rows
+into ``TimelineBucket`` models -- it preserves the repository's ascending order
+and skips malformed rows. ``_timeline_bucket_expr`` is the pure SQL-fragment
+builder that selects day vs month bucketing in Postgres; both are tested here
+without a database.
 """
 
 from __future__ import annotations
 
-from gubbi.api.v1.web.timeline import aggregate_buckets
+import pytest
+
+from gubbi.api.v1.web.timeline import count_rows_to_buckets
+from gubbi.storage.repositories.entries import _timeline_bucket_expr
 
 
 def test_empty_input_returns_empty() -> None:
     # Arrange / Act
-    result = aggregate_buckets([], "day")
+    result = count_rows_to_buckets([])
 
     # Assert
     assert result == []
 
 
-def test_day_grouping_counts_entries_and_conversations() -> None:
-    # Arrange
+def test_rows_mapped_to_buckets_in_order() -> None:
+    # Arrange -- repository returns rows pre-aggregated and pre-sorted
     rows = [
-        {"doc_type": "entry", "updated": "2026-06-10"},
-        {"doc_type": "entry", "updated": "2026-06-10"},
-        {"doc_type": "conversation", "updated": "2026-06-10"},
-        {"doc_type": "entry", "updated": "2026-06-11"},
+        {"bucket": "2026-06-10", "entry_count": 2, "conversation_count": 1},
+        {"bucket": "2026-06-11", "entry_count": 1, "conversation_count": 0},
     ]
 
     # Act
-    result = aggregate_buckets(rows, "day")
+    result = count_rows_to_buckets(rows)
 
     # Assert
     assert [b.model_dump() for b in result] == [
@@ -37,51 +40,69 @@ def test_day_grouping_counts_entries_and_conversations() -> None:
     ]
 
 
-def test_month_grouping_collapses_days() -> None:
-    # Arrange
+def test_month_buckets_passed_through() -> None:
+    # Arrange -- month grouping already done in SQL; mapper just relays keys
     rows = [
-        {"doc_type": "entry", "updated": "2026-05-31"},
-        {"doc_type": "entry", "updated": "2026-06-01"},
-        {"doc_type": "conversation", "updated": "2026-06-20"},
+        {"bucket": "2026-05", "entry_count": 1, "conversation_count": 0},
+        {"bucket": "2026-06", "entry_count": 1, "conversation_count": 1},
     ]
 
     # Act
-    result = aggregate_buckets(rows, "month")
+    result = count_rows_to_buckets(rows)
 
     # Assert
-    assert [b.model_dump() for b in result] == [
-        {"date": "2026-05", "entry_count": 1, "conversation_count": 0},
-        {"date": "2026-06", "entry_count": 1, "conversation_count": 1},
-    ]
+    assert [b.date for b in result] == ["2026-05", "2026-06"]
 
 
-def test_buckets_sorted_ascending() -> None:
-    # Arrange -- out-of-order input
+def test_order_preserved_from_repository() -> None:
+    # Arrange -- mapper must not re-sort; it trusts the repo's ORDER BY
     rows = [
-        {"doc_type": "entry", "updated": "2026-06-12"},
-        {"doc_type": "entry", "updated": "2026-06-09"},
-        {"doc_type": "entry", "updated": "2026-06-11"},
+        {"bucket": "2026-06-09", "entry_count": 1, "conversation_count": 0},
+        {"bucket": "2026-06-11", "entry_count": 1, "conversation_count": 0},
+        {"bucket": "2026-06-12", "entry_count": 1, "conversation_count": 0},
     ]
 
     # Act
-    result = aggregate_buckets(rows, "day")
+    result = count_rows_to_buckets(rows)
 
     # Assert
     assert [b.date for b in result] == ["2026-06-09", "2026-06-11", "2026-06-12"]
 
 
-def test_unparseable_date_rows_skipped() -> None:
-    # Arrange -- a malformed/missing date should not crash aggregation
+def test_malformed_bucket_rows_skipped() -> None:
+    # Arrange -- a missing/blank bucket key must not crash the mapper
     rows = [
-        {"doc_type": "entry", "updated": "2026-06-10"},
-        {"doc_type": "entry", "updated": ""},
-        {"doc_type": "entry"},
+        {"bucket": "2026-06-10", "entry_count": 1, "conversation_count": 0},
+        {"bucket": "", "entry_count": 5, "conversation_count": 5},
+        {"entry_count": 9, "conversation_count": 9},
     ]
 
     # Act
-    result = aggregate_buckets(rows, "day")
+    result = count_rows_to_buckets(rows)
 
     # Assert
     assert [b.model_dump() for b in result] == [
         {"date": "2026-06-10", "entry_count": 1, "conversation_count": 0},
     ]
+
+
+def test_bucket_expr_day_keeps_full_date() -> None:
+    # Act
+    expr = _timeline_bucket_expr("day", "e.date")
+
+    # Assert
+    assert expr == "e.date::text"
+
+
+def test_bucket_expr_month_truncates() -> None:
+    # Act
+    expr = _timeline_bucket_expr("month", "c.created_at::date")
+
+    # Assert
+    assert expr == "to_char(c.created_at::date, 'YYYY-MM')"
+
+
+def test_bucket_expr_rejects_unknown_unit() -> None:
+    # Act / Assert
+    with pytest.raises(ValueError, match="Invalid bucket"):
+        _timeline_bucket_expr("week", "e.date")

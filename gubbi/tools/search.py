@@ -18,7 +18,7 @@ from gubbi.app_context import AppContext
 from gubbi.auth.scope import require_scope
 from gubbi.auth_context import current_user_id
 from gubbi.crypto.guard import require_cipher
-from gubbi.services.search import run_journal_search
+from gubbi.services.search import encode_query, run_journal_search
 from gubbi.tools.constants import (
     DEFAULT_SEARCH_LIMIT,
     MAX_QUERY_LEN,
@@ -102,6 +102,10 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
             raise MissingUserIdError("no authenticated user -- check BearerAuthMiddleware wiring")
         cipher = require_cipher(app_ctx)
 
+        # Encode the query before acquiring the connection so the CPU-bound
+        # encode does not run while holding a user-scoped transaction.
+        query_embedding = await encode_query(app_ctx, query)
+
         async with user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             search_result = await run_journal_search(
                 conn,
@@ -112,6 +116,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 date_from=date_from,
                 date_to=date_to,
                 limit=limit,
+                query_embedding=query_embedding,
             )
 
         err = check_response_size(search_result, tool_name="journal_search")

@@ -179,6 +179,42 @@ async def test_pagination_yields_complete_disjoint_newest_first_pages(
     ), f"concatenated pages are not in non-increasing (newest-first) order: {concatenated}"
 
 
+async def test_offset_past_end_reports_full_total_not_zero(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    tenant_a: UUID,
+) -> None:
+    """A page whose offset is past the end still reports the full filtered total.
+
+    Regression guard for the pagination contract: ``total`` is the full
+    filtered count, independent of the requested page. The pre-fix code read
+    ``total`` from ``COUNT(*) OVER()`` on ``rows[0]`` and fell back to 0 when the
+    page was empty -- so offset-past-end pages wrongly reported ``total=0`` even
+    though rows exist. ``list_entries`` now runs a fallback COUNT on the empty
+    page.
+    """
+    # Arrange -- seed N entries, then request a page well past the end.
+    topic_path = "pagination/offset-past-end"
+    topic_id = await _seed_topic(admin_pool, tenant_a, topic_path)
+    seeded_ids = await _seed_entries_same_date_and_created_at(
+        admin_pool, cipher, tenant_a, topic_id, N_ENTRIES
+    )
+
+    # Act -- offset beyond the last row.
+    async with user_scoped_connection(app_pool, tenant_a) as conn:
+        rows, total = await entry_repo.list_entries(
+            conn,
+            topic=topic_path,
+            limit=PAGE_SIZE,
+            offset=N_ENTRIES + PAGE_SIZE,
+        )
+
+    # Assert -- empty page, but total reflects the full filtered set.
+    assert rows == []
+    assert total == len(seeded_ids) == N_ENTRIES
+
+
 async def test_offset_zero_page_returns_newest_entries_not_oldest(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,

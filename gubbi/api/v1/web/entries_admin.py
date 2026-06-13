@@ -118,12 +118,12 @@ async def _reembed_if_changed(
         return
     app_ctx = require_app_ctx(request)
     log = bound_logger(request)
-    async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-        row_data = await entries_repo.get_text(conn, cipher, entry_id)
-    if row_data is None:
-        return
-    embed_text = ((row_data[0] or "") + " " + (row_data[1] or "")).strip()
     try:
+        async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
+            row_data = await entries_repo.get_text(conn, cipher, entry_id)
+        if row_data is None:
+            return
+        embed_text = ((row_data[0] or "") + " " + (row_data[1] or "")).strip()
         embedding = await asyncio.to_thread(app_ctx.embedding_service.encode, embed_text)
         async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
             current = await entries_repo.get_text(conn, cipher, entry_id)

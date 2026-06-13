@@ -33,7 +33,7 @@ from pydantic import Field
 
 from gubbi.api.v1.auth import require_scope
 from gubbi.api.v1.web.decryption import decrypt_field
-from gubbi.api.v1.web.errors import entry_not_found
+from gubbi.api.v1.web.errors import entry_not_found, invalid_filter
 from gubbi.api.v1.web.pagination import OffsetQuery  # noqa: TC001
 from gubbi.api.v1.web.responses import private_no_store_response
 from gubbi.api.v1.web.schemas import DecryptableItem, PaginatedList
@@ -194,17 +194,20 @@ async def list_entries(
     log = bound_logger(request)
 
     async with safe_user_scoped_connection(app_ctx.pool, user_id=user_id) as conn:
-        rows, total = await entries_repo.list_entries(
-            conn,
-            topic=topic,
-            date_from=date_from,
-            date_to=date_to,
-            tags=tags,
-            source=source,
-            sort=sort,
-            limit=limit,
-            offset=offset,
-        )
+        try:
+            rows, total = await entries_repo.list_entries(
+                conn,
+                topic=topic,
+                date_from=date_from,
+                date_to=date_to,
+                tags=tags,
+                source=source,
+                sort=sort,
+                limit=limit,
+                offset=offset,
+            )
+        except ValueError as exc:
+            raise invalid_filter(str(exc)) from None
 
     await log.info("web_entries_list", result_count=len(rows), total=total)
     body = EntryListResponse(
