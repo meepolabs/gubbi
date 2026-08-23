@@ -245,12 +245,12 @@ async def test_update_content_append_mode_concats_old_and_new() -> None:
     conn, row = _make_conn_and_row()
     # cipher.encrypt should still produce some ciphertext.
     cipher = _make_cipher()
-    # cipher.decrypt is invoked indirectly through ``decrypt_or_raise``;
-    # the helper used in the repo path is ``_decrypt_content_field`` which
-    # calls ``decrypt_or_raise(cipher, ct, nonce)``.  Patch ``decrypt_or_raise``
-    # at module scope so we control the plaintext.
+    # The append path reads the existing plaintext via the module-level
+    # ``_decrypt_content_field`` helper (an alias of
+    # ``gubbi.crypto.cipher.decrypt_content_field``).  Patch it at module scope
+    # so we control the plaintext.
     with patch(
-        "gubbi.storage.repositories.entries.decrypt_or_raise",
+        "gubbi.storage.repositories.entries._decrypt_content_field",
         return_value="old content",
     ):
         await entry_repo.update(conn, cipher, entry_id=1, content="addendum", mode="append")

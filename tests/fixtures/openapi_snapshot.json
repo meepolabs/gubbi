@@ -210,6 +210,11 @@
             "title": "Date",
             "type": "string"
           },
+          "decryption_failed": {
+            "default": false,
+            "title": "Decryption Failed",
+            "type": "boolean"
+          },
           "doc_type": {
             "const": "conversation",
             "default": "conversation",
