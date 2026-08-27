@@ -212,9 +212,14 @@ async def _audit_rows(admin_conn: asyncpg.Connection, action: str) -> list[async
 
 
 async def _teardown(admin_pool: asyncpg.Pool, user_id: UUID) -> None:
+    """Delete the user's rows innermost-first.
+
+    Every FK in this chain is ON DELETE RESTRICT, so the order is load-bearing:
+    entries reference conversations, and both reference topics.
+    """
     async with admin_pool.acquire() as conn:
-        await conn.execute("DELETE FROM conversations WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM entries WHERE user_id = $1", user_id)
+        await conn.execute("DELETE FROM conversations WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM topics WHERE user_id = $1", user_id)
         await conn.execute("DELETE FROM users WHERE id = $1", user_id)
 

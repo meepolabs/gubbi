@@ -49,6 +49,10 @@ TOPICS_ENDPOINT = f"{API_PREFIX}/topics"
 _USER_A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _USER_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 
+# Shared with the AppContext built by ``_make_app`` so seeded ciphertext
+# decrypts under the same key the handlers use.
+_CIPHER = ContentCipher({1: bytes([1]) * 32})
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -73,7 +77,6 @@ def _make_app(pool: asyncpg.Pool, *, auth_user_id: UUID | None = None) -> FastAP
         server={"url": "http://localhost:8100"},
         data_dir=str(Path(__file__).parent),
     )
-    cipher = ContentCipher({1: bytes([1]) * 32})
     app_ctx = AppContext(
         pool=pool,
         embedding_service=EmbeddingService(),
@@ -81,7 +84,7 @@ def _make_app(pool: asyncpg.Pool, *, auth_user_id: UUID | None = None) -> FastAP
         logger=structlog.get_logger("test"),
         admin_pool=None,
         operator_user_id=auth_user_id,
-        cipher=cipher,
+        cipher=_CIPHER,
     )
     app = FastAPI()
     app.state.app_ctx = app_ctx
@@ -126,35 +129,54 @@ async def _seed_topic(admin_conn: asyncpg.Connection, user_id: UUID, path: str) 
     return int(topic_id)
 
 
-async def _seed_entry(admin_conn: asyncpg.Connection, topic_id: int, content: str = "note") -> int:
+async def _seed_entry(
+    admin_conn: asyncpg.Connection,
+    user_id: UUID,
+    topic_id: int,
+    content: str = "note",
+) -> int:
     """INSERT an active entry under a topic; return entry_id."""
+    content_ct, content_nonce = _CIPHER.encrypt(content)
     entry_id = await admin_conn.fetchval(
         """
-        INSERT INTO entries (topic_id, date, content, created_at, updated_at)
-        VALUES ($1, CURRENT_DATE, $2, now(), now())
+        INSERT INTO entries
+            (topic_id, user_id, date, content_encrypted, content_nonce,
+             created_at, updated_at)
+        VALUES ($1, $2, CURRENT_DATE, $3, $4, now(), now())
         RETURNING id
         """,
         topic_id,
-        content,
+        user_id,
+        content_ct,
+        content_nonce,
     )
     return int(entry_id)
 
 
 async def _seed_conversation(
     admin_conn: asyncpg.Connection,
+    user_id: UUID,
     topic_id: int,
     slug: str,
 ) -> int:
     """INSERT a conversation under a topic; return conversation_id."""
+    title_ct, title_nonce = _CIPHER.encrypt(f"conv {slug}")
+    summary_ct, summary_nonce = _CIPHER.encrypt(f"summary {slug}")
     conv_id = await admin_conn.fetchval(
         """
-        INSERT INTO conversations (topic_id, title, slug, source, created_at, updated_at)
-        VALUES ($1, $2, $3, 'claude', now(), now())
+        INSERT INTO conversations
+            (topic_id, user_id, title_encrypted, title_nonce, slug, source,
+             summary_encrypted, summary_nonce, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, $5, 'claude', $6, $7, now(), now())
         RETURNING id
         """,
         topic_id,
-        f"conv {slug}",
+        user_id,
+        title_ct,
+        title_nonce,
         slug,
+        summary_ct,
+        summary_nonce,
     )
     return int(conv_id)
 
@@ -353,8 +375,8 @@ class TestWebTopicDelete:
         async with admin_pool.acquire() as conn:
             src = await _seed_topic(conn, _USER_A, "work/src")
             dest = await _seed_topic(conn, _USER_A, "work/dest")
-            e1 = await _seed_entry(conn, src)
-            await _seed_conversation(conn, src, "chat-1")
+            e1 = await _seed_entry(conn, _USER_A, src)
+            await _seed_conversation(conn, _USER_A, src, "chat-1")
 
         resp = await client_a.delete(
             f"{TOPICS_ENDPOINT}/{src}",
@@ -408,8 +430,8 @@ class TestWebTopicDelete:
         """Entries present but no destination -> 400 stating the count."""
         async with admin_pool.acquire() as conn:
             tid = await _seed_topic(conn, _USER_A, "work/full")
-            await _seed_entry(conn, tid)
-            await _seed_entry(conn, tid)
+            await _seed_entry(conn, _USER_A, tid)
+            await _seed_entry(conn, _USER_A, tid)
 
         resp = await client_a.delete(f"{TOPICS_ENDPOINT}/{tid}", headers=_HDR_A)
         assert resp.status_code == 400
@@ -428,7 +450,7 @@ class TestWebTopicDelete:
         """A nonexistent destination topic -> 404."""
         async with admin_pool.acquire() as conn:
             src = await _seed_topic(conn, _USER_A, "work/src")
-            await _seed_entry(conn, src)
+            await _seed_entry(conn, _USER_A, src)
 
         resp = await client_a.delete(
             f"{TOPICS_ENDPOINT}/{src}",
@@ -457,9 +479,9 @@ class TestWebTopicMerge:
         async with admin_pool.acquire() as conn:
             src = await _seed_topic(conn, _USER_A, "work/src")
             dest = await _seed_topic(conn, _USER_A, "work/dest")
-            await _seed_entry(conn, src)
-            await _seed_entry(conn, src)
-            await _seed_conversation(conn, src, "chat-1")
+            await _seed_entry(conn, _USER_A, src)
+            await _seed_entry(conn, _USER_A, src)
+            await _seed_conversation(conn, _USER_A, src, "chat-1")
 
         resp = await client_a.post(
             f"{TOPICS_ENDPOINT}/{src}/merge",
@@ -521,9 +543,9 @@ class TestWebTopicMerge:
         async with admin_pool.acquire() as conn:
             src = await _seed_topic(conn, _USER_A, "work/src")
             dest = await _seed_topic(conn, _USER_A, "work/dest")
-            await _seed_entry(conn, src)
-            await _seed_conversation(conn, src, "dup")
-            await _seed_conversation(conn, dest, "dup")
+            await _seed_entry(conn, _USER_A, src)
+            await _seed_conversation(conn, _USER_A, src, "dup")
+            await _seed_conversation(conn, _USER_A, dest, "dup")
 
         resp = await client_a.post(
             f"{TOPICS_ENDPOINT}/{src}/merge",

@@ -22,7 +22,7 @@ need no DB.
 
 from __future__ import annotations
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -170,7 +170,7 @@ async def _seed_conversation(
         _NONCE,
         ["seed"],
         ["user", "assistant"],
-        f"{created_on.isoformat()}T12:00:00+00:00",
+        datetime.combine(created_on, time(12, 0), tzinfo=UTC),
         f"conversations_json/{uuid4()}.json",
     )
 
