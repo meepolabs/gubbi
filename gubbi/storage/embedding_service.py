@@ -259,6 +259,7 @@ class EmbeddingService:
         topic_prefix: str | None = None,
         date_from: date | None = None,
         date_to: date | None = None,
+        min_similarity: float | None = None,
     ) -> list[dict[str, Any]]:
         """Return top-k entries by a pre-computed embedding vector.
 
@@ -268,10 +269,22 @@ class EmbeddingService:
 
         topic_prefix: filter to topics whose path starts with this prefix.
         date_from / date_to: filter by entry date (datetime.date objects).
+        min_similarity: cosine-similarity floor in [0, 1]. Cosine distance
+            totally orders every stored row, so ORDER BY + LIMIT alone returns
+            the nearest rows for ANY query vector -- including a query that
+            resembles nothing in the corpus. Callers that want relevance rather
+            than pure nearest-neighbour must pass a floor. It is applied in SQL,
+            not as a post-filter on the returned rows, so LIMIT still yields up
+            to ``limit`` rows that actually clear the floor. Default ``None``
+            keeps the unconditional top-k behaviour that the briefing key-facts
+            path relies on.
         """
         params: list[Any] = [embedding, limit]  # $1=embedding, $2=limit
         where_clauses = ["e.deleted_at IS NULL"]
 
+        if min_similarity is not None:
+            params.append(min_similarity)
+            where_clauses.append(f"(1 - (ee.embedding <=> $1::vector)) >= ${len(params)}::float8")
         if topic_prefix:
             escaped = topic_prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
             params.append(escaped + "%")

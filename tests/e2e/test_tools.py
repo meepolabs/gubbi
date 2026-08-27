@@ -53,6 +53,7 @@ class _StubEmbeddingService:
         topic_prefix: str | None = None,
         date_from: Any = None,
         date_to: Any = None,
+        min_similarity: float | None = None,
     ) -> list[dict]:
         return []
 

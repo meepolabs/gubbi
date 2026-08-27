@@ -252,3 +252,10 @@ async def test_journal_search_returns_full_content_for_fts_and_semantic(
     semantic_rows = [r for r in semantic_result["results"] if r.get("entry_id") is not None]
     assert semantic_rows
     assert semantic_rows[0].get("content")
+    # No query term appears in either entry, so FTS contributes nothing and every
+    # row here came from the semantic backend. The static stub encodes every text
+    # to strong_entry's stored vector, so strong_entry scores 1.0 and weak_entry
+    # 0.0 -- the recall assertion above is only meaningful because it names the
+    # entry the vectors actually point at, and weak_entry's absence shows the
+    # relevance floor is doing the excluding.
+    assert [int(r["entry_id"]) for r in semantic_rows] == [strong_entry_id]

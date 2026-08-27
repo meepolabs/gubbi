@@ -8,6 +8,8 @@ Covers:
   ``q`` over 2000 chars -> 422.
 - Response shape: spec field set per result; ``{results, total, query}`` body;
   Cache-Control ``private, no-store``.
+- Relevance floor: a nonsense query against a populated, EMBEDDED corpus returns
+  nothing, while a real term and a pure paraphrase both still match.
 - RLS isolation: user B's search never returns user A's content.
 
 The DB-backed tests require the RLS test database. They auto-skip when the
@@ -19,6 +21,7 @@ handler touches the pool.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from pathlib import Path
 from uuid import UUID
 
@@ -51,6 +54,17 @@ _USER_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
 _CIPHER = ContentCipher({1: bytes([1]) * 32})
 
 
+@lru_cache(maxsize=1)
+def _embeddings() -> EmbeddingService:
+    """One shared real EmbeddingService for the whole module.
+
+    Seeded vectors and query vectors must come from the SAME model for a
+    similarity assertion to mean anything, and ONNX session construction is slow
+    enough that a per-app instance dominates the module's runtime.
+    """
+    return EmbeddingService()
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -75,7 +89,7 @@ def _make_app(pool: asyncpg.Pool, *, auth_user_id: UUID | None = None) -> FastAP
     )
     app_ctx = AppContext(
         pool=pool,
-        embedding_service=EmbeddingService(),
+        embedding_service=_embeddings(),
         settings=settings,
         logger=structlog.get_logger("test"),
         admin_pool=None,
@@ -123,10 +137,27 @@ async def _seed_topic(admin_conn: asyncpg.Connection, user_id: UUID, path: str) 
     )
 
 
-async def _seed_entry(pool: asyncpg.Pool, user_id: UUID, topic: str, content: str) -> int:
-    """Append a real, FTS-indexed entry through the repo (RLS-scoped)."""
+async def _seed_entry(
+    pool: asyncpg.Pool,
+    user_id: UUID,
+    topic: str,
+    content: str,
+    *,
+    embed: bool = False,
+) -> int:
+    """Append a real, FTS-indexed entry through the repo (RLS-scoped).
+
+    ``embed=True`` also writes the entry's real embedding vector, which is what
+    puts a row in ``entry_embeddings`` and so makes the semantic backend
+    reachable at all. Without it a test only ever exercises FTS, and any
+    "returns nothing" assertion passes because the k-NN has no rows to rank.
+    """
     async with user_scoped_connection(pool, user_id=user_id) as conn, conn.transaction():
-        return await entry_repo.append(conn, _CIPHER, topic, content)
+        entry_id = await entry_repo.append(conn, _CIPHER, topic, content)
+        if embed:
+            service = _embeddings()
+            await service.save_by_vector(conn, entry_id, service.encode(content))
+    return entry_id
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +237,7 @@ class TestWebSearchValidation:
         )
         app_ctx = AppContext(
             pool=app_pool,
-            embedding_service=EmbeddingService(),
+            embedding_service=_embeddings(),
             settings=settings,
             logger=structlog.get_logger("test"),
             operator_user_id=None,
@@ -289,8 +320,14 @@ class TestWebSearchValidation:
 class TestWebSearchResults:
     """Result shape, body envelope, and Cache-Control."""
 
-    async def test_empty_results(self, client_a: AsyncClient) -> None:
-        """No matching content -> 200 with empty results and total 0."""
+    async def test_empty_corpus_returns_no_results(self, client_a: AsyncClient) -> None:
+        """Nothing seeded at all -> 200 with empty results and total 0.
+
+        This is the EMPTY-CORPUS case only. It cannot detect a missing relevance
+        floor: ``clean_rls_db`` truncates ``entry_embeddings``, so the semantic
+        k-NN has no rows to return regardless of the query. The populated-corpus
+        counterpart lives in ``TestWebSearchRelevanceFloor``.
+        """
         resp = await client_a.get(
             SEARCH_ENDPOINT,
             params={"q": "nonexistent-term-zzzz"},
@@ -371,6 +408,72 @@ class TestWebSearchResults:
         )
         assert resp.status_code == 200, resp.text
         assert len(resp.json()["results"]) == 1
+
+
+class TestWebSearchRelevanceFloor:
+    """A nonsense query against a POPULATED, embedded corpus returns nothing."""
+
+    async def test_nonsense_query_returns_nothing_but_real_term_matches(
+        self,
+        client_a: AsyncClient,
+        app_pool: asyncpg.Pool,
+        admin_pool: asyncpg.Pool,
+        user_a: UUID,
+    ) -> None:
+        """Both halves in one test, deliberately.
+
+        The positive control is what gives the negative assertion meaning: it
+        proves the corpus is seeded, embedded, and reachable through this
+        endpoint, so ``total == 0`` for the nonsense query can only come from the
+        relevance floor. Split across two tests, the negative half would pass
+        again the moment seeding silently broke.
+        """
+        async with admin_pool.acquire() as conn:
+            await _seed_topic(conn, _USER_A, "work/acme")
+        await _seed_entry(app_pool, _USER_A, "work/acme", "marathon training schedule", embed=True)
+
+        positive = await client_a.get(
+            SEARCH_ENDPOINT,
+            params={"q": "marathon"},
+            headers={"X-Auth-User-Id": str(_USER_A)},
+        )
+        assert positive.status_code == 200, positive.text
+        assert positive.json()["total"] >= 1
+
+        negative = await client_a.get(
+            SEARCH_ENDPOINT,
+            params={"q": "zzzznomatchxyz"},
+            headers={"X-Auth-User-Id": str(_USER_A)},
+        )
+        assert negative.status_code == 200, negative.text
+        assert negative.json()["total"] == 0
+        assert negative.json()["results"] == []
+
+    async def test_paraphrase_still_matches_semantically(
+        self,
+        client_a: AsyncClient,
+        app_pool: asyncpg.Pool,
+        admin_pool: asyncpg.Pool,
+        user_a: UUID,
+    ) -> None:
+        """The floor must not be so high that it kills semantic recall.
+
+        No query term appears in the entry text, so FTS contributes nothing --
+        a hit here can only have come from the semantic backend clearing the
+        floor. This is the guard against "fixing" relevance by turning semantic
+        search off.
+        """
+        async with admin_pool.acquire() as conn:
+            await _seed_topic(conn, _USER_A, "work/acme")
+        await _seed_entry(app_pool, _USER_A, "work/acme", "marathon training schedule", embed=True)
+
+        resp = await client_a.get(
+            SEARCH_ENDPOINT,
+            params={"q": "running plan for a race"},
+            headers={"X-Auth-User-Id": str(_USER_A)},
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["total"] >= 1
 
 
 class TestWebSearchRLS:

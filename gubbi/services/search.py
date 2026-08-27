@@ -2,7 +2,9 @@
 
 The pipeline is: encode the query, run FTS + semantic (pgvector) backends,
 merge with FTS-first dedup, batch-decrypt (hydrate) the surviving rows, then
-sort by rank and slice to ``limit``. Both the ``journal_search`` MCP tool and
+sort by rank and slice to ``limit``. The semantic backend is floored at
+``SEMANTIC_MIN_SIMILARITY`` so a query matching nothing returns nothing rather
+than the nearest rows in the corpus. Both the ``journal_search`` MCP tool and
 ``GET /api/v1/search`` call :func:`run_journal_search` so the ranking,
 degradation, and decryption semantics are identical across surfaces.
 
@@ -39,11 +41,27 @@ if TYPE_CHECKING:
 __all__: list[str] = [
     "DECRYPTION_FAILED_SENTINEL",
     "REPO_DECRYPTION_FAILED_SENTINEL",
+    "SEMANTIC_MIN_SIMILARITY",
     "encode_query",
     "run_journal_search",
 ]
 
 logger = structlog.get_logger(__name__)
+
+# Cosine-similarity floor for the semantic backend. Without it the k-NN is
+# unconditional -- cosine distance totally orders every stored row, so a query
+# resembling nothing in the corpus still returns the ``limit`` nearest entries,
+# and the caller (often an AI client) treats them as retrieved fact.
+#
+# Tuned for all-MiniLM-L6-v2 mean-pooled + L2-normalised embeddings, where
+# cosine similarity equals the dot product (see EmbeddingService.encode).
+# Measured against this corpus shape: unrelated-token queries land at 0.00-0.16,
+# a partial topic-slug match at ~0.28, and genuine matches (exact term, or a
+# paraphrase like "running plan for a race" vs "marathon training schedule") at
+# 0.47-0.80. 0.35 sits in the empty band between the two clusters, so it drops
+# noise without costing paraphrase recall -- which is the whole point of having
+# a semantic backend alongside FTS.
+SEMANTIC_MIN_SIMILARITY: float = 0.35
 
 # The repository decryption path stores this hyphen sentinel as the entry
 # "text" when a row cannot be decrypted.
@@ -96,6 +114,7 @@ async def _run_dual_search(
                 topic_prefix=topic_prefix,
                 date_from=df,
                 date_to=dt,
+                min_similarity=SEMANTIC_MIN_SIMILARITY,
             )
             semantic_results = [
                 SearchResult(

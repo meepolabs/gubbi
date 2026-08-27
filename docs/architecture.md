@@ -153,7 +153,7 @@ A single CTE soft-deletes the entry (sets `deleted_at`), deletes its row in `ent
 
 ### Search path (journal_search)
 
-The query embedding is generated via `asyncio.to_thread(embedding_service.encode, query)` **before** a DB connection is acquired, so the pool isn't pinned during inference -> `require_cipher` gates entry -> in one user-scoped connection, `search_repo.fts_search` runs `websearch_to_tsquery` over a UNION ALL of `entries` and `conversations` (single `conn.fetch`, negated `ts_rank` for ascending sort) returning IDs + rank only -- no `ts_headline` since the columns are encrypted -> `embedding_service.search_by_vector` runs pgvector cosine similarity, RLS-scoped, topic + date pre-filtered in SQL -> FTS and semantic results are merged by `source_key` deduplication -> per-hit hydration calls `entry_repo.get_text` (decrypts content) or `conv_repo.get_title_summary` (decrypts title + summary) and truncates each at a per-result character cap. If query encoding fails the tool transparently degrades to FTS-only.
+The query embedding is generated via `asyncio.to_thread(embedding_service.encode, query)` **before** a DB connection is acquired, so the pool isn't pinned during inference -> `require_cipher` gates entry -> in one user-scoped connection, `search_repo.fts_search` runs `websearch_to_tsquery` over a UNION ALL of `entries` and `conversations` (single `conn.fetch`, negated `ts_rank` for ascending sort) returning IDs + rank only -- no `ts_headline` since the columns are encrypted -> `embedding_service.search_by_vector` runs pgvector cosine similarity, RLS-scoped, topic + date pre-filtered in SQL, with a `min_similarity` relevance floor (`services.search.SEMANTIC_MIN_SIMILARITY`) also applied in SQL -- cosine distance totally orders every stored row, so without the floor `ORDER BY` + `LIMIT` returns the nearest rows even for a query that matches nothing -> FTS and semantic results are merged by `source_key` deduplication -> per-hit hydration calls `entry_repo.get_text` (decrypts content) or `conv_repo.get_title_summary` (decrypts title + summary) and truncates each at a per-result character cap. If query encoding fails the tool transparently degrades to FTS-only.
 
 ### Conversation save path (journal_save_conversation)
 
@@ -161,7 +161,7 @@ Message count validated (max 1000) -> conversation JSON archived to `conversatio
 
 ### Briefing path (journal_briefing)
 
-A canned key-facts query embedding is pre-encoded outside the pool -> one user-scoped connection fetches this week's entries (most-recent-first, capped at 25), the top 20 recently-updated topics, topic count, entry stats, and semantic key-fact matches via `embedding_service.search_by_vector`. All prose is decrypted before return.
+A canned key-facts query embedding is pre-encoded outside the pool -> one user-scoped connection fetches this week's entries (most-recent-first, capped at 25), the top 20 recently-updated topics, topic count, entry stats, and semantic key-fact matches via `embedding_service.search_by_vector` (no `min_similarity` -- the briefing wants an unconditional top-N, unlike `journal_search`). All prose is decrypted before return.
 
 ## Concurrency model
 
