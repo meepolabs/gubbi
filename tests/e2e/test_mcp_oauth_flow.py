@@ -447,7 +447,7 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
         assert "authorization_servers" in pr_data, "Missing 'authorization_servers'"
 
         # ---- Step 5: No Authorization header -> 401 ---------------------------
-        status, result = await call_mcp_tool(
+        status, _result = await call_mcp_tool(
             client, JOURNAL_DEV_MCP_URL, None, "journal_briefing", {}
         )
         assert status == 401 or status >= 400, f"No-token should be 401+, got {status}"
@@ -487,9 +487,9 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
                 "Content-Type": "application/json",
             },
         )
-        assert (
-            inv_resp.status_code == 401
-        ), f"Invalid token should be 401, got {inv_resp.status_code}"
+        assert inv_resp.status_code == 401, (
+            f"Invalid token should be 401, got {inv_resp.status_code}"
+        )
         www_auth_inv = inv_resp.headers.get("www-authenticate", "")
         assert "Bearer" in www_auth_inv
 
@@ -539,9 +539,9 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
             "journal_list_topics",
             {"topic_prefix": ""},
         )
-        assert (
-            lt_result.get("total", 0) or len(lt_result.get("topics", [])) >= 1
-        ), f"list_topics returned no topics: {lt_result}"
+        assert lt_result.get("total", 0) or len(lt_result.get("topics", [])) >= 1, (
+            f"list_topics returned no topics: {lt_result}"
+        )
 
         # journal_search (find own secret)
         code_ss, res_ss = await call_mcp_tool(
@@ -687,9 +687,9 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
         user_b_total = (
             sr.get("total", 0) if isinstance(sr.get("total"), int) else len(sr.get("results", []))
         )
-        assert (
-            user_b_total == 0
-        ), f"User B MUST NOT see User A's entries. LSA leak! total={user_b_total}, results={sr.get('results', [])[:2]}"
+        assert user_b_total == 0, (
+            f"User B MUST NOT see User A's entries. LSA leak! total={user_b_total}, results={sr.get('results', [])[:2]}"
+        )
 
     finally:
         await client.aclose()
@@ -723,9 +723,9 @@ async def test_openai_style_mcp_oauth_flow() -> None:
         _meta["mcp/www_authenticate"] containing "insufficient_scope"
     """
     admin_url = JOURNAL_DEV_AUTH_ADMIN_URL
-    assert (
-        admin_url is not None
-    ), "JOURNAL_DEV_AUTH_ADMIN_URL required -- tunnel Hydra admin port 4445 from the dev box"
+    assert admin_url is not None, (
+        "JOURNAL_DEV_AUTH_ADMIN_URL required -- tunnel Hydra admin port 4445 from the dev box"
+    )
 
     client = httpx.AsyncClient(
         timeout=_TIMEOUT,
@@ -974,18 +974,17 @@ async def test_openai_style_mcp_oauth_flow() -> None:
             pass
         elif inv_code == 200 and isinstance(inv_result, dict):
             # MCP-level error: must carry isError flag AND _meta/www_authenticate.
-            assert inv_result.get(
-                "isError"
-            ), f"Insufficient scope should yield MCP error, got result={inv_result}"
+            assert inv_result.get("isError"), (
+                f"Insufficient scope should yield MCP error, got result={inv_result}"
+            )
             meta = inv_result.get("_meta", {}) or {}
             www_attr = meta.get("mcp/www_authenticate", "")
-            assert (
-                "insufficient_scope" in www_attr
-            ), f"Missing insufficient_scope in _meta.mcp.www_authenticate: {www_attr}"
+            assert "insufficient_scope" in www_attr, (
+                f"Missing insufficient_scope in _meta.mcp.www_authenticate: {www_attr}"
+            )
         else:
             raise AssertionError(
-                f"Insufficient scope call returned unexpected status={inv_code} "
-                f"result={inv_result}"
+                f"Insufficient scope call returned unexpected status={inv_code} result={inv_result}"
             )
 
     finally:

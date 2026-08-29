@@ -616,7 +616,7 @@ class OAuthStorage:
             # 1. Expired auth codes -- expires_at is NOT NULL for new rows; legacy NULLs
             #    are treated as expired (same as old default_expired=True behavior).
             cur = await conn.execute(
-                "DELETE FROM auth_codes " "WHERE expires_at IS NULL OR expires_at < ?",
+                "DELETE FROM auth_codes WHERE expires_at IS NULL OR expires_at < ?",
                 (now,),
             )
             deleted += cur.rowcount
@@ -629,7 +629,7 @@ class OAuthStorage:
                 (now,),
             )
             cur = await conn.execute(
-                "DELETE FROM access_tokens " "WHERE expires_at IS NOT NULL AND expires_at < ?",
+                "DELETE FROM access_tokens WHERE expires_at IS NOT NULL AND expires_at < ?",
                 (now,),
             )
             deleted += cur.rowcount
@@ -656,7 +656,7 @@ class OAuthStorage:
                 (now,),
             )
             cur = await conn.execute(
-                "DELETE FROM refresh_tokens " "WHERE expires_at IS NOT NULL AND expires_at < ?",
+                "DELETE FROM refresh_tokens WHERE expires_at IS NOT NULL AND expires_at < ?",
                 (now,),
             )
             deleted += cur.rowcount

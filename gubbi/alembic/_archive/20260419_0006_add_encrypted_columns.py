@@ -103,7 +103,7 @@ def upgrade() -> None:
     )
 
     # -- 5. Re-create the GIN index on the new column --
-    op.execute("CREATE INDEX IF NOT EXISTS idx_entries_fts " "ON entries USING GIN (search_vector)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_entries_fts ON entries USING GIN (search_vector)")
 
     # -- 6. Nonce-length CHECK constraints (GCM invariant; 12 bytes). NULL is
     # permitted because backfill in 02.14 fills nonces row-by-row; the check
@@ -168,7 +168,7 @@ def downgrade() -> None:
     )
 
     # -- 4. Re-create GIN index on the restored column --
-    op.execute("CREATE INDEX IF NOT EXISTS idx_entries_fts " "ON entries USING GIN (search_vector)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_entries_fts ON entries USING GIN (search_vector)")
 
     # -- 5. Drop messages new columns --
     op.execute("ALTER TABLE messages DROP COLUMN IF EXISTS search_text")

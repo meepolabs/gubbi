@@ -468,10 +468,10 @@ def test_encrypt_with_version_valid_version_round_trip() -> None:
 def test_encrypt_with_version_non_default_version_nonce_byte() -> None:
     """encrypt_with_version(V2) produces nonce byte-0 == 2 even if active is different."""
     keys = {1: _key(1), 2: _key(2), 5: _key(5)}
-    ct_v2, nonce_v2 = ContentCipher(keys).encrypt_with_version("v2-only", version=2)
+    _ct_v2, nonce_v2 = ContentCipher(keys).encrypt_with_version("v2-only", version=2)
     assert nonce_v2[0] == 2
 
-    ct_v1, nonce_v1 = ContentCipher(keys).encrypt_with_version("v1-specific", version=1)
+    _ct_v1, nonce_v1 = ContentCipher(keys).encrypt_with_version("v1-specific", version=1)
     assert nonce_v1[0] == 1
 
 
@@ -481,11 +481,11 @@ def test_encrypt_with_version_non_default_is_independent_of_active() -> None:
     cipher = ContentCipher(keys)
     assert cipher.active_version == 2
 
-    ct, nonce = cipher.encrypt("active-writes-v2")
+    _ct, nonce = cipher.encrypt("active-writes-v2")
     assert nonce[0] == 2
 
     # But encrypt_with_version(1) still targets V1.
-    ct_v1, nonce_v1 = cipher.encrypt_with_version("explicit-v1", version=1)
+    _ct_v1, nonce_v1 = cipher.encrypt_with_version("explicit-v1", version=1)
     assert nonce_v1[0] == 1
 
 

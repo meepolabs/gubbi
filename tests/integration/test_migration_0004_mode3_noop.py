@@ -36,7 +36,7 @@ def test_mode3_skip_logic(monkeypatch: pytest.MonkeyPatch) -> None:
         "JOURNAL_DB_MIGRATION_URL": test_db_url,
     }
 
-    result = subprocess.run(  # noqa: S603 -- sys.executable is trusted, args are literals
+    result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=project_root,
         env=env,
@@ -50,9 +50,7 @@ def test_mode3_skip_logic(monkeypatch: pytest.MonkeyPatch) -> None:
         if "could not connect to server" in stderr_lower or "connection refused" in stderr_lower:
             pytest.skip("PostgreSQL not reachable -- infrastructure missing")
         pytest.fail(
-            "alembic upgrade head failed:\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
+            f"alembic upgrade head failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
 
 
@@ -77,6 +75,6 @@ async def test_mode3_noop_no_email(pool: asyncpg.Pool) -> None:
         )
     assert row is not None, "entries.user_id column not found -- Phase 1 did not run"
 
-    assert (
-        row["is_nullable"] == "NO"
-    ), "entries.user_id is nullable but must be NOT NULL -- Phase 5 did not run"
+    assert row["is_nullable"] == "NO", (
+        "entries.user_id is nullable but must be NOT NULL -- Phase 5 did not run"
+    )

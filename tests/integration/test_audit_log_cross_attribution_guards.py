@@ -67,9 +67,9 @@ async def test_app_insert_self_only_policy_present(
     # the "char" type as a single-byte ``bytes`` value).
     assert row["polcmd"] == b"a", f"expected INSERT cmd, got: {row['polcmd']!r}"
     check_expr = row["check_expr"] or ""
-    assert (
-        "app.current_user_id" in check_expr
-    ), f"expected app.current_user_id in WITH CHECK, got: {check_expr!r}"
+    assert "app.current_user_id" in check_expr, (
+        f"expected app.current_user_id in WITH CHECK, got: {check_expr!r}"
+    )
 
 
 async def test_admin_no_user_actor_trigger_present(
@@ -93,9 +93,9 @@ async def test_admin_no_user_actor_trigger_present(
     assert row["tgenabled"] == b"O", f"expected trigger enabled (b'O'), got: {row['tgenabled']!r}"
     # Mask off the high bits and assert BEFORE INSERT ROW.
     tg_low = int(row["tgtype"]) & 0x1F
-    assert (
-        tg_low == _BEFORE_INSERT_ROW_BITS
-    ), f"expected BEFORE INSERT ROW (0x{_BEFORE_INSERT_ROW_BITS:02x}), got: 0x{tg_low:02x}"
+    assert tg_low == _BEFORE_INSERT_ROW_BITS, (
+        f"expected BEFORE INSERT ROW (0x{_BEFORE_INSERT_ROW_BITS:02x}), got: 0x{tg_low:02x}"
+    )
 
 
 async def test_audit_log_target_kind_column_present(
@@ -187,15 +187,12 @@ async def test_downgrade_removes_policy_and_trigger(
     # Act: downgrade -1.
     down = _run_alembic(RLS_BOOTSTRAP_URL, "downgrade", "-1")
     if down.returncode != 0:
-        pytest.fail(
-            f"alembic downgrade -1 failed:\n" f"stdout:\n{down.stdout}\nstderr:\n{down.stderr}"
-        )
+        pytest.fail(f"alembic downgrade -1 failed:\nstdout:\n{down.stdout}\nstderr:\n{down.stderr}")
 
     try:
         async with admin_pool.acquire() as conn:
             post_policy = await conn.fetchval(
-                "SELECT 1 FROM pg_policy WHERE polname = $1 "
-                "AND polrelid = 'audit_log'::regclass",
+                "SELECT 1 FROM pg_policy WHERE polname = $1 AND polrelid = 'audit_log'::regclass",
                 _POLICY_NAME,
             )
             post_trigger = await conn.fetchval(

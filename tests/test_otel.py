@@ -95,9 +95,9 @@ def test_mcp_tool_call_span_golden_path(in_memory_tracer: tuple[Any, InMemoryExp
 
     # All MCP_TOOL_CALL_ATTRS must be present
     for attr_key in MCP_TOOL_CALL_ATTRS:
-        assert (
-            attr_key in exported_attrs
-        ), f"Missing required attribute {attr_key!r} in mcp.tool_call span"
+        assert attr_key in exported_attrs, (
+            f"Missing required attribute {attr_key!r} in mcp.tool_call span"
+        )
         assert exported_attrs[attr_key] == attrs[attr_key], (
             f"Attribute {attr_key!r} value mismatch: "
             f"expected {attrs[attr_key]!r}, got {exported_attrs[attr_key]!r}"
@@ -136,9 +136,9 @@ def test_correlation_id_in_span_attributes(in_memory_tracer: tuple[Any, InMemory
 
     assert len(exporter.spans) == 1
     attrs = dict(exporter.spans[0].attributes) if exporter.spans[0].attributes else {}
-    assert (
-        attrs.get("correlation_id") == cid
-    ), f"Expected correlation_id={cid!r} in span attributes, got {attrs.get('correlation_id')!r}"
+    assert attrs.get("correlation_id") == cid, (
+        f"Expected correlation_id={cid!r} in span attributes, got {attrs.get('correlation_id')!r}"
+    )
 
 
 # ---------------------------------------------------------------------------

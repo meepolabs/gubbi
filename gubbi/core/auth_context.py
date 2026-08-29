@@ -9,7 +9,7 @@ from typing import Any
 def __getattr__(name: str) -> Any:
     if name == "current_user_id":
         warnings.warn(
-            "gubbi.core.auth_context is deprecated; " "import from gubbi.auth_context instead",
+            "gubbi.core.auth_context is deprecated; import from gubbi.auth_context instead",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -18,7 +18,7 @@ def __getattr__(name: str) -> Any:
         return current_user_id
     if name == "current_token_scopes":
         warnings.warn(
-            "gubbi.core.auth_context is deprecated; " "import from gubbi.auth_context instead",
+            "gubbi.core.auth_context is deprecated; import from gubbi.auth_context instead",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -27,7 +27,7 @@ def __getattr__(name: str) -> Any:
         return current_token_scopes
     if name == "get_current_user_id":
         warnings.warn(
-            "gubbi.core.auth_context is deprecated; " "import from gubbi.auth_context instead",
+            "gubbi.core.auth_context is deprecated; import from gubbi.auth_context instead",
             DeprecationWarning,
             stacklevel=2,
         )
@@ -36,7 +36,7 @@ def __getattr__(name: str) -> Any:
         return get_current_user_id
     if name == "AuthenticationError":
         warnings.warn(
-            "gubbi.core.auth_context is deprecated; " "import from gubbi.auth_context instead",
+            "gubbi.core.auth_context is deprecated; import from gubbi.auth_context instead",
             DeprecationWarning,
             stacklevel=2,
         )

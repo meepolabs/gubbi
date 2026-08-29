@@ -143,9 +143,9 @@ async def test_anthropic_retry_jitter_is_added() -> None:
         base_delay = 1.0 * (2**i)
         jitter_range = base_delay * 0.1
         assert duration >= base_delay, f"delay {duration} < base {base_delay}"
-        assert (
-            duration <= base_delay + jitter_range
-        ), f"delay {duration} exceeds max base+jitter ({base_delay + jitter_range})"
+        assert duration <= base_delay + jitter_range, (
+            f"delay {duration} exceeds max base+jitter ({base_delay + jitter_range})"
+        )
 
 
 @pytest.mark.asyncio

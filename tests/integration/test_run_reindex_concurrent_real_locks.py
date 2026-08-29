@@ -120,9 +120,9 @@ async def test_run_reindex_skips_locked_rows_then_processes_them_after_release(
                 "SELECT id FROM entries WHERE id = ANY($1) FOR UPDATE",
                 locked_ids,
             )
-            assert {r["id"] for r in held_rows} == set(
-                locked_ids
-            ), "holder transaction must lock the requested ids before the worker runs"
+            assert {r["id"] for r in held_rows} == set(locked_ids), (
+                "holder transaction must lock the requested ids before the worker runs"
+            )
 
             # First pass: worker must skip the locked rows.
             svc1 = _CountingEmbeddingService()
@@ -141,14 +141,12 @@ async def test_run_reindex_skips_locked_rows_then_processes_them_after_release(
             # worker must not have stamped them.
             async with admin_pool.acquire() as conn:
                 still_unindexed = await conn.fetch(
-                    "SELECT id FROM entries "
-                    "WHERE id = ANY($1) AND indexed_at IS NULL "
-                    "ORDER BY id",
+                    "SELECT id FROM entries WHERE id = ANY($1) AND indexed_at IS NULL ORDER BY id",
                     locked_ids,
                 )
-            assert {r["id"] for r in still_unindexed} == set(
-                locked_ids
-            ), "Locked rows must NOT have been claimed by the first worker pass"
+            assert {r["id"] for r in still_unindexed} == set(locked_ids), (
+                "Locked rows must NOT have been claimed by the first worker pass"
+            )
         finally:
             # Release the lock so the second pass can claim the rows.
             await tx.commit()
@@ -170,14 +168,14 @@ async def test_run_reindex_skips_locked_rows_then_processes_them_after_release(
     # Disjointness across both passes (the core property).
     pass1_ids = set(svc1.save_calls)
     pass2_ids = set(svc2.save_calls)
-    assert pass1_ids.isdisjoint(
-        pass2_ids
-    ), f"Passes must process disjoint id sets; overlap={pass1_ids & pass2_ids}"
+    assert pass1_ids.isdisjoint(pass2_ids), (
+        f"Passes must process disjoint id sets; overlap={pass1_ids & pass2_ids}"
+    )
 
     # Full coverage: every seeded id ended up in exactly one pass.
-    assert pass1_ids | pass2_ids == set(
-        entry_ids
-    ), f"Coverage gap: missing ids = {set(entry_ids) - (pass1_ids | pass2_ids)}"
+    assert pass1_ids | pass2_ids == set(entry_ids), (
+        f"Coverage gap: missing ids = {set(entry_ids) - (pass1_ids | pass2_ids)}"
+    )
 
     # Database invariants: every seeded entry has an embedding row, no dupes.
     async with admin_pool.acquire() as conn:
@@ -190,6 +188,6 @@ async def test_run_reindex_skips_locked_rows_then_processes_them_after_release(
         f"entry_embeddings mismatch: missing={set(entry_ids) - set(indexed_ids)}, "
         f"extra={set(indexed_ids) - set(entry_ids)}"
     )
-    assert len(indexed_ids) == len(
-        set(indexed_ids)
-    ), f"Duplicate entry_embeddings rows: {sorted(indexed_ids)}"
+    assert len(indexed_ids) == len(set(indexed_ids)), (
+        f"Duplicate entry_embeddings rows: {sorted(indexed_ids)}"
+    )

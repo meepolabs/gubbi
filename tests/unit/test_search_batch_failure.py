@@ -29,14 +29,14 @@ class _FakeRepo:
     ) -> dict[int, tuple[str, str | None]]:
         if self._raise_on == "entries":
             raise asyncpg.PostgresError("simulated entry batch failure")
-        return {i: ("ok content", None) for i in ids}
+        return dict.fromkeys(ids, ("ok content", None))
 
     async def get_titles_summaries(
         self, _conn: Any, _cipher: Any, ids: list[int]
     ) -> dict[int, tuple[str, str]]:
         if self._raise_on == "convs":
             raise asyncpg.PostgresError("simulated conversation batch failure")
-        return {i: ("a title", "a summary") for i in ids}
+        return dict.fromkeys(ids, ("a title", "a summary"))
 
 
 @pytest.fixture

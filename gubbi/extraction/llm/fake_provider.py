@@ -105,8 +105,7 @@ class FakeLLMProvider(LLMProvider):
             )
         if self.FAIL_MARKER in joined_content:
             raise LLMTransientError(
-                f"FakeLLMProvider: transient-failure marker "
-                f"{self.FAIL_MARKER!r} found in messages"
+                f"FakeLLMProvider: transient-failure marker {self.FAIL_MARKER!r} found in messages"
             )
 
         content = _canned_content_for_schema(output_schema)

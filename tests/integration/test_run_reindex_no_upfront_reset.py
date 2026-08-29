@@ -112,19 +112,19 @@ async def test_run_reindex_does_not_reset_already_indexed_rows(
     head, clearing every non-deleted row's stamp. Post-fix: the queue
     is "rows where indexed_at IS NULL" and the indexed rows stay put.
     """
-    tenant_id, indexed_ids, unindexed_ids = mixed_indexed_entries
+    _tenant_id, indexed_ids, unindexed_ids = mixed_indexed_entries
 
     # Capture the pre-run indexed_at stamps for the indexed half so we can
     # assert they are preserved (not just non-NULL but not re-stamped).
     async with admin_pool.acquire() as conn:
         before_rows = await conn.fetch(
-            "SELECT id, indexed_at FROM entries " "WHERE id = ANY($1) ORDER BY id",
+            "SELECT id, indexed_at FROM entries WHERE id = ANY($1) ORDER BY id",
             indexed_ids,
         )
     before_stamps: dict[int, datetime] = {r["id"]: r["indexed_at"] for r in before_rows}
-    assert all(
-        ts is not None for ts in before_stamps.values()
-    ), "Fixture invariant: indexed half must have non-NULL indexed_at before run"
+    assert all(ts is not None for ts in before_stamps.values()), (
+        "Fixture invariant: indexed half must have non-NULL indexed_at before run"
+    )
 
     svc = _CountingEmbeddingService()
     ctx = _make_app_ctx(svc, admin_pool)
@@ -144,14 +144,14 @@ async def test_run_reindex_does_not_reset_already_indexed_rows(
     # old upfront-reset bug racing with mark_indexed_batch).
     async with admin_pool.acquire() as conn:
         after_rows = await conn.fetch(
-            "SELECT id, indexed_at FROM entries " "WHERE id = ANY($1) ORDER BY id",
+            "SELECT id, indexed_at FROM entries WHERE id = ANY($1) ORDER BY id",
             indexed_ids,
         )
     after_stamps = {r["id"]: r["indexed_at"] for r in after_rows}
     for entry_id in indexed_ids:
-        assert (
-            after_stamps[entry_id] is not None
-        ), f"entry {entry_id} indexed_at was reset to NULL -- upfront reset regression"
+        assert after_stamps[entry_id] is not None, (
+            f"entry {entry_id} indexed_at was reset to NULL -- upfront reset regression"
+        )
         # Bit-for-bit equality: the row must not have been touched.
         assert after_stamps[entry_id] == before_stamps[entry_id], (
             f"entry {entry_id} indexed_at changed: "
@@ -177,9 +177,9 @@ async def test_reset_all_indexed_at_clears_every_indexed_row(
 
     assert result["status_locked"] == 0, "advisory lock must be available"
     # Only the indexed half had a non-NULL stamp before the reset.
-    assert result["rows_reset"] == len(
-        indexed_ids
-    ), f"rows_reset mismatch: got {result['rows_reset']}, expected {len(indexed_ids)}"
+    assert result["rows_reset"] == len(indexed_ids), (
+        f"rows_reset mismatch: got {result['rows_reset']}, expected {len(indexed_ids)}"
+    )
 
     async with admin_pool.acquire() as conn:
         rows = await conn.fetch(
@@ -188,9 +188,9 @@ async def test_reset_all_indexed_at_clears_every_indexed_row(
         )
     by_id = {r["id"]: r["indexed_at"] for r in rows}
     for entry_id in indexed_ids + unindexed_ids:
-        assert (
-            by_id[entry_id] is None
-        ), f"entry {entry_id} still has indexed_at after _reset_all_indexed_at"
+        assert by_id[entry_id] is None, (
+            f"entry {entry_id} still has indexed_at after _reset_all_indexed_at"
+        )
 
 
 async def test_reset_all_indexed_at_releases_advisory_lock(
@@ -224,7 +224,7 @@ async def test_reset_all_indexed_at_skips_when_lock_held(
     ``_reset_all_indexed_at``. The function must report
     ``status_locked = 1`` and leave ``indexed_at`` untouched.
     """
-    tenant_id, indexed_ids, unindexed_ids = mixed_indexed_entries
+    _tenant_id, indexed_ids, _unindexed_ids = mixed_indexed_entries
     lock_key = 2048976971  # mirrors _REINDEX_ADVISORY_LOCK_KEY -- private to admin.py
 
     ctx = _make_app_ctx(_CountingEmbeddingService(), admin_pool)
@@ -242,7 +242,7 @@ async def test_reset_all_indexed_at_skips_when_lock_held(
         # leaked through.
         async with admin_pool.acquire() as conn:
             still_stamped = await conn.fetchval(
-                "SELECT count(*) FROM entries " "WHERE id = ANY($1) AND indexed_at IS NOT NULL",
+                "SELECT count(*) FROM entries WHERE id = ANY($1) AND indexed_at IS NOT NULL",
                 indexed_ids,
             )
         assert still_stamped == len(indexed_ids)

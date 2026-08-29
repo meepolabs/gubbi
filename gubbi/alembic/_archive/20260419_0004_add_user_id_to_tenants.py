@@ -75,7 +75,7 @@ _TENANT_TABLES = (
 # ``python -O`` cannot strip the guard.
 if not all(t.isidentifier() for t in _TENANT_TABLES):
     raise ValueError(
-        "All entries in _TENANT_TABLES must be valid Python identifiers; " f"got {_TENANT_TABLES!r}"
+        f"All entries in _TENANT_TABLES must be valid Python identifiers; got {_TENANT_TABLES!r}"
     )
 
 
@@ -117,7 +117,7 @@ def upgrade() -> None:
         op.execute(f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL")
 
     # Phase 6 -- composite indexes for the hot-path queries under RLS
-    op.execute("CREATE INDEX IF NOT EXISTS idx_topics_user " "ON topics (user_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_topics_user ON topics (user_id)")
     op.execute(
         "CREATE INDEX IF NOT EXISTS idx_entries_user_topic_date "
         "ON entries (user_id, topic_id, date DESC) WHERE deleted_at IS NULL"
@@ -127,13 +127,13 @@ def upgrade() -> None:
         "ON entries (user_id, id) WHERE indexed_at IS NULL"
     )
     op.execute(
-        "CREATE INDEX IF NOT EXISTS idx_conv_user_topic " "ON conversations (user_id, topic_id)"
+        "CREATE INDEX IF NOT EXISTS idx_conv_user_topic ON conversations (user_id, topic_id)"
     )
     op.execute(
         "CREATE INDEX IF NOT EXISTS idx_messages_user_conv_pos "
         "ON messages (user_id, conversation_id, position)"
     )
-    op.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_user " "ON entry_embeddings (user_id)")
+    op.execute("CREATE INDEX IF NOT EXISTS idx_embeddings_user ON entry_embeddings (user_id)")
 
 
 def downgrade() -> None:

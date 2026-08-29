@@ -216,18 +216,18 @@ class TestListTopicsIsolation:
             rls_tools["journal_list_topics"](),
         )
         paths_a = {t["topic"] for t in result_a["topics"]}
-        assert (
-            dual_users.seed_b.topic_path not in paths_a
-        ), f"User A must not see User B topic '{dual_users.seed_b.topic_path}'"
+        assert dual_users.seed_b.topic_path not in paths_a, (
+            f"User A must not see User B topic '{dual_users.seed_b.topic_path}'"
+        )
 
         result_b = await _with_user(
             dual_users.user_b,
             rls_tools["journal_list_topics"](),
         )
         paths_b = {t["topic"] for t in result_b["topics"]}
-        assert (
-            dual_users.seed_a.topic_path not in paths_b
-        ), f"User B must not see User A topic '{dual_users.seed_a.topic_path}'"
+        assert dual_users.seed_a.topic_path not in paths_b, (
+            f"User B must not see User A topic '{dual_users.seed_a.topic_path}'"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +255,9 @@ class TestReadTopicIsolation:
             dual_users.user_b,
             rls_tools["journal_read_topic"](topic=dual_users.seed_a.topic_path),
         )
-        assert (
-            result.get("error_code") == "NOT_FOUND"
-        ), f"User B reading User A's topic should return NOT_FOUND, got: {result}"
+        assert result.get("error_code") == "NOT_FOUND", (
+            f"User B reading User A's topic should return NOT_FOUND, got: {result}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -297,9 +297,9 @@ class TestAppendIsolation:
             dual_users.user_b,
             rls_tools["journal_read_topic"](topic=topic),
         )
-        assert (
-            result_b.get("error_code") == "NOT_FOUND"
-        ), f"User B must not see User A's topic/entries, got: {result_b}"
+        assert result_b.get("error_code") == "NOT_FOUND", (
+            f"User B must not see User A's topic/entries, got: {result_b}"
+        )
 
     async def test_author_reads_own_entry(self, rls_tools: dict, dual_users: DualUsers) -> None:
         topic = "iso-private/verify"
@@ -355,9 +355,9 @@ class TestSearchIsolation:
             dual_users.user_b,
             rls_tools["journal_search"](query="UNIQ_SECRET_KEYWORD_ONLY_FOR_USER_A"),
         )
-        assert (
-            result_b["total"] == 0
-        ), f"User B search must not find User A's entry, got {result_b['total']}"
+        assert result_b["total"] == 0, (
+            f"User B search must not find User A's entry, got {result_b['total']}"
+        )
 
     async def test_user_finds_own_entry_by_search(
         self, rls_tools: dict, dual_users: DualUsers

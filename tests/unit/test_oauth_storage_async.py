@@ -207,9 +207,9 @@ class TestLazyInitRace:
         # Self-validation: the monkeypatched rollback must have actually fired.
         # Without this assert, a future refactor of _atomic that bypasses
         # rollback would silently pass the test.
-        assert (
-            rollback_call_count == 1
-        ), f"conn.rollback must be called exactly once; got {rollback_call_count}"
+        assert rollback_call_count == 1, (
+            f"conn.rollback must be called exactly once; got {rollback_call_count}"
+        )
 
         rollback_records = [
             r for r in caplog.records if "rollback failed" in r.getMessage().lower()

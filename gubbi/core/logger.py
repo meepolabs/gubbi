@@ -9,7 +9,7 @@ from typing import Any
 def __getattr__(name: str) -> Any:
     if name == "initialize_logger":
         warnings.warn(
-            "gubbi.core.logger is deprecated; " "import from gubbi.telemetry.logger instead",
+            "gubbi.core.logger is deprecated; import from gubbi.telemetry.logger instead",
             DeprecationWarning,
             stacklevel=2,
         )

@@ -336,6 +336,6 @@ class TestAuditedTargetTypeWarning:
             async def _handler() -> dict[str, Any]:
                 return {"success": True}
 
-        assert not any(
-            "no _TARGET_KEYS entry" in r.message for r in caplog.records
-        ), "Mapped target_type should not log unmapped-warning"
+        assert not any("no _TARGET_KEYS entry" in r.message for r in caplog.records), (
+            "Mapped target_type should not log unmapped-warning"
+        )

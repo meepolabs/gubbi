@@ -117,9 +117,9 @@ async def test_superseded_json_is_deleted_on_resave(
             summary="V2",
         )
 
-    assert (
-        result.superseded_json_path is not None
-    ), "re-save should return a superseded json_path to clean up"
+    assert result.superseded_json_path is not None, (
+        "re-save should return a superseded json_path to clean up"
+    )
     assert old_file.exists(), (
         "save_conversation must NOT delete the previous archive itself -- "
         "rollback would leave the row pointing at a deleted file"
@@ -215,6 +215,5 @@ async def test_old_archive_survives_transaction_rollback(
     assert row is not None
     assert str(row["json_path"]) == persisted_json_path, "rollback should revert json_path"
     assert persisted_file.exists(), (
-        "old archive file MUST survive a rolled-back re-save -- "
-        "the row points at it after rollback"
+        "old archive file MUST survive a rolled-back re-save -- the row points at it after rollback"
     )

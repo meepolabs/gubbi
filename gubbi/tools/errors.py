@@ -73,7 +73,7 @@ def invalid_topic(raw: str, detail: str = "") -> dict[str, Any]:
         "input": raw,
         "suggestions": _topic_suggestions(raw),
     }
-    return cast(dict[str, Any], result)
+    return cast("dict[str, Any]", result)
 
 
 def invalid_date(raw: str) -> dict[str, Any]:
@@ -84,7 +84,7 @@ def invalid_date(raw: str) -> dict[str, Any]:
         "input": raw,
         "suggestions": [],
     }
-    return cast(dict[str, Any], result)
+    return cast("dict[str, Any]", result)
 
 
 def not_found(resource: str, identifier: str | int) -> dict[str, Any]:
@@ -95,7 +95,7 @@ def not_found(resource: str, identifier: str | int) -> dict[str, Any]:
         "input": str(identifier),
         "suggestions": [],
     }
-    return cast(dict[str, Any], result)
+    return cast("dict[str, Any]", result)
 
 
 def already_exists(topic: str) -> dict[str, Any]:
@@ -106,7 +106,7 @@ def already_exists(topic: str) -> dict[str, Any]:
         "input": topic,
         "suggestions": [],
     }
-    return cast(dict[str, Any], result)
+    return cast("dict[str, Any]", result)
 
 
 def validation_error(detail: str) -> dict[str, Any]:
@@ -116,4 +116,4 @@ def validation_error(detail: str) -> dict[str, Any]:
         "success": False,
         "suggestions": [],
     }
-    return cast(dict[str, Any], result)
+    return cast("dict[str, Any]", result)

@@ -192,7 +192,7 @@ async def test_update_rotates_ciphertext_and_nonce(
     # Third encryption in the same test -- catches a buggy implementation that
     # reuses random bytes or derives them from a counter. GCM requires all
     # three random portions to be pairwise distinct.
-    third_ct, third_nonce = cipher.encrypt("third distinct value")
+    _third_ct, third_nonce = cipher.encrypt("third distinct value")
     assert len({bytes(old_nonce[1:]), bytes(new_nonce[1:]), bytes(third_nonce[1:])}) == 3
     assert after["sv"] is not None
     assert "updat" in str(after["sv"])

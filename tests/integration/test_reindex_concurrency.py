@@ -223,9 +223,9 @@ async def test_compensating_reset_on_save_failure(
             tenant_id,
         )
     by_id = {r["id"]: r["indexed_at"] for r in rows}
-    assert (
-        by_id[failing_id] is None
-    ), "Failed entry must have indexed_at cleared so the next reindex retries"
+    assert by_id[failing_id] is None, (
+        "Failed entry must have indexed_at cleared so the next reindex retries"
+    )
     others_stamped = [eid for eid, ts in by_id.items() if eid != failing_id and ts is not None]
     assert len(others_stamped) == len(entry_ids) - 1, (
         f"Non-failing entries must remain stamped; stamped={others_stamped}, "
@@ -287,9 +287,9 @@ async def test_reset_indexed_at_for_ids_skips_tombstoned_rows(
 
     by_id = {r["id"]: (r["indexed_at"], r["deleted_at"]) for r in rows}
     assert by_id[live_id] == (None, None), f"live entry {live_id} should have been reset"
-    assert (
-        by_id[tombstoned_id][0] is not None
-    ), f"tombstoned entry {tombstoned_id} must keep its indexed_at stamp"
-    assert (
-        by_id[tombstoned_id][1] is not None
-    ), f"tombstoned entry {tombstoned_id} must remain tombstoned"
+    assert by_id[tombstoned_id][0] is not None, (
+        f"tombstoned entry {tombstoned_id} must keep its indexed_at stamp"
+    )
+    assert by_id[tombstoned_id][1] is not None, (
+        f"tombstoned entry {tombstoned_id} must remain tombstoned"
+    )

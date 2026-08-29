@@ -31,7 +31,6 @@ from opentelemetry.metrics import Counter, get_meter
 from opentelemetry.trace import Status, StatusCode
 
 from gubbi.audit import record_audit
-from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.llm.provider import (
     LLMMessage,
     LLMProviderError,
@@ -55,6 +54,7 @@ if TYPE_CHECKING:
 
     import asyncpg
 
+    from gubbi.crypto.cipher import ContentCipher
     from gubbi.extraction.context import ExtractionContext
     from gubbi.extraction.service import (
         CategorizationResult,
@@ -555,7 +555,7 @@ async def extract_conversation(
     # to both arg slots), but they are semantically distinct: ctx["job_id"]
     # is the arq dedup key, the parameter is the DB row id.
     pool = ctx["pool"]
-    cipher = cast(ContentCipher, ctx["cipher"])
+    cipher = cast("ContentCipher", ctx["cipher"])
     extraction_service = ctx["extraction_service"]
     redis = ctx["redis"]
 
@@ -757,7 +757,7 @@ async def extract_conversation(
                         )
                         # Guard against async mock returning a coroutine in tests.
                         if isinstance(raw_cost, int | float):
-                            cents_spent = int(round(raw_cost))
+                            cents_spent = round(raw_cost)
                     except Exception:
                         await log.warning("cost_estimation_failed", exc_info=True)
                         cents_spent = 0

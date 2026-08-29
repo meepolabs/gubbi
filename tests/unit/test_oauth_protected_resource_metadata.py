@@ -93,12 +93,11 @@ def _fetch_metadata() -> dict:
     client = TestClient(_build_app())
     response = client.get(WELLKNOWN_PATH)
     assert response.status_code == 200, (
-        f"Expected 200 from {WELLKNOWN_PATH}; got {response.status_code} "
-        f"with body: {response.text}"
+        f"Expected 200 from {WELLKNOWN_PATH}; got {response.status_code} with body: {response.text}"
     )
-    assert response.headers["content-type"].startswith(
-        "application/json"
-    ), f"Expected JSON content-type; got {response.headers['content-type']}"
+    assert response.headers["content-type"].startswith("application/json"), (
+        f"Expected JSON content-type; got {response.headers['content-type']}"
+    )
     return response.json()
 
 
@@ -110,13 +109,13 @@ class TestProtectedResourceMetadataRequiredFields:
         body = _fetch_metadata()
         assert "resource" in body, f"Missing required 'resource' field. Body: {body}"
         resource = body["resource"]
-        assert isinstance(
-            resource, str
-        ), f"'resource' must be a string; got {type(resource).__name__}: {resource!r}"
+        assert isinstance(resource, str), (
+            f"'resource' must be a string; got {type(resource).__name__}: {resource!r}"
+        )
         assert resource, "'resource' must be a non-empty string"
-        assert resource.startswith(
-            ("http://", "https://")
-        ), f"'resource' must be an http(s) URL; got {resource!r}"
+        assert resource.startswith(("http://", "https://")), (
+            f"'resource' must be an http(s) URL; got {resource!r}"
+        )
 
     def test_authorization_servers_present_nonempty_list_of_url_strings(self) -> None:
         """``authorization_servers`` must be a list of >=1 https URL strings.
@@ -131,16 +130,16 @@ class TestProtectedResourceMetadataRequiredFields:
         from this metadata document.
         """
         body = _fetch_metadata()
-        assert (
-            "authorization_servers" in body
-        ), f"Missing required 'authorization_servers' field. Body: {body}"
+        assert "authorization_servers" in body, (
+            f"Missing required 'authorization_servers' field. Body: {body}"
+        )
         servers = body["authorization_servers"]
-        assert isinstance(
-            servers, list
-        ), f"'authorization_servers' must be a list; got {type(servers).__name__}"
-        assert (
-            len(servers) >= 1
-        ), "'authorization_servers' must contain at least one entry; got empty list"
+        assert isinstance(servers, list), (
+            f"'authorization_servers' must be a list; got {type(servers).__name__}"
+        )
+        assert len(servers) >= 1, (
+            "'authorization_servers' must contain at least one entry; got empty list"
+        )
         for idx, server in enumerate(servers):
             assert isinstance(server, str), (
                 f"authorization_servers[{idx}] must be a string; "
@@ -175,16 +174,15 @@ class TestProtectedResourceMetadataRecommendedFields:
             f"from this field; dropping it breaks the consent UX. Body: {body}"
         )
         scopes = body["scopes_supported"]
-        assert isinstance(
-            scopes, list
-        ), f"'scopes_supported' must be a list; got {type(scopes).__name__}"
-        assert (
-            len(scopes) >= 1
-        ), "'scopes_supported' must contain at least one scope; got empty list"
+        assert isinstance(scopes, list), (
+            f"'scopes_supported' must be a list; got {type(scopes).__name__}"
+        )
+        assert len(scopes) >= 1, (
+            "'scopes_supported' must contain at least one scope; got empty list"
+        )
         for idx, scope in enumerate(scopes):
             assert isinstance(scope, str), (
-                f"scopes_supported[{idx}] must be a string; "
-                f"got {type(scope).__name__}: {scope!r}"
+                f"scopes_supported[{idx}] must be a string; got {type(scope).__name__}: {scope!r}"
             )
             assert scope, f"scopes_supported[{idx}] must be a non-empty string"
 
@@ -201,16 +199,16 @@ class TestProtectedResourceMetadataRecommendedFields:
     def test_bearer_methods_supported_present_as_list_of_strings(self) -> None:
         """``bearer_methods_supported`` -- the SDK defaults to ``["header"]``."""
         body = _fetch_metadata()
-        assert (
-            "bearer_methods_supported" in body
-        ), f"Missing 'bearer_methods_supported'. Body: {body}"
+        assert "bearer_methods_supported" in body, (
+            f"Missing 'bearer_methods_supported'. Body: {body}"
+        )
         methods = body["bearer_methods_supported"]
-        assert isinstance(
-            methods, list
-        ), f"'bearer_methods_supported' must be a list; got {type(methods).__name__}"
-        assert (
-            len(methods) >= 1
-        ), "'bearer_methods_supported' must contain at least one method; got empty list"
+        assert isinstance(methods, list), (
+            f"'bearer_methods_supported' must be a list; got {type(methods).__name__}"
+        )
+        assert len(methods) >= 1, (
+            "'bearer_methods_supported' must contain at least one method; got empty list"
+        )
         for idx, method in enumerate(methods):
             assert isinstance(method, str), (
                 f"bearer_methods_supported[{idx}] must be a string; "

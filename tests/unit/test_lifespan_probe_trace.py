@@ -97,12 +97,12 @@ async def test_lifespan_canonical_probe_order(
         RecordedProbe(name="redis_ping", required=True),
         RecordedProbe(name="replica_count", required=False),
     ]
-    assert (
-        len(recording.calls) == 2
-    ), f"expected runner.run to be called twice (config + resource); got {len(recording.calls)}"
-    assert (
-        recording.calls[0] == expected_phase_1
-    ), f"phase 1 (config) probe order broken: expected {expected_phase_1}, got {recording.calls[0]}"
+    assert len(recording.calls) == 2, (
+        f"expected runner.run to be called twice (config + resource); got {len(recording.calls)}"
+    )
+    assert recording.calls[0] == expected_phase_1, (
+        f"phase 1 (config) probe order broken: expected {expected_phase_1}, got {recording.calls[0]}"
+    )
     assert recording.calls[1] == expected_phase_2, (
         f"phase 2 (resource) probe order broken: expected {expected_phase_2}, "
         f"got {recording.calls[1]}"

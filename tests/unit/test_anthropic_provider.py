@@ -248,7 +248,7 @@ def test_translate_anthropic_error_exhaustive_guard() -> None:
             continue  # skip if SDK does not expose constructor we know
         translated = _translate_anthropic_error(factories[cls_name]())
         assert isinstance(translated, expected_cls), (
-            f"{cls_name} should map to {expected_cls.__name__}, " f"got {type(translated).__name__}"
+            f"{cls_name} should map to {expected_cls.__name__}, got {type(translated).__name__}"
         )
 
 

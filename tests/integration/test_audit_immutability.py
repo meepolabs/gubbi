@@ -101,8 +101,7 @@ async def test_record_audit_inserts_row(admin_pool: asyncpg.Pool) -> None:
         assert after_count == before_count + 1
 
         row = await conn.fetchrow(
-            "SELECT * FROM audit_log WHERE actor_id = 'system:test-admin' "
-            "ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM audit_log WHERE actor_id = 'system:test-admin' ORDER BY id DESC LIMIT 1"
         )
         assert row is not None
         assert row["actor_type"] == "admin"

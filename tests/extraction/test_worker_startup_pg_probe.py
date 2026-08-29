@@ -672,8 +672,8 @@ async def test_worker_telemetry_guard_unlatched_on_configure_failure(
     # implicitly verifies the swallow path; the flag staying False
     # verifies the latch was not set.
     await worker_module.startup(ctx)  # type: ignore[arg-type]
-    assert (
-        worker_module._WORKER_TELEMETRY_CONFIGURED is False
-    ), "a second failed configure must still leave the guard unset"
+    assert worker_module._WORKER_TELEMETRY_CONFIGURED is False, (
+        "a second failed configure must still leave the guard unset"
+    )
 
     get_settings.cache_clear()

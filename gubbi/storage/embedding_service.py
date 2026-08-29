@@ -89,6 +89,27 @@ def _locate_or_download(cache_dir: Path = _CACHE_DIR) -> tuple[Path, Path]:
     return model_path, tokenizer_path
 
 
+# Every optional filter is a nullable bind parameter rather than a conditionally
+# appended clause, so the statement text is fixed and plan-cacheable.
+_SEARCH_BY_VECTOR_SQL = """
+    SELECT
+        e.id          AS entry_id,
+        t.path        AS topic,
+        e.date::text  AS date,
+        1 - (ee.embedding <=> $1::vector) AS similarity
+    FROM entry_embeddings ee
+    JOIN entries e ON e.id = ee.entry_id
+    JOIN topics  t ON t.id = e.topic_id
+    WHERE e.deleted_at IS NULL
+      AND ($3::float8 IS NULL OR (1 - (ee.embedding <=> $1::vector)) >= $3::float8)
+      AND ($4::text IS NULL OR t.path LIKE $4::text ESCAPE '!')
+      AND ($5::date IS NULL OR e.date >= $5::date)
+      AND ($6::date IS NULL OR e.date <= $6::date)
+    ORDER BY ee.embedding <=> $1::vector
+    LIMIT $2
+"""
+
+
 class EmbeddingService:
     """Thin ONNX wrapper over all-MiniLM-L6-v2 with pgvector persistence.
 
@@ -279,39 +300,19 @@ class EmbeddingService:
             keeps the unconditional top-k behaviour that the briefing key-facts
             path relies on.
         """
-        params: list[Any] = [embedding, limit]  # $1=embedding, $2=limit
-        where_clauses = ["e.deleted_at IS NULL"]
-
-        if min_similarity is not None:
-            params.append(min_similarity)
-            where_clauses.append(f"(1 - (ee.embedding <=> $1::vector)) >= ${len(params)}::float8")
+        like_pattern: str | None = None
         if topic_prefix:
-            escaped = topic_prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
-            params.append(escaped + "%")
-            where_clauses.append(f"t.path LIKE ${len(params)} ESCAPE '!'")
-        if date_from:
-            params.append(date_from)
-            where_clauses.append(f"e.date >= ${len(params)}")
-        if date_to:
-            params.append(date_to)
-            where_clauses.append(f"e.date <= ${len(params)}")
+            like_pattern = topic_prefix.replace("!", "!!").replace("%", "!%").replace("_", "!_")
+            like_pattern += "%"
 
-        where = " AND ".join(where_clauses)
         rows = await conn.fetch(
-            f"""
-            SELECT
-                e.id          AS entry_id,
-                t.path        AS topic,
-                e.date::text  AS date,
-                1 - (ee.embedding <=> $1::vector) AS similarity
-            FROM entry_embeddings ee
-            JOIN entries e ON e.id = ee.entry_id
-            JOIN topics  t ON t.id = e.topic_id
-            WHERE {where}
-            ORDER BY ee.embedding <=> $1::vector
-            LIMIT $2
-            """,
-            *params,
+            _SEARCH_BY_VECTOR_SQL,
+            embedding,
+            limit,
+            min_similarity,
+            like_pattern,
+            date_from,
+            date_to,
         )
         return [dict(r) for r in rows]
 

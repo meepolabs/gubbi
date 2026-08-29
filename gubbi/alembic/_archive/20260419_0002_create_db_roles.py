@@ -61,8 +61,7 @@ def upgrade() -> None:
         "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO journal_app"
     )
     op.execute(
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-        "GRANT USAGE, SELECT ON SEQUENCES TO journal_app"
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO journal_app"
     )
 
     # journal_admin — all privileges, BYPASSRLS attribute already set at creation
@@ -77,8 +76,7 @@ def upgrade() -> None:
     # access them until an explicit grant runs. That breaks 02.14 backfill
     # (runs as journal_admin) and every admin-pool test fixture.
     op.execute(
-        "ALTER DEFAULT PRIVILEGES IN SCHEMA public "
-        "GRANT ALL PRIVILEGES ON TABLES TO journal_admin"
+        "ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL PRIVILEGES ON TABLES TO journal_admin"
     )
     op.execute(
         "ALTER DEFAULT PRIVILEGES IN SCHEMA public "

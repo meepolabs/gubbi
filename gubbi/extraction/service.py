@@ -155,7 +155,7 @@ class ExtractionService:
         if isinstance(content, dict):
             return content
         try:
-            return cast(dict[str, Any], json.loads(content))
+            return cast("dict[str, Any]", json.loads(content))
         except json.JSONDecodeError as e:
             # Do NOT interpolate the raw content into the exception
             # message: this exception's str() flows through OTel's

@@ -258,7 +258,7 @@ def register_tools(mcp: FastMCP, app_ctx: AppContext) -> None:
     tool_manager = getattr(mcp, "_tool_manager", None)
     if tool_manager is None:
         logger.warning(
-            "Could not patch ToolManager: " "_tool_manager attribute not found on FastMCP instance"
+            "Could not patch ToolManager: _tool_manager attribute not found on FastMCP instance"
         )
     elif not isinstance(tool_manager, ToolManager):
         logger.warning(

@@ -141,7 +141,7 @@ def _collect_sql_tables(root: Path) -> set[str]:
                 continue
             # Skip docstrings: string constants whose immediate parent is an
             # Expr node are standalone expression statements (docstrings).
-            parent = parent_map.get(id(node), None)
+            parent = parent_map.get(id(node))
             if isinstance(parent, ast.Expr):
                 continue
 
@@ -172,6 +172,6 @@ def test_all_app_sql_tables_are_accounted_for() -> None:
 
 def test_users_table_in_tenant_tables() -> None:
     """Regression guard: users table must be in _TENANT_TABLES."""
-    assert (
-        "users" in _TENANT_TABLES
-    ), "users table must be in _TENANT_TABLES -- migration 0019_rls_users"
+    assert "users" in _TENANT_TABLES, (
+        "users table must be in _TENANT_TABLES -- migration 0019_rls_users"
+    )

@@ -164,9 +164,9 @@ async def test_admin_no_user_actor_message_mentions_hydra_subject(
                 str(tenant_a),
             )
     message = str(exc_info.value)
-    assert (
-        "hydra_subject" in message
-    ), f"expected 'hydra_subject' in trigger error message, got: {message!r}"
-    assert (
-        "founder" not in message
-    ), f"expected 'founder' to be absent from trigger error message, got: {message!r}"
+    assert "hydra_subject" in message, (
+        f"expected 'hydra_subject' in trigger error message, got: {message!r}"
+    )
+    assert "founder" not in message, (
+        f"expected 'founder' to be absent from trigger error message, got: {message!r}"
+    )

@@ -446,9 +446,9 @@ class TestSingleflight:
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         assert call_count == 1, f"Expected 1 upstream call, got {call_count}"
-        assert all(
-            isinstance(r, HydraInvalidToken) for r in results
-        ), f"Not all raised HydraInvalidToken: {results}"
+        assert all(isinstance(r, HydraInvalidToken) for r in results), (
+            f"Not all raised HydraInvalidToken: {results}"
+        )
         # Cache should be empty (invalid token not cached)
         if introspector.cache is not None:
             assert introspector.cache.get(_cache_key(FAKE_TOKEN)) is None

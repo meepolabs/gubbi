@@ -175,7 +175,7 @@ def _render_scopes_html(scope_str: str) -> str:
             f'<div class="scope-desc">{esc(desc) if desc else "No description available."}</div>'
             f"</div>"
         )
-    return '<div class="scopes">' "<h2>Permissions requested</h2>" f"{''.join(items)}" "</div>"
+    return f'<div class="scopes"><h2>Permissions requested</h2>{"".join(items)}</div>'
 
 
 def render_login_page(

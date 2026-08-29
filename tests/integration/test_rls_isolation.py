@@ -378,9 +378,9 @@ async def test_force_rls_is_enabled_on_every_tenant_table(admin_pool: asyncpg.Po
             list(tenant_tables),
         )
     seen = {r["relname"]: (r["relrowsecurity"], r["relforcerowsecurity"]) for r in rows}
-    assert set(seen.keys()) == set(
-        tenant_tables
-    ), f"missing tables: {set(tenant_tables) - set(seen)}"
+    assert set(seen.keys()) == set(tenant_tables), (
+        f"missing tables: {set(tenant_tables) - set(seen)}"
+    )
     for table, (row_sec, force_sec) in seen.items():
         assert row_sec, f"ENABLE ROW LEVEL SECURITY missing on {table}"
         assert force_sec, f"FORCE ROW LEVEL SECURITY missing on {table}"

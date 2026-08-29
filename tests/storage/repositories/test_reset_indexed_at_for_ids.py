@@ -69,6 +69,6 @@ async def test_reset_indexed_at_for_ids_filters_tombstoned_rows() -> None:
 
     await entry_repo.reset_indexed_at_for_ids(conn, [1, 2, 3])
 
-    assert (
-        "AND deleted_at IS NULL" in captured["query"]
-    ), f"reset_indexed_at_for_ids must skip tombstoned rows; query was: {captured['query']!r}"
+    assert "AND deleted_at IS NULL" in captured["query"], (
+        f"reset_indexed_at_for_ids must skip tombstoned rows; query was: {captured['query']!r}"
+    )

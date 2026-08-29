@@ -617,9 +617,9 @@ async def test_lifecycle_retry_idempotency(
             "WHERE action = 'extraction_job.completed' AND target_id = $1",
             str(job_id),
         )
-    assert (
-        completed_audit_count == 1
-    ), f"Expected exactly 1 extraction_job.completed audit row, got {completed_audit_count}"
+    assert completed_audit_count == 1, (
+        f"Expected exactly 1 extraction_job.completed audit row, got {completed_audit_count}"
+    )
 
 
 async def test_audit_rows_actor_type_user(

@@ -128,7 +128,7 @@ def test_api_key_scopes_rejects_json_array() -> None:
     """JSON-array shape is rejected with a clear operator hint."""
     with pytest.raises(
         pydantic.ValidationError,
-        match="comma-separated string.*not a JSON array",
+        match=r"comma-separated string.*not a JSON array",
     ):
         _make_settings(JOURNAL_API_KEY_SCOPES='["journal:read","journal:write"]')
 

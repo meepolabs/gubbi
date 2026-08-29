@@ -387,9 +387,9 @@ def test_rebind_metrics_after_configure_rebinds_lifespan_cache() -> None:
     gubbi_metrics.initialize_metrics.cache_clear()
     gubbi_metrics.record_audit_persistence_failure("test_event")
     sealed = gubbi_metrics.initialize_metrics()[MetricNames.AUDIT_PERSISTENCE_FAILURE]
-    assert type(sealed).__name__.startswith(
-        "NoOp"
-    ), "precondition: cache must be sealed against NoOp instrument"
+    assert type(sealed).__name__.startswith("NoOp"), (
+        "precondition: cache must be sealed against NoOp instrument"
+    )
 
     # 2. Configure a real SDK provider (mirror of what configure_otel does).
     reader = InMemoryMetricReader()
@@ -573,9 +573,9 @@ def test_orphan_cleanup_swept_counter_rebinds_to_real_provider() -> None:
     _get_orphan_cleanup_swept_counter.cache_clear()
     _get_orphan_cleanup_swept_counter().add(1, attributes={"result": "swept", "state": "pending"})
     sealed = _get_orphan_cleanup_swept_counter()
-    assert type(sealed).__name__.startswith(
-        "NoOp"
-    ), "precondition: factory must be sealed against NoOp"
+    assert type(sealed).__name__.startswith("NoOp"), (
+        "precondition: factory must be sealed against NoOp"
+    )
 
     # 2. Configure a real SDK provider (mirror of what configure_otel does).
     reader = InMemoryMetricReader()
@@ -618,9 +618,9 @@ def test_extraction_refund_skipped_counter_rebinds_to_real_provider() -> None:
     _get_extraction_refund_skipped_counter.cache_clear()
     _get_extraction_refund_skipped_counter().add(1, attributes={"reason": "unknown_period"})
     sealed = _get_extraction_refund_skipped_counter()
-    assert type(sealed).__name__.startswith(
-        "NoOp"
-    ), "precondition: factory must be sealed against NoOp"
+    assert type(sealed).__name__.startswith("NoOp"), (
+        "precondition: factory must be sealed against NoOp"
+    )
 
     reader = InMemoryMetricReader()
     real_provider = MeterProvider(metric_readers=[reader])
@@ -659,9 +659,9 @@ def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
         1, attributes={"result": "retried", "error_class": "LLMTransientError"}
     )
     sealed = _get_anthropic_retry_counter()
-    assert type(sealed).__name__.startswith(
-        "NoOp"
-    ), "precondition: factory must be sealed against NoOp"
+    assert type(sealed).__name__.startswith("NoOp"), (
+        "precondition: factory must be sealed against NoOp"
+    )
 
     reader = InMemoryMetricReader()
     real_provider = MeterProvider(metric_readers=[reader])

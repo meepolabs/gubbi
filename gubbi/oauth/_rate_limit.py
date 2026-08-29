@@ -72,7 +72,7 @@ class RateLimitStorage:
         remediation hint instead of a raw `sqlite3.OperationalError`.
         """
         cur = await conn.execute(
-            "SELECT name FROM sqlite_master " "WHERE type = 'table' AND name = 'rate_limit_events'"
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'rate_limit_events'"
         )
         row = await cur.fetchone()
         if row is None:

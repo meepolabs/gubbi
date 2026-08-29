@@ -43,9 +43,9 @@ class TestWellknownRegister:
         authorization_servers = [AnyHttpUrl("https://auth.example.com")]
         register(app, settings, authorization_servers)
         route_paths = [r.path for r in app.routes if hasattr(r, "path")]
-        assert any(
-            ".well-known/oauth-protected-resource/mcp" in p for p in route_paths
-        ), f"Expected well-known route; got: {route_paths}"
+        assert any(".well-known/oauth-protected-resource/mcp" in p for p in route_paths), (
+            f"Expected well-known route; got: {route_paths}"
+        )
 
     def test_no_auth_routes_registered(self) -> None:
         settings = _make_settings()
@@ -54,6 +54,6 @@ class TestWellknownRegister:
         register(app, settings, authorization_servers)
         route_paths = [r.path for r in app.routes if hasattr(r, "path")]
         for forbidden in ["/authorize", "/token", "/register", "/login"]:
-            assert (
-                forbidden not in route_paths
-            ), f"{forbidden} should not be registered; got: {route_paths}"
+            assert forbidden not in route_paths, (
+                f"{forbidden} should not be registered; got: {route_paths}"
+            )

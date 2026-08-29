@@ -34,9 +34,9 @@ class TestValidatorIsCoroutineFunction:
     async def test_iscoroutinefunction(self, storage: OAuthStorage) -> None:
         """_make_token_validator must return an async callable (coroutine function)."""
         validator = _make_token_validator(storage)
-        assert inspect.iscoroutinefunction(
-            validator
-        ), f"Expected an async function; got {type(validator)}"
+        assert inspect.iscoroutinefunction(validator), (
+            f"Expected an async function; got {type(validator)}"
+        )
 
     async def test_calling_validator_returns_awaitable(self, storage: OAuthStorage) -> None:
         """Invoking the validator (without await) must produce an Awaitable."""

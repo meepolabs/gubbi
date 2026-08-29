@@ -280,8 +280,7 @@ async def _reset_all_indexed_at(admin_pool: asyncpg.Pool, app_ctx: AppContext) -
         # so the count reflects rows that would be reset.
         rows_reset = int(
             await conn.fetchval(
-                "SELECT count(*) FROM entries "
-                "WHERE deleted_at IS NULL AND indexed_at IS NOT NULL"
+                "SELECT count(*) FROM entries WHERE deleted_at IS NULL AND indexed_at IS NOT NULL"
             )
             or 0
         )

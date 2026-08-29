@@ -63,7 +63,7 @@ _TENANT_TABLES = (
 # `python -O` cannot strip the guard.
 if not all(t.isidentifier() for t in _TENANT_TABLES):
     raise ValueError(
-        "All entries in _TENANT_TABLES must be valid Python identifiers; " f"got {_TENANT_TABLES!r}"
+        f"All entries in _TENANT_TABLES must be valid Python identifiers; got {_TENANT_TABLES!r}"
     )
 
 
@@ -108,8 +108,7 @@ def upgrade() -> None:
             """
         )
         op.execute(
-            f"COMMENT ON POLICY tenant_isolation ON {table} IS "
-            f"$policy${_POLICY_COMMENT}$policy$"
+            f"COMMENT ON POLICY tenant_isolation ON {table} IS $policy${_POLICY_COMMENT}$policy$"
         )
 
 

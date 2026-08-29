@@ -183,7 +183,7 @@ async def read(
     def _build_entry(r: Any) -> Entry:
         try:
             content = cast(
-                str, _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+                "str", _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
             )
             reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")
         except DecryptionError:
@@ -798,6 +798,75 @@ async def get_timeline_counts(
     ]
 
 
+def _date_range_sql(order: str) -> str:
+    """Render the timeline UNION query for one sort direction.
+
+    The direction cannot be a bind parameter, so exactly two statements are
+    rendered at import time from this single body and looked up by
+    ``ascending``; nothing is interpolated per call.
+    """
+    return (
+        _DATE_RANGE_BODY
+        + "        ORDER BY date "
+        + order
+        + ", doc_type ASC, doc_id "
+        + order
+        + "\n        LIMIT $4::bigint OFFSET $5::bigint\n    "
+    )
+
+
+_DATE_RANGE_BODY = """
+        SELECT
+            e.id              AS doc_id,
+            'entry'           AS doc_type,
+            e.date::text      AS date,
+            e.content_encrypted,
+            e.content_nonce,
+            NULL::bytea       AS title_encrypted,
+            NULL::bytea       AS title_nonce,
+            NULL::bytea       AS summary_encrypted,
+            NULL::bytea       AS summary_nonce,
+            e.tags,
+            t.path            AS topic,
+            t.title           AS topic_title,
+            NULL::int         AS conv_id
+        FROM entries e
+        JOIN topics t ON t.id = e.topic_id
+        WHERE e.date >= $1 AND e.date <= $2
+          AND e.deleted_at IS NULL
+          AND e.conversation_id IS NULL
+          AND ($3::text IS NULL OR t.path LIKE $3::text ESCAPE '!')
+
+        UNION ALL
+
+        SELECT
+            c.id                      AS doc_id,
+            'conversation'            AS doc_type,
+            c.created_at::date::text  AS date,
+            NULL::bytea               AS content_encrypted,
+            NULL::bytea               AS content_nonce,
+            c.title_encrypted,
+            c.title_nonce,
+            c.summary_encrypted,
+            c.summary_nonce,
+            c.tags,
+            t.path                    AS topic,
+            t.title                   AS topic_title,
+            c.id                      AS conv_id
+        FROM conversations c
+        JOIN topics t ON t.id = c.topic_id
+        WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
+          AND ($3::text IS NULL OR t.path LIKE $3::text ESCAPE '!')
+
+"""
+
+
+_DATE_RANGE_SQL_BY_DIRECTION: dict[bool, str] = {
+    True: _date_range_sql("ASC"),
+    False: _date_range_sql("DESC"),
+}
+
+
 async def get_by_date_range(
     conn: asyncpg.Connection,
     cipher: ContentCipher | None,
@@ -833,72 +902,18 @@ async def get_by_date_range(
                     this prefix. None (default) returns all topics, so existing
                     callers are unaffected.
     """
-    order = "ASC" if ascending else "DESC"
-    params: list[Any] = [
-        date_cls.fromisoformat(date_from),
-        date_cls.fromisoformat(date_to),
-    ]
-    prefix_clause = ""
+    like_pattern: str | None = None
     if topic_prefix:
         topic_prefix = _validate_topic(topic_prefix)
-        placeholder = _add_param(params, _escape_like(topic_prefix) + "%")
-        prefix_clause = f" AND t.path LIKE {placeholder} ESCAPE '!'"
-
-    limit_clause = ""
-    offset_clause = ""
-    if limit is not None:
-        limit_clause = f" LIMIT {_add_param(params, limit)}"
-    if offset > 0:
-        offset_clause = f" OFFSET {_add_param(params, offset)}"
+        like_pattern = _escape_like(topic_prefix) + "%"
 
     rows = await conn.fetch(
-        f"""
-        SELECT
-            e.id              AS doc_id,
-            'entry'           AS doc_type,
-            e.date::text      AS date,
-            e.content_encrypted,
-            e.content_nonce,
-            NULL::bytea       AS title_encrypted,
-            NULL::bytea       AS title_nonce,
-            NULL::bytea       AS summary_encrypted,
-            NULL::bytea       AS summary_nonce,
-            e.tags,
-            t.path            AS topic,
-            t.title           AS topic_title,
-            NULL::int         AS conv_id
-        FROM entries e
-        JOIN topics t ON t.id = e.topic_id
-        WHERE e.date >= $1 AND e.date <= $2
-          AND e.deleted_at IS NULL
-          AND e.conversation_id IS NULL
-          {prefix_clause}
-
-        UNION ALL
-
-        SELECT
-            c.id                      AS doc_id,
-            'conversation'            AS doc_type,
-            c.created_at::date::text  AS date,
-            NULL::bytea               AS content_encrypted,
-            NULL::bytea               AS content_nonce,
-            c.title_encrypted,
-            c.title_nonce,
-            c.summary_encrypted,
-            c.summary_nonce,
-            c.tags,
-            t.path                    AS topic,
-            t.title                   AS topic_title,
-            c.id                      AS conv_id
-        FROM conversations c
-        JOIN topics t ON t.id = c.topic_id
-        WHERE c.created_at::date >= $1 AND c.created_at::date <= $2
-          {prefix_clause}
-
-        ORDER BY date {order}, doc_type ASC, doc_id {order}
-        {limit_clause}{offset_clause}
-        """,
-        *params,
+        _DATE_RANGE_SQL_BY_DIRECTION[ascending],
+        date_cls.fromisoformat(date_from),
+        date_cls.fromisoformat(date_to),
+        like_pattern,
+        limit,
+        offset,
     )
 
     if cipher is None and not title_only:
@@ -1123,7 +1138,7 @@ async def get_text(
         return None
     return (
         cast(
-            str,
+            "str",
             _decrypt_content_field(cipher, row, "content_encrypted", "content_nonce"),
         ),
         _decrypt_content_field(cipher, row, "reasoning_encrypted", "reasoning_nonce"),
@@ -1154,7 +1169,7 @@ async def get_texts(
         eid = int(r["id"])
         try:
             content = cast(
-                str,
+                "str",
                 _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce"),
             )
             reasoning = _decrypt_content_field(cipher, r, "reasoning_encrypted", "reasoning_nonce")

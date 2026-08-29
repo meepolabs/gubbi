@@ -122,12 +122,12 @@ def test_module_import_has_no_side_effects_with_minimal_env(
     # Reload triggers re-execution of every top-level statement in main.py.
     reloaded = importlib.reload(gubbi.main)
 
-    assert (
-        init_pool_mock.call_count == 0
-    ), "Importing gubbi.main must not call init_pool -- pool creation belongs to lifespan."
-    assert (
-        redis_from_url.call_count == 0
-    ), "Importing gubbi.main must not open a Redis connection pool."
+    assert init_pool_mock.call_count == 0, (
+        "Importing gubbi.main must not call init_pool -- pool creation belongs to lifespan."
+    )
+    assert redis_from_url.call_count == 0, (
+        "Importing gubbi.main must not open a Redis connection pool."
+    )
 
     # ``server`` is now a CorrelationIDMiddleware-wrapped ASGI chain (the
     # ContextVar must populate BEFORE the FastAPIInstrumentor's
@@ -135,14 +135,14 @@ def test_module_import_has_no_side_effects_with_minimal_env(
     # the bottom of gubbi.main). The inner FastAPI is exposed as
     # ``app`` for tests / introspection that need the FastAPI surface
     # (state, routes, decorators).
-    assert isinstance(
-        reloaded.app, FastAPI
-    ), "Reloaded gubbi.main must expose a FastAPI app via the ``app`` symbol."
+    assert isinstance(reloaded.app, FastAPI), (
+        "Reloaded gubbi.main must expose a FastAPI app via the ``app`` symbol."
+    )
     # ``app_ctx`` is written by lifespan startup; it must NOT be set after
     # mere import. Test asserts the field is absent or None.
-    assert (
-        getattr(reloaded.app.state, "app_ctx", None) is None
-    ), "app.state.app_ctx must be unset after import alone -- lifespan has not run."
+    assert getattr(reloaded.app.state, "app_ctx", None) is None, (
+        "app.state.app_ctx must be unset after import alone -- lifespan has not run."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -427,9 +427,9 @@ async def test_post_shutdown_request_is_not_500(
             )
         else:
             # If we got a response back, the critical invariant is no 500.
-            assert (
-                response.status_code != 500
-            ), f"Post-shutdown request returned 500: body={response.text!r}"
+            assert response.status_code != 500, (
+                f"Post-shutdown request returned 500: body={response.text!r}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -561,9 +561,9 @@ async def test_lifespan_warns_and_increments_counter_when_replicas_gt_1(
     # admin_pool is None in this stub -> per-pod footprint is the live
     # app pool max (read via get_max_size(), here _STUB_APP_POOL_MAX).
     assert diagnostic["pool_max_per_pod"] == _STUB_APP_POOL_MAX
-    assert (
-        diagnostic["pool_max_total"] == _STUB_APP_POOL_MAX * 2
-    ), "effective DB connections must be POOL_MAX_PER_POD * REPLICA_COUNT"
+    assert diagnostic["pool_max_total"] == _STUB_APP_POOL_MAX * 2, (
+        "effective DB connections must be POOL_MAX_PER_POD * REPLICA_COUNT"
+    )
 
     get_settings.cache_clear()
 

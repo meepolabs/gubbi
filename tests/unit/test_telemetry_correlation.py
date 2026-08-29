@@ -324,7 +324,7 @@ def test_gubbi_main_server_shape_pins_outer_wrap() -> None:
 
     inner = path_layer.app
     assert isinstance(inner, FastAPI), (
-        f"the innermost layer must be the FastAPI app; got " f"{type(inner).__name__}"
+        f"the innermost layer must be the FastAPI app; got {type(inner).__name__}"
     )
     # The exposed `app` symbol must point at the same FastAPI instance
     # the chain holds. A drift here means callers using `app` for state

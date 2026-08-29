@@ -73,8 +73,7 @@ class TestDedupeLogic:
         mock_conn.fetchval.assert_called_once()
         call_args = mock_conn.fetchval.call_args[0]
         assert call_args[0] == (
-            "SELECT 1 FROM conversations"
-            " WHERE user_id = $1 AND platform = $2 AND platform_id = $3"
+            "SELECT 1 FROM conversations WHERE user_id = $1 AND platform = $2 AND platform_id = $3"
         )
         assert call_args[1] == user_id
         assert call_args[2] == platform

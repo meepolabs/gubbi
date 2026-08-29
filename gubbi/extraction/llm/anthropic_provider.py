@@ -169,7 +169,7 @@ class AnthropicProvider(LLMProvider):
             for block in response.content:
                 block_types.append(getattr(block, "type", type(block).__name__))
                 if hasattr(block, "name") and block.name == "respond":
-                    content = block.input if isinstance(block.input, dict) else block.input
+                    content = block.input if isinstance(block.input, dict) else str(block.input)
                     break
             if content == "":
                 raise ValueError(

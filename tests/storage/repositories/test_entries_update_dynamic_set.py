@@ -242,7 +242,7 @@ async def test_update_content_append_mode_concats_old_and_new() -> None:
     concatenation is observable in the value bound to the search_vector
     parameter.
     """
-    conn, row = _make_conn_and_row()
+    conn, _row = _make_conn_and_row()
     # cipher.encrypt should still produce some ciphertext.
     cipher = _make_cipher()
     # The append path reads the existing plaintext via the module-level
@@ -260,9 +260,9 @@ async def test_update_content_append_mode_concats_old_and_new() -> None:
     sql = conn.execute.await_args_list[0].args[0]
     assert "to_tsvector" in sql
     bound_args = conn.execute.await_args_list[0].args[1:]
-    assert any(
-        isinstance(a, str) and "old content" in a and "addendum" in a for a in bound_args
-    ), f"expected concatenated plaintext bound to to_tsvector; got args: {bound_args!r}"
+    assert any(isinstance(a, str) and "old content" in a and "addendum" in a for a in bound_args), (
+        f"expected concatenated plaintext bound to to_tsvector; got args: {bound_args!r}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -297,14 +297,14 @@ async def test_update_content_change_deletes_entry_embedding() -> None:
     await entry_repo.update(conn, cipher, entry_id=1, content="new text")
 
     # Two executes: the UPDATE entries CTE and the DELETE FROM entry_embeddings.
-    assert (
-        conn.execute.await_count == 2
-    ), f"expected 2 executes (UPDATE + DELETE), got {conn.execute.await_count}"
+    assert conn.execute.await_count == 2, (
+        f"expected 2 executes (UPDATE + DELETE), got {conn.execute.await_count}"
+    )
     delete_sql = conn.execute.await_args_list[1].args[0]
     delete_args = conn.execute.await_args_list[1].args[1:]
-    assert (
-        "DELETE FROM entry_embeddings" in delete_sql
-    ), f"second execute must DELETE the stale embedding row; SQL was: {delete_sql}"
+    assert "DELETE FROM entry_embeddings" in delete_sql, (
+        f"second execute must DELETE the stale embedding row; SQL was: {delete_sql}"
+    )
     assert delete_args == (1,), f"DELETE must bind entry_id=1 only; got args: {delete_args!r}"
 
 
@@ -315,13 +315,13 @@ async def test_update_reasoning_change_deletes_entry_embedding() -> None:
 
     await entry_repo.update(conn, cipher, entry_id=1, reasoning="new reasoning")
 
-    assert (
-        conn.execute.await_count == 2
-    ), f"expected 2 executes (UPDATE + DELETE), got {conn.execute.await_count}"
+    assert conn.execute.await_count == 2, (
+        f"expected 2 executes (UPDATE + DELETE), got {conn.execute.await_count}"
+    )
     delete_sql = conn.execute.await_args_list[1].args[0]
-    assert (
-        "DELETE FROM entry_embeddings" in delete_sql
-    ), f"second execute must DELETE the stale embedding row; SQL was: {delete_sql}"
+    assert "DELETE FROM entry_embeddings" in delete_sql, (
+        f"second execute must DELETE the stale embedding row; SQL was: {delete_sql}"
+    )
 
 
 async def test_update_date_only_does_not_delete_entry_embedding() -> None:
@@ -349,7 +349,7 @@ async def test_update_tags_only_does_not_delete_entry_embedding() -> None:
     await entry_repo.update(conn, cipher, entry_id=1, tags=["new"])
 
     assert conn.execute.await_count == 1, (
-        f"tags-only update must run a single execute (UPDATE); " f"got {conn.execute.await_count}"
+        f"tags-only update must run a single execute (UPDATE); got {conn.execute.await_count}"
     )
     sql = conn.execute.await_args_list[0].args[0]
     assert "DELETE FROM entry_embeddings" not in sql

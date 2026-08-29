@@ -169,7 +169,7 @@ async def pool() -> AsyncIterator[asyncpg.Pool]:
         "JOURNAL_DB_MIGRATION_URL": TEST_DATABASE_URL,
         "JOURNAL_OPERATOR_EMAIL": _RLS_OPERATOR_EMAIL,
     }
-    result = subprocess.run(  # noqa: S603 -- sys.executable is trusted, args are literals
+    result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=project_root,
         env=env,
@@ -301,7 +301,7 @@ def _run_alembic_upgrade(bootstrap_dsn: str) -> None:
         "JOURNAL_DB_MIGRATION_URL": bootstrap_dsn,
         "JOURNAL_OPERATOR_EMAIL": _RLS_OPERATOR_EMAIL,
     }
-    result = subprocess.run(  # noqa: S603 -- args are a hard-coded list, no shell
+    result = subprocess.run(
         [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=project_root,
         env=env,

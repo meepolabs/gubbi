@@ -119,9 +119,9 @@ class TestHydraOauthFlow:
                     "token_endpoint_auth_method": "none",
                 },
             )
-            assert (
-                reg_resp.status_code == 201
-            ), f"DCR failed: {reg_resp.status_code} {reg_resp.text[:500]}"
+            assert reg_resp.status_code == 201, (
+                f"DCR failed: {reg_resp.status_code} {reg_resp.text[:500]}"
+            )
             reg_data: dict[str, Any] = reg_resp.json()
             client_id = reg_data["client_id"]
 
@@ -134,7 +134,7 @@ class TestHydraOauthFlow:
                 headers={"Accept": "application/json"},
             )
             assert flow_resp.status_code == 200, (
-                f"Kratos flow init failed: {flow_resp.status_code} " f"{flow_resp.text[:500]}"
+                f"Kratos flow init failed: {flow_resp.status_code} {flow_resp.text[:500]}"
             )
             flow_action = flow_resp.json().get("ui", {}).get("action")
             assert flow_action, "Kratos flow response missing ui.action"
@@ -149,7 +149,7 @@ class TestHydraOauthFlow:
                 },
             )
             assert ident_resp.status_code in (200, 201), (
-                f"Kratos reg failed: {ident_resp.status_code} " f"{ident_resp.text[:500]}"
+                f"Kratos reg failed: {ident_resp.status_code} {ident_resp.text[:500]}"
             )
             identity_body = ident_resp.json()
             # API-mode submit returns {session_token, session, identity, continue_with};
@@ -182,8 +182,7 @@ class TestHydraOauthFlow:
             # or param-shape errors for debugging.
             auth_ok = auth_resp.status_code in (302, 303, 400)
             assert auth_ok, (
-                f"Auth request failed unexpectedly: {auth_resp.status_code} "
-                f"{auth_resp.text[:500]}"
+                f"Auth request failed unexpectedly: {auth_resp.status_code} {auth_resp.text[:500]}"
             )
             auth_location = auth_resp.headers.get("location", "")
             # Fail loudly if Hydra redirected back to redirect_uri with an
@@ -199,9 +198,9 @@ class TestHydraOauthFlow:
             _skip_if_no_admin_url()
             assert JOURNAL_DEV_AUTH_ADMIN_URL is not None
             login_challenge = _query_param_from_url(auth_location, "login_challenge")
-            assert (
-                login_challenge
-            ), f"Hydra auth redirect missing login_challenge: {auth_location[:500]}"
+            assert login_challenge, (
+                f"Hydra auth redirect missing login_challenge: {auth_location[:500]}"
+            )
 
             # Admin-gated flow: once past _skip_if_no_admin_url the tunnel is
             # assumed live; let HTTP errors surface as real test failures so
@@ -263,7 +262,7 @@ class TestHydraOauthFlow:
             )
 
             assert mcp_resp.status_code == 200, (
-                f"MCP authenticated call failed: {mcp_resp.status_code} " f"{mcp_resp.text[:500]}"
+                f"MCP authenticated call failed: {mcp_resp.status_code} {mcp_resp.text[:500]}"
             )
         finally:
             await client.aclose()
@@ -369,7 +368,7 @@ async def _accept_consent(
     )
     if accept_resp.status_code >= 400:
         raise AssertionError(
-            f"consent/accept failed {accept_resp.status_code}: " f"{accept_resp.text[:500]}"
+            f"consent/accept failed {accept_resp.status_code}: {accept_resp.text[:500]}"
         )
     redirect_to = str(accept_resp.json().get("redirect_to", ""))
     if not redirect_to:

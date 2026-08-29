@@ -152,8 +152,8 @@ def record_tool_call(latency_ms: float, tool_name: str) -> None:
     """
     attrs = _validate_metric_attrs({"tool.name": tool_name})
     inst = initialize_metrics()
-    cast(Histogram, inst[MetricNames.MCP_TOOL_CALL_DURATION]).record(latency_ms, attributes=attrs)
-    cast(Counter, inst[MetricNames.MCP_TOOL_CALL_COUNT]).add(1, attributes=attrs)
+    cast("Histogram", inst[MetricNames.MCP_TOOL_CALL_DURATION]).record(latency_ms, attributes=attrs)
+    cast("Counter", inst[MetricNames.MCP_TOOL_CALL_COUNT]).add(1, attributes=attrs)
 
 
 def record_tool_response_size(size_chars: int, tool_name: str) -> None:
@@ -163,7 +163,7 @@ def record_tool_response_size(size_chars: int, tool_name: str) -> None:
     """
     attrs = _validate_metric_attrs({"tool.name": tool_name})
     inst = initialize_metrics()
-    cast(Histogram, inst[MetricNames.MCP_TOOL_RESPONSE_SIZE_CHARS]).record(
+    cast("Histogram", inst[MetricNames.MCP_TOOL_RESPONSE_SIZE_CHARS]).record(
         size_chars, attributes=attrs
     )
 
@@ -182,7 +182,7 @@ def record_audit_persistence_failure(event_type: str) -> None:
     """
     attrs = _validate_metric_attrs({"event_type": event_type})
     inst = initialize_metrics()
-    cast(Counter, inst[MetricNames.AUDIT_PERSISTENCE_FAILURE]).add(1, attributes=attrs)
+    cast("Counter", inst[MetricNames.AUDIT_PERSISTENCE_FAILURE]).add(1, attributes=attrs)
 
 
 def record_replica_count_warning(*, replica_count: int) -> None:
@@ -220,7 +220,7 @@ def record_replica_count_warning(*, replica_count: int) -> None:
     inst = initialize_metrics()
     raw = inst.get(MetricNames.REPLICA_COUNT_WARNING)
     if raw is not None:
-        cast(Counter, raw).add(1, {"replica_count": str(replica_count)})
+        cast("Counter", raw).add(1, {"replica_count": str(replica_count)})
 
 
 def record_startup_probe_outcome(*, name: str, outcome: str, app_env: str) -> None:
@@ -241,7 +241,7 @@ def record_startup_probe_outcome(*, name: str, outcome: str, app_env: str) -> No
     inst = initialize_metrics()
     raw = inst.get(MetricNames.STARTUP_PROBE_OUTCOME)
     if raw is not None:
-        cast(Counter, raw).add(
+        cast("Counter", raw).add(
             1,
             {"name": name, "outcome": outcome, "app_env": app_env},
         )

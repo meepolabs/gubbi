@@ -566,6 +566,20 @@ async def count_conversations(
     return int(await conn.fetchval(sql, *params) or 0)
 
 
+_LIST_CONVERSATIONS_SQL = """
+    SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
+           c.summary_encrypted, c.summary_nonce, c.tags,
+           c.participants, c.message_count,
+           c.created_at, c.updated_at, t.path AS topic,
+           COUNT(*) OVER() AS total_count
+    FROM conversations c
+    JOIN topics t ON t.id = c.topic_id
+    WHERE ($1::text IS NULL OR t.path LIKE $1::text ESCAPE '!')
+    ORDER BY c.created_at DESC, c.id DESC
+    LIMIT $2::bigint OFFSET $3::bigint
+"""
+
+
 async def list_conversations(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
@@ -585,31 +599,12 @@ async def list_conversations(
     ``decryption_failed`` per meta instead, so one bad row does not fail the
     whole list.
     """
-    params: list[Any] = []
-    where = ""
+    like_pattern: str | None = None
     if topic_prefix:
         topic_prefix = validate_topic(topic_prefix)
-        where = (
-            f"WHERE t.path LIKE {_add_param(params, _escape_like(topic_prefix) + '%')} ESCAPE '!'"
-        )
+        like_pattern = _escape_like(topic_prefix) + "%"
 
-    pagination = ""
-    if limit is not None:
-        pagination = f"LIMIT {_add_param(params, limit)} OFFSET {_add_param(params, offset)}"
-
-    sql = f"""
-        SELECT c.id, c.title_encrypted, c.title_nonce, c.slug, c.source,
-               c.summary_encrypted, c.summary_nonce, c.tags,
-               c.participants, c.message_count,
-               c.created_at, c.updated_at, t.path AS topic,
-               COUNT(*) OVER() AS total_count
-        FROM conversations c
-        JOIN topics t ON t.id = c.topic_id
-        {where}
-        ORDER BY c.created_at DESC, c.id DESC
-        {pagination}
-    """
-    rows = await conn.fetch(sql, *params)
+    rows = await conn.fetch(_LIST_CONVERSATIONS_SQL, like_pattern, limit, offset)
     if rows:
         total = int(rows[0]["total_count"])
     else:
@@ -834,8 +829,7 @@ async def exists_by_platform_id(
     """Return True iff a conversation row matches (user_id, platform, platform_id)."""
     return bool(
         await conn.fetchval(
-            "SELECT 1 FROM conversations"
-            " WHERE user_id = $1 AND platform = $2 AND platform_id = $3",
+            "SELECT 1 FROM conversations WHERE user_id = $1 AND platform = $2 AND platform_id = $3",
             user_id,
             platform,
             platform_id,

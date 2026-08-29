@@ -87,9 +87,12 @@ pytest = "^9.0.3"
 pytest-asyncio = "^1.3.0"  # TIGHT: pytest 9 requires pytest-asyncio >= 1.x. 1.0 introduced loop-scope semantics changes; ``asyncio_mode = "auto"`` (see [tool.pytest.ini_options]) auto-marks every coroutine test, so the per-test mark is implicit -- verified clean against 1.3.0 by the full suite. Pin floor matches lock-resolved version so consumers pinning the same constraint get reproducible behavior. Harmonised with gubbi-common + gubbi-cloud (Wave 4). Closes CVE-2025-71176 (pytest <9.0.3 world-readable /tmp/pytest-of-{user} on multi-user hosts).
 pytest-cov = "^6.0.0"
 pre-commit = "^3.5.0"
-# TIGHT: ruff format-rule changes between minors mass-rewrite source.
-# Caret on a 0.x already means <0.9; do not relax without a coordinated reformat commit.
-ruff = "^0.8.0"
+# TIGHT: ruff format-rule changes between minors mass-rewrite source, so a
+# bump here has to land together with the reformat it causes -- and in lockstep
+# with the ruff rev in .pre-commit-config.yaml. Two versions across the local
+# hook and the CI gate means they rewrite each other's output: 0.15 collapses
+# implicit string concatenation and 0.8 puts it back.
+ruff = "^0.15.0"
 mypy = "^1.13.0"
 types-requests = "==2.33.0.20260402"
 types-pyyaml = "==6.0.12.20260408"

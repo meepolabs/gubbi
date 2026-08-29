@@ -671,16 +671,16 @@ class TestToolAnnotations:
     def test_read_tools_have_readonly_hint_true(self) -> None:
         actual = _extract_tool_annotations()
         for tool in READ_TOOLS:
-            assert (
-                actual[tool].get("readOnlyHint") is True
-            ), f"{tool}: expected readOnlyHint=True, got {actual[tool]}"
+            assert actual[tool].get("readOnlyHint") is True, (
+                f"{tool}: expected readOnlyHint=True, got {actual[tool]}"
+            )
 
     def test_write_tools_have_readonly_hint_false(self) -> None:
         actual = _extract_tool_annotations()
         for tool in WRITE_TOOLS:
-            assert (
-                actual[tool].get("readOnlyHint") is False
-            ), f"{tool}: expected readOnlyHint=False, got {actual[tool]}"
+            assert actual[tool].get("readOnlyHint") is False, (
+                f"{tool}: expected readOnlyHint=False, got {actual[tool]}"
+            )
 
     def test_only_delete_entry_is_destructive(self) -> None:
         actual = _extract_tool_annotations()
@@ -688,8 +688,7 @@ class TestToolAnnotations:
             name for name, ann in actual.items() if ann.get("destructiveHint") is True
         }
         assert destructive_tools == {"journal_delete_entry"}, (
-            f"destructiveHint=True must be reserved for delete_entry only, "
-            f"got {destructive_tools}"
+            f"destructiveHint=True must be reserved for delete_entry only, got {destructive_tools}"
         )
 
     def test_idempotent_hints_match_spec(self) -> None:
@@ -706,13 +705,13 @@ class TestToolAnnotations:
             "journal_create_topic",
         }
         for tool in expected_idempotent_true:
-            assert (
-                actual[tool].get("idempotentHint") is True
-            ), f"{tool}: expected idempotentHint=True"
+            assert actual[tool].get("idempotentHint") is True, (
+                f"{tool}: expected idempotentHint=True"
+            )
         for tool in expected_idempotent_false:
-            assert (
-                actual[tool].get("idempotentHint") is False
-            ), f"{tool}: expected idempotentHint=False"
+            assert actual[tool].get("idempotentHint") is False, (
+                f"{tool}: expected idempotentHint=False"
+            )
 
     def test_all_annotations_match_spec_table(self) -> None:
         """Full per-tool, per-field assertion against the locked spec table."""

@@ -92,8 +92,7 @@ async def test_record_audit_without_target_kind_still_works(
         assert after_count == before_count + 1
 
         row = await conn.fetchrow(
-            "SELECT * FROM audit_log WHERE actor_id = 'system:test-worker' "
-            "ORDER BY id DESC LIMIT 1"
+            "SELECT * FROM audit_log WHERE actor_id = 'system:test-worker' ORDER BY id DESC LIMIT 1"
         )
         assert row is not None
         assert row["target_kind"] is None

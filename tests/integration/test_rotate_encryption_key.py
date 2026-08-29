@@ -195,9 +195,9 @@ async def _verify_all_at_version(
         )
         for row in rows:
             nonce = bytes(row["nc"])
-            assert (
-                nonce[0] == target_version
-            ), f"{table}.{col_nonce}[0]={nonce[0]} expected {target_version}"
+            assert nonce[0] == target_version, (
+                f"{table}.{col_nonce}[0]={nonce[0]} expected {target_version}"
+            )
             # Round-trip decrypt must succeed under V2-only cipher.
             cipher_v2.decrypt(bytes(row["ct"]), nonce)
 

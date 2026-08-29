@@ -111,6 +111,6 @@ async def test_idx_messages_fts_exists(
     assert row is not None, "idx_messages_fts missing -- migration 0025 not applied"
     indexdef = row["indexdef"]
     assert "using gin" in indexdef.lower(), f"idx_messages_fts must be a GIN index; got: {indexdef}"
-    assert (
-        "search_vector" in indexdef
-    ), f"idx_messages_fts must cover the search_vector column; got: {indexdef}"
+    assert "search_vector" in indexdef, (
+        f"idx_messages_fts must cover the search_vector column; got: {indexdef}"
+    )

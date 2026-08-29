@@ -24,6 +24,12 @@ repos:
           # Versions pinned from poetry.lock to keep the pre-commit mypy hook
           # (which runs in an isolated venv) deterministic across CI + local
           # runs. Bump in lock-step with poetry.lock when those deps move.
+          #
+          # A dep missing here does not fail the hook -- it makes the hook
+          # DISAGREE with CI. Without aiosqlite, `cur.rowcount` resolves as
+          # Any and the hook reports a no-any-return that CI does not, on code
+          # CI considers clean.
+          - aiosqlite==0.22.1
           - pydantic==2.13.3
           - pydantic-settings==2.13.1
           - types-PyYAML==6.0.12.20260408

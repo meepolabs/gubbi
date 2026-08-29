@@ -18,6 +18,6 @@ class TestDisabledRegister:
             "/login",
             "/.well-known/oauth-protected-resource/mcp",
         ]
-        assert not any(
-            p in route_paths for p in oauth_paths
-        ), f"Expected no OAuth routes; got: {route_paths}"
+        assert not any(p in route_paths for p in oauth_paths), (
+            f"Expected no OAuth routes; got: {route_paths}"
+        )

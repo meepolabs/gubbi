@@ -133,9 +133,9 @@ class TestExtractionJobSpan:
                 await extract_conversation(ctx, conversation_id, user_id)
 
         job_spans = [s for s in exporter.spans if s.name == "extraction.job"]
-        assert (
-            len(job_spans) == 1
-        ), f"expected 1 extraction.job span, got {[s.name for s in exporter.spans]}"
+        assert len(job_spans) == 1, (
+            f"expected 1 extraction.job span, got {[s.name for s in exporter.spans]}"
+        )
         job_span = job_spans[0]
         attrs = dict(job_span.attributes) if job_span.attributes else {}
         assert attrs.get("success") is False
@@ -143,9 +143,9 @@ class TestExtractionJobSpan:
         assert attrs.get("failure_reason") == "llm_rate_limited"
         # An exception event must have been recorded on the span.
         event_names = [ev.name for ev in job_span.events]
-        assert (
-            "exception" in event_names
-        ), f"expected an exception event on extraction.job span, got {event_names}"
+        assert "exception" in event_names, (
+            f"expected an exception event on extraction.job span, got {event_names}"
+        )
 
         # The categorize llm_call span must also have an exception event.
         llm_spans = [s for s in exporter.spans if s.name == "extraction.llm_call"]
@@ -226,9 +226,9 @@ class TestExtractionJobSpan:
         # extract_entries). Verify provider_name + model_name attributes wired
         # through safe_set_attributes (banned-key filter in place).
         llm_spans = [s for s in exporter.spans if s.name == "extraction.llm_call"]
-        assert (
-            len(llm_spans) >= 1
-        ), f"expected at least 1 extraction.llm_call span, got {[s.name for s in exporter.spans]}"
+        assert len(llm_spans) >= 1, (
+            f"expected at least 1 extraction.llm_call span, got {[s.name for s in exporter.spans]}"
+        )
         llm_attrs = dict(llm_spans[0].attributes) if llm_spans[0].attributes else {}
         assert llm_attrs.get("provider_name") == "MagicMock"
         assert llm_attrs.get("model_name") == "fake-haiku-1"

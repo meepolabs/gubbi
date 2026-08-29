@@ -24,11 +24,13 @@ StatusCounts        -- dataclass returned by get_status_counts
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
-from typing import cast
+from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
 import asyncpg
+
+if TYPE_CHECKING:
+    from datetime import date, datetime
 
 __all__: list[str] = [
     "ExtractionJobAlreadyInFlight",
@@ -169,7 +171,7 @@ async def get_period_start(
     )
     if row is None:
         return None
-    return cast(date, row["period_start"])
+    return cast("date", row["period_start"])
 
 
 # ---------------------------------------------------------------------------

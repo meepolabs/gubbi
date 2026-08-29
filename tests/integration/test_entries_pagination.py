@@ -174,9 +174,9 @@ async def test_pagination_yields_complete_disjoint_newest_first_pages(
     # Assert (c): concatenated pages are non-INCREASING by id -- newest-first
     # stream. Equivalent to "sorted in reverse on id".
     concatenated = page0 + page1 + page2
-    assert concatenated == sorted(
-        concatenated, reverse=True
-    ), f"concatenated pages are not in non-increasing (newest-first) order: {concatenated}"
+    assert concatenated == sorted(concatenated, reverse=True), (
+        f"concatenated pages are not in non-increasing (newest-first) order: {concatenated}"
+    )
 
 
 async def test_offset_past_end_reports_full_total_not_zero(
@@ -254,7 +254,7 @@ async def test_offset_zero_page_returns_newest_entries_not_oldest(
     page_ids = [e.id for e in entries]
     expected_newest = sorted(seeded_ids, reverse=True)[:PAGE_SIZE]
     assert page_ids == expected_newest, (
-        f"offset=0 page must be the newest {PAGE_SIZE} ids " f"({expected_newest}); got {page_ids}"
+        f"offset=0 page must be the newest {PAGE_SIZE} ids ({expected_newest}); got {page_ids}"
     )
 
     # And the page contents must match the newest contents in DESC

@@ -278,7 +278,7 @@ def test_environment_literal_drift_detected(tmp_path: Path) -> None:
         "from typing import Literal\n\n"
         'Environment = Literal["dev", "ci", "staging", "production"]\n'
     )
-    b.write_text("from typing import Literal\n\n" 'Environment = Literal["dev", "prod"]\n')
+    b.write_text('from typing import Literal\n\nEnvironment = Literal["dev", "prod"]\n')
 
     drifts = lint.check_environment_literal_parity(str(a), str(b))
 

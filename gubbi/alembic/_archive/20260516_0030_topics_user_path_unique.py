@@ -110,7 +110,7 @@ def upgrade() -> None:
             "re-running."
         )
     op.execute("ALTER TABLE topics DROP CONSTRAINT IF EXISTS topics_path_key")
-    op.execute("ALTER TABLE topics " "ADD CONSTRAINT topics_user_path_key UNIQUE (user_id, path)")
+    op.execute("ALTER TABLE topics ADD CONSTRAINT topics_user_path_key UNIQUE (user_id, path)")
     # idx_topics_user (user_id) is now redundant: the composite
     # topics_user_path_key UNIQUE (user_id, path) creates an implicit
     # btree whose leftmost prefix covers user_id-only queries. Drop the

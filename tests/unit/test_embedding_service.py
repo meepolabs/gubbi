@@ -126,7 +126,7 @@ class TestStoreByVectorDeprecation:
         self, mock_embedding_service: Any
     ) -> None:
         conn = AsyncMock()
-        with pytest.warns(DeprecationWarning):
+        with pytest.warns(DeprecationWarning, match="store_by_vector is deprecated"):
             await mock_embedding_service.store_by_vector(
                 conn, entry_id=42, embedding=[1.0] + [0.0] * 383
             )

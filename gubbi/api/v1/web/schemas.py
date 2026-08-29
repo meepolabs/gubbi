@@ -14,8 +14,6 @@ Two reusable shapes that every resource router composes:
 
 from __future__ import annotations
 
-from typing import Generic, TypeVar
-
 from pydantic import BaseModel
 
 __all__: list[str] = [
@@ -23,10 +21,8 @@ __all__: list[str] = [
     "PaginatedList",
 ]
 
-ItemT = TypeVar("ItemT", bound=BaseModel)
 
-
-class PaginatedList(BaseModel, Generic[ItemT]):
+class PaginatedList[ItemT: BaseModel](BaseModel):
     """Generic offset-paginated list envelope.
 
     ``total`` is the full filtered count before ``LIMIT`` (the repo functions

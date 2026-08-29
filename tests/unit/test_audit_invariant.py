@@ -81,4 +81,6 @@ class TestAuditInvariant:
 
             assert found_func, f"Function {tool_name} not found in {filename}"
 
-        assert not missing, f'The following write tools have @require_scope("journal:write") but are missing @audited: {missing}'
+        assert not missing, (
+            f'The following write tools have @require_scope("journal:write") but are missing @audited: {missing}'
+        )

@@ -61,15 +61,15 @@ class ContentCipher:
                 raise TypeError(f"key version must be int, got {type(version).__name__}")
             if not _VERSION_MIN <= version <= _VERSION_MAX:
                 raise ValueError(
-                    f"key version {version} out of range " f"[{_VERSION_MIN}, {_VERSION_MAX}]"
+                    f"key version {version} out of range [{_VERSION_MIN}, {_VERSION_MAX}]"
                 )
             if not isinstance(key, bytes | bytearray):
                 raise TypeError(
-                    f"key for version {version} must be bytes, " f"got {type(key).__name__}"
+                    f"key for version {version} must be bytes, got {type(key).__name__}"
                 )
             if len(key) != _KEY_LEN:
                 raise ValueError(
-                    f"key for version {version} must be {_KEY_LEN} bytes, " f"got {len(key)}"
+                    f"key for version {version} must be {_KEY_LEN} bytes, got {len(key)}"
                 )
         frozen_keys: dict[int, bytes] = {v: bytes(k) for v, k in master_keys.items()}
         self._keys: Mapping[int, bytes] = MappingProxyType(frozen_keys)
@@ -243,7 +243,7 @@ def load_master_keys_from_env(
         version = int(raw_version)
         if not _VERSION_MIN <= version <= _VERSION_MAX:
             raise ValueError(
-                f"{name}: version {version} out of range " f"[{_VERSION_MIN}, {_VERSION_MAX}]"
+                f"{name}: version {version} out of range [{_VERSION_MIN}, {_VERSION_MAX}]"
             )
         try:
             raw = base64.b64decode(value, validate=True)

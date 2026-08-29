@@ -375,7 +375,7 @@ def check_env_contract(
     # All canonical env vars count as known.
     known_env: set[str] = {finfo["env_var"] for finfo in fields.values()}
     stale.extend(
-        f"WARN: stale passthrough `{dk}` in {target_service}. " f"No matching Settings field found."
+        f"WARN: stale passthrough `{dk}` in {target_service}. No matching Settings field found."
         for dk in sorted(svc["declared_keys"])
         if dk not in known_env
     )

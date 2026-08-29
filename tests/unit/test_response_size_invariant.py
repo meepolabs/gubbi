@@ -81,6 +81,6 @@ class TestResponseSizeGuardInvariant:
             tree = ast.parse(source_path.read_text(encoding="utf-8"))
             if not _function_contains_call_check_response_size(tree, tool_name):
                 missing.append(tool_name)
-        assert (
-            not missing
-        ), f"The following tools are missing a call to check_response_size: {missing}"
+        assert not missing, (
+            f"The following tools are missing a call to check_response_size: {missing}"
+        )

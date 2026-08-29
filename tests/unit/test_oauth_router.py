@@ -91,9 +91,9 @@ class TestMode1NoOAuth:
             "/login",
             "/.well-known/oauth-protected-resource/mcp",
         ]
-        assert not any(
-            p in route_paths for p in oauth_paths
-        ), f"Expected no OAuth routes; got: {route_paths}"
+        assert not any(p in route_paths for p in oauth_paths), (
+            f"Expected no OAuth routes; got: {route_paths}"
+        )
 
 
 class TestMode2SelfHostOAuth:
@@ -161,13 +161,13 @@ class TestMode3HydraBacked:
         await register_oauth_routes(app, storage, settings)
         route_paths = [r.path for r in app.routes if isinstance(r, Route)]
         await storage.close()
-        assert any(
-            ".well-known/oauth-protected-resource/mcp" in p for p in route_paths
-        ), f"Missing protected-resource route; got: {route_paths}"
+        assert any(".well-known/oauth-protected-resource/mcp" in p for p in route_paths), (
+            f"Missing protected-resource route; got: {route_paths}"
+        )
         for forbidden in ["/authorize", "/token", "/register", "/login"]:
-            assert (
-                forbidden not in route_paths
-            ), f"{forbidden} should not be registered in Mode 3; got: {route_paths}"
+            assert forbidden not in route_paths, (
+                f"{forbidden} should not be registered in Mode 3; got: {route_paths}"
+            )
 
 
 class TestDeployShapeValidator:
@@ -207,7 +207,7 @@ class TestDeployShapeValidator:
         from gubbi.config import get_settings
 
         get_settings.cache_clear()
-        with pytest.raises(ValueError, match="(?i)hydra_public_issuer_url.*required"):
+        with pytest.raises(ValueError, match=r"(?i)hydra_public_issuer_url.*required"):
             self._get_settings()
 
     def test_hydra_issuer_without_admin(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,7 +218,7 @@ class TestDeployShapeValidator:
         from gubbi.config import get_settings
 
         get_settings.cache_clear()
-        with pytest.raises(ValueError, match="(?i)hydra_admin_url.*required"):
+        with pytest.raises(ValueError, match=r"(?i)hydra_admin_url.*required"):
             self._get_settings()
 
     def test_hydra_admin_without_public_url(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -231,7 +231,7 @@ class TestDeployShapeValidator:
         from gubbi.config import get_settings
 
         get_settings.cache_clear()
-        with pytest.raises(ValueError, match="(?i)hydra_public_url.*required"):
+        with pytest.raises(ValueError, match=r"(?i)hydra_public_url.*required"):
             self._get_settings()
 
     def test_hydra_public_url_without_admin(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -245,5 +245,5 @@ class TestDeployShapeValidator:
         from gubbi.config import get_settings
 
         get_settings.cache_clear()
-        with pytest.raises(ValueError, match="(?i)hydra_admin_url.*required"):
+        with pytest.raises(ValueError, match=r"(?i)hydra_admin_url.*required"):
             self._get_settings()

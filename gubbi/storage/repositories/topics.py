@@ -141,6 +141,20 @@ async def create(
         raise TopicAlreadyExists(msg) from e
 
 
+_LIST_ALL_SQL = """
+    SELECT t.id, t.path, t.title, t.description,
+           t.created_at, t.updated_at,
+           COUNT(e.id) AS entry_count,
+           COUNT(*) OVER() AS total_count
+    FROM topics t
+    LEFT JOIN entries e ON e.topic_id = t.id AND e.deleted_at IS NULL
+    WHERE ($1::text IS NULL OR t.path LIKE $1::text ESCAPE '!')
+    GROUP BY t.id
+    ORDER BY t.updated_at DESC, t.id DESC
+    LIMIT $2::bigint OFFSET $3::bigint
+"""
+
+
 async def list_all(
     conn: asyncpg.Connection,
     topic_prefix: str | None = None,
@@ -151,31 +165,12 @@ async def list_all(
 
     total_count reflects the full filtered set before LIMIT -- use for pagination.
     """
-    params: list[Any] = []
-    where = ""
+    like_pattern: str | None = None
     if topic_prefix:
         topic_prefix = validate_topic(topic_prefix)
-        where = (
-            f"WHERE t.path LIKE {_add_param(params, _escape_like(topic_prefix) + '%')} ESCAPE '!'"
-        )
+        like_pattern = _escape_like(topic_prefix) + "%"
 
-    pagination = ""
-    if limit is not None:
-        pagination = f"LIMIT {_add_param(params, limit)} OFFSET {_add_param(params, offset)}"
-
-    sql = f"""
-        SELECT t.id, t.path, t.title, t.description,
-               t.created_at, t.updated_at,
-               COUNT(e.id) AS entry_count,
-               COUNT(*) OVER() AS total_count
-        FROM topics t
-        LEFT JOIN entries e ON e.topic_id = t.id AND e.deleted_at IS NULL
-        {where}
-        GROUP BY t.id
-        ORDER BY t.updated_at DESC, t.id DESC
-        {pagination}
-    """
-    rows = await conn.fetch(sql, *params)
+    rows = await conn.fetch(_LIST_ALL_SQL, like_pattern, limit, offset)
     if rows:
         total = int(rows[0]["total_count"])
     else:

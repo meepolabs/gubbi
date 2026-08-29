@@ -103,7 +103,7 @@ async def test_run_reindex_processes_failed_entries_on_retry(
     this is hard to surface in unit tests, so we exercise the
     cross-call retry path here as the durable contract.
     """
-    tenant_id, entry_ids = seeded_entries_for_cursor
+    _tenant_id, entry_ids = seeded_entries_for_cursor
     failing_id = entry_ids[len(entry_ids) // 2]
 
     # First pass: failing_id raises, others succeed.
@@ -122,9 +122,9 @@ async def test_run_reindex_processes_failed_entries_on_retry(
         failed_row_state = await conn.fetchval(
             "SELECT indexed_at FROM entries WHERE id = $1", failing_id
         )
-    assert (
-        failed_row_state is None
-    ), f"Compensating reset must NULL indexed_at on the failed id; got {failed_row_state}"
+    assert failed_row_state is None, (
+        f"Compensating reset must NULL indexed_at on the failed id; got {failed_row_state}"
+    )
 
     # Second pass with no injected failure: must pick up the previously-
     # failed id and succeed.
@@ -134,7 +134,7 @@ async def test_run_reindex_processes_failed_entries_on_retry(
 
     assert result2["embeddings_failed"] == 0
     assert svc2.save_calls == [failing_id], (
-        "Second pass must encode exactly the previously-failed id; " f"got {svc2.save_calls}"
+        f"Second pass must encode exactly the previously-failed id; got {svc2.save_calls}"
     )
 
 
