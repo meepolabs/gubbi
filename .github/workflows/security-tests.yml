@@ -55,8 +55,8 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.12"
       - run: pip install pyyaml
@@ -83,22 +83,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.12"
 
       - name: Install Poetry
-        uses: snok/install-poetry@v1
+        uses: snok/install-poetry@76e04a911780d5b312d89783f7b1cd627778900a # v1.4.1
         with:
           version: 1.8.5
           virtualenvs-create: true
           virtualenvs-in-project: true
 
       - name: Cache Poetry virtualenv
-        uses: actions/cache@v4
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
@@ -150,22 +150,22 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
 
       - name: Set up Python 3.12
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@42375524e23c412d93fb67b49958b491fce71c38 # v5.4.0
         with:
           python-version: "3.12"
 
       - name: Install Poetry
-        uses: snok/install-poetry@v1
+        uses: snok/install-poetry@76e04a911780d5b312d89783f7b1cd627778900a # v1.4.1
         with:
           version: 1.8.5
           virtualenvs-create: true
           virtualenvs-in-project: true
 
       - name: Cache Poetry virtualenv
-        uses: actions/cache@v4
+        uses: actions/cache@1bd1e32a3bdc45362d1e726936510720a7c30a57 # v4.2.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
@@ -243,7 +243,7 @@ jobs:
 
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.0
         with:
           name: coverage-${{ github.run_id }}
           path: .coverage
