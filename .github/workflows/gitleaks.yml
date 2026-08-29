@@ -12,6 +12,12 @@ on:
     branches: [main, develop]
   schedule:
     - cron: '0 6 * * 1'
+  # Manual trigger. Without it a push- or cron-driven scan cannot be forced,
+  # so a repin or trigger fix has to wait for the next real event to prove it
+  # works -- and a workflow GitHub has disabled for inactivity looks identical
+  # to a misconfigured one.
+  workflow_dispatch:
+
 
 # Cancel redundant runs on the same branch. Keyed on event_name too so the
 # weekly scheduled full-history scan is never cancelled by a push to the same
@@ -30,13 +36,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           # Full history so the schedule run can see everything.
           fetch-depth: 0
 
       - name: Run gitleaks
-        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # gitleaks-action v2 requires a license for any repo owned by a
