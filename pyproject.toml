@@ -15,11 +15,25 @@ pydantic = "^2.13.2"  # Harmonised floor with gubbi-cloud.
 pydantic-settings = "^2.7.0"
 structlog = "^24.4.0"
 gunicorn = "^23.0.0"
-# TIGHT: gubbi/tools/registry.py and 4 test files reach into
-# mcp._mcp_server / mcp._tool_manager._tools (private FastMCP internals).
-# Hold to the 1.26 minor until we either upstream a public API or add
-# an upgrade-time guard test.
-mcp = ">=1.26,<1.27"
+# STILL TIGHT, and the reason is unchanged: gubbi/tools/registry.py plus 4
+# test files reach into mcp._mcp_server / mcp._tool_manager._tools (private
+# FastMCP internals), so any minor can break us silently. The registry fails
+# loudly rather than silently (getattr + raise) which is the mitigation.
+#
+# Moved off 1.26 to close GHSA-jpw9-pfvf-9f58: HTTP transports served session
+# requests without verifying the authenticated principal, and this server
+# serves streamable-http for multi-tenant journal data. The other two
+# advisories in that batch do not reach us (no WebSocket transport, no
+# experimental task handlers).
+#
+# The 1.26 comment named an exit condition -- upstream a public API, or add an
+# upgrade-time guard test -- and NEITHER is met. Recorded rather than papered
+# over: the empirical guard is the 5 MCP test files that run against the live
+# docker-compose stack in gubbi-testbench, not a hand-written shim. 1.28 is
+# also upstream's own recommended position for staying on v1 (`>=1.28,<2`).
+# v1.x is in maintenance mode (security fixes only), so the real fix is the
+# v2 migration -- filed, and it owns the private-internals question.
+mcp = ">=1.28.1,<1.29"
 bcrypt = "^5.0.0"
 # PostgreSQL async driver + pgvector extension codec
 asyncpg = "^0.30.0"
@@ -31,7 +45,20 @@ numpy = ">=1.24,<3"  # Already crossed 1->2 silently; cap to gate the next major
 requests = ">=2.33,<3"
 httpx = ">=0.28,<0.29"  # Harmonised with gubbi-cloud (which overrides the private _merge_cookies).
 PyJWT = {version = ">=2.12,<3", extras = ["crypto"]}  # TIGHT: token verification; major bumps changed default algorithms.
-cryptography = ">=46,<47"  # TIGHT: crypto primitives; major bumps deprecate algorithms.
+# Was held at <47 on the grounds that "major bumps deprecate algorithms".
+# Checked rather than assumed: this package imports exactly ONE thing from
+# cryptography -- AESGCM (gubbi/crypto/cipher.py) plus the InvalidTag
+# exception. AESGCM is untouched across 47..50, so the deprecation risk the
+# old cap guarded against does not apply to our usage.
+#
+# Moved to close 4 advisories. Three are unreachable here (PKCS#7 EnvelopedData,
+# X.509 path building, certificate-verifier wildcard handling -- none of those
+# APIs appear in this tree); GHSA-537c-gmf6-5ccf is a vulnerable OpenSSL bundled
+# in the wheels, which does affect us and only a wheel bump fixes.
+#
+# Still capped at one major: widen only after re-checking that whatever AEAD
+# this module uses is not on the next major's deprecation list.
+cryptography = ">=50,<51"
 # Database migrations
 alembic = "^1.14.0"
 sqlalchemy = "^2.0.0"

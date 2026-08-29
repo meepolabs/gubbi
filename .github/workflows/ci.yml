@@ -58,3 +58,45 @@ jobs:
 
       - name: mypy
         run: poetry run mypy gubbi/
+
+  # Dependency vulnerabilities, read straight off poetry.lock so no dev
+  # dependency has to be installed for the gate to run. A `pip-audit` step was
+  # prescribed for Python CI long before this and never adopted in any repo,
+  # precisely because it needed a dev-group entry -- keep one gate in one place
+  # rather than adding both.
+  #
+  # Why the pinned CLI and not google/osv-scanner-action: that action ships
+  # REUSABLE WORKFLOWS whose `upload-sarif` input defaults to true, which needs
+  # `security-events: write` plus GitHub code scanning -- not available for
+  # private repos on a free plan. Calling the pinned binary keeps one pattern
+  # that works on public and private repos alike, and keeps this job on
+  # `contents: read`.
+  #
+  # Pin + verify the checksum before running, so a tampered release artifact
+  # fails the job rather than executing.
+  osv-scan:
+    name: dependency vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install osv-scanner
+        env:
+          OSV_VERSION: 2.5.1
+        run: |
+          set -euo pipefail
+          BASE="https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}"
+          curl -sSfL -o /tmp/osv-scanner    "${BASE}/osv-scanner_linux_amd64"
+          curl -sSfL -o /tmp/osv_SHA256SUMS "${BASE}/osv-scanner_SHA256SUMS"
+          # The checksums file names the upstream artifact, so verify under
+          # that name before renaming it into place.
+          ( cd /tmp && cp osv-scanner osv-scanner_linux_amd64 \
+            && grep ' osv-scanner_linux_amd64$' osv_SHA256SUMS | sha256sum --check --status )
+          chmod +x /tmp/osv-scanner
+          sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
+          osv-scanner --version
+
+      # `-r .` walks the tree and picks up every lockfile it recognises,
+      # including any outside the repo root. Exits non-zero on a finding.
+      - name: Scan lockfiles
+        run: osv-scanner scan source -r .
