@@ -414,13 +414,13 @@ class TestOriginValidation:
             resp = await client.get("/", headers={"Origin": "http://127.0.0.1:8100"})
         assert resp.status_code == 200
 
-    async def test_mcp_gubbi_allowed(self) -> None:
-        allowed = frozenset({"https://mcp.gubbi.ai"})
+    async def test_configured_origin_allowed(self) -> None:
+        allowed = frozenset({"https://mcp.example.com"})
         mw = OriginValidationMiddleware(_asgi_app(), allowed)
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
-            resp = await client.get("/", headers={"Origin": "https://mcp.gubbi.ai"})
+            resp = await client.get("/", headers={"Origin": "https://mcp.example.com"})
         assert resp.status_code == 200
 
     async def test_non_http_scope_bypass(self) -> None:

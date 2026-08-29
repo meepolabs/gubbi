@@ -46,7 +46,7 @@ def build_mcp_middleware(
     protected_resource_metadata_url:
         RFC 9728 metadata doc URL for OAuth discoverability (may be None).
     allowed_origins:
-        Allowed host values from ``ALLOWED_ORIGINS`` config.
+        Allowed origin values from ``ServerConfig.allowed_origins``.
 
     Returns
     -------

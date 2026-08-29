@@ -49,7 +49,6 @@ from gubbi.bootstrap import (
     teardown_lifespan_resources,
 )
 from gubbi.config import (
-    ALLOWED_ORIGINS,
     HYDRA_INTROSPECT_TIMEOUT_SECS,
     REQUIRED_OAUTH_SCOPE,
     Settings,
@@ -488,7 +487,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             strategies=auth_strategies,
             required_scope=REQUIRED_OAUTH_SCOPE,
             protected_resource_metadata_url=protected_resource_metadata_url,
-            allowed_origins=ALLOWED_ORIGINS,
+            allowed_origins=settings.server.allowed_origins,
         )
         app.mount("/mcp", origin_validated_mcp)
 

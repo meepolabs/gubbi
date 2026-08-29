@@ -184,7 +184,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 markers = [
     "slow: slower tests (e.g. large-input performance checks)",
-    "hosted_live: requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
+    "hosted_live: requires a live hosted stack (auth + identity + MCP endpoints reachable); enable with JOURNAL_LIVE_STACK=1 and set JOURNAL_DEV_AUTH_URL / JOURNAL_DEV_IDENTITY_URL / JOURNAL_DEV_MCP_URL",
     "unit: fast, isolated unit tests with no external dependencies",
     "integration: tests that exercise multiple components or require a running service",
 ]

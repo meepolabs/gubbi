@@ -3,13 +3,14 @@ import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Final, Literal, Self
+from urllib.parse import urlsplit
 
 from gubbi_common.bootstrap import PgLogProbeMode
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 __all__: list[str] = [
-    "ALLOWED_ORIGINS",
+    "DEFAULT_ALLOWED_ORIGINS",
     "HYDRA_INTROSPECT_TIMEOUT_SECS",
     "OAUTH_ACCESS_TOKEN_TTL_SECS",
     "OAUTH_AUTH_CODE_TTL_SECS",
@@ -31,18 +32,16 @@ HYDRA_INTROSPECT_TIMEOUT_SECS: Final[float] = 3.0
 # OAuth scope every MCP token must carry. Product constant, not a knob.
 REQUIRED_OAUTH_SCOPE: Final[str] = "journal"
 
-# Allowed origins for the MCP streamable HTTP endpoint.  Used by
-# OriginValidationMiddleware to prevent DNS-rebinding attacks.
-# Loopback origins are always allowed; this allowlist is for production
-# MCP clients (claude.ai, chatgpt.com, journal.gubbi.ai, mcp.gubbi.ai).
-ALLOWED_ORIGINS: Final[frozenset[str]] = frozenset(
+# Origins allowed on the MCP streamable HTTP endpoint out of the box.  Used
+# by OriginValidationMiddleware to prevent DNS-rebinding attacks. These are
+# the hosted MCP clients every deployment talks to; anything
+# deployment-specific (an operator's own web frontend or MCP hostname) is
+# added via JOURNAL_EXTRA_ALLOWED_ORIGINS. Loopback origins are always
+# allowed by the middleware itself.
+DEFAULT_ALLOWED_ORIGINS: Final[frozenset[str]] = frozenset(
     {
         "https://claude.ai",
         "https://chatgpt.com",
-        "https://journal.gubbi.ai",
-        "https://mcp.gubbi.ai",
-        "https://journal-dev.gubbi.ai",
-        "https://mcp-dev.gubbi.ai",
     }
 )
 
@@ -183,6 +182,31 @@ class AuthConfig(BaseSettings):
         return self
 
 
+def _origin_problem(origin: str) -> str | None:
+    """Return why *origin* is not a valid absolute http(s) origin, else None."""
+    try:
+        parts = urlsplit(origin)
+    except ValueError as exc:
+        return f"unparseable ({exc})"
+    if parts.scheme not in ("http", "https"):
+        return "scheme must be http or https"
+    if not parts.netloc:
+        return "missing host"
+    if parts.path or parts.query or parts.fragment:
+        return "must carry no path, query, or fragment"
+    if "@" in parts.netloc or "*" in parts.netloc:
+        return "host must not contain userinfo or a wildcard"
+    try:
+        # Attribute access is where urlsplit actually parses the port, so
+        # this touch is what rejects a non-numeric or out-of-range value.
+        _ = parts.port
+    except ValueError as exc:
+        return f"invalid port ({exc})"
+    if not parts.hostname:
+        return "missing host"
+    return None
+
+
 class ServerConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -193,6 +217,63 @@ class ServerConfig(BaseSettings):
     )
     port: int = Field(default=8100, validation_alias="JOURNAL_PORT")
     transport: str = Field(default="streamable-http", validation_alias="JOURNAL_TRANSPORT")
+    # Deployment-specific MCP origins, ADDED to DEFAULT_ALLOWED_ORIGINS
+    # (never replacing it -- the hosted MCP clients are correct for every
+    # deployment, so a typo'd operator value can never lock them out).
+    # ``NoDecode`` suppresses pydantic-settings' JSON decoding of complex
+    # types so the env source hands the raw string to
+    # ``_split_csv_origins``; same trap and same reasoning as
+    # ``AuthConfig.api_key_scopes``.
+    extra_allowed_origins: Annotated[list[str], NoDecode] = Field(
+        default_factory=list,
+        validation_alias="JOURNAL_EXTRA_ALLOWED_ORIGINS",
+    )
+
+    @field_validator("extra_allowed_origins", mode="before")
+    @classmethod
+    def _split_csv_origins(cls, v: object) -> Any:
+        """Split a comma- or newline-separated string of origins into a list.
+
+        CSV is the only accepted env shape, matching
+        ``JOURNAL_API_KEY_SCOPES``. A JSON-array value is rejected loudly
+        rather than silently becoming one malformed origin.
+        """
+        if isinstance(v, str):
+            stripped = v.strip()
+            if stripped.startswith("["):
+                raise ValueError(
+                    "extra_allowed_origins expects a comma-separated string "
+                    "(e.g. 'https://journal.example.com,https://mcp.example.com'), "
+                    "not a JSON array. Drop the brackets and quotes."
+                )
+            return [s for item in re.split(r"[,\n\r]+", stripped) if (s := item.strip())]
+        return v
+
+    @field_validator("extra_allowed_origins")
+    @classmethod
+    def _validate_origins(cls, v: list[str]) -> list[str]:
+        """Reject anything that is not an absolute http(s) origin.
+
+        An Origin header is scheme + host + optional port and nothing else,
+        so a value carrying a path, query, fragment, userinfo, or wildcard
+        would never match a real header -- accepting it would give an
+        operator a silently-inert allowlist entry on a DNS-rebinding guard.
+        """
+        for origin in v:
+            problem = _origin_problem(origin)
+            if problem is not None:
+                raise ValueError(
+                    f"JOURNAL_EXTRA_ALLOWED_ORIGINS entry {origin!r} is invalid: "
+                    f"{problem}. Each entry must be a bare origin such as "
+                    "'https://journal.example.com' or "
+                    "'https://journal.example.com:8443'."
+                )
+        return v
+
+    @property
+    def allowed_origins(self) -> frozenset[str]:
+        """Effective MCP Origin allowlist: built-in client origins plus operator extras."""
+        return DEFAULT_ALLOWED_ORIGINS | frozenset(self.extra_allowed_origins)
 
 
 class LLMConfig(BaseSettings):

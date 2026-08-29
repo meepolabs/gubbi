@@ -17,7 +17,7 @@ def _make_mode3_settings() -> Settings:
         auth=AuthConfig.model_construct(
             password_hash="",
             hydra_admin_url="http://hydra:4445",
-            hydra_public_issuer_url="https://auth-dev.gubbi.ai",
+            hydra_public_issuer_url="https://auth.example.com",
             hydra_public_url=None,
             api_key="",
             operator_email="",
@@ -97,7 +97,7 @@ class TestMode3ProtectedResourceMetadata:
         response = client.get("/.well-known/oauth-protected-resource/mcp")
         data = response.json()
         # AnyHttpUrl adds a trailing slash in its string representation.
-        assert data["authorization_servers"] == ["https://auth-dev.gubbi.ai/"]
+        assert data["authorization_servers"] == ["https://auth.example.com/"]
 
     async def test_rfc9728_compliant_fields(self, tmp_path: Path) -> None:
         """RFC 9728 requires 'resource' and 'authorization_servers' keys."""

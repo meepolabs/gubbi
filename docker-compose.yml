@@ -77,6 +77,11 @@ services:
       - JOURNAL_DB_MIGRATION_URL=postgresql://journal_admin:${JOURNAL_DB_ADMIN_PASSWORD}@postgres:5432/journal
       - JOURNAL_DATA_DIR=/app/journal
       - JOURNAL_TRANSPORT=streamable-http
+      # Comma-separated extra origins allowed on /mcp, on top of the
+      # built-in hosted MCP client origins. Set this to your own frontend
+      # or MCP hostname, e.g.
+      # JOURNAL_EXTRA_ALLOWED_ORIGINS=https://journal.example.com
+      - JOURNAL_EXTRA_ALLOWED_ORIGINS=${JOURNAL_EXTRA_ALLOWED_ORIGINS:-}
       - JOURNAL_TIMEZONE=${JOURNAL_TIMEZONE:-America/Los_Angeles}
       - JOURNAL_LOG_LEVEL=info
       - JOURNAL_LOG_DIR=/app/logs
@@ -91,7 +96,7 @@ services:
       - JOURNAL_ENCRYPTION_MASTER_KEY_V1
       # Hydra introspection (leave empty to disable Hydra auth path).
       # Mutually exclusive with JOURNAL_PASSWORD_HASH -- setting both fails startup.
-      # PUBLIC_ISSUER_URL is the external HTTPS issuer (auth-dev.gubbi.ai)
+      # PUBLIC_ISSUER_URL is the external HTTPS issuer (e.g. auth.example.com)
       # advertised to MCP clients; both must be set together for Mode 3.
       # PUBLIC_URL is the Hydra base used for JIT /userinfo calls (provisioning);
       # both must be set together -- see config.py _validate_deploy_shape.

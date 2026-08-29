@@ -143,7 +143,7 @@ class TestMode3HydraBacked:
     async def test_returns_none(self, tmp_path: Path) -> None:
         settings = _make_settings(
             hydra_admin_url="http://hydra:4445",
-            hydra_public_issuer_url="https://auth-dev.gubbi.ai",
+            hydra_public_issuer_url="https://auth.example.com",
         )
         app = FastAPI()
         storage = await _make_storage(tmp_path)
@@ -154,7 +154,7 @@ class TestMode3HydraBacked:
     async def test_only_protected_resource_route(self, tmp_path: Path) -> None:
         settings = _make_settings(
             hydra_admin_url="http://hydra:4445",
-            hydra_public_issuer_url="https://auth-dev.gubbi.ai",
+            hydra_public_issuer_url="https://auth.example.com",
         )
         app = FastAPI()
         storage = await _make_storage(tmp_path)

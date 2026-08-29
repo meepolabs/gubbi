@@ -26,15 +26,25 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-# -- URL overrides from existing env vars (hosted dev stack convention) --
-JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.gubbi.ai")
-JOURNAL_DEV_IDENTITY_URL: str = os.environ.get(
-    "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.gubbi.ai"
-)
-JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://mcp-dev.gubbi.ai")
+# -- Hosted-stack endpoints. No defaults: these tests only run against a
+# -- real deployment, whose hostnames belong to whoever runs them.
+JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "")
+JOURNAL_DEV_IDENTITY_URL: str = os.environ.get("JOURNAL_DEV_IDENTITY_URL", "")
+JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "")
 
 # Hydra admin port (optional; when set drives login/consent for full flow).
 JOURNAL_DEV_AUTH_ADMIN_URL: str | None = os.environ.get("JOURNAL_DEV_AUTH_ADMIN_URL", None)
+
+# The live-stack suite needs the opt-in flag AND all three endpoints; a
+# missing endpoint would otherwise turn into a request against a
+# relative URL and fail for the wrong reason.
+_LIVE_STACK_READY: bool = os.environ.get("JOURNAL_LIVE_STACK") == "1" and all(
+    (JOURNAL_DEV_AUTH_URL, JOURNAL_DEV_IDENTITY_URL, JOURNAL_DEV_MCP_URL)
+)
+_LIVE_STACK_SKIP_REASON = (
+    "requires a live hosted stack; enable with JOURNAL_LIVE_STACK=1 and set "
+    "JOURNAL_DEV_AUTH_URL, JOURNAL_DEV_IDENTITY_URL, JOURNAL_DEV_MCP_URL"
+)
 
 # -- Defaults used across helper modules --
 _EMAIL_PREFIX = "test-oauth-iso-"
@@ -354,10 +364,7 @@ async def call_mcp_tool(
 
 
 @pytest.mark.hosted_live
-@pytest.mark.skipif(
-    os.environ.get("JOURNAL_LIVE_STACK") != "1",
-    reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
-)
+@pytest.mark.skipif(not _LIVE_STACK_READY, reason=_LIVE_STACK_SKIP_REASON)
 async def test_anthropic_style_mcp_oauth_flow() -> None:
     """Anthropic-style profile.
 
@@ -373,7 +380,7 @@ async def test_anthropic_style_mcp_oauth_flow() -> None:
     admin_url = JOURNAL_DEV_AUTH_ADMIN_URL
     assert admin_url is not None, (
         "JOURNAL_DEV_AUTH_ADMIN_URL required for login/consent acceptance -- "
-        "tunnel Hydra admin port 4445 from the dev box and set this variable"
+        "tunnel Hydra admin port 4445 from the stack host and set this variable"
     )
 
     client = httpx.AsyncClient(
@@ -708,10 +715,7 @@ def _has_resource_wwwauth(resp: httpx.Response) -> bool:
 
 
 @pytest.mark.hosted_live
-@pytest.mark.skipif(
-    os.environ.get("JOURNAL_LIVE_STACK") != "1",
-    reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
-)
+@pytest.mark.skipif(not _LIVE_STACK_READY, reason=_LIVE_STACK_SKIP_REASON)
 async def test_openai_style_mcp_oauth_flow() -> None:
     """OpenAI-style profile.
 
@@ -724,7 +728,7 @@ async def test_openai_style_mcp_oauth_flow() -> None:
     """
     admin_url = JOURNAL_DEV_AUTH_ADMIN_URL
     assert admin_url is not None, (
-        "JOURNAL_DEV_AUTH_ADMIN_URL required -- tunnel Hydra admin port 4445 from the dev box"
+        "JOURNAL_DEV_AUTH_ADMIN_URL required -- tunnel Hydra admin port 4445 from the stack host"
     )
 
     client = httpx.AsyncClient(

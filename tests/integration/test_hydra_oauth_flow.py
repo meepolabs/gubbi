@@ -1,4 +1,4 @@
-"""Hosted Mode-3 OAuth E2E tests against the live dev stack.
+"""Hosted Mode-3 OAuth E2E tests against a live hosted stack.
 
 Flows: Hydra DCR + Kratos identity creation + PKCE/S256 auth request,
 followed by login/consent acceptance (via Hydra admin port when reachable),
@@ -25,16 +25,26 @@ from urllib.parse import parse_qs, urlparse
 import httpx
 import pytest
 
-# -- URL overrides via env vars (defaults point at the dev stack) --
-JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "https://auth-dev.gubbi.ai")
-JOURNAL_DEV_IDENTITY_URL: str = os.environ.get(
-    "JOURNAL_DEV_IDENTITY_URL", "https://identity-dev.gubbi.ai"
-)
-JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "https://mcp-dev.gubbi.ai")
+# -- Hosted-stack endpoints. No defaults: these tests only run against a
+# -- real deployment, whose hostnames belong to whoever runs them.
+JOURNAL_DEV_AUTH_URL: str = os.environ.get("JOURNAL_DEV_AUTH_URL", "")
+JOURNAL_DEV_IDENTITY_URL: str = os.environ.get("JOURNAL_DEV_IDENTITY_URL", "")
+JOURNAL_DEV_MCP_URL: str = os.environ.get("JOURNAL_DEV_MCP_URL", "")
 
-# Optionally override the Hydra admin port (4445, loopback on the dev box).
+# Optionally override the Hydra admin port (4445, loopback on the host).
 # When set, drives login/consent acceptance and completes the full flow.
 JOURNAL_DEV_AUTH_ADMIN_URL: str | None = os.environ.get("JOURNAL_DEV_AUTH_ADMIN_URL", None)
+
+# The live-stack suite needs the opt-in flag AND all three endpoints; a
+# missing endpoint would otherwise turn into a request against a
+# relative URL and fail for the wrong reason.
+_LIVE_STACK_READY: bool = os.environ.get("JOURNAL_LIVE_STACK") == "1" and all(
+    (JOURNAL_DEV_AUTH_URL, JOURNAL_DEV_IDENTITY_URL, JOURNAL_DEV_MCP_URL)
+)
+_LIVE_STACK_SKIP_REASON = (
+    "requires a live hosted stack; enable with JOURNAL_LIVE_STACK=1 and set "
+    "JOURNAL_DEV_AUTH_URL, JOURNAL_DEV_IDENTITY_URL, JOURNAL_DEV_MCP_URL"
+)
 
 # -- Test constants --
 EMAIL_PREFIX = "test-hydra-oauth-"  # cleanup API filters on this
@@ -74,17 +84,14 @@ def _skip_if_no_admin_url() -> None:
         pytest.skip(
             "JOURNAL_DEV_AUTH_ADMIN_URL not set -- skipping login/consent "
             "acceptance and token exchange (admin port 4445 needed). "
-            "Set to http://localhost:4445 with SSH tunnel from the dev box."
+            "Set to http://localhost:4445 with an SSH tunnel from the stack host."
         )
 
 
 @pytest.mark.hosted_live
-@pytest.mark.skipif(
-    os.environ.get("JOURNAL_LIVE_STACK") != "1",
-    reason="requires live dev stack (auth-dev.gubbi.ai + identity-dev.gubbi.ai + mcp-dev.gubbi.ai); enable with JOURNAL_LIVE_STACK=1",
-)
+@pytest.mark.skipif(not _LIVE_STACK_READY, reason=_LIVE_STACK_SKIP_REASON)
 class TestHydraOauthFlow:
-    """Hosted OAuth flow -- live dev stack.
+    """Hosted OAuth flow -- live hosted stack.
 
     The test class is skipped unless JOURNAL_LIVE_STACK=1.
 
@@ -96,7 +103,7 @@ class TestHydraOauthFlow:
     """
 
     async def test_full_flow(self) -> None:
-        """End-to-end Mode-3 hosted OAuth flow against live dev stack."""
+        """End-to-end Mode-3 hosted OAuth flow against a live hosted stack."""
         client = httpx.AsyncClient(follow_redirects=False, timeout=_REQUEST_TIMEOUT)
         _access_token = ""  # set in token-exchange block below
 
