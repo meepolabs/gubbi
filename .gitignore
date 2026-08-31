@@ -38,5 +38,6 @@ Thumbs.db
 
 /scripts/*
 !/scripts/dump_openapi.py
+!/scripts/dump_period_fixtures.py
 *.dump
 *.dmp

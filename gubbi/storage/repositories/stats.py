@@ -20,7 +20,7 @@ from datetime import date as date_cls
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
-from gubbi.tools.context import _resolve_period
+from gubbi.tools.context import resolve_period
 from gubbi.validation import local_today
 
 if TYPE_CHECKING:
@@ -71,7 +71,7 @@ def user_week_bounds(timezone: str) -> tuple[date_cls, date_cls]:
     same fallback ``local_today`` applies).
     """
     today = date_cls.fromisoformat(local_today(timezone))
-    date_from, date_to, _label = _resolve_period("this-week", today=today)
+    date_from, date_to, _label = resolve_period("this-week", today=today)
     return date_cls.fromisoformat(date_from), date_cls.fromisoformat(date_to)
 
 

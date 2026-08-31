@@ -34,7 +34,7 @@ from gubbi.tools.errors import validation_error
 from gubbi.tools.response_size import _report_oversized, check_response_size
 from gubbi.validation import local_today
 
-__all__: list[str] = ["register"]
+__all__: list[str] = ["register", "resolve_period"]
 
 logger = structlog.get_logger(__name__)
 
@@ -51,7 +51,7 @@ def _normalize_period(period: str) -> str:
     return re.sub(r"[\s_]+", "-", period.strip().lower())
 
 
-def _resolve_period(period: str, today: date) -> tuple[str, str, str]:
+def resolve_period(period: str, today: date) -> tuple[str, str, str]:
     """Resolve a period string to (date_from, date_to, label).
 
     Supports: 'YYYY', 'YYYY-MM', 'YYYY-WNN',
@@ -155,7 +155,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
 
         # This week's timeline
         _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
-        date_from, date_to, label = _resolve_period("this-week", today=_today)
+        date_from, date_to, label = resolve_period("this-week", today=_today)
 
         # Encode before acquiring a DB connection -- keeps the pool free during inference
         key_facts_embedding: list[float] | None = None
@@ -313,7 +313,7 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
         """
         try:
             _today = date.fromisoformat(local_today(app_ctx.settings.timezone))
-            date_from, date_to, label = _resolve_period(period, today=_today)
+            date_from, date_to, label = resolve_period(period, today=_today)
         except ValueError as e:
             return validation_error(str(e))
         limit = max(1, min(limit, MAX_TIMELINE_ENTRIES))

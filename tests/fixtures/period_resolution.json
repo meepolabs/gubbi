@@ -1,0 +1,313 @@
+{
+	"_comment": [
+		"GENERATED -- do not hand-edit. Every row is the literal return of the Python",
+		"resolver gubbi.tools.context._resolve_period(period, today), which is the",
+		"authority for the period vocabulary published in gubbi/docs/tools-reference.md",
+		"on the journal_timeline `period` parameter row (today, this-week, last-week,",
+		"this-month, last-month, YYYY, YYYY-MM, YYYY-WNN).",
+		"",
+		"This fixture pins the WEB side only: a change to the Python resolver is UNCAUGHT",
+		"here until the Python-side drift test that regenerates these bytes and diffs them",
+		"exists. Until then a green web suite proves the web has not drifted from this",
+		"snapshot, not that the snapshot still matches Python.",
+		"",
+		"`label` is recorded for completeness but is presentation, which each surface owns",
+		"independently -- the web renders its own wording and never asserts this field.",
+		"",
+		"Two inputs are deliberately absent because the resolver raises on them today:",
+		"'9999-12' (a valid month rejected -- the December branch builds date(10000, 1, 1))",
+		"and '9999-W52' (raises OverflowError rather than ValueError, so it escapes the",
+		"resolver's own handlers). Both are Python-side defects tracked separately; adding",
+		"them would pin bugs as contract."
+	],
+	"rows": [
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-03-16",
+			"date_to": "2026-03-22",
+			"label": "Week 12, 2026",
+			"period": "  2026-W12  ",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "0000",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "0099-01-01",
+			"date_to": "0099-12-31",
+			"label": "0099",
+			"period": "0099",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "1000-01-01",
+			"date_to": "1000-12-31",
+			"label": "1000",
+			"period": "1000",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "0999-12-30",
+			"date_to": "1000-01-05",
+			"label": "Week 1, 1000",
+			"period": "1000-W01",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "202",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2020-12-28",
+			"date_to": "2021-01-03",
+			"label": "Week 53, 2020",
+			"period": "2020-W53",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2021-01-04",
+			"date_to": "2021-01-10",
+			"label": "Week 1, 2021",
+			"period": "2021-W01",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2024-02-01",
+			"date_to": "2024-02-29",
+			"label": "February 2024",
+			"period": "2024-02",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2024-01-01",
+			"date_to": "2024-01-07",
+			"label": "Week 1, 2024",
+			"period": "2024-W01",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2025-12-22",
+			"date_to": "2025-12-28",
+			"label": "Week 52, 2025",
+			"period": "2025-W52",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "2025-W53",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-01-01",
+			"date_to": "2026-12-31",
+			"label": "2026",
+			"period": "2026",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "2026-00",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-02-01",
+			"date_to": "2026-02-28",
+			"label": "February 2026",
+			"period": "2026-02",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-03-01",
+			"date_to": "2026-03-31",
+			"label": "March 2026",
+			"period": "2026-03",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-12-01",
+			"date_to": "2026-12-31",
+			"label": "December 2026",
+			"period": "2026-12",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "2026-13",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "2026-W00",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2025-12-29",
+			"date_to": "2026-01-04",
+			"label": "Week 1, 2026",
+			"period": "2026-W01",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-03-16",
+			"date_to": "2026-03-22",
+			"label": "Week 12, 2026",
+			"period": "2026-W012",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2025-12-29",
+			"date_to": "2026-01-04",
+			"label": "Week 1, 2026",
+			"period": "2026-W1",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-03-16",
+			"date_to": "2026-03-22",
+			"label": "Week 12, 2026",
+			"period": "2026-W12",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-12-28",
+			"date_to": "2027-01-03",
+			"label": "Week 53, 2026",
+			"period": "2026-W53",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "2026-W54",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-03-16",
+			"date_to": "2026-03-22",
+			"label": "Week 12, 2026",
+			"period": "2026_w12",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "9999-01-01",
+			"date_to": "9999-12-31",
+			"label": "9999",
+			"period": "9999",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "abc",
+			"rejected": true,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2025-12-01",
+			"date_to": "2025-12-31",
+			"label": "December 2025",
+			"period": "last-month",
+			"rejected": false,
+			"today": "2026-01-01"
+		},
+		{
+			"date_from": "2026-05-01",
+			"date_to": "2026-05-31",
+			"label": "May 2026",
+			"period": "last-month",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2025-12-29",
+			"date_to": "2026-01-04",
+			"label": "Week 1, 2025",
+			"period": "last-week",
+			"rejected": false,
+			"today": "2026-01-05"
+		},
+		{
+			"date_from": "2026-06-01",
+			"date_to": "2026-06-07",
+			"label": "Week 23, 2026",
+			"period": "last-week",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-06-01",
+			"date_to": "2026-06-30",
+			"label": "June 2026",
+			"period": "this-month",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-06-08",
+			"date_to": "2026-06-14",
+			"label": "Week 24, 2026",
+			"period": "this-week",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "2026-06-11",
+			"date_to": "2026-06-11",
+			"label": "Today (2026-06-11)",
+			"period": "today",
+			"rejected": false,
+			"today": "2026-06-11"
+		}
+	]
+}
