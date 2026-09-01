@@ -12,13 +12,7 @@
 		"Regenerate BOTH from this repo's generator whenever the resolver changes.",
 		"",
 		"`label` is recorded for completeness but is presentation, which each surface owns",
-		"independently -- the web renders its own wording and never asserts this field.",
-		"",
-		"Two inputs are deliberately absent because the resolver raises on them today:",
-		"'9999-12' (a valid month rejected -- the December branch builds date(10000, 1, 1))",
-		"and '9999-W52' (raises OverflowError rather than ValueError, so it escapes the",
-		"resolver's own handlers). Both are Python-side defects tracked separately; adding",
-		"them would pin bugs as contract."
+		"independently -- the web renders its own wording and never asserts this field."
 	],
 	"rows": [
 		{
@@ -243,6 +237,22 @@
 			"label": "9999",
 			"period": "9999",
 			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": "9999-12-01",
+			"date_to": "9999-12-31",
+			"label": "December 9999",
+			"period": "9999-12",
+			"rejected": false,
+			"today": "2026-06-11"
+		},
+		{
+			"date_from": null,
+			"date_to": null,
+			"label": null,
+			"period": "9999-W52",
+			"rejected": true,
 			"today": "2026-06-11"
 		},
 		{

@@ -42,7 +42,7 @@ logger = structlog.get_logger(__name__)
 def _month_end(year: int, month: int) -> date:
     """Return the last day of the given month."""
     if month == 12:
-        return date(year + 1, 1, 1) - timedelta(days=1)
+        return date(year, 12, 31)
     return date(year, month + 1, 1) - timedelta(days=1)
 
 
@@ -60,6 +60,10 @@ def resolve_period(period: str, today: date) -> tuple[str, str, str]:
 
     today must be supplied by the caller (computed from the configured timezone)
     so that period boundaries reflect the user's local date rather than server UTC.
+
+    Raises:
+        ValueError: for any period that cannot be resolved to a representable
+            date range, including one whose resolved end would exceed `date.max`.
     """
     period = _normalize_period(period)
 
@@ -114,7 +118,7 @@ def resolve_period(period: str, today: date) -> tuple[str, str, str]:
                 start = date.fromisocalendar(year, week, 1)
                 end = start + timedelta(days=6)
                 return start.isoformat(), end.isoformat(), f"Week {week}, {year}"
-            except ValueError:
+            except (ValueError, OverflowError):
                 pass
 
     msg = (

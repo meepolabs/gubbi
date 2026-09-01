@@ -40,18 +40,11 @@ FIXTURE_COMMENT: list[str] = [
     "",
     "`label` is recorded for completeness but is presentation, which each surface owns",
     "independently -- the web renders its own wording and never asserts this field.",
-    "",
-    "Two inputs are deliberately absent because the resolver raises on them today:",
-    "'9999-12' (a valid month rejected -- the December branch builds date(10000, 1, 1))",
-    "and '9999-W52' (raises OverflowError rather than ValueError, so it escapes the",
-    "resolver's own handlers). Both are Python-side defects tracked separately; adding",
-    "them would pin bugs as contract.",
 ]
 
 _DEFAULT_TODAY = "2026-06-11"
 
-# Periods probed against a single reference date. Deliberately excluded:
-# '9999-12' and '9999-W52' -- see the note in FIXTURE_COMMENT.
+# Periods probed against a single reference date.
 _SINGLE_DATE_PERIODS: tuple[str, ...] = (
     "today",
     "this-week",
@@ -70,6 +63,7 @@ _SINGLE_DATE_PERIODS: tuple[str, ...] = (
     "2026-12",
     "2026-00",
     "2026-13",
+    "9999-12",
     "2026-W01",
     "2026-W12",
     "2026-W1",
@@ -83,6 +77,7 @@ _SINGLE_DATE_PERIODS: tuple[str, ...] = (
     "2025-W52",
     "2025-W53",
     "1000-W01",
+    "9999-W52",
     "2026_w12",
     "  2026-W12  ",
 )

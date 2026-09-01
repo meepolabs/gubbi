@@ -24,7 +24,7 @@ View all journal activity within a time period.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| `period` | string | yes | Time window. Accepts: `today`, `this-week`, `last-week`, `this-month`, `last-month`, `YYYY` (e.g. `2026`), `YYYY-MM` (e.g. `2026-03`), `YYYY-WNN` (e.g. `2026-W14`) |
+| `period` | string | yes | Time window. Accepts: `today`, `this-week`, `last-week`, `this-month`, `last-month`, `YYYY` (e.g. `2026`), `YYYY-MM` (e.g. `2026-03`), `YYYY-WNN` (e.g. `2026-W14`). Every well-formed period whose full date range falls within four-digit civil years (0001-9999) resolves; anything else -- malformed syntax, an ISO week that does not exist for its year, or a week whose range would cross into year 10000 -- is rejected with the standard invalid-period error. |
 
 **Returns:** Chronological list of all entries and conversations updated within the period. Period boundaries respect the configured timezone.
 

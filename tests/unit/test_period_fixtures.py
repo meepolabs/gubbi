@@ -61,14 +61,16 @@ def test_fixture_covers_both_accepted_and_rejected_inputs() -> None:
     assert any(not row["rejected"] for row in rows)
 
 
-def test_fixture_excludes_inputs_the_resolver_raises_on() -> None:
-    """The two known-defective inputs stay out of the fixture.
+def test_fixture_includes_year_boundary_inputs() -> None:
+    """The year-9999 boundary cases stay in the matrix.
 
-    Pinning them would enshrine the defect as contract; their absence means a
-    later fix surfaces as a regeneration crash instead.
+    These inputs exercise the resolver's upper civil-year boundary directly:
+    one accepted (the last representable December), one rejected (a week whose
+    range would cross into year 10000). Their presence guards against the
+    boundary logic regressing back out of the probed matrix.
     """
     rows = json.loads(FIXTURE_PATH.read_text(encoding="ascii"))["rows"]
-    periods = {row["period"] for row in rows}
+    by_period = {row["period"]: row for row in rows}
 
-    assert "9999-12" not in periods
-    assert "9999-W52" not in periods
+    assert not by_period["9999-12"]["rejected"]
+    assert by_period["9999-W52"]["rejected"]
