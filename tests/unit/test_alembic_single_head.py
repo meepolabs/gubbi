@@ -26,7 +26,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0002_add_onboarding_completed_at"
+_EXPECTED_HEAD = "0003_audit_log_app_dedup_read"
 
 
 def _alembic_config() -> Config:

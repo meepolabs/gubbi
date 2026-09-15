@@ -173,6 +173,43 @@ jobs:
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
 
+      # The audit_log dedup repair / invariant tests shell out to `psql` and to
+      # deployment/scripts/verify-db-invariants.sh, and they FAIL rather than skip
+      # when psql is absent -- so the client is a job prerequisite, not an extra.
+      # It is installed from PGDG and pinned to major 17 to match the
+      # pgvector/pgvector:pg17 service: the runner image ships whatever client
+      # major it happens to ship, and a client older than the server can fail on
+      # newer catalog output. tests/unit/test_ci_workflow_contract.py asserts this
+      # step keeps existing with the same pin, so runner-image drift cannot remove
+      # it silently.
+      - name: Install PostgreSQL 17 client
+        env:
+          PG_MAJOR: "17"
+        run: |
+          set -euo pipefail
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo curl -sSfL -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt $(lsb_release -cs)-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends "postgresql-client-${PG_MAJOR}"
+          # PGDG installs to a versioned dir; put it ahead of the runner image's
+          # own client so `psql` on PATH is the pinned major for every later step.
+          echo "/usr/lib/postgresql/${PG_MAJOR}/bin" >> "$GITHUB_PATH"
+
+      - name: Verify psql major matches the pin
+        env:
+          PG_MAJOR: "17"
+        run: |
+          set -euo pipefail
+          psql --version
+          actual=$(psql --version | sed -E 's/^psql \(PostgreSQL\) ([0-9]+).*/\1/')
+          if [[ "${actual}" != "${PG_MAJOR}" ]]; then
+            echo "psql major is ${actual}, expected ${PG_MAJOR}" >&2
+            exit 1
+          fi
+
       - name: Wait for Postgres to accept connections
         run: |
           for i in {1..30}; do

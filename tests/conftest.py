@@ -246,7 +246,11 @@ def cipher() -> ContentCipher:
 _DEFAULT_RLS_DB = "postgresql://journal:testpass@localhost:5433/journal_rls_test"
 RLS_BOOTSTRAP_URL = os.environ.get("TEST_DATABASE_URL_RLS", _DEFAULT_RLS_DB)
 
-_RLS_APP_PASSWORD = "testpass_app"
+# Exported alongside RLS_BOOTSTRAP_URL: a test that opens its own journal_app
+# connection must reuse this credential rather than assign a fresh one. Roles are
+# cluster-global, so rotating the password invalidates every session-scoped pool
+# in the run.
+RLS_APP_PASSWORD = "testpass_app"
 _RLS_ADMIN_PASSWORD = "testpass_admin"
 _RLS_OPERATOR_EMAIL = "operator@test.local"
 
@@ -326,14 +330,14 @@ async def _set_role_passwords(bootstrap_dsn: str) -> None:
     env-sourced passwords is forced to introduce proper escaping. Using ``raise``
     (not ``assert``) so ``python -O`` cannot strip the check.
     """
-    if "'" in _RLS_APP_PASSWORD or "'" in _RLS_ADMIN_PASSWORD:
+    if "'" in RLS_APP_PASSWORD or "'" in _RLS_ADMIN_PASSWORD:
         raise ValueError(
             "RLS test passwords must not contain single-quotes -- "
             "see _set_role_passwords docstring for the interpolation-safety contract"
         )
     conn = await asyncpg.connect(bootstrap_dsn, timeout=5)
     try:
-        await conn.execute(f"ALTER ROLE journal_app WITH PASSWORD '{_RLS_APP_PASSWORD}'")
+        await conn.execute(f"ALTER ROLE journal_app WITH PASSWORD '{RLS_APP_PASSWORD}'")
         await conn.execute(f"ALTER ROLE journal_admin WITH PASSWORD '{_RLS_ADMIN_PASSWORD}'")
     finally:
         await conn.close()
@@ -417,7 +421,7 @@ def _rls_derived_dsn(role: str, password: str) -> str:
     return _rewrite_dsn(RLS_BOOTSTRAP_URL, user=role, password=password)
 
 
-RLS_APP_URL = _rls_derived_dsn("journal_app", _RLS_APP_PASSWORD)
+RLS_APP_URL = _rls_derived_dsn("journal_app", RLS_APP_PASSWORD)
 RLS_ADMIN_URL = _rls_derived_dsn("journal_admin", _RLS_ADMIN_PASSWORD)
 
 

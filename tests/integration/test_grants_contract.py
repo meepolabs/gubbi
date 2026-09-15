@@ -74,6 +74,10 @@ EXPECTED_GRANTS[("journal_admin", "users", "UPDATE")] = True
 EXPECTED_GRANTS[("journal_admin", "users", "DELETE")] = True
 
 # audit_log: append-only least-privilege (gubbi migration 0010)
+# Table-wide SELECT stays denied. journal_app's read capability is
+# column-level on the five dedup conflict-target columns only, which
+# has_table_privilege does NOT report -- that contract is asserted in
+# tests/integration/test_audit_log_app_dedup_read.py.
 EXPECTED_GRANTS[("journal_app", "audit_log", "SELECT")] = False
 EXPECTED_GRANTS[("journal_app", "audit_log", "INSERT")] = True
 EXPECTED_GRANTS[("journal_app", "audit_log", "UPDATE")] = False

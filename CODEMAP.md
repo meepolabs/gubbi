@@ -109,7 +109,10 @@ Six tenant tables (RLS-enforced via `journal_app` role) + audit log
 - `messages` -- per-turn rows; content encrypted
 - `entry_embeddings` -- pgvector(384) ON DELETE CASCADE
 - `users` -- one row per tenant; partial UNIQUE on email WHERE NOT deleted
-- `audit_log` -- append-only; UPDATE/DELETE blocked by trigger
+- `audit_log` -- append-only; UPDATE/DELETE blocked by trigger. `journal_app`
+  has INSERT plus column-level SELECT on the five columns the deduped INSERT's
+  ON CONFLICT clause reads, scoped to its own rows by a self-only policy; no
+  table-wide SELECT
 
 Five column pairs are AES-256-GCM at the app layer
 (`*_encrypted BYTEA NOT NULL`, `*_nonce BYTEA NOT NULL CHECK(=12)`).

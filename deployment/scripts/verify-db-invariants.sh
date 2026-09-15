@@ -20,9 +20,24 @@ set -euo pipefail
 #   - 3 audit_log triggers (no_update, no_delete, admin_no_user_actor)
 #   - RLS enabled + force-RLS on every gubbi tenant table
 #   - each gubbi table's expected named policy exists, scoped TO journal_app
+#   - audit_log's SELECT-applicable policy set is EXACTLY one permissive policy
+#     named audit_log_app_select_self_only, TO journal_app, whose USING
+#     predicate and the INSERT policy's WITH CHECK each match the literal
+#     self-only contract and mirror each other. A second permissive SELECT (or
+#     FOR ALL) policy would OR-widen the read surface, so existence alone is not
+#     enough -- and applicability is evaluated through role membership, so a
+#     policy scoped TO PUBLIC or TO a parent role of journal_app is part of the
+#     matched set.
 #   - role grants per gubbi table match the audited end-state, INCLUDING:
 #       * journal_app on users     -> SELECT, UPDATE only (no INSERT/DELETE)
-#       * journal_app on audit_log -> INSERT only
+#       * journal_app on audit_log -> INSERT, plus column-level SELECT on
+#         EXACTLY actor_id, target_kind, target_id, action, metadata (the
+#         five columns the deduped audit INSERT's ON CONFLICT inference
+#         clause reads). Table-wide SELECT stays denied; every other column
+#         is asserted unreadable, derived from the catalog. EFFECTIVE exposure
+#         is checked too: any SELECT granted to PUBLIC or to a role whose
+#         privileges journal_app holds is reported with its grantee, since no
+#         REVOKE naming journal_app clears it.
 #       * journal_admin on audit_log -> SELECT + INSERT (explicit grants);
 #         NO explicit UPDATE/DELETE in pg_class.relacl. Ownership-implicit
 #         UPDATE/DELETE is NOT blocked at the ACL level (cannot be --
@@ -131,6 +146,7 @@ done
 # ---------------------------------------------------------------------------
 declare -a POLICY_PAIRS=(
     "audit_log:audit_log_app_insert_self_only"
+    "audit_log:audit_log_app_select_self_only"
     "conversations:tenant_isolation"
     "entries:tenant_isolation"
     "entry_embeddings:tenant_isolation"
@@ -146,6 +162,103 @@ for pair in "${POLICY_PAIRS[@]}"; do
     assert_true "policy_${table}.${policy}" \
         "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='${table}' AND policyname='${policy}' AND roles::text='{journal_app}')"
 done
+
+# ---------------------------------------------------------------------------
+# 5b. audit_log SELECT policy set -- EXACT, not just present.
+#
+# A permissive policy is OR-ed with every other permissive policy for the same
+# command, so "the expected policy exists" says nothing about how wide the read
+# surface actually is: a second permissive SELECT (or FOR ALL) policy on
+# audit_log widens it regardless. These checks pin the whole applicable set:
+#   * exactly one policy applies to SELECT for journal_app, and it is the
+#     expected name
+#   * it is PERMISSIVE (polpermissive) -- a RESTRICTIVE policy of the same name
+#     would AND instead of OR and silently deny the dedup read
+#   * its USING predicate AND the INSERT policy's WITH CHECK each match the
+#     literal self-only contract, pinned independently, and mirror each other
+#
+# APPLICABILITY IS EFFECTIVE, NOT DIRECT. A policy's polroles is matched against
+# every role journal_app has the privileges of, not only journal_app itself:
+# measured on PostgreSQL 17, a policy scoped TO a parent role of journal_app
+# applies to journal_app even when journal_app is NOINHERIT. polroles = {0} is
+# TO PUBLIC, which applies to every role; pg_has_role() does not accept oid 0,
+# so PUBLIC gets its own arm of the predicate.
+# ---------------------------------------------------------------------------
+AUDIT_LOG_SELECT_POLICY=audit_log_app_select_self_only
+AUDIT_LOG_INSERT_POLICY=audit_log_app_insert_self_only
+
+# The self-only contract as written in the migration and in grants.sql. Pinned
+# literally: comparing the two policies only to EACH OTHER passes a mutation
+# that widens both to `true`, which keeps them mirrored while exposing every row.
+AUDIT_LOG_SELF_ONLY_CONTRACT="actor_id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')) AND actor_id <> '' AND actor_type = 'user'"
+
+# 'r' = SELECT, '*' = ALL. Both apply to a SELECT statement. A policy reaches
+# journal_app if any of its polroles is PUBLIC (oid 0) or is a role whose
+# privileges journal_app holds -- itself included.
+_audit_log_select_policies="
+    SELECT polname
+    FROM pg_policy p
+    WHERE p.polrelid = 'public.audit_log'::regclass
+      AND p.polcmd IN ('r', '*')
+      AND EXISTS (
+          SELECT 1 FROM unnest(p.polroles) AS r(oid)
+          WHERE r.oid = 0 OR pg_has_role('journal_app', r.oid, 'USAGE')
+      )
+"
+
+assert_true "policy_set audit_log: exactly one SELECT-applicable policy for journal_app" \
+    "SELECT (SELECT COUNT(*) FROM (${_audit_log_select_policies}) s) = 1"
+
+assert_true "policy_set audit_log: the SELECT-applicable policy is ${AUDIT_LOG_SELECT_POLICY}" \
+    "SELECT EXISTS (
+        SELECT 1 FROM (${_audit_log_select_policies}) s
+        WHERE s.polname = '${AUDIT_LOG_SELECT_POLICY}'
+     )"
+
+assert_true "policy_cmd audit_log.${AUDIT_LOG_SELECT_POLICY}: polcmd is SELECT" \
+    "SELECT polcmd = 'r' FROM pg_policy
+     WHERE polrelid = 'public.audit_log'::regclass
+       AND polname = '${AUDIT_LOG_SELECT_POLICY}'"
+
+assert_true "policy_permissive audit_log.${AUDIT_LOG_SELECT_POLICY}" \
+    "SELECT polpermissive FROM pg_policy
+     WHERE polrelid = 'public.audit_log'::regclass
+       AND polname = '${AUDIT_LOG_SELECT_POLICY}'"
+
+assert_true "policy_roles audit_log.${AUDIT_LOG_SELECT_POLICY}: journal_app only" \
+    "SELECT ARRAY(SELECT rolname::text FROM pg_roles WHERE oid = ANY (polroles) ORDER BY rolname)
+            = ARRAY['journal_app']
+     FROM pg_policy
+     WHERE polrelid = 'public.audit_log'::regclass
+       AND polname = '${AUDIT_LOG_SELECT_POLICY}'"
+
+# pg_get_expr reprints a USING and a WITH CHECK of the same expression in forms
+# that differ cosmetically, so every side is normalized before comparison:
+# whitespace, ::text casts, parens and the subquery output alias pg adds
+# (AS "nullif") are stripped.
+_norm() {
+    printf "%s" "regexp_replace(regexp_replace(coalesce(${1}, ''), '\\s|::text|[()]', '', 'g'), 'AS\"nullif\"', '', 'g')"
+}
+
+_norm_policy_expr() {
+    local column=$1 policy=$2
+    _norm "(SELECT pg_get_expr(${column}, polrelid) FROM pg_policy
+            WHERE polrelid = 'public.audit_log'::regclass AND polname = '${policy}')"
+}
+
+_norm_contract=$(_norm "'${AUDIT_LOG_SELF_ONLY_CONTRACT//\'/\'\'}'")
+
+# Each predicate is pinned to the literal contract on its own, so widening BOTH
+# to `true` together -- which keeps the mirror check below green -- still fails.
+assert_true "policy_predicate audit_log.${AUDIT_LOG_SELECT_POLICY}: USING matches the self-only contract" \
+    "SELECT $(_norm_policy_expr polqual "${AUDIT_LOG_SELECT_POLICY}") = ${_norm_contract}"
+
+assert_true "policy_predicate audit_log.${AUDIT_LOG_INSERT_POLICY}: WITH CHECK matches the self-only contract" \
+    "SELECT $(_norm_policy_expr polwithcheck "${AUDIT_LOG_INSERT_POLICY}") = ${_norm_contract}"
+
+assert_true "policy_predicate audit_log.${AUDIT_LOG_SELECT_POLICY}: mirrors ${AUDIT_LOG_INSERT_POLICY}" \
+    "SELECT $(_norm_policy_expr polqual "${AUDIT_LOG_SELECT_POLICY}") =
+            $(_norm_policy_expr polwithcheck "${AUDIT_LOG_INSERT_POLICY}")"
 
 # ---------------------------------------------------------------------------
 # 6. Triggers (3 on audit_log)
@@ -227,6 +340,66 @@ assert_priv journal_app audit_log INSERT t
 for p in SELECT UPDATE DELETE; do
     assert_priv journal_app audit_log "$p" f
 done
+
+# audit_log: journal_app holds column-level SELECT on EXACTLY the five columns
+# the deduped audit INSERT's ON CONFLICT inference clause reads. Table-wide
+# SELECT is asserted absent above; these two checks pin the column set from
+# both directions so neither a missing grant nor a broadened one passes.
+# has_column_privilege is the right tool here: journal_app does not own the
+# table, so no ownership-implicit privilege can mask ACL drift.
+AUDIT_LOG_APP_SELECT_COLUMNS=(actor_id target_kind target_id action metadata)
+for c in "${AUDIT_LOG_APP_SELECT_COLUMNS[@]}"; do
+    assert_true "column_grant audit_log.${c}: journal_app SELECT" \
+        "SELECT has_column_privilege('journal_app', 'public.audit_log', '${c}', 'SELECT')"
+done
+# Every other audit_log column must be denied. Derived from the catalog rather
+# than hardcoded so a column added by a future migration is caught here.
+audit_log_extra_readable=$(q "
+    SELECT COALESCE(string_agg(column_name, ',' ORDER BY column_name), '')
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'audit_log'
+      AND column_name NOT IN ('actor_id','target_kind','target_id','action','metadata')
+      AND has_column_privilege('journal_app', 'public.audit_log', column_name, 'SELECT')
+")
+if [[ -n "${audit_log_extra_readable}" ]]; then
+    fail "column_grant audit_log: journal_app can read columns outside the dedup conflict target: ${audit_log_extra_readable}"
+fi
+
+# EFFECTIVE exposure, attributed to its grantee. has_table_privilege /
+# has_column_privilege above already fold in inherited roles and PUBLIC, so they
+# detect that exposure exists -- but they cannot say WHERE it came from, and a
+# table-level check reporting 'f' while a parent role holds column SELECT leaves
+# the operator with a column list and no grantee. This walks the ACLs directly:
+# grantee 0 is PUBLIC (which every role holds, and which pg_has_role does not
+# accept as an argument), and any other grantee whose privileges journal_app
+# holds reaches journal_app -- measured on PostgreSQL 17, a column SELECT granted
+# to a parent role of journal_app survives every REVOKE naming journal_app.
+audit_log_inherited_select=$(q "
+    SELECT COALESCE(string_agg(DISTINCT descr, ', ' ORDER BY descr), '')
+    FROM (
+        SELECT format('table SELECT via %s',
+                      CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                           ELSE a.grantee::regrole::text END) AS descr
+        FROM pg_class c, aclexplode(c.relacl) AS a
+        WHERE c.oid = 'public.audit_log'::regclass
+          AND a.privilege_type = 'SELECT'
+          AND a.grantee <> 'journal_app'::regrole
+          AND (a.grantee = 0 OR pg_has_role('journal_app', a.grantee, 'USAGE'))
+        UNION ALL
+        SELECT format('column SELECT on %I via %s', at.attname,
+                      CASE WHEN a.grantee = 0 THEN 'PUBLIC'
+                           ELSE a.grantee::regrole::text END) AS descr
+        FROM pg_attribute at, aclexplode(at.attacl) AS a
+        WHERE at.attrelid = 'public.audit_log'::regclass
+          AND at.attnum > 0
+          AND a.privilege_type = 'SELECT'
+          AND a.grantee <> 'journal_app'::regrole
+          AND (a.grantee = 0 OR pg_has_role('journal_app', a.grantee, 'USAGE'))
+    ) s
+")
+if [[ -n "${audit_log_inherited_select}" ]]; then
+    fail "inherited_grant audit_log: journal_app reaches SELECT through PUBLIC or an inherited role: ${audit_log_inherited_select}"
+fi
 
 # audit_log: journal_admin has SELECT + INSERT only.
 # SELECT/INSERT pass via ownership AND via explicit grants in grants.sql /
@@ -356,7 +529,7 @@ assert_true "default_privs_tables_journal_admin_all" \
 # Report
 # ---------------------------------------------------------------------------
 if [[ ${PASS} == "true" && ${#FAILURES[@]} -eq 0 ]]; then
-    echo "verify-db-invariants: OK -- 8 gubbi tables, 9 policies, 3 triggers, otel_ro role, alembic_version revocation, default-priv shape all match audited baseline"
+    echo "verify-db-invariants: OK -- 8 gubbi tables, 10 policies, exact audit_log SELECT policy set (effective through PUBLIC + inherited roles), 3 triggers, audit_log dedup column grants, otel_ro role, alembic_version revocation, default-priv shape all match audited baseline"
     exit 0
 fi
 
