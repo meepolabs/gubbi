@@ -34,6 +34,7 @@ from opentelemetry import trace
 from gubbi.auth.scope import SCOPE_GRANTS
 from gubbi.auth_context import current_token_scopes
 from gubbi.telemetry.attrs import _NS_PER_MS, _TRACER_NAME, SpanNames, safe_set_attributes
+from gubbi.telemetry.sanitized_errors import record_exception_sanitized
 from gubbi.tools import (
     context,
     conversations,
@@ -161,7 +162,17 @@ def patch_tool_manager(tm: ToolManager) -> None:
             "tool.name": name,
         }
 
-        with _tracer.start_as_current_span(span_name) as span:
+        # Both auto-record flags off: the SDK's context exit would re-add
+        # the raw exception event and a status description built from
+        # ``str(exc)``, undoing the sanitization in the except block. The
+        # except block records every outcome the SDK would have, and
+        # re-raises, so the span still ends and the exception still
+        # propagates.
+        with _tracer.start_as_current_span(
+            span_name,
+            record_exception=False,
+            set_status_on_exception=False,
+        ) as span:
             safe_set_attributes(span_name, span, attrs)
             try:
                 result = await original_call_tool(name, arguments or {}, **kwargs)
@@ -178,10 +189,14 @@ def patch_tool_manager(tm: ToolManager) -> None:
                 )
                 return result
             except Exception as exc:
-                from opentelemetry.trace import Status, StatusCode
-
-                span.record_exception(exc)
-                span.set_status(Status(StatusCode.ERROR))
+                # A tool handler reaches ``record_audit`` through the
+                # repository layer (entries.move_entries_to_topic,
+                # topics.rename / merge / delete_with_reassign), so a
+                # PostgreSQL rejection quoting the audit row's actor id,
+                # IP and User-Agent can surface here. Only that case is
+                # bounded; an ordinary tool error keeps the SDK's own
+                # event and description so MCP diagnostics are unaffected.
+                record_exception_sanitized(span, exc)
                 latency_ms = (time.monotonic_ns() - start_ns) / _NS_PER_MS
                 safe_set_attributes(
                     span_name,

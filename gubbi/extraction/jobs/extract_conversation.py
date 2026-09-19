@@ -47,6 +47,7 @@ from gubbi.telemetry.attrs import (
     SpanNames,
     safe_set_attributes,
 )
+from gubbi.telemetry.sanitized_errors import record_exception_sanitized, safe_error_fields
 from gubbi.validation import harden_llm_topic_path
 
 if TYPE_CHECKING:
@@ -334,17 +335,25 @@ async def _mark_job_failed(
                     target_id=str(job_id),
                     metadata={"error_code": error_code, "conversation_id": conversation_id},
                 )
-    except Exception:
+    except Exception as exc:
         # Swallow secondary failure -- the original exception is what Arq needs.
         # The job row may remain in 'running' and will be cleaned up by a
         # future monitor / TTL sweep.
+        #
+        # This block catches a failing ``record_audit`` above, so the
+        # exception can be a PostgreSQL rejection whose message and DETAIL
+        # quote the audit row's actor id, IP and User-Agent. Bounded safe
+        # fields instead of the exception's own text; ``exc_info=True``
+        # would in any case export nothing here, since this logger
+        # dispatches the emit to a worker thread where the exception is no
+        # longer current.
         await logger.warning(
             "mark_job_failed_secondary_error",
             user_id=str(user_uuid),
             job_id=job_id,
             conversation_id=conversation_id,
             error_code=error_code,
-            exc_info=True,
+            **safe_error_fields(exc),
         )
 
 
@@ -591,7 +600,11 @@ async def extract_conversation(
     success = True
     failure_reason: str | None = None
 
-    with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as job_span:
+    with trace.get_tracer(_TRACER_NAME).start_as_current_span(
+        span_name,
+        record_exception=False,
+        set_status_on_exception=False,
+    ) as job_span:
         safe_set_attributes(
             span_name,
             job_span,
@@ -884,13 +897,14 @@ async def extract_conversation(
         except Exception as exc:
             success = False
             failure_reason = _classify_error(exc)
-            job_span.record_exception(exc)
-            # No ``description=``: same rationale as the llm_span sites
-            # above. ``record_exception`` emits the type+message as an
-            # event; the upstream sanitization at
-            # ``service.py:_parse_content`` keeps content out of the
-            # message string.
-            job_span.set_status(Status(StatusCode.ERROR))
+            # A failing audit write inside this job propagates here, and a
+            # PostgreSQL rejection's message and DETAIL quote the audit
+            # row's actor id, IP and User-Agent. Sanitized for that case,
+            # SDK-default for anything this codebase raises itself. The
+            # span's two auto-record flags are off so the context exit
+            # cannot re-add the raw event; the bare raise still ends the
+            # span and propagates.
+            record_exception_sanitized(job_span, exc)
             raise
         finally:
             latency_ms = (time.monotonic_ns() - span_start_ns) / _NS_PER_MS

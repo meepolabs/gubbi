@@ -59,7 +59,13 @@ async def test_scaffold_error_on_no_row_after_insert() -> None:
 
 
 async def test_scaffold_postgres_error_wrapped() -> None:
-    """Postgres errors are wrapped in RuntimeError with original cause."""
+    """Postgres errors are wrapped in RuntimeError with original cause.
+
+    The wrapper names the exception CLASS, never interpolates the driver
+    message: a PostgreSQL message carries its DETAIL block, which quotes
+    the rejected row. The original stays chained, so a caller that
+    records this RuntimeError can still classify it as driver-caused.
+    """
     import asyncpg
 
     pool = MagicMock()
@@ -73,8 +79,15 @@ async def test_scaffold_postgres_error_wrapped() -> None:
 
     from gubbi.users.bootstrap import scaffold_operator
 
-    with pytest.raises(RuntimeError, match="PostgreSQL error during scaffold: connection refused"):
+    with pytest.raises(RuntimeError, match="PostgreSQL error during scaffold: PostgresError") as e:
         await scaffold_operator(pool, _EMAIL, _TIMEZONE)
+
+    assert "connection refused" not in str(e.value), (
+        "the driver message must not be interpolated into the wrapper"
+    )
+    assert isinstance(e.value.__cause__, asyncpg.PostgresError), (
+        "the original must stay chained for cause-aware sanitization"
+    )
 
 
 async def test_scaffold_audit_write_passes_target_kind_user() -> None:

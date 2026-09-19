@@ -72,6 +72,11 @@ from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import configure_otel
 from gubbi.telemetry.logger import initialize_logger
 from gubbi.telemetry.metrics import record_startup_probe_outcome
+from gubbi.telemetry.sanitized_errors import (
+    DRIVER_ERROR_TYPES,
+    is_driver_caused,
+    safe_error_fields,
+)
 from gubbi.tools.registry import register_tools
 from gubbi.users.bootstrap import scaffold_operator
 
@@ -579,7 +584,6 @@ app.include_router(web_timeline_router, prefix="/api/v1")
 app.include_router(web_topic_admin_router, prefix="/api/v1")
 
 
-@app.exception_handler(DatabaseUnavailable)
 async def database_unavailable_handler(
     request: Request,
     exc: DatabaseUnavailable,
@@ -592,23 +596,65 @@ async def database_unavailable_handler(
     )
 
 
-@app.exception_handler(Exception)
 async def general_exception_handler(
     request: Request,
     exc: Exception,
 ) -> JSONResponse:
     """Handle unhandled exceptions."""
     logger = structlog.get_logger("gubbi")
-    await logger.error(
-        "Unhandled exception",
-        exc_info=exc,
-        path=request.url.path,
-        method=request.method,
-    )
+    if is_driver_caused(exc):
+        # ``is_driver_caused``, not ``isinstance``: a translated wrapper
+        # such as DatabaseUnavailable(str(exc)) carries the driver's
+        # message in its own str() while failing an outermost-type check.
+        # A PostgreSQL message and its DETAIL quote the rejected
+        # statement, whose values on the audit path are the actor id, the
+        # originating IP and the User-Agent.
+        await logger.error(
+            "Unhandled exception",
+            path=request.url.path,
+            method=request.method,
+            **safe_error_fields(exc),
+        )
+    else:
+        await logger.error(
+            "Unhandled exception",
+            exc_info=exc,
+            path=request.url.path,
+            method=request.method,
+        )
     return JSONResponse(
         status_code=500,
         content={"error": "Internal server error"},
     )
+
+
+def register_exception_handlers(target: FastAPI) -> None:
+    """Install the app-wide exception handlers on *target*.
+
+    The concrete driver classes are registered explicitly rather than
+    being left to the ``Exception`` catch-all. The FastAPI instrumentation
+    wraps the entire middleware stack and calls ``record_exception`` on
+    anything that escapes it, and Starlette's ``ServerErrorMiddleware``
+    re-raises after a handler has produced the response -- so a
+    catch-all handler still lets the driver's message and DETAIL reach
+    the HTTP server span as ``exception.message`` and
+    ``exception.stacktrace``. A handler keyed on the concrete class
+    resolves before the exception escapes, which is what keeps that text
+    off the span.
+
+    All three classified driver families are registered, matching
+    ``gubbi.telemetry.sanitized_errors.DRIVER_ERROR_TYPES``: registering
+    only ``PostgresError`` would leave the two driver-side classes taking
+    the catch-all route and reaching the server span un-sanitized, even
+    though the handler itself would have logged them safely.
+    """
+    target.add_exception_handler(DatabaseUnavailable, database_unavailable_handler)  # type: ignore[arg-type]  # Starlette types handlers against bare Exception
+    for driver_error_type in DRIVER_ERROR_TYPES:
+        target.add_exception_handler(driver_error_type, general_exception_handler)
+    target.add_exception_handler(Exception, general_exception_handler)
+
+
+register_exception_handlers(app)
 
 
 @app.get("/health")

@@ -52,6 +52,7 @@ from gubbi_common.db.user_scoped import user_scoped_connection
 from gubbi.audit.sql import record_audit
 from gubbi.auth_context import current_user_id
 from gubbi.telemetry.metrics import record_audit_persistence_failure
+from gubbi.telemetry.sanitized_errors import safe_error_fields
 
 if TYPE_CHECKING:
     from gubbi_common.audit.targets import TargetKind
@@ -156,13 +157,16 @@ def audited(
                                 target_id=target_id,
                                 target_kind=effective_kind,
                             )
-                    except Exception:
+                    except Exception as exc:
+                        # No ``exc_info``: a PostgreSQL error's message and
+                        # DETAIL quote the rejected row, whose values are the
+                        # actor id, the originating IP and the User-Agent.
                         await logger.warning(
                             "Audit write failed",
                             handler=fn.__name__,
                             action=action,
                             target_type=target_type,
-                            exc_info=True,
+                            **safe_error_fields(exc),
                         )
                         record_audit_persistence_failure(action)
 

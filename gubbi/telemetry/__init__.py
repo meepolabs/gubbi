@@ -185,8 +185,24 @@ def _wire_instrumentors(app: FastAPI) -> None:
     try:
         from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
 
-        AsyncPGInstrumentor().instrument()  # type: ignore[no-untyped-call]  # opentelemetry-instrumentation-asyncpg ships no py.typed marker
-        _logger.debug("asyncpg auto-instrumentation wired")
+        from gubbi.telemetry.asyncpg_sanitized import (
+            SanitizerUnsafeError,
+            instrument_asyncpg_sanitized,
+        )
+
+        # Sanitized, not bare ``instrument()``: the instrumentor's client
+        # span lets the driver exception escape to the SDK's context exit,
+        # which records the server's message and DETAIL. On a failing
+        # audit_log INSERT that text quotes the rejected row's actor id,
+        # IP and User-Agent.
+        sanitized = instrument_asyncpg_sanitized(AsyncPGInstrumentor())  # type: ignore[no-untyped-call]  # opentelemetry-instrumentation-asyncpg ships no py.typed marker
+        _logger.debug("asyncpg auto-instrumentation wired (sanitized=%s)", sanitized)
+    except SanitizerUnsafeError:
+        # Deliberately NOT degraded like the other instrumentors: this is
+        # the one asyncpg state that must stop startup, because the
+        # alternative is exporting driver DETAIL on every failing audit
+        # write for the life of the process.
+        raise
     except Exception as exc:
         _logger.warning("AsyncPGInstrumentor failed: %s", exc)
 

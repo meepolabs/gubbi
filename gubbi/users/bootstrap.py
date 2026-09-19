@@ -24,6 +24,7 @@ import structlog
 from gubbi_common.audit.targets import TargetKind
 
 from gubbi.audit import Action, record_audit
+from gubbi.telemetry.sanitized_errors import safe_error_fields
 
 __all__: list[str] = ["scaffold_operator"]
 
@@ -83,8 +84,14 @@ async def scaffold_operator(
                         target_kind=TargetKind.USER,
                         metadata={"provision_path": "scaffold"},
                     )
-                except Exception:
-                    await logger.exception("scaffold_operator: audit write failed")
+                except Exception as exc:
+                    # No ``exception()``: a PostgreSQL error's message and
+                    # DETAIL quote the rejected row, whose values are the
+                    # actor id, the originating IP and the User-Agent.
+                    await logger.error(
+                        "scaffold_operator: audit write failed",
+                        **safe_error_fields(exc),
+                    )
 
             # Verify a row exists (covers both newly-created and pre-existing).
             user_id = await conn.fetchval(
@@ -96,4 +103,11 @@ async def scaffold_operator(
                 raise RuntimeError(f"No active user row found after provisioning for {email}")
 
     except asyncpg.PostgresError as exc:
-        raise RuntimeError(f"PostgreSQL error during scaffold: {exc}") from exc
+        # Type only, never ``{exc}``: interpolating the driver's message
+        # would copy its DETAIL block into a RuntimeError whose own type
+        # carries no hint that its text came from the server, and this
+        # exception reaches startup logging and the lifespan span. The
+        # original is still chained, so the cause-aware sanitizer
+        # classifies the wrapper correctly wherever it is recorded.
+        msg = f"PostgreSQL error during scaffold: {type(exc).__name__}"
+        raise RuntimeError(msg) from exc

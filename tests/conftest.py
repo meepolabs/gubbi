@@ -43,6 +43,9 @@ from gubbi.crypto.cipher import ContentCipher
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.storage.pg_setup import _init_connection
 
+# Sentinel for "attribute was absent", distinct from a stored None.
+_ATTR_MISSING: object = object()
+
 TEST_PASSWORD = "test-password"
 TEST_PASSWORD_HASH = bcrypt.hashpw(TEST_PASSWORD.encode(), bcrypt.gensalt()).decode()
 
@@ -603,3 +606,48 @@ def in_memory_tracer() -> Generator[tuple[Any, InMemoryExporter], None, None]:
         with contextlib.suppress(Exception):
             provider.shutdown()
         _restore_otel_globals(saved)
+
+
+@pytest.fixture
+def restore_asyncpg_instrumentation() -> Iterator[Any]:
+    """Yield the AsyncPG instrumentor singleton, restoring its state afterwards.
+
+    ``AsyncPGInstrumentor`` is a singleton holding process-global wrapt
+    patches on ``asyncpg.connection``, and its ``instrument()`` is a
+    silent no-op once anything has already instrumented. Any test that
+    instruments asyncpg -- directly or via
+    ``gubbi.telemetry._wire_instrumentors`` -- therefore changes what
+    every LATER test in the session observes: extra client spans appear
+    in unrelated suites, and a test that needs the un-instrumented state
+    can no longer reach it. Measured: without this restore, the
+    HTTP-boundary test leaves asyncpg instrumented and four asyncpg
+    span-sanitization tests fail when they run after it, while passing in
+    the opposite order.
+
+    Request this fixture from any test that instruments asyncpg.
+    """
+    from opentelemetry.instrumentation.asyncpg import AsyncPGInstrumentor
+
+    instrumentor = AsyncPGInstrumentor()
+    was_instrumented = bool(getattr(instrumentor, "is_instrumented_by_opentelemetry", False))
+    saved_tracer = getattr(instrumentor, "_tracer", _ATTR_MISSING)
+    try:
+        yield instrumentor
+    finally:
+        # Order matters: drop the wrappers FIRST, then restore the
+        # recorded attributes, so a test that installed the sanitizing
+        # tracer cannot leave it bound to live wrappers.
+        if not was_instrumented and getattr(
+            instrumentor, "is_instrumented_by_opentelemetry", False
+        ):
+            with contextlib.suppress(Exception):
+                instrumentor.uninstrument()
+        # Restore unconditionally, including a saved ``None``: a test that
+        # made the tracer a SanitizingTracer must not leave it wrapped for
+        # later tests just because the pre-test value happened to be None.
+        if saved_tracer is _ATTR_MISSING:
+            with contextlib.suppress(AttributeError):
+                del instrumentor._tracer
+        else:
+            instrumentor._tracer = saved_tracer
+        instrumentor._is_instrumented_by_opentelemetry = was_instrumented

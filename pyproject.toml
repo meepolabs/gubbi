@@ -75,7 +75,7 @@ opentelemetry-instrumentation-httpx = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-asyncpg = ">=0.50b0,<1.0"
 opentelemetry-instrumentation-redis = ">=0.50b0,<1.0"
 opentelemetry-exporter-otlp-proto-grpc = ">=1.27,<2.0"
-gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "ec2e7ff", extras = ["db"] }  # journal scope constants + topic/entry audit actions (v0.16.0).
+gubbi-common = { git = "https://github.com/meepolabs/gubbi-common.git", rev = "137b470", extras = ["db"] }  # sanitized audit-write failure telemetry: type + shape-validated SQLSTATE instead of the raw driver exception event (v0.16.3).
 
 # LLM extraction -- Arq worker + Anthropic API
 arq = "^0.26.0"
