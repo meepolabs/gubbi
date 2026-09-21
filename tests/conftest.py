@@ -42,6 +42,11 @@ from gubbi.config import get_settings
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.oauth.storage import OAuthStorage
 from gubbi.storage.pg_setup import _init_connection
+from tests.fixtures.cluster_roles import (
+    assert_required_roles_present,
+    cluster_role_lock,
+    maintenance_dsn,
+)
 
 # Sentinel for "attribute was absent", distinct from a stored None.
 _ATTR_MISSING: object = object()
@@ -332,18 +337,24 @@ async def _set_role_passwords(bootstrap_dsn: str) -> None:
     guard below locks that invariant so a future contributor who switches to
     env-sourced passwords is forced to introduce proper escaping. Using ``raise``
     (not ``assert``) so ``python -O`` cannot strip the check.
+
+    Roles are CLUSTER-GLOBAL, so these two statements race every other pytest
+    session starting against the same cluster: concurrent ``ALTER ROLE`` on the
+    same ``pg_authid`` rows fails with "tuple concurrently updated". They therefore
+    run under the same maintenance-database lock the role-state fixtures use, which
+    serializes cluster-wide (advisory locks are database-scoped, so locking the
+    working database would not). The lock is taken on its own connection and
+    released before returning, so nothing downstream inherits a hold that could
+    deadlock re-entrantly.
     """
     if "'" in RLS_APP_PASSWORD or "'" in _RLS_ADMIN_PASSWORD:
         raise ValueError(
             "RLS test passwords must not contain single-quotes -- "
             "see _set_role_passwords docstring for the interpolation-safety contract"
         )
-    conn = await asyncpg.connect(bootstrap_dsn, timeout=5)
-    try:
-        await conn.execute(f"ALTER ROLE journal_app WITH PASSWORD '{RLS_APP_PASSWORD}'")
-        await conn.execute(f"ALTER ROLE journal_admin WITH PASSWORD '{_RLS_ADMIN_PASSWORD}'")
-    finally:
-        await conn.close()
+    async with cluster_role_lock(bootstrap_dsn) as lock_conn:
+        await lock_conn.execute(f"ALTER ROLE journal_app WITH PASSWORD '{RLS_APP_PASSWORD}'")
+        await lock_conn.execute(f"ALTER ROLE journal_admin WITH PASSWORD '{_RLS_ADMIN_PASSWORD}'")
 
 
 @pytest_asyncio.fixture(scope="session")
@@ -355,6 +366,14 @@ async def _rls_provisioned() -> None:
     calls ``pytest.skip``, which aborts the demanding test (and any other tests
     that depend on this fixture transitively) with a clear reason.
 
+    ORDERING IS LOAD-BEARING. The required-role check runs BEFORE the alembic
+    upgrade, because the baseline migration GRANTs to journal_app and journal_admin
+    and fails without them -- and this fixture converts an upgrade failure into a
+    ``skip``. Checking after the upgrade would turn a missing required role into a
+    silent skip, reporting green for contracts nothing measured. Reachability is
+    established first, so only an unreachable server skips; a reachable server
+    missing a required role fails hard.
+
     Recovery note: alembic upgrade is idempotent, so a partial provisioning in
     one session (e.g. upgrade succeeded but _set_role_passwords failed) recovers
     automatically on the next session -- the upgrade no-ops and password setting
@@ -364,6 +383,9 @@ async def _rls_provisioned() -> None:
         await _ensure_database_exists(RLS_BOOTSTRAP_URL)
     except (OSError, asyncpg.PostgresError, TimeoutError) as exc:
         pytest.skip(f"Cannot provision RLS test DB at {RLS_BOOTSTRAP_URL}: {exc}")
+
+    # Reachable, so a missing required role is a hard failure from here on.
+    await _assert_required_roles_before_migrating()
 
     # Ensure pgvector is installed in the target DB before migrations reference vectors.
     conn = await asyncpg.connect(RLS_BOOTSTRAP_URL, timeout=5)
@@ -375,6 +397,19 @@ async def _rls_provisioned() -> None:
     _run_alembic_upgrade(RLS_BOOTSTRAP_URL)
     await _set_role_passwords(RLS_BOOTSTRAP_URL)
     await _reassign_ownership_to_admin(RLS_BOOTSTRAP_URL)
+
+
+async def _assert_required_roles_before_migrating() -> None:
+    """Fail hard when a reachable cluster lacks journal_app or journal_admin.
+
+    Separated so the ordering guarantee is legible: this must precede
+    ``_run_alembic_upgrade``, whose failure this fixture turns into a skip.
+    """
+    conn = await asyncpg.connect(maintenance_dsn(RLS_BOOTSTRAP_URL), timeout=5)
+    try:
+        await assert_required_roles_present(conn, ("journal_app", "journal_admin"))
+    finally:
+        await conn.close()
 
 
 async def _reassign_ownership_to_admin(bootstrap_dsn: str) -> None:

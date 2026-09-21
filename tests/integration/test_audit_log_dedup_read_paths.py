@@ -29,31 +29,51 @@ established before any migration runs.
 
 from __future__ import annotations
 
-import os
 import re
-import shutil
 import subprocess
 import sys
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
 import asyncpg
 import pytest
 import pytest_asyncio
 
-from tests.conftest import RLS_APP_PASSWORD, RLS_BOOTSTRAP_URL
+from tests.conftest import RLS_ADMIN_URL, RLS_APP_PASSWORD, RLS_BOOTSTRAP_URL
+from tests.fixtures.cluster_roles import (
+    ClusterRoleState,
+    assert_required_roles_present,
+    capture_cluster_state,
+    cluster_role_lock,
+    restore_cluster_state,
+)
+from tests.fixtures.db_invariants import (
+    REPO_ROOT as _REPO_ROOT,
+)
+from tests.fixtures.db_invariants import (
+    assert_clean_of as _assert_clean_of,
+)
+from tests.fixtures.db_invariants import (
+    psql_bin as _psql_bin,
+)
+from tests.fixtures.db_invariants import (
+    run_argv as _run,
+)
+from tests.fixtures.db_invariants import (
+    tags_mentioning as _tags_mentioning,
+)
+from tests.fixtures.db_invariants import (
+    verifier_failure_tags as _verifier_failure_tags,
+)
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
     pytest.mark.integration,
 ]
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
 _GRANTS_SQL = _REPO_ROOT / "deployment" / "scripts" / "grants.sql"
-_VERIFY_SCRIPT = _REPO_ROOT / "deployment" / "scripts" / "verify-db-invariants.sh"
 
 _APP_ROLE = "journal_app"
 _SELECT_POLICY_NAME = "audit_log_app_select_self_only"
@@ -78,19 +98,25 @@ _SELF_ONLY_CONTRACT = (
 # script can run to completion under ON_ERROR_STOP.
 _CLOUD_GRANT_TARGETS = ("tenants", "subscriptions", "llm_budgets", "stripe_events")
 
-# Role posture the migration chain, grants.sql and the verifier all assume is
-# already in place -- in prod and on the testbench an init script creates these
-# before anything else runs. Roles are cluster-global, so the scratch fixture
-# converges them rather than creating per-database copies.
+# Roles this fixture touches, and the subset it OWNS. The parent probe role
+# exists only for these tests, so the fixture creates and drops it. The shared
+# roles are ALTERed and GRANTed but never created blindly and never dropped: four
+# attributes cannot reconstitute a role's password, rolconfig or connection limit.
+_PARENT_PROBE_ROLE = "journal_app_parent_probe"
+_OTEL_ROLE = "otel_ro"
+# Unconditionally fixture-owned: created here, dropped here.
+_FIXTURE_OWNED_ROLES = (_PARENT_PROBE_ROLE,)
+_SHARED_ROLES = ("journal_app", "journal_admin", _OTEL_ROLE)
+_SCRATCH_TRACKED_ROLES = (*_SHARED_ROLES, _PARENT_PROBE_ROLE)
+
+# Convergence the migration chain, grants.sql and the verifier all assume a deploy
+# already performed. Roles are cluster-global, so this runs under the
+# maintenance-database lock and is undone by an exact restore on teardown --
+# without which this fixture leaks otel_ro, the parent-role membership and
+# journal_admin's NOCREATEROLE into every later test in the session.
 _REQUIRED_ROLES_SQL = """
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'journal_app') THEN
-        CREATE ROLE journal_app LOGIN;
-    END IF;
-    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'journal_admin') THEN
-        CREATE ROLE journal_admin LOGIN;
-    END IF;
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'otel_ro') THEN
         CREATE ROLE otel_ro LOGIN;
     END IF;
@@ -106,28 +132,26 @@ GRANT pg_monitor TO otel_ro;
 GRANT journal_app_parent_probe TO journal_app;
 """
 
-# Set to the SAME value tests/conftest.py assigns, so converging it here is a
-# no-op for any session-scoped pool already authenticated with it. Roles are
-# cluster-global: assigning anything else would break every other test in the run.
-_SET_APP_PASSWORD_SQL = f"ALTER ROLE journal_app WITH PASSWORD '{RLS_APP_PASSWORD}'"
+# This fixture NEVER writes a role credential. Passwords are cluster-global
+# secrets: overwriting one invalidates every session-scoped pool in the run and,
+# on a shared or deployed cluster, destroys a credential the harness cannot
+# restore (rolpassword is a hash it never captured). The app connection below
+# authenticates with the credential the test environment already provisioned --
+# tests/conftest.py owns that, under the same maintenance-database lock -- and a
+# credential that does not work is reported as an environment prerequisite.
 
 
-def _psql_bin() -> str:
-    """The ``psql`` binary, or a hard failure.
+def _scratch_disposable_roles(before: ClusterRoleState) -> tuple[str, ...]:
+    """The roles this fixture's teardown may drop, given the pre-convergence snapshot.
 
-    ``psql`` is not optional for these tests: the repair path IS ``psql -f
-    grants.sql``, so skipping when it is absent would report green for a
-    capability nothing exercised.
+    otel_ro is CONDITIONALLY disposable: the baseline migration creates it, so on a
+    migrated cluster it is shared state to preserve, while on a cluster where it is
+    genuinely absent the convergence creates it and the harness owns it. The
+    decision reads the snapshot taken BEFORE any write, so it can never classify a
+    role the harness just created as pre-existing.
     """
-    found = shutil.which("psql")
-    if found is None:
-        pytest.fail(
-            "psql is not on PATH -- it is a required prerequisite for the "
-            "grants.sql repair and verify-db-invariants.sh paths, not an "
-            "optional extra. Install a postgresql-client matching the server "
-            "major version, or expose the test container's psql on PATH."
-        )
-    return found
+    conditional = () if _OTEL_ROLE in before.present else (_OTEL_ROLE,)
+    return (*_FIXTURE_OWNED_ROLES, *conditional)
 
 
 def _with_database(dsn: str, name: str) -> str:
@@ -136,17 +160,6 @@ def _with_database(dsn: str, name: str) -> str:
 
 def _maintenance_dsn(dsn: str) -> str:
     return _with_database(dsn, "postgres")
-
-
-def _run(argv: list[str], **extra_env: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 -- argv entries are literals or local paths
-        argv,
-        cwd=_REPO_ROOT,
-        env={**os.environ, **extra_env},
-        capture_output=True,
-        text=True,
-        check=False,
-    )
 
 
 def _psql(dsn: str, sql: str) -> str:
@@ -177,6 +190,14 @@ async def scratch_dsn() -> AsyncIterator[str]:
     is the same prerequisite the deployed database satisfies by having run the
     cloud chain first.
 
+    CLUSTER-GLOBAL ROLE STATE. The convergence below ALTERs shared roles and
+    GRANTs memberships, all of which outlive this database. Advisory locks are
+    database-scoped while roles are not, so the lock is taken on the cluster's
+    MAINTENANCE database -- the same fixed key the posture suite uses -- and held
+    across the snapshot, the convergence, the test body and the restore. The
+    ``try``/``finally`` opens immediately after the snapshot, so a convergence
+    that fails halfway still restores.
+
     Reaching Postgres at all is the ONE prerequisite whose absence skips: it is
     positively detected before any migration starts. Everything after that point
     -- role provisioning, the alembic upgrade -- fails loudly, because past that
@@ -184,61 +205,63 @@ async def scratch_dsn() -> AsyncIterator[str]:
     """
     name = f"journal_scratch_{uuid.uuid4().hex[:12]}"
     dsn = _with_database(RLS_BOOTSTRAP_URL, name)
-    maintenance = _maintenance_dsn(RLS_BOOTSTRAP_URL)
 
     try:
-        conn = await asyncpg.connect(maintenance, timeout=5)
+        probe = await asyncpg.connect(_maintenance_dsn(RLS_BOOTSTRAP_URL), timeout=5)
     except (OSError, asyncpg.PostgresError, TimeoutError) as exc:
         pytest.skip(f"cannot reach Postgres to provision a scratch DB: {exc}")
+    await probe.close()
 
-    try:
-        await conn.execute(_REQUIRED_ROLES_SQL)
-        await conn.execute(_SET_APP_PASSWORD_SQL)
-        await conn.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await conn.close()
-
-    try:
-        setup = await asyncpg.connect(dsn, timeout=5)
+    async with cluster_role_lock(RLS_BOOTSTRAP_URL) as lock_conn:
+        await assert_required_roles_present(lock_conn, ("journal_app", "journal_admin"))
+        before = await capture_cluster_state(lock_conn, _SCRATCH_TRACKED_ROLES)
         try:
-            await setup.execute("CREATE EXTENSION IF NOT EXISTS vector")
-        finally:
-            await setup.close()
+            await lock_conn.execute(_REQUIRED_ROLES_SQL)
+            await lock_conn.execute(f'CREATE DATABASE "{name}"')
+            try:
+                setup = await asyncpg.connect(dsn, timeout=5)
+                try:
+                    await setup.execute("CREATE EXTENSION IF NOT EXISTS vector")
+                finally:
+                    await setup.close()
 
-        upgrade = _run(
-            [sys.executable, "-m", "alembic", "upgrade", "head"],
-            JOURNAL_DB_MIGRATION_URL=dsn,
-            JOURNAL_OPERATOR_EMAIL="operator@test.local",
-        )
-        if upgrade.returncode != 0:
-            pytest.fail(
-                "alembic upgrade head failed for the scratch DB -- Postgres was "
-                "reachable and the required roles were provisioned, so this is a "
-                f"migration-chain failure, not a missing prerequisite:\nstdout:\n{upgrade.stdout}\n"
-                f"stderr:\n{upgrade.stderr}"
-            )
+                upgrade = _run(
+                    [sys.executable, "-m", "alembic", "upgrade", "head"],
+                    JOURNAL_DB_MIGRATION_URL=dsn,
+                    JOURNAL_OPERATOR_EMAIL="operator@test.local",
+                )
+                if upgrade.returncode != 0:
+                    pytest.fail(
+                        "alembic upgrade head failed for the scratch DB -- Postgres was "
+                        "reachable and the required roles were provisioned, so this is a "
+                        f"migration-chain failure, not a missing prerequisite:\n"
+                        f"stdout:\n{upgrade.stdout}\nstderr:\n{upgrade.stderr}"
+                    )
 
-        stubs = await asyncpg.connect(dsn, timeout=5)
-        try:
-            for table in _CLOUD_GRANT_TARGETS:
-                await stubs.execute(f'CREATE TABLE IF NOT EXISTS public."{table}" ()')
-            await stubs.execute(
-                "CREATE TABLE IF NOT EXISTS public.outbox_events (id bigserial PRIMARY KEY)"
-            )
-            await stubs.execute(
-                "CREATE TABLE IF NOT EXISTS public.alembic_version_cloud (version_num text)"
-            )
-            await stubs.execute("ALTER TABLE public.outbox_events OWNER TO journal_admin")
-        finally:
-            await stubs.close()
+                stubs = await asyncpg.connect(dsn, timeout=5)
+                try:
+                    for table in _CLOUD_GRANT_TARGETS:
+                        await stubs.execute(f'CREATE TABLE IF NOT EXISTS public."{table}" ()')
+                    await stubs.execute(
+                        "CREATE TABLE IF NOT EXISTS public.outbox_events (id bigserial PRIMARY KEY)"
+                    )
+                    await stubs.execute(
+                        "CREATE TABLE IF NOT EXISTS public.alembic_version_cloud (version_num text)"
+                    )
+                    await stubs.execute("ALTER TABLE public.outbox_events OWNER TO journal_admin")
+                finally:
+                    await stubs.close()
 
-        yield dsn
-    finally:
-        conn = await asyncpg.connect(maintenance, timeout=5)
-        try:
-            await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+                yield dsn
+            finally:
+                await lock_conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
         finally:
-            await conn.close()
+            await restore_cluster_state(
+                lock_conn,
+                before,
+                _SCRATCH_TRACKED_ROLES,
+                disposable=_scratch_disposable_roles(before),
+            )
 
 
 @dataclass(frozen=True)
@@ -688,11 +711,7 @@ async def _app_read_surface(dsn: str) -> AppReadSurface:
         await admin.close()
     assert planted, "no audit rows exist, so a row-invisibility result proves nothing"
 
-    parsed = urlparse(dsn)
-    host = parsed.hostname or "localhost"
-    port = f":{parsed.port}" if parsed.port else ""
-    app_dsn = urlunparse(parsed._replace(netloc=f"{_APP_ROLE}:{RLS_APP_PASSWORD}@{host}{port}"))
-    app = await asyncpg.connect(app_dsn, timeout=5)
+    app = await _connect_as_provisioned_app_role(dsn)
     try:
         # actor_id is readable under the contract, so this counts rows the
         # POLICY lets through rather than tripping the column ACL first.
@@ -710,6 +729,36 @@ async def _app_read_surface(dsn: str) -> AppReadSurface:
         await app.close()
 
     return AppReadSurface(visible_rows=visible, readable_columns=frozenset(readable))
+
+
+async def _connect_as_provisioned_app_role(dsn: str) -> asyncpg.Connection:
+    """Connect to ``dsn`` as journal_app using the ALREADY-PROVISIONED credential.
+
+    The credential is READ from the test environment, never written: a role
+    password is cluster-global, and overwriting one invalidates every
+    session-scoped pool in the run while destroying a secret the harness cannot
+    restore (``rolpassword`` is a hash it does not capture).
+
+    A credential that does not authenticate is therefore an ENVIRONMENT
+    PREREQUISITE failure, not something to repair by assignment. The message names
+    what to fix without echoing the credential itself.
+    """
+    parsed = urlparse(dsn)
+    host = parsed.hostname or "localhost"
+    port = f":{parsed.port}" if parsed.port else ""
+    app_dsn = urlunparse(parsed._replace(netloc=f"{_APP_ROLE}:{RLS_APP_PASSWORD}@{host}{port}"))
+    try:
+        return await asyncpg.connect(app_dsn, timeout=5)
+    except asyncpg.InvalidPasswordError as exc:
+        pytest.fail(
+            f"cannot authenticate as {_APP_ROLE} with the credential the test "
+            "environment provisioned. This is an environment prerequisite: the "
+            "harness deliberately does NOT assign role passwords, because they are "
+            "cluster-global and a reassignment would invalidate every "
+            "session-scoped pool in the run and destroy a secret it cannot "
+            "restore. Re-provision the role credential to match "
+            f"tests.conftest.RLS_APP_PASSWORD, then re-run. ({type(exc).__name__})"
+        )
 
 
 async def _plant_foreign_audit_row(dsn: str) -> None:
@@ -943,55 +992,9 @@ async def test_no_successful_repair_leaves_a_widened_app_read_surface(
 
 
 # ---------------------------------------------------------------------------
-# Post-deploy invariant script
-#
-# On a gubbi-only database the verifier can report failures unrelated to the
-# capability under test (cloud-side objects it does not create), so exit code
-# alone proves nothing. These tests instead diff the verifier's FAILURE TAG SET
-# between a clean run and a mutated one: the tag must be absent when the
-# capability is intact and present when it is broken. That is a check the
-# verifier can fail in both directions.
-#
-# An aborted run (psql error under ``set -e``, before the report block) yields an
-# empty tag set for reasons unrelated to the assertion, which would let every
-# mutation test pass vacuously -- so an abort FAILS rather than skipping.
+# Post-deploy invariant script. The failure-tag diffing rationale lives in
+# tests/fixtures/db_invariants.py, which owns the harness.
 # ---------------------------------------------------------------------------
-
-
-def _verifier_failure_tags(dsn: str) -> frozenset[str]:
-    """Run the verifier and return the ``FAIL: <tag>`` lines it emitted."""
-    _psql_bin()  # the verifier shells out to psql; fail early and with a clear reason
-    result = _run([str(_VERIFY_SCRIPT)], JOURNAL_DB_MIGRATION_URL=dsn)
-    reached_report = "--- invariant check failed ---" in result.stderr or (
-        "verify-db-invariants: OK" in result.stdout
-    )
-    if not reached_report:
-        pytest.fail(
-            "verify-db-invariants.sh aborted before reaching its report block, so "
-            "its failure tag set is empty for reasons unrelated to what is being "
-            "asserted. Every prerequisite it references (psql, the journal_app / "
-            "journal_admin / otel_ro roles, the gubbi tables) is provisioned by "
-            f"the scratch fixture, so an abort is a real defect:\n"
-            f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
-        )
-    return frozenset(
-        line.removeprefix("FAIL: ").strip()
-        for line in result.stderr.splitlines()
-        if line.startswith("FAIL: ")
-    )
-
-
-def _tags_mentioning(tags: frozenset[str], needle: str) -> frozenset[str]:
-    return frozenset(tag for tag in tags if needle in tag)
-
-
-def _assert_clean_of(dsn: str, needle: str) -> frozenset[str]:
-    """Baseline the verifier: it must NOT flag ``needle`` on an intact database."""
-    clean = _verifier_failure_tags(dsn)
-    assert not _tags_mentioning(clean, needle), (
-        f"verifier flagged {needle!r} on an intact DB: {sorted(clean)}"
-    )
-    return clean
 
 
 async def test_invariant_script_flags_a_dropped_select_policy(scratch_dsn: str) -> None:
@@ -1306,3 +1309,378 @@ async def test_invariant_script_flags_only_the_insert_predicate_widened(
         _INSERT_POLICY_NAME in tag and "WITH CHECK" in tag
         for tag in _tags_mentioning(degraded, "policy_predicate")
     ), f"verifier did not flag the widened INSERT WITH CHECK: {sorted(degraded)}"
+
+
+# ---------------------------------------------------------------------------
+# The scratch fixture's own cluster-state hygiene.
+#
+# scratch_dsn CONVERGES cluster-global role state (otel_ro, the parent-probe
+# membership, journal_admin's NOCREATEROLE) so the migration chain and the
+# verifier see what a deploy would have left. All of that outlives the throwaway
+# database, so the fixture must restore it -- otherwise every later test in the
+# session inherits the drift, and a leaked BYPASSRLS or NOCREATEROLE silently
+# voids assertions in unrelated modules.
+#
+# Both topologies are exercised, because they restore differently: on a FRESH
+# cluster otel_ro and the parent role do not exist and the fixture created them,
+# so they must be dropped; on a PRECONFIGURED one otel_ro already exists as a
+# shared role and must SURVIVE with its attributes intact.
+# ---------------------------------------------------------------------------
+
+
+async def _scratch_tracked_state(dsn: str) -> ClusterRoleState:
+    conn = await asyncpg.connect(_maintenance_dsn(dsn), timeout=5)
+    try:
+        return await capture_cluster_state(conn, _SCRATCH_TRACKED_ROLES)
+    finally:
+        await conn.close()
+
+
+async def _role_present(dsn: str, role: str) -> bool:
+    conn = await asyncpg.connect(_maintenance_dsn(dsn), timeout=5)
+    try:
+        return bool(
+            await conn.fetchval("SELECT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = $1)", role)
+        )
+    finally:
+        await conn.close()
+
+
+async def test_scratch_fixture_leaves_no_cluster_role_drift(scratch_dsn: str) -> None:
+    """Inside the fixture, the convergence it promises is actually in place.
+
+    The paired teardown assertion lives in the test below, which reads the
+    cluster AFTER the fixture has torn down. This half exists so that test cannot
+    pass vacuously: if convergence never happened, "no drift afterwards" would be
+    free.
+    """
+    # Arrange / Act
+    state = await _scratch_tracked_state(scratch_dsn)
+
+    # Assert
+    assert _PARENT_PROBE_ROLE in state.attributes, (
+        "the fixture must have provisioned the parent probe role, or the teardown "
+        "assertion in the sibling test proves nothing"
+    )
+    edges = {(edge.granted, edge.member) for edge in state.memberships}
+    assert (_PARENT_PROBE_ROLE, _APP_ROLE) in edges, (
+        f"the parent-role membership the exposure tests need is missing: {sorted(edges)}"
+    )
+    assert state.attributes["journal_admin"].can_create_role is False, (
+        "the fixture converges journal_admin to NOCREATEROLE; without that this "
+        "test is not observing the state whose restoration matters"
+    )
+
+
+@pytest.mark.usefixtures("_rls_provisioned")
+async def test_scratch_fixture_restores_cluster_state_on_a_fresh_topology() -> None:
+    """On a cluster without otel_ro or the parent role, teardown drops both.
+
+    "Fresh" is established by observation, not assumed: if the roles already
+    exist this is the preconfigured topology and the sibling test covers it.
+    """
+    # Arrange
+    before = await _scratch_tracked_state(RLS_BOOTSTRAP_URL)
+    if _PARENT_PROBE_ROLE in before.attributes:
+        pytest.skip(
+            "the parent probe role already exists, so this cluster is not in the "
+            "fresh topology; the preconfigured case is covered separately"
+        )
+
+    # Act
+    await _drive_scratch_fixture_once()
+
+    # Assert
+    after = await _scratch_tracked_state(RLS_BOOTSTRAP_URL)
+    assert _PARENT_PROBE_ROLE not in after.attributes, (
+        "a role the fixture created must be dropped on teardown"
+    )
+    assert after.attributes == before.attributes, (
+        f"teardown left role attributes changed:\nbefore={before.attributes}\n"
+        f"after={after.attributes}"
+    )
+    assert after.memberships == before.memberships, (
+        f"teardown left memberships changed:\n"
+        f"added={sorted(after.memberships - before.memberships)}\n"
+        f"removed={sorted(before.memberships - after.memberships)}"
+    )
+
+
+@pytest.mark.usefixtures("_rls_provisioned")
+async def test_scratch_fixture_preserves_a_preexisting_shared_role() -> None:
+    """On a cluster where otel_ro already exists, teardown must NOT drop it.
+
+    A deployment's otel_ro carries a password and a pg_monitor membership the
+    harness never captures, so dropping and recreating it would destroy state.
+    The role is planted with a distinctive, non-default attribute set, and both
+    its survival and its exact attributes are asserted afterwards.
+    """
+    # Arrange -- plant otel_ro as a pre-existing shared role with CREATEROLE set,
+    # which the fixture's convergence does not touch and must not clear. The plant
+    # and its removal each take the lock briefly and RELEASE it, because the
+    # fixture under test acquires the same key on the same maintenance database:
+    # holding it across the drive would self-deadlock on a separate connection.
+    pristine = await _plant_preexisting_otel_ro()
+    try:
+        before = await _scratch_tracked_state(RLS_BOOTSTRAP_URL)
+        assert before.attributes["otel_ro"].can_create_role is True, (
+            "the planted attribute did not take, so its preservation is unproven"
+        )
+
+        # Act
+        await _drive_scratch_fixture_once()
+
+        # Assert
+        after = await _scratch_tracked_state(RLS_BOOTSTRAP_URL)
+    finally:
+        await _restore_after_plant(pristine)
+
+    # OUTER assertion: this test's own plant must be fully undone. The inner
+    # before/after pair proves the FIXTURE preserved a pre-existing role; this pair
+    # proves the TEST left no drift of its own -- without it, a plant that leaked
+    # would silently become the next test's baseline.
+    outer_after = await _scratch_tracked_state(RLS_BOOTSTRAP_URL)
+    assert outer_after.attributes == pristine.attributes, (
+        "the test's own plant was not undone, so it leaks cluster-global drift into "
+        f"the rest of the session:\npristine={pristine.attributes}\n"
+        f"after={outer_after.attributes}"
+    )
+    assert outer_after.memberships == pristine.memberships, (
+        "the test's own plant left membership drift:\n"
+        f"added={sorted(outer_after.memberships - pristine.memberships)}\n"
+        f"removed={sorted(pristine.memberships - outer_after.memberships)}"
+    )
+
+    assert "otel_ro" in after.attributes, (
+        "a pre-existing shared role must survive the fixture -- the harness cannot "
+        "recreate its password or memberships"
+    )
+    assert after.attributes["otel_ro"] == before.attributes["otel_ro"], (
+        "the shared role's attributes must be restored exactly, including the "
+        f"CREATEROLE the fixture's convergence never set:\n"
+        f"before={before.attributes['otel_ro']}\nafter={after.attributes['otel_ro']}"
+    )
+    assert after.memberships == before.memberships, (
+        f"teardown left memberships changed:\n"
+        f"added={sorted(after.memberships - before.memberships)}\n"
+        f"removed={sorted(before.memberships - after.memberships)}"
+    )
+
+
+async def _plant_preexisting_otel_ro() -> ClusterRoleState:
+    """Give otel_ro a distinctive attribute the fixture must preserve.
+
+    Returns the pre-plant snapshot so the caller can undo it. CREATEROLE is chosen
+    because the fixture's convergence never writes it, so preserving it can only
+    happen by genuinely restoring rather than by coincidentally re-converging.
+    """
+    async with cluster_role_lock(RLS_BOOTSTRAP_URL) as lock_conn:
+        pristine = await capture_cluster_state(lock_conn, _SCRATCH_TRACKED_ROLES)
+        await lock_conn.execute(
+            "DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname='otel_ro') "
+            "THEN CREATE ROLE otel_ro LOGIN; END IF; END $$;"
+        )
+        await lock_conn.execute("ALTER ROLE otel_ro WITH LOGIN CREATEROLE")
+    return pristine
+
+
+async def _restore_after_plant(pristine: ClusterRoleState) -> None:
+    """Undo the plant, so this test leaks none of the drift it exists to detect.
+
+    The disposable set is derived from ``pristine`` -- the snapshot taken before the
+    plant -- not from the unconditional owned list. Passing the unconditional list
+    would refuse to drop an otel_ro the PLANT created, leaking it into the rest of
+    the session; deriving it here drops exactly that case and still preserves an
+    otel_ro that already existed.
+    """
+    async with cluster_role_lock(RLS_BOOTSTRAP_URL) as lock_conn:
+        await restore_cluster_state(
+            lock_conn,
+            pristine,
+            _SCRATCH_TRACKED_ROLES,
+            disposable=_scratch_disposable_roles(pristine),
+        )
+
+
+async def _drive_scratch_fixture_once() -> None:
+    """Run the scratch fixture's full setup/teardown cycle with an empty body.
+
+    The fixture is driven directly rather than requested, so the calling test can
+    snapshot the cluster OUTSIDE it and observe the before/after pair.
+
+    The caller must NOT hold the posture lock across this call on a separate
+    connection: the fixture takes the same key on the same maintenance database,
+    and pg_advisory_lock is re-entrant only within one session. Callers that need a
+    surrounding hold use the same connection, which this helper does not touch.
+    """
+    generator = scratch_dsn.__wrapped__()  # type: ignore[attr-defined]
+    await anext(generator)
+    with pytest.raises(StopAsyncIteration):
+        await anext(generator)
+
+
+# ---------------------------------------------------------------------------
+# Credential hygiene.
+#
+# This fixture used to ALTER journal_app's password on every setup, reasoning that
+# it assigned the same value. That still rewrote a CLUSTER-GLOBAL secret on a
+# cluster it does not own, raced every concurrent session on the same pg_authid
+# row, and would have destroyed a real credential on a shared or deployed cluster
+# -- rolpassword is a hash the harness never captures, so there is nothing to
+# restore from. The credential is now READ, never written.
+#
+# "Never written" is a claim about absence, free unless something can detect a
+# write. These controls fingerprint the stored hash and require byte-identity, and
+# separately require that the credential still AUTHENTICATES -- a fingerprint match
+# alone would miss a rewrite to a different valid hash of the same password.
+# ---------------------------------------------------------------------------
+
+_CREDENTIAL_ROLES = ("journal_app", "journal_admin")
+
+
+async def _credential_fingerprints(dsn: str) -> dict[str, str]:
+    """An md5 fingerprint of each shared role's stored password hash.
+
+    The FINGERPRINT is compared, never the hash: a mismatch is all a test needs,
+    and the digest cannot be used to authenticate. ``unset`` distinguishes "no
+    password" from any hash, so clearing a credential is caught as readily as
+    replacing one.
+
+    This is a STRICT detector, which is what makes it worth having. Under
+    ``password_encryption = scram-sha-256`` the stored verifier embeds a random
+    salt, so re-assigning the SAME password produces a DIFFERENT hash -- measured
+    on PostgreSQL 17. A fixture that "harmlessly" re-asserts the expected password
+    therefore cannot hide behind an unchanged fingerprint.
+    """
+    conn = await asyncpg.connect(_maintenance_dsn(dsn), timeout=5)
+    try:
+        rows = await conn.fetch(
+            """
+            SELECT r.rolname,
+                   CASE WHEN a.rolpassword IS NULL THEN 'unset'
+                        ELSE md5(a.rolpassword) END AS fingerprint
+            FROM pg_roles r
+            LEFT JOIN pg_authid a ON a.oid = r.oid
+            WHERE r.rolname = ANY($1::text[])
+            ORDER BY r.rolname
+            """,
+            list(_CREDENTIAL_ROLES),
+        )
+    finally:
+        await conn.close()
+    return {str(row["rolname"]): str(row["fingerprint"]) for row in rows}
+
+
+async def test_scratch_fixture_leaves_credentials_usable(scratch_dsn: str) -> None:
+    """Inside the fixture, the provisioned credential still authenticates.
+
+    Paired with the bracketing test below: this half proves the credential is
+    present and working DURING the fixture, so a before/after fingerprint match
+    cannot pass on two identically-broken readings.
+    """
+    # Arrange
+    during = await _credential_fingerprints(scratch_dsn)
+
+    # Act
+    app = await _connect_as_provisioned_app_role(scratch_dsn)
+    await app.close()
+
+    # Assert
+    assert all(value != "unset" for value in during.values()), (
+        f"the shared roles must still have credentials after setup: {during}"
+    )
+
+
+@pytest.mark.usefixtures("_rls_provisioned")
+async def test_scratch_fixture_never_rewrites_a_shared_credential() -> None:
+    """Bracket the whole scratch lifecycle: credentials in, credentials out.
+
+    Driven directly rather than requested, so the fingerprints are taken OUTSIDE
+    the fixture and can observe the before/after pair.
+
+    SCOPE. This measures the SCRATCH FIXTURE only. The session fixture's
+    ``_set_role_passwords`` legitimately converges the test-environment credential
+    once per session, and under scram the stored verifier is salted, so that write
+    moves the fingerprint by design. The bracket here therefore excludes session
+    setup -- ``_rls_provisioned`` has already run -- so any movement it observes is
+    attributable to the fixture under test and to nothing else. The companion
+    assertion about the environment's convergence being CORRECT is logical
+    authentication, covered by the sibling test below.
+    """
+    # Arrange
+    before = await _credential_fingerprints(RLS_BOOTSTRAP_URL)
+    assert all(value != "unset" for value in before.values()), (
+        f"credentials must be provisioned before the exercise: {before}"
+    )
+
+    # Act
+    await _drive_scratch_fixture_once()
+
+    # Assert
+    after = await _credential_fingerprints(RLS_BOOTSTRAP_URL)
+    assert after == before, (
+        "the scratch fixture changed a shared role credential. Passwords are "
+        "cluster-global and the harness does not capture the hash, so a rewrite is "
+        f"unrecoverable:\n before={before}\n after={after}"
+    )
+
+
+@pytest.mark.usefixtures("_rls_provisioned")
+async def test_scratch_fixture_preserves_credentials_through_an_exception() -> None:
+    """A body that raises must not cost a credential either.
+
+    The restore path runs on both the happy and the failing path, so a rewrite
+    hiding in the exception route would be just as fatal and far less visible.
+    """
+    # Arrange
+    before = await _credential_fingerprints(RLS_BOOTSTRAP_URL)
+
+    # Act
+    generator = scratch_dsn.__wrapped__()  # type: ignore[attr-defined]
+    await anext(generator)
+    with pytest.raises(RuntimeError, match="induced"):
+        await generator.athrow(RuntimeError("induced"))
+
+    # Assert
+    after = await _credential_fingerprints(RLS_BOOTSTRAP_URL)
+    assert after == before, (
+        "an exception inside the scratch fixture cost a shared role credential:\n"
+        f" before={before}\n after={after}"
+    )
+
+
+@pytest.mark.usefixtures("_rls_provisioned")
+async def test_provisioned_credentials_authenticate_after_the_scratch_lifecycle() -> None:
+    """LOGICAL authentication survives, which is the property that actually matters.
+
+    Kept separate from the fingerprint bracket on purpose. Under
+    ``password_encryption = scram-sha-256`` the stored verifier is salted, so the
+    session fixture's legitimate one-time convergence changes the hash while leaving
+    the PASSWORD unchanged. A fingerprint comparison alone therefore cannot
+    distinguish "someone rewrote the credential" from "the environment converged it
+    as designed" unless the measurement window excludes that convergence.
+
+    This test asks the question the fingerprint cannot: after the scratch lifecycle,
+    do both roles still authenticate with the credentials the environment
+    provisioned? That is unaffected by salting and is what every pool in the run
+    depends on.
+    """
+    # Arrange
+    await _drive_scratch_fixture_once()
+
+    # Act / Assert -- an actual login per role, not a catalog read.
+    app = await _connect_as_provisioned_app_role(RLS_BOOTSTRAP_URL)
+    try:
+        assert str(await app.fetchval("SELECT current_user")) == "journal_app", (
+            "the app connection authenticated as an unexpected role"
+        )
+    finally:
+        await app.close()
+
+    admin = await asyncpg.connect(RLS_ADMIN_URL, timeout=5)
+    try:
+        assert str(await admin.fetchval("SELECT current_user")) == "journal_admin", (
+            "the admin connection authenticated as an unexpected role"
+        )
+    finally:
+        await admin.close()

@@ -120,7 +120,14 @@ jobs:
 
     services:
       postgres:
-        image: pgvector/pgvector:pg17
+        # Pinned by immutable DIGEST, same one the disposable service uses. A tag
+        # can move to a different build with no commit here, which would change the
+        # server the RLS, grant and posture contracts run against -- and silently
+        # desynchronise them from the psql client major installed below.
+        # Verified: this digest resolves and runs PostgreSQL 17.11 with pgvector
+        # 0.8.6. The major is declared once, in PGVECTOR_PG_MAJOR below, because a
+        # digest carries no readable version and nothing may infer one from a tag.
+        image: pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
         env:
           POSTGRES_DB: journal_test
           POSTGRES_USER: journal
@@ -133,7 +140,39 @@ jobs:
           --health-timeout 3s
           --health-retries 10
 
+      # A SECOND, throwaway cluster on its own port. The missing-required-role
+      # contracts need a role to be genuinely ABSENT, and roles are cluster-global:
+      # staging that on the working cluster above would mean dropping a shared role,
+      # which is unrecoverable (the harness captures four attributes, not the
+      # password or rolconfig it would need to restore one). So absence gets its own
+      # cluster, whose DSN is exported for ONE step only -- see the integration step
+      # below -- so no other step can accidentally point role-dropping code at the
+      # working cluster.
+      postgres_disposable:
+        # Pinned by immutable DIGEST, not by the mutable pg17 tag. This service
+        # gates the missing-required-role contracts, which DROP roles; a tag that
+        # silently moved to a different build could change role semantics under
+        # them without any commit here. Verified: this digest resolves and runs
+        # PostgreSQL 17.11 with pgvector 0.8.6.
+        image: pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        env:
+          POSTGRES_DB: postgres
+          POSTGRES_USER: journal
+          POSTGRES_PASSWORD: testpass
+        ports:
+          - 5434:5432
+        options: >-
+          --health-cmd "pg_isready -U journal -d postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     env:
+      # The PostgreSQL major both pinned digests provide. A digest reference carries
+      # no readable version, so this is the single declared source of truth: the
+      # client install step below derives its pin from it, and the workflow contract
+      # tests assert against it rather than parsing an image tag.
+      PGVECTOR_PG_MAJOR: "17"
       # Consumed by tests/conftest.py (legacy + RLS fixtures).
       TEST_DATABASE_URL: postgresql://journal:testpass@localhost:5433/journal_test
       TEST_DATABASE_URL_RLS: postgresql://journal:testpass@localhost:5433/journal_rls_test
@@ -176,15 +215,19 @@ jobs:
       # The audit_log dedup repair / invariant tests shell out to `psql` and to
       # deployment/scripts/verify-db-invariants.sh, and they FAIL rather than skip
       # when psql is absent -- so the client is a job prerequisite, not an extra.
-      # It is installed from PGDG and pinned to major 17 to match the
-      # pgvector/pgvector:pg17 service: the runner image ships whatever client
-      # major it happens to ship, and a client older than the server can fail on
-      # newer catalog output. tests/unit/test_ci_workflow_contract.py asserts this
-      # step keeps existing with the same pin, so runner-image drift cannot remove
-      # it silently.
-      - name: Install PostgreSQL 17 client
+      # It is installed from PGDG and pinned to the major both digest-pinned
+      # pgvector services provide, taken from PGVECTOR_PG_MAJOR rather than restated
+      # here: the runner image ships whatever client major it happens to ship, and a
+      # client older than the server can fail on newer catalog output.
+      # tests/unit/test_ci_workflow_contract.py asserts this step keeps existing and
+      # keeps deriving its pin from that declaration, so neither runner-image drift
+      # nor a hard-coded major can slip in silently.
+      - name: Install PostgreSQL client
         env:
-          PG_MAJOR: "17"
+          # Derived from the single declared major, not restated. Both service
+          # images are digest-pinned and carry no readable version, so a literal
+          # here could drift from the server the contracts actually run against.
+          PG_MAJOR: ${{ env.PGVECTOR_PG_MAJOR }}
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -200,7 +243,7 @@ jobs:
 
       - name: Verify psql major matches the pin
         env:
-          PG_MAJOR: "17"
+          PG_MAJOR: ${{ env.PGVECTOR_PG_MAJOR }}
         run: |
           set -euo pipefail
           psql --version
@@ -247,6 +290,12 @@ jobs:
           SQL
 
       - name: Integration tests (Postgres-only; excludes hosted_live live-stack)
+        # TEST_DISPOSABLE_CLUSTER_URL is set HERE, not at job level, and points at
+        # the throwaway service. Step scope is deliberate: the code it gates drops
+        # shared roles, so the variable must not be visible to any step whose DSN
+        # could be the working cluster.
+        env:
+          TEST_DISPOSABLE_CLUSTER_URL: postgresql://journal:testpass@localhost:5434/postgres
         # MARKER-DRIVEN: every Postgres-only test under these dirs gates here.
         # `-m "not hosted_live"` excludes the live-stack E2E (Hydra + Kratos +
         # cloud-api) that runs in Tier-2 on the testbench.
