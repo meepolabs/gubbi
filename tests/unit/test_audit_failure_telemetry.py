@@ -21,8 +21,6 @@ assertion elsewhere is evidence rather than an empty scan.
 
 from __future__ import annotations
 
-import io
-import logging
 from contextlib import ExitStack
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,56 +44,42 @@ from gubbi.telemetry.sanitized_errors import (
     record_exception_sanitized,
     safe_error_fields,
 )
+from tests.fixtures.driver_errors import (
+    MARKER_DETAIL,
+    MARKER_IP,
+    MARKER_SID,
+    MARKER_TOKEN,
+    MARKER_USER_AGENT,
+    MARKERS,
+    SQLSTATE,
+    assert_no_markers,
+    markers_present,
+    planted_driver_error,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
     from opentelemetry.sdk.trace import ReadableSpan
 
     from tests.conftest import InMemoryExporter
+    from tests.fixtures.log_capture import LogCapture
 
 pytestmark = pytest.mark.unit
 
 _USER_ID = UUID("11111111-2222-3333-4444-555555555555")
 
-# Synthetic values planted in the exception the driver would raise. Each
-# stands for one class of identity-bearing text a real PostgreSQL error
-# for this statement can quote back: the session id, the originating IP,
-# the User-Agent, a bearer credential and the server's DETAIL block.
-# Deliberately low-entropy, hyphenated words rather than key-shaped
-# strings: a realistic-looking credential here trips the repo's secret
-# scanner, and the assertions only need each marker to be unique.
-_MARKER_SID = "planted-session-marker"
-_MARKER_IP = "203.0.113.77"
-_MARKER_USER_AGENT = "PlantedAgent/9.9"
-_MARKER_TOKEN = "planted-bearer-marker"
-_MARKER_DETAIL = "planted-detail-marker"
-_MARKERS: tuple[str, ...] = (
-    _MARKER_SID,
-    _MARKER_IP,
-    _MARKER_USER_AGENT,
-    _MARKER_TOKEN,
-    _MARKER_DETAIL,
-)
-
-_SQLSTATE = "42501"
-
-
-def _planted_driver_error() -> asyncpg.PostgresError:
-    """Build the failing-INSERT exception with every marker embedded.
-
-    Both halves matter: ``str(exc)`` concatenates the message AND the
-    ``DETAIL`` block, so a surface that stringifies the exception leaks
-    both, while one that reads only ``exc.detail`` leaks only the
-    second.
-    """
-    exc = asyncpg.exceptions.InsufficientPrivilegeError(
-        "permission denied for table audit_log while inserting "
-        f"sid={_MARKER_SID} ip={_MARKER_IP} ua={_MARKER_USER_AGENT} "
-        f"token={_MARKER_TOKEN}"
-    )
-    exc.detail = f"DETAIL: rejected row carried {_MARKER_DETAIL}"
-    return exc
+# The planted markers, the exception carrying them, and the marker scan
+# live in ``tests.fixtures.driver_errors`` because the read-path
+# sanitization tests assert against the same notion of "driver-supplied
+# text"; two copies would let one drift from the other.
+_MARKER_SID = MARKER_SID
+_MARKER_IP = MARKER_IP
+_MARKER_USER_AGENT = MARKER_USER_AGENT
+_MARKER_TOKEN = MARKER_TOKEN
+_MARKER_DETAIL = MARKER_DETAIL
+_MARKERS = MARKERS
+_SQLSTATE = SQLSTATE
+_planted_driver_error = planted_driver_error
+_assert_no_markers = assert_no_markers
 
 
 def _failing_conn() -> MagicMock:
@@ -124,83 +108,12 @@ def _span_text(span: ReadableSpan) -> str:
     return "\n".join(parts)
 
 
-def _assert_no_markers(text: str, surface: str) -> None:
-    leaked = [marker for marker in _MARKERS if marker in text]
-    assert not leaked, f"{surface} exported planted driver text {leaked}: {text}"
-
-
 def _event_attributes(span: ReadableSpan, event_name: str) -> dict[str, Any]:
     for event in span.events:
         if event.name == event_name:
             return dict(event.attributes or {})
     msg = f"no {event_name!r} event on span {span.name!r}; got {[e.name for e in span.events]}"
     raise AssertionError(msg)
-
-
-class _LogCapture(logging.Handler):
-    """Collect every log surface a structlog emit can write to.
-
-    Two are needed. Structured fields land on the ``LogRecord`` and are
-    rendered by the ProcessorFormatter. The exception itself does NOT:
-    the configured processor chain ends in ``ExceptionPrettyPrinter``,
-    which pops ``exc_info`` and prints the formatted traceback to its own
-    file object, so a caller passing ``exc_info=True`` leaks through a
-    surface that inspecting ``LogRecord.exc_text`` cannot see.
-    """
-
-    def __init__(self, exception_sink: io.StringIO) -> None:
-        super().__init__(level=logging.DEBUG)
-        self._exception_sink = exception_sink
-        self.setFormatter(
-            structlog.stdlib.ProcessorFormatter(
-                processors=[
-                    structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-                    structlog.processors.JSONRenderer(),
-                ],
-            )
-        )
-        self.lines: list[str] = []
-
-    def emit(self, record: logging.LogRecord) -> None:
-        self.lines.append(self.format(record))
-
-    @property
-    def text(self) -> str:
-        """Every captured structured line plus every pretty-printed traceback."""
-        return "\n".join([*self.lines, self._exception_sink.getvalue()])
-
-
-@pytest.fixture
-def log_capture() -> Iterator[_LogCapture]:
-    """Attach a root handler and redirect the pretty-printer's own output."""
-    printers = [
-        processor
-        for processor in structlog.get_config()["processors"]
-        if isinstance(processor, structlog.processors.ExceptionPrettyPrinter)
-    ]
-    assert printers, (
-        "the configured structlog chain has no ExceptionPrettyPrinter; "
-        "the traceback surface this fixture captures has moved -- re-derive it "
-        "from gubbi_common.telemetry.logging.initialize_logger before trusting "
-        "any assertion built on this fixture"
-    )
-    sink = io.StringIO()
-    original_files = [printer._file for printer in printers]
-    for printer in printers:
-        printer._file = sink
-
-    handler = _LogCapture(sink)
-    root = logging.getLogger()
-    original_level = root.level
-    root.addHandler(handler)
-    root.setLevel(logging.DEBUG)
-    try:
-        yield handler
-    finally:
-        root.removeHandler(handler)
-        root.setLevel(original_level)
-        for printer, original_file in zip(printers, original_files, strict=True):
-            printer._file = original_file
 
 
 def _make_app_ctx() -> AppContext:
@@ -395,7 +308,7 @@ class TestAuditedDecoratorCallerLog:
     async def test_decorator_failure_log_omits_driver_text_and_keeps_safe_shape(
         self,
         in_memory_tracer: tuple[Any, InMemoryExporter],
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         # Arrange
         _tracer, exporter = in_memory_tracer
@@ -446,7 +359,7 @@ class TestScaffoldOperatorCallerLog:
 
     async def test_scaffold_audit_failure_log_omits_driver_text(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         # Arrange
         from gubbi.users.bootstrap import scaffold_operator
@@ -479,7 +392,7 @@ class TestUnhandledDriverErrorHandler:
 
     async def test_wrapped_driver_error_takes_the_safe_path(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         """A translated wrapper must be classified by its cause, not its type.
 
@@ -519,7 +432,7 @@ class TestUnhandledDriverErrorHandler:
 
     async def test_general_exception_handler_omits_driver_text(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         # Arrange
         from gubbi.main import general_exception_handler
@@ -540,7 +453,7 @@ class TestUnhandledDriverErrorHandler:
 
     async def test_non_driver_exception_keeps_its_traceback(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         """Sanitization is scoped to driver text, not to all error logging.
 
@@ -593,7 +506,7 @@ class TestHttpBoundaryServerSpan:
         make_exc: Any,
         in_memory_tracer: tuple[Any, InMemoryExporter],
         restore_asyncpg_instrumentation: Any,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         """All three classified driver families must be registered handlers.
 
@@ -639,7 +552,7 @@ class TestHttpBoundaryServerSpan:
         self,
         in_memory_tracer: tuple[Any, InMemoryExporter],
         restore_asyncpg_instrumentation: Any,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         """Control: the extra registrations must not alter ordinary handling."""
         # Arrange
@@ -939,7 +852,7 @@ class TestMarkJobFailedSecondaryAudit:
 
     async def test_secondary_audit_failure_log_omits_driver_text(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         # Arrange
         from gubbi.extraction.jobs import extract_conversation as job_module
@@ -1446,7 +1359,7 @@ class TestHarnessCanFail:
 
     async def test_capture_sees_default_exception_log(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         """``logger.exception()`` -- the default way to log a caught exception.
 
@@ -1468,7 +1381,7 @@ class TestHarnessCanFail:
             await logger.exception("control_audit_write_failed")
 
         # Assert
-        leaked = [marker for marker in _MARKERS if marker in log_capture.text]
+        leaked = markers_present(log_capture.text)
         assert set(leaked) == set(_MARKERS), (
             f"the log capture must see every planted marker an exception() emit exports; "
             f"saw {leaked}"
@@ -1476,7 +1389,7 @@ class TestHarnessCanFail:
 
     async def test_capture_sees_stringified_exception_field(
         self,
-        log_capture: _LogCapture,
+        log_capture: LogCapture,
     ) -> None:
         """``error=str(exc)`` -- the other shape in use across this codebase."""
         # Arrange
@@ -1487,7 +1400,7 @@ class TestHarnessCanFail:
         await logger.warning("control_audit_write_failed", error=str(exc))
 
         # Assert
-        leaked = [marker for marker in _MARKERS if marker in log_capture.text]
+        leaked = markers_present(log_capture.text)
         assert set(leaked) == set(_MARKERS), (
             f"the log capture must see markers a stringified exception field exports; saw {leaked}"
         )
@@ -1512,7 +1425,7 @@ class TestHarnessCanFail:
         control_spans = [s for s in exporter.spans if s.name == "control.caller"]
         assert len(control_spans) == 1
         text = _span_text(control_spans[0])
-        leaked = [marker for marker in _MARKERS if marker in text]
+        leaked = markers_present(text)
         assert set(leaked) == set(_MARKERS), (
             f"the span scan must see every planted marker record_exception exports; saw {leaked}"
         )

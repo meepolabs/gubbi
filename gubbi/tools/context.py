@@ -20,6 +20,7 @@ from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import search as search_repo
 from gubbi.storage.repositories import topics as topic_repo
+from gubbi.telemetry.sanitized_errors import is_driver_caused, safe_error_fields
 from gubbi.tools.constants import (
     BRIEFING_KEY_FACTS_COUNT,
     BRIEFING_KEY_FACTS_QUERY,
@@ -201,10 +202,28 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                         error_type=type(exc).__name__,
                         exc_info=True,
                     )
-                except asyncpg.PostgresError:
-                    await logger.exception("Key facts batch query failed")
-                except Exception:
-                    await logger.exception("Key facts retrieval failed unexpectedly")
+                except asyncpg.PostgresError as exc:
+                    # No ``exception()``: the driver message and its
+                    # DETAIL block quote the failing SELECT's predicate
+                    # values.
+                    await logger.error(
+                        "Key facts batch query failed",
+                        **safe_error_fields(exc),
+                    )
+                except Exception as exc:
+                    # Bounded fields only for an exception carrying driver
+                    # text; a failure this codebase owns keeps its message
+                    # and traceback. ``is_driver_caused``, not
+                    # ``isinstance``: a translated wrapper such as
+                    # ``DatabaseUnavailable(str(exc))`` carries the driver
+                    # message in its own ``str()``.
+                    if is_driver_caused(exc):
+                        await logger.error(
+                            "Key facts retrieval failed unexpectedly",
+                            **safe_error_fields(exc),
+                        )
+                    else:
+                        await logger.error("Key facts retrieval failed unexpectedly", exc_info=exc)
                     raise
 
             if raw_facts:
@@ -217,10 +236,11 @@ def register(mcp: FastMCP, app_ctx: AppContext) -> None:
                 decrypted_entries: dict[int, tuple[str, str | None]] = {}
                 try:
                     decrypted_entries = await entry_repo.get_texts(conn, cipher, fact_entry_ids)
-                except asyncpg.PostgresError:
-                    await logger.exception(
+                except asyncpg.PostgresError as exc:
+                    await logger.error(
                         "Key facts entry batch query failed",
                         entry_count=len(fact_entry_ids),
+                        **safe_error_fields(exc),
                     )
 
                 for row in raw_facts:

@@ -32,6 +32,7 @@ from gubbi.models.search import SearchResult
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import search as search_repo
+from gubbi.telemetry.sanitized_errors import is_driver_caused, safe_error_fields
 from gubbi.tools.constants import MAX_SEARCH_CONTENT_CHARS
 
 if TYPE_CHECKING:
@@ -129,10 +130,31 @@ async def _run_dual_search(
                 for r in raw
                 if r.get("entry_id") is not None
             ]
-        except asyncpg.PostgresError:
-            await logger.warning("Semantic search failed, using FTS only", exc_info=True)
-        except Exception:
-            await logger.exception("Semantic search failed unexpectedly")
+        except asyncpg.PostgresError as exc:
+            # No ``exc_info``: the driver message and its DETAIL block
+            # quote the failing statement's predicate values. Bounded
+            # fields rather than relying on the emit landing on a worker
+            # thread where the exception is no longer current -- that is
+            # an ``AsyncBoundLogger`` implementation detail, not a
+            # property of this call site.
+            await logger.warning(
+                "Semantic search failed, using FTS only",
+                **safe_error_fields(exc),
+            )
+        except Exception as exc:
+            # Bounded fields only for an exception carrying driver text; a
+            # failure this codebase owns keeps its message and traceback,
+            # since withholding those blinds the operator for no gain.
+            # ``is_driver_caused``, not ``isinstance``: a translated
+            # wrapper such as ``DatabaseUnavailable(str(exc))`` carries
+            # the driver message in its own ``str()``.
+            if is_driver_caused(exc):
+                await logger.error(
+                    "Semantic search failed unexpectedly",
+                    **safe_error_fields(exc),
+                )
+            else:
+                await logger.error("Semantic search failed unexpectedly", exc_info=exc)
             raise
 
     # Merge with seen_keys dedup -- FTS first, semantic second preserves order.
@@ -173,22 +195,26 @@ async def _hydrate_results(
     entries_batch_failed = False
     try:
         decrypted_entries = await entry_repo.get_texts(conn, cipher, entry_id_list)
-    except asyncpg.PostgresError:
+    except asyncpg.PostgresError as exc:
         entries_batch_failed = True
-        await logger.exception(
+        # No ``exception()``: the driver message and its DETAIL block
+        # quote the failing SELECT's predicate values.
+        await logger.error(
             "Entry batch query failed, surfacing entries as decryption-failed",
             entry_count=len(entry_id_list),
+            **safe_error_fields(exc),
         )
 
     decrypted_convs: dict[int, tuple[str, str]] = {}
     convs_batch_failed = False
     try:
         decrypted_convs = await conv_repo.get_titles_summaries(conn, cipher, conv_id_list)
-    except asyncpg.PostgresError:
+    except asyncpg.PostgresError as exc:
         convs_batch_failed = True
-        await logger.exception(
+        await logger.error(
             "Conversation batch query failed, surfacing conversations as decryption-failed",
             conv_count=len(conv_id_list),
+            **safe_error_fields(exc),
         )
 
     hydrated: list[SearchResult] = []

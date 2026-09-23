@@ -47,6 +47,7 @@ from tests.fixtures.cluster_roles import (
     cluster_role_lock,
     maintenance_dsn,
 )
+from tests.fixtures.log_capture import LogCapture, log_capture_handler
 
 # Sentinel for "attribute was absent", distinct from a stored None.
 _ATTR_MISSING: object = object()
@@ -63,6 +64,16 @@ def tmp_journal(tmp_path: Path) -> Path:
     """Create a temporary journal directory structure."""
     (tmp_path / "conversations_json").mkdir()
     return tmp_path
+
+
+@pytest.fixture
+def log_capture() -> Iterator[LogCapture]:
+    """Collect every log surface a structlog emit can write to.
+
+    Requires the configured processor chain, so it depends on
+    ``_configure_structlog_for_tests`` being in effect (autouse, session).
+    """
+    yield from log_capture_handler()
 
 
 @pytest.fixture(autouse=True, scope="session")
