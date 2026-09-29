@@ -8,6 +8,7 @@
 		"schedule:weekly"
 	],
 	"baseBranchPatterns": ["develop"],
+	"mode": "full",
 	"timezone": "Etc/UTC",
 	"automerge": false,
 	"minimumReleaseAge": "14 days",
