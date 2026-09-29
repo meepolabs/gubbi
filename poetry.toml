@@ -1,0 +1,9 @@
+# Ignore releases younger than 14 days when Poetry resolves (lock/add/update),
+# so a freshly published, possibly malicious release is not pulled in by hand.
+# Mirrors the Renovate release-age delay, which does not cover manual runs.
+# Security-fix bypass: temporarily add the fixed package plus any co-released
+# package it pins exactly, e.g.
+#   min-release-age-exclude = ["pkg", "pkg-companion"]
+# under [solver], lock, then remove the entries.
+[solver]
+min-release-age = 14
