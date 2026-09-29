@@ -66,6 +66,12 @@
 			"groupSlug": "poetry"
 		},
 		{
+			"description": "poetry-requirements.txt is a pip-compile lock of Poetry's own dependency closure; Renovate can only rehash single packages and never re-resolves the closure, so transitive pins move only by regenerating the file with the command in its header. The poetry pin stays managed, grouped with POETRY_VERSION",
+			"matchFileNames": ["**/poetry-requirements.txt"],
+			"matchPackageNames": ["!poetry"],
+			"enabled": false
+		},
+		{
 			"description": "The pre-commit hook resolves gitleaks from git tags while the CI binary resolves from GitHub releases; resolve the hook from releases too so both group members see the same versions and release timestamps and always land on one version",
 			"matchManagers": ["pre-commit"],
 			"matchDepNames": ["gitleaks/gitleaks"],
