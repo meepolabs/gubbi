@@ -150,3 +150,8 @@ its tables.
   fail against the 0001 squashed baseline (un-ignore each as rewritten).
   The job bootstraps `journal_app` + `journal_admin` roles (the baseline
   assumes they pre-exist).
+- Image closure gate (`.github/workflows/poetry-image-closure.yml`):
+  on changes to `deployment/Dockerfile` or
+  `deployment/poetry-requirements.txt`, installs the hash-pinned Poetry
+  closure in the Dockerfile's base image and checks `POETRY_VERSION`
+  matches the lock's `poetry` pin.

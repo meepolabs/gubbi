@@ -1,0 +1,67 @@
+# Proves the hash-pinned Poetry closure the production image installs still
+# installs.
+#
+# The Dockerfile installs Poetry from a pip-compile lock of Poetry plus its
+# transitive dependencies. Dependency bumps move only the `poetry` pin in that
+# lock (together with the Dockerfile's POETRY_VERSION); the transitive pins
+# stay frozen. No other CI job builds the image, so a Poetry release whose
+# metadata conflicts with a frozen pin would otherwise first fail at image
+# build time on deploy. This job replays the Dockerfile's Poetry install step
+# in the Dockerfile's own base image so that failure lands on the PR instead.
+#
+# The base image is read from the Dockerfile's FROM line at run time rather
+# than copied here, so a base-image bump cannot leave this gate testing a
+# different interpreter than the one the image ships.
+
+name: poetry-image-closure
+
+on:
+  pull_request:
+    paths:
+      - deployment/Dockerfile
+      - deployment/poetry-requirements.txt
+      - .github/workflows/poetry-image-closure.yml
+  push:
+    branches: [main, develop]
+    paths:
+      - deployment/Dockerfile
+      - deployment/poetry-requirements.txt
+      - .github/workflows/poetry-image-closure.yml
+  workflow_dispatch:
+
+# Cancel redundant runs on the same branch.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  install:
+    name: poetry closure installs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DOCKERFILE: deployment/Dockerfile
+      REQUIREMENTS: deployment/poetry-requirements.txt
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install the Poetry closure in the image's base
+        run: |
+          set -eu
+          base_image=$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$DOCKERFILE")
+          test -n "$base_image"
+          test "$(printf '%s\n' "$base_image" | wc -l)" -eq 1
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -e DOCKERFILE -e REQUIREMENTS "$base_image" sh -eu -c '
+            docker_version=$(sed -n "s/^[[:space:]]*POETRY_VERSION=\([^[:space:]]*\).*/\1/p" "/workspace/$DOCKERFILE")
+            requirements_version=$(sed -n "s/^poetry==\([^[:space:]]*\).*/\1/p" "/workspace/$REQUIREMENTS")
+            if [ -z "$docker_version" ] || [ "$docker_version" != "$requirements_version" ]; then
+              echo "POETRY_VERSION in $DOCKERFILE (\"$docker_version\") does not match the poetry pin in $REQUIREMENTS (\"$requirements_version\")" >&2
+              exit 1
+            fi
+            python -m venv /tmp/poetry
+            /tmp/poetry/bin/pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r "/workspace/$REQUIREMENTS"
+            /tmp/poetry/bin/poetry --version'
