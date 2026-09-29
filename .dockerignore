@@ -11,6 +11,7 @@ tests/
 docs/
 deployment/
 !deployment/entrypoint.sh
+!deployment/poetry-requirements.txt
 !deployment/scripts/
 *.dump
 *.db

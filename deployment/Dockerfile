@@ -5,7 +5,7 @@ ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=off \
     PIP_DISABLE_PIP_VERSION_CHECK=on \
-    POETRY_VERSION=2.0.1 \
+    POETRY_VERSION=2.4.1 \
     POETRY_HOME="/opt/poetry" \
     POETRY_VIRTUALENVS_IN_PROJECT=true \
     POETRY_NO_INTERACTION=1 \
@@ -19,8 +19,19 @@ RUN apt-get update && \
     apt-get install -y curl build-essential gosu postgresql-client && \
     rm -rf /var/lib/apt/lists/*
 
-# Install poetry
-RUN curl -sSL https://install.python-poetry.org | python -
+# Install poetry into its own venv from a hash-pinned requirements file, so
+# the build runs no fetched installer script and poetry's own dependencies
+# never enter the app venv. --only-binary: building an sdist would fetch its
+# build backend without hash checks. Only the poetry entry point goes on
+# PATH; a venv python in $POETRY_HOME/bin would shadow the app venv's python.
+COPY deployment/poetry-requirements.txt /tmp/poetry-requirements.txt
+RUN test "$(sed -n 's/^poetry==\([^ ]*\).*/\1/p' /tmp/poetry-requirements.txt)" = "$POETRY_VERSION" && \
+    python -m venv "$POETRY_HOME/venv" && \
+    "$POETRY_HOME/venv/bin/pip" install --no-cache-dir --require-hashes --only-binary=:all: -r /tmp/poetry-requirements.txt && \
+    mkdir -p "$POETRY_HOME/bin" && \
+    ln -s "$POETRY_HOME/venv/bin/poetry" "$POETRY_HOME/bin/poetry" && \
+    rm /tmp/poetry-requirements.txt && \
+    poetry --version
 
 # Copy dependency files
 WORKDIR $PYSETUP_PATH
