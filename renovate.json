@@ -1,0 +1,122 @@
+{
+	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
+	"extends": [
+		"config:recommended",
+		":semanticCommits",
+		":dependencyDashboard",
+		"group:allNonMajor",
+		"schedule:weekly"
+	],
+	"baseBranchPatterns": ["develop"],
+	"timezone": "Etc/UTC",
+	"automerge": false,
+	"minimumReleaseAge": "14 days",
+	"minimumReleaseAgeBehaviour": "timestamp-required",
+	"internalChecksFilter": "strict",
+	"prHourlyLimit": 4,
+	"prConcurrentLimit": 8,
+	"vulnerabilityAlerts": {
+		"enabled": true,
+		"labels": ["security", "vulnerability"],
+		"schedule": "at any time",
+		"minimumGroupSize": 1
+	},
+	"lockFileMaintenance": {
+		"enabled": true,
+		"schedule": ["before 4am on monday"]
+	},
+	"pre-commit": {
+		"enabled": true
+	},
+	"github-actions": {
+		"enabled": true
+	},
+	"packageRules": [
+		{
+			"description": "Pin exact versions for npm and GitHub Actions only; other managers keep Renovate's default range strategy",
+			"matchManagers": ["npm", "github-actions"],
+			"rangeStrategy": "pin"
+		},
+		{
+			"description": "Pin GitHub Actions to commit SHAs (security: tags can be moved)",
+			"matchManagers": ["github-actions"],
+			"pinDigests": true
+		},
+		{
+			"description": "Actions are pinned as sha plus exact version tag, so a digest-only update means the tag was moved to another commit, which is the tampering case sha pinning exists to catch; release-age checks the tag original date and would not hold it, so require explicit dashboard approval. Initial pinning and version updates are unaffected",
+			"matchManagers": ["github-actions"],
+			"matchUpdateTypes": ["digest"],
+			"dependencyDashboardApproval": true
+		},
+		{
+			"description": "Docker registry lookups provide no release timestamp, so the release-age delay can never be satisfied and every image update would be held indefinitely; image updates remain human-reviewed on the weekly schedule",
+			"matchDatasources": ["docker"],
+			"minimumReleaseAge": null
+		},
+		{
+			"description": "First-party library pinned to a reviewed commit and bumped deliberately alongside the change that needs it; the release-age delay is meaningless for our own code and the git-refs datasource has no release timestamp",
+			"matchDepNames": ["gubbi-common"],
+			"enabled": false
+		},
+		{
+			"description": "Keep every Poetry pin (install-poetry input, pip install, cache keys, Dockerfile POETRY_VERSION) in one PR so they cannot drift apart",
+			"matchPackageNames": ["poetry"],
+			"groupName": "poetry",
+			"groupSlug": "poetry"
+		},
+		{
+			"description": "The pre-commit hook resolves gitleaks from git tags while the CI binary resolves from GitHub releases; resolve the hook from releases too so both group members see the same versions and release timestamps and always land on one version",
+			"matchManagers": ["pre-commit"],
+			"matchDepNames": ["gitleaks/gitleaks"],
+			"overrideDatasource": "github-releases"
+		},
+		{
+			"description": "Bump the CI gitleaks binary and the pre-commit hook rev together so local and CI scans agree; require both members rather than letting one open a PR alone",
+			"matchPackageNames": ["gitleaks/gitleaks"],
+			"groupName": "gitleaks",
+			"groupSlug": "gitleaks",
+			"minimumGroupSize": 2
+		},
+		{
+			"description": "Major version bumps need explicit review; never auto-merge",
+			"matchUpdateTypes": ["major"],
+			"automerge": false,
+			"labels": ["major-update"]
+		}
+	],
+	"customManagers": [
+		{
+			"customType": "regex",
+			"description": "Poetry pins the github-actions manager cannot see: pip install, the venv cache keys that embed the version, and POETRY_VERSION in Dockerfiles (the install-poetry input is handled by github-actions)",
+			"managerFilePatterns": [
+				"/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/",
+				"/(^|/)Dockerfile[^/]*$/"
+			],
+			"matchStrings": [
+				"pip install poetry==(?<currentValue>\\d+\\.\\d+\\.\\d+)",
+				"key:\\s*venv-[^\\n]*?-poetry(?<currentValue>\\d+\\.\\d+\\.\\d+)-",
+				"\\bPOETRY_VERSION=(?<currentValue>\\d+\\.\\d+\\.\\d+)"
+			],
+			"depNameTemplate": "poetry",
+			"datasourceTemplate": "pypi"
+		},
+		{
+			"customType": "regex",
+			"description": "OSV-scanner release pinned in the workflow env",
+			"managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+			"matchStrings": ["(?:^|\\n)\\s*OSV_VERSION:\\s*['\\\"]?(?<currentValue>\\d+\\.\\d+\\.\\d+)['\\\"]?"],
+			"depNameTemplate": "google/osv-scanner",
+			"datasourceTemplate": "github-releases",
+			"extractVersionTemplate": "^v(?<version>.+)$"
+		},
+		{
+			"customType": "regex",
+			"description": "gitleaks binary version pinned in the workflow env",
+			"managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
+			"matchStrings": ["(?:^|\\n)\\s*GITLEAKS_VERSION:\\s*['\\\"]?(?<currentValue>\\d+\\.\\d+\\.\\d+)['\\\"]?"],
+			"depNameTemplate": "gitleaks/gitleaks",
+			"datasourceTemplate": "github-releases",
+			"extractVersionTemplate": "^v(?<version>.+)$"
+		}
+	]
+}
