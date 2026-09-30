@@ -99,6 +99,15 @@ types-pyyaml = "==6.0.12.20260408"
 hypothesis = "^6.152.1"
 asgi-lifespan = "^2.1.0"
 
+# Optional group: the tools CI runs outside the app environment (the
+# env-contract lint), installed with ``poetry install --only ci-tools`` so
+# they come from this lock rather than an unpinned pip install.
+[tool.poetry.group.ci-tools]
+optional = true
+
+[tool.poetry.group.ci-tools.dependencies]
+pyyaml = "^6.0"
+
 [build-system]
 requires = ["poetry-core>=1.0.0"]
 build-backend = "poetry.core.masonry.api"
