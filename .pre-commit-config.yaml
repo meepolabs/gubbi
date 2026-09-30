@@ -51,7 +51,7 @@ repos:
         entry: python tools/check_env_contract.py
         pass_filenames: false
         always_run: true
-        additional_dependencies: [pyyaml]
+        additional_dependencies: [pyyaml==6.0.3]
       # Ban accidental doubled JOURNAL_ prefix in env var names.
       # Trips when a pydantic Settings field named journal_<name> under
       # env_prefix="JOURNAL_" silently produces JOURNAL_JOURNAL_<NAME>.
