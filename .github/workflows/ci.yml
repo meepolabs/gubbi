@@ -82,16 +82,21 @@ jobs:
 
       - name: Install osv-scanner
         env:
+          # OSV_VERSION and OSV_SHA256 must change together. Renovate bumps
+          # OSV_VERSION but cannot compute a release asset digest, so a bump
+          # PR fails this step until OSV_SHA256 is set by hand to the sha256
+          # of osv-scanner_linux_amd64 for the new release (compute it from
+          # the downloaded asset and cross-check the release SHA256SUMS).
           OSV_VERSION: 2.5.1
+          OSV_SHA256: f9f25499a2c8cc367b3af45df2ea7eeca7fbccceab9c35079968f4b3652194be
         run: |
           set -euo pipefail
           BASE="https://github.com/google/osv-scanner/releases/download/v${OSV_VERSION}"
-          curl -sSfL -o /tmp/osv-scanner    "${BASE}/osv-scanner_linux_amd64"
-          curl -sSfL -o /tmp/osv_SHA256SUMS "${BASE}/osv-scanner_SHA256SUMS"
-          # The checksums file names the upstream artifact, so verify under
-          # that name before renaming it into place.
-          ( cd /tmp && cp osv-scanner osv-scanner_linux_amd64 \
-            && grep ' osv-scanner_linux_amd64$' osv_SHA256SUMS | sha256sum --check --status )
+          curl -sSfL -o /tmp/osv-scanner "${BASE}/osv-scanner_linux_amd64"
+          # Verify against the committed digest, not the release SHA256SUMS:
+          # that file is served from the same release as the binary, so it
+          # cannot vouch for it.
+          echo "${OSV_SHA256}  /tmp/osv-scanner" | sha256sum --check
           chmod +x /tmp/osv-scanner
           sudo mv /tmp/osv-scanner /usr/local/bin/osv-scanner
           osv-scanner --version
