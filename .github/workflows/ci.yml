@@ -1,9 +1,18 @@
-# PR-time lint + type-check gate -- adopted from meepo-conventions baseline.
+# CI orchestrator: every blocking lane runs from this workflow, and the
+# terminal `required` job is the single check branch protection names.
 #
-# Adapted to gubbi: only lint + typecheck. The test surface is already
-# covered by security-tests.yml (unit tests + RLS + encryption integration
-# tests with a postgres service container); duplicating a generic pytest
-# job here would just slow CI without adding signal.
+# Lanes:
+#   - lint + typecheck (this file)
+#   - security-tests.yml (called): env-contract check, unit suite, and the
+#     Postgres-backed security suite with its coverage gate
+#   - gitleaks.yml (called): secret scan. It also keeps its own push and
+#     schedule triggers so every pushed commit is scanned even when a newer
+#     push cancels this run.
+#
+# Advisory and path-filtered workflows (dependency-scan.yml,
+# poetry-image-closure.yml) are deliberately NOT lanes of `required`: an
+# advisory finding must not block unrelated work, and a path-filtered
+# workflow never reports on most commits.
 
 name: ci
 
@@ -12,7 +21,9 @@ on:
   push:
     branches: [main, develop]
 
-# Cancel redundant runs on the same branch.
+# Cancel redundant runs on the same branch. Called workflows run inside this
+# run and see this workflow's name as `github.workflow`, so none of them may
+# declare a concurrency group that evaluates to this one.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -28,6 +39,7 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Set up Python 3.12
+        id: setup-python
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.12"
@@ -39,12 +51,19 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      # Runs on a cache hit too: the cache is keyed on poetry.lock alone, so a
+      # pyproject.toml edited without relocking would otherwise go unnoticed.
+      - name: Verify poetry.lock matches pyproject.toml
+        run: poetry check --lock
+
+      # The `-poetry<version>-` literal is what Renovate's poetry regex
+      # matches; keep it a literal, not an expression.
       - name: Cache Poetry virtualenv
         id: cached-poetry-dependencies
         uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
         with:
           path: .venv
-          key: venv-lint-${{ runner.os }}-poetry2.4.1-${{ hashFiles('poetry.lock') }}
+          key: venv-lint-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-poetry2.4.1-${{ hashFiles('poetry.lock') }}
 
       - name: Install dependencies
         if: steps.cached-poetry-dependencies.outputs.cache-hit != 'true'
@@ -58,3 +77,55 @@ jobs:
 
       - name: mypy
         run: poetry run mypy gubbi/
+
+  security-tests:
+    name: security-tests
+    uses: ./.github/workflows/security-tests.yml
+    permissions:
+      contents: read
+
+  secret-scan:
+    name: secret scan
+    uses: ./.github/workflows/gitleaks.yml
+    # At least what gitleaks.yml declares; the action lists PR commits.
+    permissions:
+      contents: read
+      pull-requests: read
+    secrets: inherit
+
+  # Branch protection names only this job, so renaming or adding a lane is an
+  # edit to `needs` below rather than to the protection settings. It must run
+  # even when a lane fails (`always()`): a skipped required check counts as
+  # passing. A skipped lane fails it too, so a lane that silently stops
+  # running cannot pass as green. Every other job in this file belongs in
+  # `needs`; the needs check below enforces that here rather than in a lane,
+  # so dropping a lane cannot also drop the check.
+  required:
+    name: required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ always() }}
+    needs:
+      - lint
+      - security-tests
+      - secret-scan
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      # Standard library only, on the runner's own python3: nothing to install.
+      - name: needs lists every other job
+        run: python3 tools/check_required_needs.py --self-test .github/workflows/ci.yml
+
+      - name: every required job succeeded
+        env:
+          RESULTS: ${{ toJSON(needs.*.result) }}
+        run: |
+          set -euo pipefail
+          echo "dependency results: $RESULTS"
+          if printf '%s' "$RESULTS" | grep -Eq '"(failure|cancelled|skipped)"'; then
+            echo "required: at least one job did not succeed" >&2
+            exit 1
+          fi
+          printf '%s' "$RESULTS" | grep -q '"success"' || { echo "required: no results" >&2; exit 1; }

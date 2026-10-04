@@ -7,6 +7,10 @@ block (as a bare passthrough, KEY=value, or ${VAR} variable reference).
 Also enforces:
 - Cross-repo parity of the canonical ``Environment = Literal[...]`` line
   in ``gubbi/gubbi/config.py`` + ``gubbi-cloud/gubbi_cloud/config.py``.
+  The sibling gubbi-cloud checkout is resolved from the Git common
+  directory and the ancestors of both trees, so a worktree answers the
+  same as the main checkout; an unresolvable sibling is reported as a
+  prerequisite, never skipped.
 
 Exit 0 when the contract is satisfied.  Exit 1 on any drift.
 
@@ -18,11 +22,18 @@ from __future__ import annotations
 import argparse
 import ast
 import re
+import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 
 import yaml
+
+# Path of gubbi-cloud's config module relative to the directory holding the
+# sibling checkouts.
+_CLOUD_CONFIG_RELATIVE: Final[tuple[str, ...]] = ("gubbi-cloud", "gubbi_cloud", "config.py")
+
+_GIT_COMMON_DIR_TIMEOUT_SECS: Final[int] = 10
 
 
 def env_var_name(field_name: str, alias: str | None, prefix: str) -> str:
@@ -404,6 +415,82 @@ def extract_environment_literal(path: str) -> str | None:
     return match.group(0) if match else None
 
 
+def _git_common_dir(start: Path) -> Path | None:
+    """Return the Git common directory for *start*, or None outside a repo.
+
+    The common directory is shared between a worktree and its main
+    checkout, so it anchors the search at the same place however deeply
+    the worktree is nested.
+    """
+    try:
+        completed = subprocess.run(
+            ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],  # noqa: S607
+            cwd=start,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GIT_COMMON_DIR_TIMEOUT_SECS,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    # Only the terminating newline is git's; a path may legitimately end in
+    # whitespace, so stripping more would corrupt it.
+    output = completed.stdout.removesuffix("\n")
+    if not output:
+        return None
+    return Path(output)
+
+
+def resolve_cloud_config(start: Path | None = None) -> Path | None:
+    """Return the sibling gubbi-cloud ``config.py``, or None when absent.
+
+    Anchors, in order: *start*, its ancestors, then the Git common
+    directory's parent and that parent's ancestors. The common directory is
+    identical for a worktree and its main checkout, so it answers where
+    ancestor walking cannot -- a worktree checked out outside the directory
+    holding the sibling repos.
+
+    *start* defaults to this file's directory, so the answer does not
+    depend on the cwd the lint was invoked from.
+    """
+    origin = (Path(__file__).parent if start is None else start).resolve()
+    anchors = [origin, *origin.parents]
+
+    common_dir = _git_common_dir(origin)
+    if common_dir is not None:
+        # ``.../<repo>/.git`` -> ``.../<repo>`` -> its ancestors.
+        repo_root = common_dir.resolve().parent
+        anchors += [repo_root, *repo_root.parents]
+
+    for anchor in anchors:
+        candidate = anchor.joinpath(*_CLOUD_CONFIG_RELATIVE)
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def _select_cloud_config(flag: str | None) -> tuple[str | None, str | None]:
+    """Return (config_path, prerequisite_drift) for the parity check.
+
+    An explicit non-empty ``--cloud-config`` wins, an explicit empty value
+    opts out, and an absent flag resolves the sibling checkout. At most one
+    element of the pair is ever set.
+    """
+    if flag is not None:
+        return (flag or None), None
+    resolved = resolve_cloud_config()
+    if resolved is None:
+        return None, (
+            "DRIFT: no sibling gubbi-cloud checkout found beside this repo. The "
+            "Environment Literal parity check needs gubbi-cloud's config.py: clone "
+            "gubbi-cloud next to gubbi, or pass --cloud-config <path> "
+            "(--cloud-config '' skips the parity check)."
+        )
+    return str(resolved), None
+
+
 def check_environment_literal_parity(
     gubbi_config_path: str,
     cloud_config_path: str,
@@ -475,10 +562,12 @@ def main() -> None:
     )
     parser.add_argument(
         "--cloud-config",
-        default="../gubbi-cloud/gubbi_cloud/config.py",
+        default=None,
         help=(
             "Path to gubbi-cloud's config.py for the Environment Literal "
-            "parity check (DEC-094). Set to empty to skip."
+            "parity check. Defaults to the sibling gubbi-cloud checkout, "
+            "resolved from the Git common directory so a worktree answers the "
+            "same as the main checkout. Set to empty to skip the parity check."
         ),
     )
     args = parser.parse_args()
@@ -495,10 +584,13 @@ def main() -> None:
     )
 
     # Cross-repo Environment Literal parity.
-    # Contract rule: drift fails CI -- a missing cross-repo config path is
-    # itself a drift signal handled inside check_environment_literal_parity.
-    if args.cloud_config:
-        drifts.extend(check_environment_literal_parity(args.settings, args.cloud_config))
+    # Contract rule: drift fails CI -- an unresolvable sibling checkout or a
+    # missing explicit path is itself a drift signal.
+    cloud_config, prerequisite = _select_cloud_config(args.cloud_config)
+    if prerequisite is not None:
+        drifts.append(prerequisite)
+    elif cloud_config is not None:
+        drifts.extend(check_environment_literal_parity(args.settings, cloud_config))
 
     for msg in stale:
         _out(msg)

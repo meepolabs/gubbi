@@ -1,4 +1,6 @@
-# Tier-1 fast gate (every push to develop + every PR).
+# Tier-1 fast gate, called from ci.yml as a lane of its `required` check
+# (every push to main + develop and every PR). Call-only: it has no triggers
+# of its own, so it never runs a second time beside the ci run.
 #
 # Runs lint-adjacent security invariants plus the full Postgres-only test
 # surface:
@@ -23,9 +25,6 @@
 # the integration suite, and narrow line-coverage will return to the gate when
 # their dedicated tests are rewritten against the squashed baseline.
 #
-# Branch protection on `main` + `develop`: require `security-tests` to pass
-# before merge.
-#
 # QUARANTINE (historical): a set of tests pre-dated the 0001 squashed baseline
 # and were temporarily excluded via an `--ignore` block here while they were
 # rewritten against it. That block has been retired -- the tests now gate in
@@ -36,17 +35,11 @@
 
 name: security-tests
 
+# No workflow-level concurrency: inside a called workflow `github.workflow`
+# is the caller's name, so the usual group would equal ci.yml's own and cancel
+# the run that called it. ci.yml's group already cancels superseded runs.
 on:
-  pull_request:
-  push:
-    branches:
-      - main
-      - develop
-
-# Cancel redundant runs on the same branch.
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  workflow_call:
 
 jobs:
   env-contract-lint:
@@ -63,6 +56,8 @@ jobs:
         uses: snok/install-poetry@76e04a911780d5b312d89783f7b1cd627778900a # v1.4.1
         with:
           version: 2.4.1
+      - name: Verify poetry.lock matches pyproject.toml
+        run: poetry check --lock
       - run: poetry install --no-interaction --no-root --only ci-tools
       # gubbi-cloud is private; checking it out from this public-repo workflow
       # would require a PAT. Skip the cross-repo Environment Literal
@@ -90,6 +85,7 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Set up Python 3.12
+        id: setup-python
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.12"
@@ -101,11 +97,16 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      - name: Verify poetry.lock matches pyproject.toml
+        run: poetry check --lock
+
+      # The `-poetry<version>-` literal is what Renovate's poetry regex
+      # matches; keep it a literal, not an expression.
       - name: Cache Poetry virtualenv
         uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
         with:
           path: .venv
-          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-poetry2.4.1-${{ hashFiles('poetry.lock') }}
 
       - name: Install dependencies
         run: poetry install --no-interaction --no-root
@@ -196,6 +197,7 @@ jobs:
         uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 
       - name: Set up Python 3.12
+        id: setup-python
         uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
         with:
           python-version: "3.12"
@@ -207,11 +209,16 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
+      - name: Verify poetry.lock matches pyproject.toml
+        run: poetry check --lock
+
+      # The `-poetry<version>-` literal is what Renovate's poetry regex
+      # matches; keep it a literal, not an expression.
       - name: Cache Poetry virtualenv
         uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
         with:
           path: .venv
-          key: venv-${{ runner.os }}-py3.12-${{ hashFiles('poetry.lock') }}
+          key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-poetry2.4.1-${{ hashFiles('poetry.lock') }}
 
       - name: Install dependencies
         run: poetry install --no-interaction --no-root

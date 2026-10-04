@@ -1,0 +1,196 @@
+"""Contract tests for the ``required`` aggregator job in ci.yml.
+
+Branch protection names one check, ``required``. It is only meaningful if it
+depends on every blocking lane, fails on any result other than success, and is
+never itself skipped. The lanes it calls must not double-run (a called workflow
+that keeps its own pull_request trigger runs twice per PR) and must not share a
+concurrency group with their caller (inside a called workflow
+``github.workflow`` is the caller's name, so a copied group cancels the caller).
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Any
+
+import pytest
+import yaml
+
+pytestmark = pytest.mark.unit
+
+_WORKFLOWS = Path(__file__).resolve().parents[2] / ".github" / "workflows"
+_CI = _WORKFLOWS / "ci.yml"
+_AGGREGATOR = "required"
+_AGGREGATOR_STEP = "every required job succeeded"
+
+# Workflows that must never gate `required`: advisory scans and path-filtered
+# workflows that do not report on most commits.
+_NEVER_REQUIRED = ("dependency-scan.yml", "poetry-image-closure.yml")
+
+# Called lanes that are call-only (no triggers of their own).
+_CALL_ONLY = ("security-tests.yml",)
+
+# The secret scan keeps its own push, schedule and manual triggers so a pushed
+# commit is scanned even when the ci run is cancelled; pull requests reach it
+# only through ci.yml.
+_SECRET_SCAN = "gitleaks.yml"
+_SECRET_SCAN_TRIGGERS = {"workflow_call", "push", "schedule", "workflow_dispatch"}
+
+
+def _load(path: Path) -> dict[str, Any]:
+    parsed = yaml.safe_load(path.read_text(encoding="utf-8"))
+    assert isinstance(parsed, dict), f"{path} did not parse as a mapping"
+    return parsed
+
+
+def _triggers(workflow: dict[str, Any]) -> set[str]:
+    # PyYAML (YAML 1.1) reads the bare key `on` as boolean True.
+    on = workflow.get("on", workflow.get(True))
+    if isinstance(on, str):
+        return {on}
+    if isinstance(on, list):
+        return set(on)
+    assert isinstance(on, dict), f"unrecognised trigger block: {on!r}"
+    return set(on)
+
+
+def _ci_jobs() -> dict[str, Any]:
+    jobs = _load(_CI)["jobs"]
+    assert isinstance(jobs, dict)
+    return jobs
+
+
+def _aggregator() -> dict[str, Any]:
+    jobs = _ci_jobs()
+    assert _AGGREGATOR in jobs, f"ci.yml has no {_AGGREGATOR!r} job: {sorted(jobs)}"
+    job = jobs[_AGGREGATOR]
+    assert isinstance(job, dict)
+    return job
+
+
+def _needs() -> list[str]:
+    needs = _aggregator().get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _called_workflows() -> dict[str, str]:
+    """Map each ci.yml job that calls a local workflow to the called file name."""
+    prefix = "./.github/workflows/"
+    return {
+        job_id: job["uses"].removeprefix(prefix)
+        for job_id, job in _ci_jobs().items()
+        if isinstance(job, dict) and str(job.get("uses", "")).startswith(prefix)
+    }
+
+
+# -- shape of the aggregator --------------------------------------------------
+
+
+def test_required_needs_every_other_ci_job() -> None:
+    """A job missing from `needs` can fail while `required` stays green."""
+    other_jobs = set(_ci_jobs()) - {_AGGREGATOR}
+
+    assert set(_needs()) == other_jobs
+    assert len(_needs()) == len(set(_needs())), f"duplicate entries in needs: {_needs()}"
+
+
+def test_required_needs_the_named_blocking_lanes() -> None:
+    """Positive control: an empty ci.yml would satisfy the completeness test."""
+    assert {"lint", "security-tests", "secret-scan"} <= set(_needs())
+    assert _called_workflows() == {
+        "security-tests": "security-tests.yml",
+        "secret-scan": _SECRET_SCAN,
+    }
+
+
+def test_required_always_runs_and_is_named_for_branch_protection() -> None:
+    """A skipped required check reads as passing, so it must run on failure too."""
+    job = _aggregator()
+
+    assert job.get("name") == _AGGREGATOR
+    assert job.get("if") == "${{ always() }}"
+
+
+@pytest.mark.parametrize("workflow", _NEVER_REQUIRED)
+def test_advisory_and_path_filtered_workflows_are_not_lanes(workflow: str) -> None:
+    assert workflow not in _called_workflows().values()
+
+
+# -- aggregator step behaviour ------------------------------------------------
+
+
+def _aggregator_script() -> str:
+    for step in _aggregator()["steps"]:
+        if step.get("name") == _AGGREGATOR_STEP:
+            assert step["env"]["RESULTS"] == "${{ toJSON(needs.*.result) }}"
+            return str(step["run"])
+    pytest.fail(f"the {_AGGREGATOR!r} job has no {_AGGREGATOR_STEP!r} step")
+
+
+def _run_aggregator(results: list[str]) -> subprocess.CompletedProcess[str]:
+    bash = shutil.which("bash")
+    assert bash is not None, "bash is required to execute the aggregator step"
+    return subprocess.run(  # noqa: S603 -- the workflow's own step script
+        [bash, "-c", _aggregator_script()],
+        env={"PATH": "/usr/bin:/bin", "RESULTS": json.dumps(results, indent=2)},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+@pytest.mark.parametrize(
+    "results",
+    [
+        pytest.param(["success", "failure"], id="failure"),
+        pytest.param(["success", "cancelled"], id="cancelled"),
+        pytest.param(["success", "skipped"], id="skipped"),
+        pytest.param([], id="no-results"),
+    ],
+)
+def test_aggregator_fails_unless_every_result_is_success(results: list[str]) -> None:
+    assert _run_aggregator(results).returncode == 1
+
+
+def test_aggregator_passes_when_every_result_is_success() -> None:
+    result = _run_aggregator(["success", "success", "success"])
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+# -- called lanes -------------------------------------------------------------
+
+
+@pytest.mark.parametrize("workflow", _CALL_ONLY)
+def test_call_only_lanes_have_no_trigger_of_their_own(workflow: str) -> None:
+    """Any extra trigger would run the lane a second time beside ci.yml."""
+    assert _triggers(_load(_WORKFLOWS / workflow)) == {"workflow_call"}
+
+
+def test_secret_scan_keeps_its_own_triggers_except_pull_request() -> None:
+    """Pull requests reach the scan through ci.yml; a second PR trigger double-runs it."""
+    assert _triggers(_load(_WORKFLOWS / _SECRET_SCAN)) == _SECRET_SCAN_TRIGGERS
+
+
+@pytest.mark.parametrize("workflow", _CALL_ONLY)
+def test_call_only_lanes_declare_no_workflow_concurrency(workflow: str) -> None:
+    assert "concurrency" not in _load(_WORKFLOWS / workflow)
+
+
+def test_secret_scan_concurrency_group_differs_from_the_callers() -> None:
+    """Called from ci.yml, an equal group expression would cancel the caller."""
+    caller = _load(_CI)["concurrency"]["group"]
+    callee = _load(_WORKFLOWS / _SECRET_SCAN)["concurrency"]["group"]
+
+    assert callee != caller
+
+
+def test_secret_scan_caller_grants_what_the_callee_declares() -> None:
+    """A called workflow cannot exceed the permissions its calling job grants."""
+    callee = _load(_WORKFLOWS / _SECRET_SCAN)["permissions"]
+    caller = _ci_jobs()["secret-scan"]["permissions"]
+
+    assert caller == callee

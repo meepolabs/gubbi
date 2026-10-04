@@ -141,8 +141,15 @@ its tables.
   + e2e require `TEST_DATABASE_URL` (default
   `postgresql://journal:testpass@localhost:5433/journal_test`); skip
   gracefully if unreachable.
-- CI gate (`.github/workflows/security-tests.yml`): Tier-1 fast gate on
-  every push to `develop` + PRs. Split into a no-service unit job and a
+- CI gate (`.github/workflows/ci.yml`): the terminal `required` job is
+  the one check branch protection names; it needs every blocking lane
+  (lint + typecheck, the called `security-tests.yml` and `gitleaks.yml`)
+  and fails unless all succeeded. Before the verdict it runs
+  `tools/check_required_needs.py --self-test` (stdlib, on the runner's
+  python3), which fails it when `needs` misses a job or the file leaves
+  the one layout the check accepts.
+- Tier-1 suite (`.github/workflows/security-tests.yml`, call-only from
+  `ci.yml`): env-contract check, a no-service unit job and a
   Postgres-only integration job. Selection is marker-driven --
   `-m "not hosted_live"` over all test dirs; `hosted_live` tests
   (live Hydra + Kratos + cloud-api) run in Tier-2 on the testbench, not

@@ -1,13 +1,15 @@
 # Secret scanning -- adopted from meepo-conventions baseline.
 #
-# Runs on every PR + push to main, plus a weekly full-history scan to
-# catch anything historical that slipped past the diff scan on prior
-# PRs.
+# ci.yml calls this workflow as a lane of its `required` check, which is how
+# pull requests are scanned. It also keeps its own push trigger, so every
+# pushed commit is scanned even when a newer push cancels the ci run, plus a
+# weekly full-history scan to catch anything historical that slipped past
+# the diff scans.
 
 name: gitleaks
 
 on:
-  pull_request:
+  workflow_call:
   push:
     branches: [main, develop]
   schedule:
@@ -25,6 +27,9 @@ on:
 # Only pull-request runs are cancelled: the newer PR head rescans the same
 # diff, but a cancelled push scan would leave its commits unscanned until
 # the weekly run.
+# When called from ci.yml, `github.workflow` and `github.event_name` are the
+# caller's. The event segment keeps this group distinct from ci.yml's own
+# group; were they equal, the called scan would cancel its caller.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
