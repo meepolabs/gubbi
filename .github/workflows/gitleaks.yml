@@ -22,9 +22,12 @@ on:
 # Cancel redundant runs on the same branch. Keyed on event_name too so the
 # weekly scheduled full-history scan is never cancelled by a push to the same
 # ref (and vice versa).
+# Only pull-request runs are cancelled: the newer PR head rescans the same
+# diff, but a cancelled push scan would leave its commits unscanned until
+# the weekly run.
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
