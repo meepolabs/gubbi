@@ -155,3 +155,6 @@ its tables.
   `deployment/poetry-requirements.txt`, installs the hash-pinned Poetry
   closure in the Dockerfile's base image and checks `POETRY_VERSION`
   matches the lock's `poetry` pin.
+- Dependency scan (`.github/workflows/dependency-scan.yml`): advisory
+  OSV scan of every lockfile via the digest-pinned scanner image; red on
+  a finding, required by nothing.

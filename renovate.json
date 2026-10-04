@@ -44,8 +44,8 @@
 			"pinDigests": true
 		},
 		{
-			"description": "Actions are pinned as sha plus exact version tag, so a digest-only update means the tag was moved to another commit, which is the tampering case sha pinning exists to catch; release-age checks the tag original date and would not hold it, so require explicit dashboard approval. Initial pinning and version updates are unaffected",
-			"matchManagers": ["github-actions"],
+			"description": "Actions and pre-commit hooks are pinned as sha plus exact version tag, so a digest-only update means the tag was moved to another commit, which is the tampering case sha pinning exists to catch; release-age checks the tag original date and would not hold it, so require explicit dashboard approval. Initial pinning and version updates are unaffected",
+			"matchManagers": ["github-actions", "pre-commit"],
 			"matchUpdateTypes": ["digest"],
 			"dependencyDashboardApproval": true
 		},
@@ -106,15 +106,6 @@
 			],
 			"depNameTemplate": "poetry",
 			"datasourceTemplate": "pypi"
-		},
-		{
-			"customType": "regex",
-			"description": "OSV-scanner release pinned in the workflow env",
-			"managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
-			"matchStrings": ["(?:^|\\n)\\s*OSV_VERSION:\\s*['\\\"]?(?<currentValue>\\d+\\.\\d+\\.\\d+)['\\\"]?"],
-			"depNameTemplate": "google/osv-scanner",
-			"datasourceTemplate": "github-releases",
-			"extractVersionTemplate": "^v(?<version>.+)$"
 		},
 		{
 			"customType": "regex",

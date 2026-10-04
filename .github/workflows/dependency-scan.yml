@@ -1,0 +1,44 @@
+# Dependency vulnerability scan, read straight off the lockfiles so no dev
+# dependency has to be installed for the scan to run.
+#
+# Advisory: findings turn this workflow red but nothing depends on it, so a
+# newly published advisory never blocks unrelated work. Renovate security
+# PRs carry the fixes.
+#
+# Why the scanner image and not google/osv-scanner-action: that action ships
+# REUSABLE WORKFLOWS whose `upload-sarif` input defaults to true, which needs
+# `security-events: write` plus GitHub code scanning -- not available for
+# private repos on a free plan. Running the image keeps one pattern that works
+# on public and private repos alike, and keeps this job on `contents: read`.
+#
+# The image is pinned by tag AND multi-arch index digest; Renovate's
+# github-actions manager updates both together.
+
+name: dependency-scan
+
+on:
+  pull_request:
+  push:
+    branches: [main, develop]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  osv-scan:
+    name: dependency vulnerabilities
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      # `-r .` walks the tree and picks up every lockfile it recognises,
+      # including any outside the repo root. Exits non-zero on a finding.
+      - name: Scan lockfiles
+        uses: docker://ghcr.io/google/osv-scanner:v2.5.1@sha256:8108ae94eadea5a02c9bec6e646909d5b790b44bd62d7f5b7f0b1d6d0ffc7734
+        with:
+          args: scan source -r .
