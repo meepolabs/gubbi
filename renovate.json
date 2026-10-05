@@ -115,6 +115,15 @@
 			"depNameTemplate": "gitleaks/gitleaks",
 			"datasourceTemplate": "github-releases",
 			"extractVersionTemplate": "^v(?<version>.+)$"
+		},
+		{
+			"customType": "regex",
+			"description": "Test database images pinned as repo:tag@sha256 in testdb.env, the one file CI and local runs read them from; the tag selects the release line and the digest is what runs, so both move together",
+			"managerFilePatterns": ["/(^|/)tools/testdb/testdb\\.env$/"],
+			"matchStrings": [
+				"(?:^|\\n)[A-Z][A-Z0-9_]*_IMAGE=(?<depName>[a-z0-9][a-z0-9._/-]*):(?<currentValue>[A-Za-z0-9._-]+)@(?<currentDigest>sha256:[0-9a-f]{64})"
+			],
+			"datasourceTemplate": "docker"
 		}
 	]
 }

@@ -8,6 +8,7 @@ in a consumer.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -26,11 +27,24 @@ _read_testdb_env = _testdb.read_testdb_env
 _violations = _testdb.violations
 _parse = _testdb.parse_testdb_env
 
+# Renovate only tracks a pin it can read a tag from.
+_TAGGED_PIN = re.compile(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}")
+
 
 def test_real_file_obeys_line_rule() -> None:
     raw = _read_testdb_env(_TESTDB_ENV)
 
     assert _violations(raw) == []
+
+
+def test_every_real_image_pin_carries_a_tag() -> None:
+    values = _parse(_read_testdb_env(_TESTDB_ENV))
+    images = {key: value for key, value in values.items() if key.endswith("_IMAGE")}
+
+    untagged = {key: value for key, value in images.items() if not _TAGGED_PIN.fullmatch(value)}
+
+    assert images.keys() == {"PGVECTOR_IMAGE", "REDIS_IMAGE"}
+    assert untagged == {}
 
 
 def test_real_file_declares_required_keys() -> None:

@@ -247,6 +247,9 @@ def test_testdb_env_holds_the_verified_pgvector_build_and_major() -> None:
     assert (reference["repository"], reference["digest"]) == (
         _PGVECTOR_REPOSITORY,
         _PGVECTOR_DIGEST,
+    ), (
+        "tools/testdb/testdb.env pgvector pin changed: verify the new image build out of band, "
+        "then update _PGVECTOR_DIGEST (and the tag/major) in this test in the same change"
     )
     assert pins["PG_MAJOR"] == _EXPECTED_MAJOR
 
