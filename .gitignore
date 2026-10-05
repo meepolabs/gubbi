@@ -11,6 +11,8 @@ build/
 venv/
 .env
 .env.*
+.testdb.env
+.testdb.env.*
 doppler.yaml
 
 *.db

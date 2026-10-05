@@ -53,7 +53,10 @@ gubbi/
                           restore-db.sh, verify-db-invariants.sh
   tools/                  standalone helpers (env-contract checker);
                           tools/testdb/ holds testdb.env (pinned test DB
-                          images) and bootstrap.sql (test role bootstrap)
+                          images), bootstrap.sql (test role bootstrap) and
+                          testdb.py (stdlib controller: per-checkout docker
+                          test stack up/down/status/env, and check-env, the
+                          one testdb.env validator)
   gubbi/                  Python package (see below)
   tests/                  unit / integration / e2e
 ```

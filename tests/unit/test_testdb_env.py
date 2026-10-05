@@ -1,17 +1,19 @@
 """Contract test: tools/testdb/testdb.env obeys its strict ASCII KEY=value format.
 
-Every consumer (CI config jobs, the local stack controller, sibling repos) reads
-this file with the same line rule rather than a parser, so a file that breaks the
-format must fail here before it fails in a consumer.
+Every consumer (CI config jobs, the local stack controller, sibling repos) gets
+the values through the one validator in tools/testdb/testdb.py, so the rows here
+pin that validator, and a file that breaks the format fails here before it fails
+in a consumer.
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
 import yaml
+
+from tests.fixtures.testdb_tool import load_testdb_tool
 
 pytestmark = pytest.mark.unit
 
@@ -19,55 +21,13 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TESTDB_ENV = _REPO_ROOT / "tools" / "testdb" / "testdb.env"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "security-tests.yml"
 
-_LINE_RULE = re.compile(r"[A-Z][A-Z0-9_]*=[!-~]+", re.ASCII)
-_CONTROL_CHAR = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]", re.ASCII)
 _REQUIRED_KEYS = ("PGVECTOR_IMAGE", "PG_MAJOR", "REDIS_IMAGE")
 _PGVECTOR_SERVICES = ("postgres", "postgres_disposable")
 
-
-def _read_testdb_env(path: Path) -> bytes:
-    # Raw bytes: read_text() would translate CRLF to LF before validation.
-    return path.read_bytes()
-
-
-def _is_ignorable(line: str) -> bool:
-    return line == "" or line.startswith("#")
-
-
-def _lines(text: str) -> list[str]:
-    # Split on LF only: splitlines() would also eat CR, VT, FF and other
-    # separators, hiding bytes the shell consumers do not tolerate.
-    return text.removesuffix("\n").split("\n")
-
-
-def _is_valid_line(line: str) -> bool:
-    if _CONTROL_CHAR.search(line):
-        return False
-    return _is_ignorable(line) or _LINE_RULE.fullmatch(line) is not None
-
-
-def _violations(raw: bytes) -> list[str]:
-    try:
-        text = raw.decode("ascii")
-    except UnicodeDecodeError as exc:
-        return [f"non-ASCII byte {raw[exc.start : exc.start + 1]!r} at offset {exc.start}"]
-    bad_lines = [line for line in _lines(text) if not _is_valid_line(line)]
-    # A line-by-line shell reader drops an unterminated last line without error.
-    if raw and not raw.endswith(b"\n"):
-        return [*bad_lines, "missing final newline"]
-    return bad_lines
-
-
-def _parse(raw: bytes) -> dict[str, str]:
-    bad = _violations(raw)
-    if bad:
-        raise ValueError(f"testdb.env breaks the KEY=value format: {bad!r}")
-    pairs = [line.split("=", 1) for line in _lines(raw.decode("ascii")) if not _is_ignorable(line)]
-    keys = [key for key, _ in pairs]
-    duplicates = sorted({key for key in keys if keys.count(key) > 1})
-    if duplicates:
-        raise ValueError(f"testdb.env repeats keys: {duplicates!r}")
-    return dict(pairs)
+_testdb = load_testdb_tool()
+_read_testdb_env = _testdb.read_testdb_env
+_violations = _testdb.violations
+_parse = _testdb.parse_testdb_env
 
 
 def test_real_file_obeys_line_rule() -> None:
@@ -159,9 +119,9 @@ def test_format_rejects_missing_final_newline(raw: bytes) -> None:
 @pytest.mark.parametrize(
     ("raw", "offset"),
     [
-        pytest.param("PG_MAJOR=1 7".encode(), 10, id="line-separator-in-value"),
+        pytest.param("PG_MAJOR=1\u20287".encode(), 10, id="line-separator-in-value"),
         pytest.param("PG_MAJOR=1\u00857".encode(), 10, id="next-line-in-value"),
-        pytest.param("# café".encode(), 5, id="non-ascii-in-comment"),
+        pytest.param("# caf\u00e9".encode(), 5, id="non-ascii-in-comment"),
     ],
 )
 def test_format_rejects_non_ascii(raw: bytes, offset: int) -> None:
