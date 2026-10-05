@@ -51,7 +51,11 @@ def _violations(raw: bytes) -> list[str]:
         text = raw.decode("ascii")
     except UnicodeDecodeError as exc:
         return [f"non-ASCII byte {raw[exc.start : exc.start + 1]!r} at offset {exc.start}"]
-    return [line for line in _lines(text) if not _is_valid_line(line)]
+    bad_lines = [line for line in _lines(text) if not _is_valid_line(line)]
+    # A line-by-line shell reader drops an unterminated last line without error.
+    if raw and not raw.endswith(b"\n"):
+        return [*bad_lines, "missing final newline"]
+    return bad_lines
 
 
 def _parse(raw: bytes) -> dict[str, str]:
@@ -107,7 +111,11 @@ def test_reader_rejects_crlf_file(tmp_path: Path) -> None:
     ],
 )
 def test_line_rule_accepts(line: str) -> None:
-    assert _violations(line.encode("ascii")) == []
+    assert _violations(f"{line}\n".encode("ascii")) == []
+
+
+def test_format_accepts_empty_file() -> None:
+    assert _violations(b"") == []
 
 
 @pytest.mark.parametrize(
@@ -134,7 +142,18 @@ def test_line_rule_accepts(line: str) -> None:
     ],
 )
 def test_line_rule_rejects(line: str) -> None:
-    assert _violations(line.encode("ascii")) == [line]
+    assert _violations(f"{line}\n".encode("ascii")) == [line]
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(b"PG_MAJOR=17", id="single-unterminated-line"),
+        pytest.param(b"PG_MAJOR=17\nREDIS_IMAGE=x", id="unterminated-final-line"),
+    ],
+)
+def test_format_rejects_missing_final_newline(raw: bytes) -> None:
+    assert _violations(raw) == ["missing final newline"]
 
 
 @pytest.mark.parametrize(

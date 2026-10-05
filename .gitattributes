@@ -1,1 +1,1 @@
-tools/testdb/* text eol=lf
+tools/testdb/testdb.env text eol=lf
