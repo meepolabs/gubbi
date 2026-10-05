@@ -8,13 +8,11 @@ runner that records argv and environment and writes a scripted JUnit report.
 from __future__ import annotations
 
 import importlib.util
-import shlex
 import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import pytest
-import yaml
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -24,8 +22,6 @@ pytestmark = pytest.mark.unit
 
 _ROOT = Path(__file__).resolve().parents[2]
 _RUNNER = _ROOT / "tools" / "run_db_suites.py"
-_WORKFLOW = _ROOT / ".github" / "workflows" / "security-tests.yml"
-_JOB = "security-tests"
 _PASSWORD = "testpass"
 
 
@@ -75,37 +71,62 @@ def _plan(tmp_path: Path, environ: Mapping[str, str] | None = None, *, ci: bool 
 
 
 # ---------------------------------------------------------------------------
-# Stage table vs today's workflow
+# Stage table
 # ---------------------------------------------------------------------------
 
+# The exact pytest invocations the lane gates on, written out rather than
+# derived from the table, so an edit to the table is an edit here too. The
+# workflow calls only the runner (tests/unit/test_ci_workflow_contract.py).
+_EXPECTED_STAGES = {
+    "integration": (
+        (
+            "poetry",
+            "run",
+            "pytest",
+            "tests/integration",
+            "tests/e2e",
+            "tests/api",
+            "tests/extraction",
+            "tests/security",
+            "tests/storage",
+            "-m",
+            "not hosted_live",
+            "--tb=short",
+        ),
+        ("TEST_DISPOSABLE_CLUSTER_URL",),
+    ),
+    "coverage": (
+        (
+            "poetry",
+            "run",
+            "pytest",
+            "tests/unit",
+            "tests/integration/test_rls_isolation.py",
+            "tests/integration/test_entries_encryption.py",
+            "tests/integration/test_encryption_contract.py",
+            "tests/integration/test_encryption_correctness.py",
+            "tests/integration/test_repo_inserts_under_rls.py",
+            "--cov=gubbi.core.crypto",
+            "--cov=gubbi.core.cipher_guard",
+            "--cov=gubbi.core.db_context",
+            "--cov-report=term-missing",
+            "--cov-fail-under=80",
+        ),
+        (),
+    ),
+}
 
-def _pytest_steps() -> list[dict[str, Any]]:
-    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
-    steps = workflow["jobs"][_JOB]["steps"]
-    return [s for s in steps if isinstance(s, dict) and "pytest" in str(s.get("run", ""))]
+
+def test_stage_commands_are_exactly_the_gated_pytest_invocations() -> None:
+    actual = {stage.name: stage.argv for stage in runner.STAGES}
+
+    assert actual == {name: argv for name, (argv, _) in _EXPECTED_STAGES.items()}
 
 
-def _step_argv(step: dict[str, Any]) -> tuple[str, ...]:
-    return tuple(shlex.split(str(step["run"]).replace("\\\n", " ")))
+def test_only_the_integration_stage_scopes_the_disposable_dsn() -> None:
+    actual = {stage.name: stage.scoped_dsns for stage in runner.STAGES}
 
-
-def test_stage_commands_equal_the_workflow_pytest_invocations() -> None:
-    expected = [_step_argv(step) for step in _pytest_steps()]
-
-    actual = [stage.argv for stage in runner.STAGES]
-
-    assert expected, f"no pytest step found in job {_JOB!r}"
-    assert actual == expected
-
-
-def test_stage_scoped_dsns_match_the_workflow_step_env() -> None:
-    steps = _pytest_steps()
-
-    step_scoped = [
-        sorted(set(step.get("env") or {}) & set(runner.SUITE_DSN_NAMES)) for step in steps
-    ]
-
-    assert [sorted(stage.scoped_dsns) for stage in runner.STAGES] == step_scoped
+    assert actual == {name: scoped for name, (_, scoped) in _EXPECTED_STAGES.items()}
 
 
 @pytest.mark.parametrize(

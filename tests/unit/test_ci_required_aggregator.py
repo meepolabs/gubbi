@@ -11,6 +11,7 @@ concurrency group with their caller (inside a called workflow
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -194,3 +195,235 @@ def test_secret_scan_caller_grants_what_the_callee_declares() -> None:
     caller = _ci_jobs()["secret-scan"]["permissions"]
 
     assert caller == callee
+
+
+# -- service image pins ---------------------------------------------------------
+
+# A service image is pinned by an immutable digest, or is an output of the
+# lane's own testdb-config job, whose step takes it from tools/testdb/testdb.env
+# through that file's one validator; the file's digest pins are its contract.
+# Accepted only for the image keys that validator exports, and only when the
+# producing job in the same workflow wires that output straight from the
+# validating step. Any other expression is refused, and any missing piece fails
+# closed.
+_CONFIG_JOB = "testdb-config"
+_VALIDATED_IMAGE_KEYS = frozenset({"PGVECTOR_IMAGE", "REDIS_IMAGE"})
+_CONFIG_IMAGE_OUTPUT = re.compile(r"\$\{\{ needs\.testdb-config\.outputs\.([A-Z][A-Z0-9_]*) \}\}")
+_STEP_OUTPUT = re.compile(r"\$\{\{ steps\.([A-Za-z0-9_-]+)\.outputs\.([A-Z][A-Z0-9_]*) \}\}")
+_EXPORT_RUN = 'python3 tools/testdb/testdb.py check-env --github-output "$GITHUB_OUTPUT"'
+
+
+def _job_needs(job: dict[str, Any]) -> list[str]:
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _gated_workflows() -> list[tuple[str, dict[str, Any]]]:
+    """(filename, workflow) for ci.yml and every lane it calls."""
+    called = sorted(set(_called_workflows().values()))
+    return [("ci.yml", _load(_CI)), *((name, _load(_WORKFLOWS / name)) for name in called)]
+
+
+def _exports_validated(workflow: dict[str, Any], key: str) -> bool:
+    """Whether the workflow's config job sets output ``key`` from a check-env export step."""
+    producer = (workflow.get("jobs") or {}).get(_CONFIG_JOB)
+    if not isinstance(producer, dict):
+        return False
+    step_ref = _STEP_OUTPUT.fullmatch(str((producer.get("outputs") or {}).get(key, "")))
+    if step_ref is None or step_ref.group(2) != key:
+        return False
+    steps = list(producer.get("steps") or [])
+    matches = [i for i, step in enumerate(steps) if step.get("id") == step_ref.group(1)]
+    if len(matches) != 1 or str(steps[matches[0]].get("run", "")).strip() != _EXPORT_RUN:
+        return False
+    return not any("GITHUB_OUTPUT" in str(step.get("run", "")) for step in steps[matches[0] + 1 :])
+
+
+def _is_pinned_image(workflow: dict[str, Any], job: dict[str, Any], image: str) -> bool:
+    if re.search(r"@sha256:[0-9a-f]{64}$", image):
+        return True
+    output = _CONFIG_IMAGE_OUTPUT.fullmatch(image)
+    if output is None or output.group(1) not in _VALIDATED_IMAGE_KEYS:
+        return False
+    return _CONFIG_JOB in _job_needs(job) and _exports_validated(workflow, output.group(1))
+
+
+def test_every_service_image_in_the_required_graph_is_pinned() -> None:
+    images = [
+        (f"{name}:{job_id}", workflow, job, str(service["image"]))
+        for name, workflow in _gated_workflows()
+        for job_id, job in workflow["jobs"].items()
+        for service in (job.get("services") or {}).values()
+    ]
+
+    assert images, "no service containers found; the assertion below would be vacuous"
+    for label, workflow, job, image in images:
+        assert _is_pinned_image(workflow, job, image), f"{label} runs {image!r} by tag"
+
+
+def _config_workflow(
+    outputs: dict[str, str] | None = None, steps: list[dict[str, str]] | None = None
+) -> dict[str, Any]:
+    """A workflow whose config job exports every image key from a check-env step by default."""
+    keys = [*_VALIDATED_IMAGE_KEYS, "UNRELATED_IMAGE"]
+    default_outputs = {key: f"${{{{ steps.pins.outputs.{key} }}}}" for key in keys}
+    default_steps = [{"id": "other", "run": "true"}, {"id": "pins", "run": _EXPORT_RUN}]
+    producer = {
+        "outputs": default_outputs if outputs is None else outputs,
+        "steps": default_steps if steps is None else steps,
+    }
+    return {"jobs": {_CONFIG_JOB: producer}}
+
+
+_PGVECTOR_OUTPUT = "${{ needs.testdb-config.outputs.PGVECTOR_IMAGE }}"
+
+
+@pytest.mark.parametrize(
+    ("workflow", "needs", "image", "is_pinned"),
+    [
+        pytest.param(
+            _config_workflow(), None, "pgvector/pgvector@sha256:" + "a" * 64, True, id="digest"
+        ),
+        pytest.param(
+            _config_workflow(),
+            None,
+            "pgvector/pgvector:0.8.6-pg17@sha256:" + "a" * 64,
+            True,
+            id="tag-and-digest",
+        ),
+        pytest.param(
+            _config_workflow(), None, "pgvector/pgvector@sha256:" + "a" * 63, False, id="short"
+        ),
+        pytest.param(_config_workflow(), _CONFIG_JOB, _PGVECTOR_OUTPUT, True, id="pgvector-output"),
+        pytest.param(
+            _config_workflow(),
+            _CONFIG_JOB,
+            "${{ needs.testdb-config.outputs.REDIS_IMAGE }}",
+            True,
+            id="redis-output",
+        ),
+        pytest.param(
+            _config_workflow(), ["other", _CONFIG_JOB], _PGVECTOR_OUTPUT, True, id="needs-list"
+        ),
+        pytest.param(_config_workflow(), _CONFIG_JOB, "pgvector/pgvector:pg17", False, id="tag"),
+        pytest.param(
+            _config_workflow(),
+            _CONFIG_JOB,
+            "${{ needs.testdb-config.outputs.PG_MAJOR }}",
+            False,
+            id="not-an-image",
+        ),
+        pytest.param(
+            _config_workflow(),
+            _CONFIG_JOB,
+            "${{ needs.testdb-config.outputs.UNRELATED_IMAGE }}",
+            False,
+            id="unvalidated-key",
+        ),
+        pytest.param(
+            _config_workflow(),
+            _CONFIG_JOB,
+            "${{ needs.other.outputs.PGVECTOR_IMAGE }}",
+            False,
+            id="other-job",
+        ),
+        pytest.param(
+            _config_workflow(), _CONFIG_JOB, "${{ inputs.PGVECTOR_IMAGE }}", False, id="input"
+        ),
+        pytest.param(
+            _config_workflow(),
+            _CONFIG_JOB,
+            f"{_PGVECTOR_OUTPUT}-suffix",
+            False,
+            id="suffixed-output",
+        ),
+        pytest.param(_config_workflow(), None, _PGVECTOR_OUTPUT, False, id="consumer-no-needs"),
+        pytest.param(
+            _config_workflow(), ["other"], _PGVECTOR_OUTPUT, False, id="consumer-needs-other"
+        ),
+        pytest.param(
+            _config_workflow(
+                outputs={"PGVECTOR_IMAGE": "${{ steps.other.outputs.PGVECTOR_IMAGE }}"}
+            ),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-different-step",
+        ),
+        pytest.param(
+            _config_workflow(outputs={"PGVECTOR_IMAGE": "${{ steps.pins.outputs.REDIS_IMAGE }}"}),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-different-key",
+        ),
+        pytest.param(
+            _config_workflow(outputs={"PGVECTOR_IMAGE": "pgvector/pgvector:pg17"}),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-literal",
+        ),
+        pytest.param(
+            _config_workflow(outputs={}),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-no-output",
+        ),
+        pytest.param(
+            _config_workflow(steps=[{"id": "pins", "run": "echo PGVECTOR_IMAGE=pgvector:pg17"}]),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-step-not-validator",
+        ),
+        pytest.param(
+            _config_workflow(steps=[{"id": "pins", "run": _EXPORT_RUN}] * 2),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-step-id-ambiguous",
+        ),
+        pytest.param(
+            _config_workflow(steps=[{"id": "pins", "run": f"true # {_EXPORT_RUN}"}]),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-validator-only-in-comment",
+        ),
+        pytest.param(
+            _config_workflow(steps=[{"id": "pins", "run": f"{_EXPORT_RUN} --file other.env"}]),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-validator-other-file",
+        ),
+        pytest.param(
+            _config_workflow(
+                steps=[
+                    {"id": "pins", "run": _EXPORT_RUN},
+                    {"id": "later", "run": 'echo PGVECTOR_IMAGE=x >> "$GITHUB_OUTPUT"'},
+                ]
+            ),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            False,
+            id="producer-output-overwritten-later",
+        ),
+        pytest.param(
+            _config_workflow(steps=[{"id": "pins", "run": f"\n{_EXPORT_RUN}\n"}]),
+            _CONFIG_JOB,
+            _PGVECTOR_OUTPUT,
+            True,
+            id="producer-validator-surrounding-whitespace",
+        ),
+        pytest.param({"jobs": {}}, _CONFIG_JOB, _PGVECTOR_OUTPUT, False, id="no-producer-job"),
+    ],
+)
+def test_a_service_image_is_pinned_only_by_digest_or_a_validated_config_output(
+    workflow: dict[str, Any], needs: str | list[str] | None, image: str, is_pinned: bool
+) -> None:
+    job = {} if needs is None else {"needs": needs}
+
+    assert _is_pinned_image(workflow, job, image) is is_pinned

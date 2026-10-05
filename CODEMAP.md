@@ -162,14 +162,15 @@ its tables.
   python3), which fails it when `needs` misses a job or the file leaves
   the one layout the check accepts.
 - Tier-1 suite (`.github/workflows/security-tests.yml`, call-only from
-  `ci.yml`): env-contract check, a no-service unit job and a
-  Postgres-only integration job. Selection is marker-driven --
-  `-m "not hosted_live"` over all test dirs; `hosted_live` tests
-  (live Hydra + Kratos + cloud-api) run in Tier-2 on the testbench, not
-  here. A file-level `--ignore` block quarantines never-gated tests that
-  fail against the 0001 squashed baseline (un-ignore each as rewritten).
-  The job bootstraps `journal_app` + `journal_admin` roles (the baseline
-  assumes they pre-exist).
+  `ci.yml`): env-contract check, a no-service unit job, a
+  `testdb-config` job that exports the `tools/testdb/testdb.env` pins
+  through `testdb.py check-env`, and the DB job, whose two pgvector
+  services take their image from those outputs and whose suites run in
+  one `tools/run_db_suites.py --ci` call (reset with `bootstrap.sql`,
+  migrate, integration suites, coverage gate). Selection is
+  marker-driven -- `-m "not hosted_live"`; `hosted_live` tests (live
+  Hydra + Kratos + cloud-api) run in Tier-2 on the testbench, not here.
+  Its shape is pinned by `tests/unit/test_ci_workflow_contract.py`.
 - Image closure gate (`.github/workflows/poetry-image-closure.yml`):
   on changes to `deployment/Dockerfile` or
   `deployment/poetry-requirements.txt`, installs the hash-pinned Poetry

@@ -6,32 +6,21 @@
 # surface:
 #   1. Unit suite (crypto, db_context, cipher_guard, oauth, auth middleware,
 #      ...) -- no service container needed.
-#   2. Integration + e2e + api + extraction + security + storage tests that
-#      need ONLY a single Postgres (pgvector/pg17) service. Selected by
-#      marker: everything that is NOT `hosted_live`.
+#   2. Every database-backed suite, against two pgvector service clusters,
+#      through one runner: tools/run_db_suites.py --ci resets the clusters
+#      (roles from tools/testdb/bootstrap.sql, then `alembic upgrade head`),
+#      runs the integration + e2e + api + extraction + security + storage
+#      suites with `-m "not hosted_live"`, then the crypto + RLS coverage gate
+#      (>= 80%). Its stage table is pinned by tests/unit/test_run_db_suites.py;
+#      this file's shape by tests/unit/test_ci_workflow_contract.py.
 #
 # Tier-2 (full cross-service live E2E against live Hydra + Kratos + cloud-api)
 # runs separately on the operator's dev server via gubbi-testbench. Tests that
 # need the full multi-service stack are marked `hosted_live` and are excluded
-# here via `-m "not hosted_live"`.
+# from this lane.
 #
 # Test selection is MARKER-DRIVEN, not a hand-maintained file list: new
 # Postgres-only integration tests are gated automatically the moment they land.
-#
-# Coverage gate: the security-critical crypto + RLS primitives
-# (gubbi/core/crypto.py, cipher_guard.py, db_context.py) must keep combined
-# coverage >= 80%. The repository-layer modules (storage/repositories/*) are
-# intentionally NOT on this gate; their correctness is exercised end-to-end by
-# the integration suite, and narrow line-coverage will return to the gate when
-# their dedicated tests are rewritten against the squashed baseline.
-#
-# QUARANTINE (historical): a set of tests pre-dated the 0001 squashed baseline
-# and were temporarily excluded via an `--ignore` block here while they were
-# rewritten against it. That block has been retired -- the tests now gate in
-# the integration job below. A few individual tests remain `@pytest.mark.skip`
-# in-file with documented reasons (concurrent-conflict recovery pending a
-# prod-side SAVEPOINT, the squashed baseline's by-design lack of a per-step
-# downgrade, and otel_ro posture which is bootstrapped only in Tier-2).
 
 name: security-tests
 
@@ -116,8 +105,41 @@ jobs:
         # unit dir carries no live-stack tests today).
         run: poetry run pytest tests/unit -m "not hosted_live" --tb=short
 
+  # The service images and the client major are not written here. This job
+  # reads them from tools/testdb/testdb.env through that file's one validator,
+  # so CI and a local stack run the same images with no second copy to drift.
+  # It lives in this file rather than in ci.yml because `needs` outputs do not
+  # cross a workflow_call boundary; it is required through this lane.
+  testdb-config:
+    name: Test database image pins
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      PGVECTOR_IMAGE: ${{ steps.pins.outputs.PGVECTOR_IMAGE }}
+      PG_MAJOR: ${{ steps.pins.outputs.PG_MAJOR }}
+      REDIS_IMAGE: ${{ steps.pins.outputs.REDIS_IMAGE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@e797f83bcb11b83ae66e0230d6156d7c80228e7c # v6.0.0
+        with:
+          python-version: "3.12"
+
+      # check-env is the one testdb.env validator: any line outside its strict
+      # KEY=value rule fails this job before a service is started.
+      - name: Validate and export the image pins
+        id: pins
+        run: python3 tools/testdb/testdb.py check-env --github-output "$GITHUB_OUTPUT"
+
   security-tests:
     name: Security invariants (RLS + encryption + unit)
+    needs: testdb-config
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -125,14 +147,7 @@ jobs:
 
     services:
       postgres:
-        # Pinned by immutable DIGEST, same one the disposable service uses. A tag
-        # can move to a different build with no commit here, which would change the
-        # server the RLS, grant and posture contracts run against -- and silently
-        # desynchronise them from the psql client major installed below.
-        # Verified: this digest resolves and runs PostgreSQL 17.11 with pgvector
-        # 0.8.6. The major is declared once, in PGVECTOR_PG_MAJOR below, because a
-        # digest carries no readable version and nothing may infer one from a tag.
-        image: pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        image: ${{ needs.testdb-config.outputs.PGVECTOR_IMAGE }}
         env:
           POSTGRES_DB: journal_test
           POSTGRES_USER: journal
@@ -150,16 +165,10 @@ jobs:
       # staging that on the working cluster above would mean dropping a shared role,
       # which is unrecoverable (the harness captures four attributes, not the
       # password or rolconfig it would need to restore one). So absence gets its own
-      # cluster, whose DSN is exported for ONE step only -- see the integration step
-      # below -- so no other step can accidentally point role-dropping code at the
-      # working cluster.
+      # cluster on the same image. The runner hands its DSN to the one stage that
+      # owns those contracts and to no other.
       postgres_disposable:
-        # Pinned by immutable DIGEST, not by the mutable pg17 tag. This service
-        # gates the missing-required-role contracts, which DROP roles; a tag that
-        # silently moved to a different build could change role semantics under
-        # them without any commit here. Verified: this digest resolves and runs
-        # PostgreSQL 17.11 with pgvector 0.8.6.
-        image: pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f
+        image: ${{ needs.testdb-config.outputs.PGVECTOR_IMAGE }}
         env:
           POSTGRES_DB: postgres
           POSTGRES_USER: journal
@@ -173,14 +182,6 @@ jobs:
           --health-retries 10
 
     env:
-      # The PostgreSQL major both pinned digests provide. A digest reference carries
-      # no readable version, so this is the single declared source of truth: the
-      # client install step below derives its pin from it, and the workflow contract
-      # tests assert against it rather than parsing an image tag.
-      PGVECTOR_PG_MAJOR: "17"
-      # Consumed by tests/conftest.py (legacy + RLS fixtures).
-      TEST_DATABASE_URL: postgresql://journal:testpass@localhost:5433/journal_test
-      TEST_DATABASE_URL_RLS: postgresql://journal:testpass@localhost:5433/journal_rls_test
       JOURNAL_OPERATOR_EMAIL: operator@test.local
       # The fixture cipher uses a fixed key; this env var only matters for tests
       # that construct a real cipher from the env loader. Pre-encoded 32-byte
@@ -226,19 +227,13 @@ jobs:
       # The audit_log dedup repair / invariant tests shell out to `psql` and to
       # deployment/scripts/verify-db-invariants.sh, and they FAIL rather than skip
       # when psql is absent -- so the client is a job prerequisite, not an extra.
-      # It is installed from PGDG and pinned to the major both digest-pinned
-      # pgvector services provide, taken from PGVECTOR_PG_MAJOR rather than restated
-      # here: the runner image ships whatever client major it happens to ship, and a
-      # client older than the server can fail on newer catalog output.
-      # tests/unit/test_ci_workflow_contract.py asserts this step keeps existing and
-      # keeps deriving its pin from that declaration, so neither runner-image drift
-      # nor a hard-coded major can slip in silently.
+      # It is installed from PGDG at the major the pinned server image provides,
+      # taken from testdb.env rather than restated here: the runner image ships
+      # whatever client major it happens to ship, and a client older than the
+      # server can fail on newer catalog output.
       - name: Install PostgreSQL client
         env:
-          # Derived from the single declared major, not restated. Both service
-          # images are digest-pinned and carry no readable version, so a literal
-          # here could drift from the server the contracts actually run against.
-          PG_MAJOR: ${{ env.PGVECTOR_PG_MAJOR }}
+          PG_MAJOR: ${{ needs.testdb-config.outputs.PG_MAJOR }}
         run: |
           set -euo pipefail
           sudo install -d /usr/share/postgresql-common/pgdg
@@ -254,7 +249,7 @@ jobs:
 
       - name: Verify psql major matches the pin
         env:
-          PG_MAJOR: ${{ env.PGVECTOR_PG_MAJOR }}
+          PG_MAJOR: ${{ needs.testdb-config.outputs.PG_MAJOR }}
         run: |
           set -euo pipefail
           psql --version
@@ -276,67 +271,14 @@ jobs:
           echo "Postgres did not become ready in 30 seconds"
           exit 1
 
-      - name: Bootstrap database roles
-        # The 0001 squashed baseline ASSUMES journal_app + journal_admin already
-        # exist (in testbench/prod they are pre-created by an init script). The
-        # raw GitHub Postgres service has neither, so the conftest `pool` /
-        # `_rls_provisioned` fixtures would silently skip on a GRANT failure.
-        # Create the two roles here so the RLS + encryption integration tests
-        # actually run. otel_ro is created by the baseline migration itself.
-        # journal_app/journal_admin passwords are set by the RLS conftest via
-        # ALTER ROLE, so no password is needed at creation time.
+      - name: Run the database-backed suites
         env:
-          PGPASSWORD: testpass
-        run: |
-          psql -h localhost -p 5433 -U journal -d journal_test -v ON_ERROR_STOP=1 <<'SQL'
-          DO $$
-          BEGIN
-              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'journal_app') THEN
-                  CREATE ROLE journal_app LOGIN;
-              END IF;
-              IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'journal_admin') THEN
-                  CREATE ROLE journal_admin LOGIN BYPASSRLS CREATEROLE;
-              END IF;
-          END $$;
-          SQL
-
-      - name: Integration tests (Postgres-only; excludes hosted_live live-stack)
-        # TEST_DISPOSABLE_CLUSTER_URL is set HERE, not at job level, and points at
-        # the throwaway service. Step scope is deliberate: the code it gates drops
-        # shared roles, so the variable must not be visible to any step whose DSN
-        # could be the working cluster.
-        env:
-          TEST_DISPOSABLE_CLUSTER_URL: postgresql://journal:testpass@localhost:5434/postgres
-        # MARKER-DRIVEN: every Postgres-only test under these dirs gates here.
-        # `-m "not hosted_live"` excludes the live-stack E2E (Hydra + Kratos +
-        # cloud-api) that runs in Tier-2 on the testbench.
-        #
-        # The pre-0001-baseline quarantine --ignore block has been retired: the
-        # affected tests were rewritten against the squashed baseline and now
-        # gate here. A handful of individual tests remain skipped in-file with a
-        # documented reason (concurrent-conflict recovery that needs a prod-side
-        # SAVEPOINT, the by-design no-downgrade on the squashed baseline, and
-        # otel_ro posture which is bootstrapped only in Tier-2).
-        run: |
-          poetry run pytest \
-            tests/integration tests/e2e tests/api tests/extraction tests/security tests/storage \
-            -m "not hosted_live" \
-            --tb=short
-
-      - name: Coverage gate - crypto + RLS primitives must stay >= 80%
-        run: |
-          poetry run pytest \
-            tests/unit \
-            tests/integration/test_rls_isolation.py \
-            tests/integration/test_entries_encryption.py \
-            tests/integration/test_encryption_contract.py \
-            tests/integration/test_encryption_correctness.py \
-            tests/integration/test_repo_inserts_under_rls.py \
-            --cov=gubbi.core.crypto \
-            --cov=gubbi.core.cipher_guard \
-            --cov=gubbi.core.db_context \
-            --cov-report=term-missing \
-            --cov-fail-under=80
+          # The job's own service clusters, as superuser DSNs. reset --ci wipes
+          # and rebuilds them (roles from tools/testdb/bootstrap.sql, then the
+          # migrations) and is honoured only when GITHUB_ACTIONS=true.
+          TESTDB_PG_URL: postgresql://journal:testpass@localhost:5433/postgres
+          TESTDB_PG_DISPOSABLE_URL: postgresql://journal:testpass@localhost:5434/postgres
+        run: python3 tools/run_db_suites.py --ci
 
       - name: Upload coverage report
         if: always()

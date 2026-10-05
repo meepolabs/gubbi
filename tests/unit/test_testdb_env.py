@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
 from tests.fixtures.testdb_tool import load_testdb_tool
 
@@ -19,10 +18,8 @@ pytestmark = pytest.mark.unit
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TESTDB_ENV = _REPO_ROOT / "tools" / "testdb" / "testdb.env"
-_WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "security-tests.yml"
 
 _REQUIRED_KEYS = ("PGVECTOR_IMAGE", "PG_MAJOR", "REDIS_IMAGE")
-_PGVECTOR_SERVICES = ("postgres", "postgres_disposable")
 
 _testdb = load_testdb_tool()
 _read_testdb_env = _testdb.read_testdb_env
@@ -41,16 +38,6 @@ def test_real_file_declares_required_keys() -> None:
 
     assert set(_REQUIRED_KEYS) <= values.keys()
     assert values["PG_MAJOR"] == "17"
-
-
-def test_pgvector_image_matches_every_ci_service() -> None:
-    values = _parse(_read_testdb_env(_TESTDB_ENV))
-    workflow = yaml.safe_load(_WORKFLOW.read_text(encoding="utf-8"))
-    services = workflow["jobs"]["security-tests"]["services"]
-
-    images = {name: services[name]["image"] for name in _PGVECTOR_SERVICES}
-
-    assert images == dict.fromkeys(_PGVECTOR_SERVICES, values["PGVECTOR_IMAGE"])
 
 
 def test_reader_rejects_crlf_file(tmp_path: Path) -> None:
