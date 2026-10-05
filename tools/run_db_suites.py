@@ -32,8 +32,9 @@ can change a stage's selection or target.
 
 A pytest stage is green only when pytest exits 0 and its JUnit report parses,
 counts at least one test, records no failures or errors and at least one
-passed test. Every child's output is relayed line by line with URL passwords
-masked, so no DSN password reaches the output. The summary prints each stage's
+passed test. A command that cannot start counts as exit 127. Every child's
+output, and every summary reason, is relayed with URL passwords masked, so no
+DSN password reaches the output. The summary prints each stage's
 seconds and collected/passed/failed/errors/skipped counts.
 
 Exit 0 when every stage is green, 1 when any stage failed, 2 on a usage or
@@ -68,6 +69,7 @@ EXIT_OK = 0
 EXIT_FAILED = 1
 EXIT_USAGE = 2
 PYTEST_NO_TESTS = 5
+EXIT_NOT_STARTED = 127
 
 PROFILE = (
     "--repo",
@@ -348,16 +350,21 @@ def streaming_runner(secrets: Sequence[str]) -> Callable[[Sequence[str], Mapping
 # ---------------------------------------------------------------------------
 
 
-def _suite_counts(suite: ET.Element) -> tuple[int, int, int, int]:
-    raw = [suite.get(key) for key in JUNIT_COUNT_KEYS]
-    if None in raw:
-        raise ReportError(f"report counts incomplete {raw}")
+def _suite_count(suite: ET.Element, key: str) -> int:
+    # Reasons name the attribute only: its value is unvetted report content.
+    value = suite.get(key)
+    if value is None:
+        raise ReportError(f"report count {key} missing")
     try:
-        tests, failures, errors, skipped = (int(value) for value in raw if value is not None)
+        return int(value)
     except ValueError as exc:
-        raise ReportError(f"malformed report counts {raw}") from exc
+        raise ReportError(f"report count {key} malformed") from exc
+
+
+def _suite_counts(suite: ET.Element) -> tuple[int, int, int, int]:
+    tests, failures, errors, skipped = (_suite_count(suite, key) for key in JUNIT_COUNT_KEYS)
     if min(tests, failures, errors, skipped) < 0 or failures + errors + skipped > tests:
-        raise ReportError(f"inconsistent report counts {raw}")
+        raise ReportError("inconsistent report counts")
     return tests, failures, errors, skipped
 
 
@@ -417,6 +424,22 @@ class Plan:
     path: str
 
 
+def start_command(
+    name: str,
+    plan: Plan,
+    run: Callable[[Sequence[str], Mapping[str, str]], int],
+    argv: Sequence[str],
+    env: Mapping[str, str],
+) -> int:
+    """Run one stage's command; a command that cannot start is exit 127, not a crash."""
+    try:
+        return run(argv, env)
+    except OSError as exc:
+        line = f"db-suites: stage {name} could not start {argv[0]}: {exc.strerror}"
+        say(testdb.redact(line, dsn_passwords(plan.dsns)))
+        return EXIT_NOT_STARTED
+
+
 def run_reset(
     plan: Plan,
     run: Callable[[Sequence[str], Mapping[str, str]], int],
@@ -425,7 +448,7 @@ def run_reset(
     """Reset the stack's clusters; the stage is green when reset exits 0."""
     say(f"db-suites: stage {RESET_STAGE}")
     start = clock()
-    exit_code = run(reset_command(ci=plan.ci), plan.environ)
+    exit_code = start_command(RESET_STAGE, plan, run, reset_command(ci=plan.ci), plan.environ)
     reason = "" if exit_code == 0 else f"reset exit {exit_code}"
     return StageResult(RESET_STAGE, exit_code, clock() - start, None, reason)
 
@@ -442,7 +465,7 @@ def run_stage(
     junit = workdir / f"{stage.name}.xml"
     env = stage_env(stage, plan.environ, plan.dsns, plan.path)
     start = clock()
-    exit_code = run([*stage.argv, f"--junitxml={junit}"], env)
+    exit_code = start_command(stage.name, plan, run, [*stage.argv, f"--junitxml={junit}"], env)
     seconds = clock() - start
     counts, reason = judge_stage(exit_code, junit)
     return StageResult(stage.name, exit_code, seconds, counts, reason)
@@ -463,9 +486,9 @@ def run_all(
     return results
 
 
-def format_result(result: StageResult) -> str:
-    """Render one summary line: stage, verdict, seconds and counts."""
-    verdict = "PASS" if result.is_green else f"FAIL ({result.reason})"
+def format_result(result: StageResult, secrets: Sequence[str] = ()) -> str:
+    """Render one summary line: stage, verdict, seconds and counts, with secrets masked."""
+    verdict = "PASS" if result.is_green else f"FAIL ({testdb.redact(result.reason, secrets)})"
     line = f"  {result.name:<12} {verdict:<32} {result.seconds:8.1f}s"
     if result.counts is None:
         return line
@@ -476,11 +499,13 @@ def format_result(result: StageResult) -> str:
     )
 
 
-def summarize(results: Sequence[StageResult], *, seconds: float) -> int:
+def summarize(
+    results: Sequence[StageResult], *, seconds: float, secrets: Sequence[str] = ()
+) -> int:
     """Print the per-stage summary and return the overall exit code."""
     say("db-suites: summary")
     for result in results:
-        say(format_result(result))
+        say(format_result(result, secrets))
     say(f"  {'total':<12} {'':<32} {seconds:8.1f}s")
     is_complete = len(results) == len(STAGES) + 1
     return EXIT_OK if is_complete and all(r.is_green for r in results) else EXIT_FAILED
@@ -509,8 +534,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"db-suites: {exc}\n")
         return EXIT_USAGE
     start = time.monotonic()
-    results = run_all(plan, streaming_runner(dsn_passwords(plan.dsns)))
-    return summarize(results, seconds=time.monotonic() - start)
+    secrets = dsn_passwords(plan.dsns)
+    results = run_all(plan, streaming_runner(secrets))
+    return summarize(results, seconds=time.monotonic() - start, secrets=secrets)
 
 
 if __name__ == "__main__":

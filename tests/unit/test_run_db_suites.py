@@ -294,6 +294,38 @@ def test_judge_stage(
     assert actual == reason
 
 
+def test_a_malformed_report_count_never_reaches_the_reason_or_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    junit = tmp_path / "r.xml"
+    junit.write_text(
+        '<testsuites><testsuite tests="postgresql://u:secretpw@h/db" failures="0" '
+        'errors="0" skipped="0"/></testsuites>',
+        encoding="ascii",
+    )
+
+    counts, reason = runner.judge_stage(0, junit)
+    result = runner.StageResult("integration", 0, 1.0, counts, reason)
+    runner.summarize([result], seconds=1.0)
+
+    out = capsys.readouterr().out
+    assert reason == "report count tests malformed"
+    assert "secretpw" not in out
+
+
+def test_summary_masks_passwords_in_stage_reasons(capsys: pytest.CaptureFixture[str]) -> None:
+    result = runner.StageResult(
+        "reset", 1, 1.0, None, f"saw {_PASSWORD} and postgresql://u:pw2@h/db"
+    )
+
+    runner.summarize([result], seconds=1.0, secrets=(_PASSWORD,))
+
+    out = capsys.readouterr().out
+    assert "FAIL (saw *** and postgresql://u:***@h/db)" in out
+    assert _PASSWORD not in out
+    assert "pw2" not in out
+
+
 def test_read_counts_sums_every_testsuite(tmp_path: Path) -> None:
     junit = tmp_path / "r.xml"
     junit.write_text(
@@ -395,3 +427,31 @@ def test_streaming_runner_masks_dsn_passwords(
     assert "postgresql://journal:***@127.0.0.1:41001/journal_test" in out
     assert "pw=***" in out
     assert _PASSWORD not in out
+
+
+def test_a_stage_that_cannot_start_is_red_and_the_run_continues(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fake = FakeRun({})
+    real = runner.streaming_runner(())
+    missing = str(tmp_path / "no-such-dir" / "poetry")
+
+    def run(argv: Sequence[str], env: Mapping[str, str]) -> int:
+        if list(argv[:-1]) == list(runner.STAGES[0].argv):
+            return real([missing, *argv[1:]], env)
+        return fake(argv, env)
+
+    results = runner.run_all(_plan(tmp_path), run, _ticks())
+    code = runner.summarize(results, seconds=1.0)
+
+    out = capsys.readouterr().out
+    assert [(r.name, r.exit_code, r.is_green) for r in results] == [
+        ("reset", 0, True),
+        ("integration", 127, False),
+        ("coverage", 0, True),
+    ]
+    assert code == runner.EXIT_FAILED
+    assert "db-suites: stage integration could not start poetry: " in out
+    assert "integration  FAIL (pytest exit 127)" in out
+    assert "db-suites: summary" in out
+    assert "Traceback" not in out
