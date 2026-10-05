@@ -55,8 +55,11 @@ gubbi/
                           tools/testdb/ holds testdb.env (pinned test DB
                           images), bootstrap.sql (test role bootstrap) and
                           testdb.py (stdlib controller: per-checkout docker
-                          test stack up/down/status/env, and check-env, the
-                          one testdb.env validator)
+                          test stack up/down/status/env, check-env, the
+                          one testdb.env validator, and psql-path) and
+                          bin/psql (docker psql wrapper on PGVECTOR_IMAGE,
+                          put on PATH by psql-path when no host psql of
+                          PG_MAJOR exists)
   gubbi/                  Python package (see below)
   tests/                  unit / integration / e2e
 ```

@@ -10,6 +10,7 @@ Usage::
     testdb.py status    PROFILE [--require-ready]
     testdb.py env       PROFILE
     testdb.py check-env [--file PATH] [--github-output PATH]
+    testdb.py psql-path [--file PATH]
 
 PROFILE is ``--repo NAME --role ROLE [--role ROLE ...] [--db NAME ...]``:
 
@@ -70,6 +71,11 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             charset, which still admits shell metacharacters: consumers must
             never eval or source it. Read specific keys instead (CI appends it
             to ``$GITHUB_OUTPUT``; make and bash consumers pick keys by name).
+``psql-path`` prints the absolute path of ``bin/`` next to this script, which
+            holds a ``psql`` wrapper running PGVECTOR_IMAGE's psql in docker,
+            when no ``psql`` on PATH (``bin/`` itself excluded) reports major
+            PG_MAJOR in ``psql --version``; otherwise prints nothing. Consumers
+            prepend a non-empty result to PATH.
 
 ``.testdb.env`` is bash-sourceable (``set -a; . ./.testdb.env``); every value
 is single-quoted and contains no quote, space or control character. Per role R
@@ -89,6 +95,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -102,6 +109,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
 TESTDB_ENV = Path(__file__).resolve().parent / "testdb.env"
+PSQL_WRAPPER_DIR = Path(__file__).resolve().parent / "bin"
 STACK_ENV_NAME = ".testdb.env"
 NOT_RUNNING = "test stack not running: make test-stack-up"
 
@@ -156,6 +164,8 @@ _FORBIDDEN_NAME_PARTS = ("gubbi-db-", "-disp-pg")
 # testdb.env line rule: comment, blank, or KEY=value with printable ASCII values.
 _LINE_RULE = re.compile(r"[A-Z][A-Z0-9_]*=[!-~]+", re.ASCII)
 _CONTROL_CHAR = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]", re.ASCII)
+_PG_MAJOR_RULE = re.compile(r"[1-9][0-9]*", re.ASCII)
+_PSQL_VERSION = re.compile(r"psql \(PostgreSQL\) ([0-9]+)", re.ASCII)
 
 
 class ConfigError(Exception):
@@ -853,6 +863,52 @@ def cmd_check_env(env_file: Path, github_output: Path | None) -> int:
 
 
 # ---------------------------------------------------------------------------
+# psql on PATH
+# ---------------------------------------------------------------------------
+
+
+def _host_psql(path: str) -> str | None:
+    """Return the first ``psql`` on ``path`` outside the wrapper dir, or None."""
+    entries = [
+        entry
+        for entry in path.split(os.pathsep)
+        if entry and Path(entry).resolve() != PSQL_WRAPPER_DIR
+    ]
+    return shutil.which("psql", path=os.pathsep.join(entries)) if entries else None
+
+
+def psql_major(
+    run: Callable[[Sequence[str], float | None], CommandResult], psql: str
+) -> str | None:
+    """Return the major version ``psql --version`` reports, or None if it does not."""
+    result = run([psql, "--version"], PROBE_TIMEOUT_S)
+    match = _PSQL_VERSION.match(result.stdout) if result.returncode == 0 else None
+    return match[1] if match else None
+
+
+def psql_path_prefix(
+    run: Callable[[Sequence[str], float | None], CommandResult], path: str, pg_major: str
+) -> Path | None:
+    """Return the wrapper dir to prepend to ``path``, or None when a host psql fits."""
+    host = _host_psql(path)
+    if host is not None and psql_major(run, host) == pg_major:
+        return None
+    return PSQL_WRAPPER_DIR
+
+
+def cmd_psql_path(env_file: Path) -> int:
+    """Print the wrapper dir when PATH lacks a host psql of PG_MAJOR."""
+    pins = load_pins(env_file)
+    pg_major = pins.values.get("PG_MAJOR", "")
+    if not _PG_MAJOR_RULE.fullmatch(pg_major):
+        raise ConfigError(f"{env_file}: PG_MAJOR={pg_major} must match {_PG_MAJOR_RULE.pattern}")
+    prefix = psql_path_prefix(run_command, os.environ.get("PATH", ""), pg_major)
+    if prefix is not None:
+        sys.stdout.write(f"{prefix}\n")
+    return EXIT_OK
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
@@ -871,12 +927,16 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check-env")
     check.add_argument("--file", type=Path, default=TESTDB_ENV)
     check.add_argument("--github-output", type=Path, default=None)
+    psql_path = sub.add_parser("psql-path")
+    psql_path.add_argument("--file", type=Path, default=TESTDB_ENV)
     return parser
 
 
 def _dispatch(args: argparse.Namespace, ctx_factory: Callable[[], Context]) -> int:
     if args.command == "check-env":
         return cmd_check_env(args.file, args.github_output)
+    if args.command == "psql-path":
+        return cmd_psql_path(args.file)
     profile = make_profile(args.repo, args.roles, args.dbs)
     ctx = ctx_factory()
     if args.command == "up":
