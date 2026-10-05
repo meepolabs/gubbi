@@ -30,6 +30,10 @@ _parse = _testdb.parse_testdb_env
 # Renovate only tracks a pin it can read a tag from.
 _TAGGED_PIN = re.compile(r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]+@sha256:[0-9a-f]{64}")
 
+_PGVECTOR_TAG_MAJOR = re.compile(
+    r"[a-z0-9][a-z0-9._/-]*:[A-Za-z0-9._-]*-pg(?P<major>[1-9][0-9]*)@sha256:[0-9a-f]{64}"
+)
+
 
 def test_real_file_obeys_line_rule() -> None:
     raw = _read_testdb_env(_TESTDB_ENV)
@@ -52,6 +56,19 @@ def test_real_file_declares_required_keys() -> None:
 
     assert set(_REQUIRED_KEYS) <= values.keys()
     assert values["PG_MAJOR"] == "17"
+
+
+def test_pg_major_matches_pgvector_tag_suffix() -> None:
+    values = _parse(_read_testdb_env(_TESTDB_ENV))
+    image = values["PGVECTOR_IMAGE"]
+
+    match = _PGVECTOR_TAG_MAJOR.fullmatch(image)
+
+    assert match is not None, f"PGVECTOR_IMAGE tag has no -pg<N> suffix: {image}"
+    assert match["major"] == values["PG_MAJOR"], (
+        f"PGVECTOR_IMAGE targets pg{match['major']} but PG_MAJOR={values['PG_MAJOR']}; "
+        "a pgvector bump to a new Postgres major must update PG_MAJOR in the same change"
+    )
 
 
 def test_reader_rejects_crlf_file(tmp_path: Path) -> None:
