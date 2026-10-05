@@ -47,6 +47,7 @@ _ROLES = [
     {"name": "zz_leftover", "super": False},
 ]
 _SURVIVING_DBS = ["postgres", "template1"]
+_CONNINFO_DBNAME = re.compile(r"dbname='((?:[^'\\]|\\.)*)'")
 
 
 @dataclass
@@ -62,8 +63,14 @@ class Call:
         return self.argv[self.argv.index("-tAc") + 1] if "-tAc" in self.argv else None
 
     @property
+    def statements(self) -> list[str]:
+        return [self.argv[i + 1] for i, arg in enumerate(self.argv) if arg == "-c"]
+
+    @property
     def db(self) -> str:
-        return self.argv[self.argv.index("-d") + 1]
+        match = _CONNINFO_DBNAME.fullmatch(self.argv[self.argv.index("-d") + 1])
+        assert match is not None, self.argv
+        return re.sub(r"\\(.)", r"\1", match.group(1))
 
 
 @dataclass
@@ -73,6 +80,9 @@ class FakePsql:
     psql: str
     calls: list[Call] = field(default_factory=list)
     roles: list[dict[str, Any]] = field(default_factory=lambda: list(_ROLES))
+    dbs: list[dict[str, Any]] = field(
+        default_factory=lambda: [{"name": db, "allowconn": True} for db in _SURVIVING_DBS]
+    )
     fail_on: str | None = None
     fail_stderr: str = ""
 
@@ -92,7 +102,7 @@ class FakePsql:
         if call.sql == testdb.ROLE_LIST_SQL:
             return testdb.CommandResult(0, json.dumps(self.roles) + "\n", "")
         if call.sql == testdb.DB_LIST_SQL:
-            return testdb.CommandResult(0, json.dumps(_SURVIVING_DBS) + "\n", "")
+            return testdb.CommandResult(0, json.dumps(self.dbs) + "\n", "")
         return testdb.CommandResult(0, "", "")
 
     def psql_calls(self) -> list[Call]:
@@ -103,6 +113,13 @@ class FakePsql:
             call
             for call in self.psql_calls()
             if call.sql is not None and (port is None or _arg(call, "-p") == port)
+        ]
+
+    def owned_calls(self, port: str | None = None) -> list[Call]:
+        return [
+            call
+            for call in self.psql_calls()
+            if call.statements and (port is None or _arg(call, "-p") == port)
         ]
 
     def bootstraps(self) -> list[Call]:
@@ -313,15 +330,107 @@ def test_reset_clears_owned_objects_in_every_surviving_database_before_dropping_
     _reset(stack, fake_psql, env_file, toplevel, [*_PROFILE, *_DBS])
     port = _port(stack, _name("pg", toplevel))
 
-    calls = fake_psql.sql_calls(port)
-    owned = [i for i, c in enumerate(calls) if c.sql and c.sql.startswith("REASSIGN OWNED")]
-    drop = next(i for i, c in enumerate(calls) if c.sql and c.sql.startswith("DROP ROLE"))
+    calls = [c for c in fake_psql.psql_calls() if _arg(c, "-p") == port]
+    owned = [i for i, c in enumerate(calls) if c.statements]
+    drop = next(i for i, c in enumerate(calls) if (c.sql or "").startswith("DROP ROLE"))
     assert [calls[i].db for i in owned] == _SURVIVING_DBS
-    assert calls[owned[0]].sql == (
-        'REASSIGN OWNED BY "journal_admin", "journal_app", "zz_leftover" TO "journal"; '
-        'DROP OWNED BY "journal_admin", "journal_app", "zz_leftover"'
-    )
     assert max(owned) < drop
+
+
+def test_reset_drops_owned_objects_once_per_role_each_in_its_own_transaction(
+    stack: FakeDocker, fake_psql: FakePsql, env_file: Path, toplevel: Path
+) -> None:
+    _reset(stack, fake_psql, env_file, toplevel, [*_PROFILE, *_DBS])
+
+    assert fake_psql.owned_calls()[0].statements == [
+        'REASSIGN OWNED BY "journal_admin", "journal_app", "zz_leftover" TO "journal"',
+        'DROP OWNED BY "journal_admin"',
+        'DROP OWNED BY "journal_app"',
+        'DROP OWNED BY "zz_leftover"',
+    ]
+
+
+def test_reset_lists_every_database_but_template0_for_the_cleanup() -> None:
+    assert "datname <> 'template0'" in testdb.DB_LIST_SQL
+    assert "WHERE datallowconn" not in testdb.DB_LIST_SQL
+
+
+def test_reset_opens_a_connection_disabled_database_for_cleanup_and_closes_it_again(
+    stack: FakeDocker, fake_psql: FakePsql, env_file: Path, toplevel: Path
+) -> None:
+    fake_psql.dbs = [
+        {"name": "postgres", "allowconn": True},
+        {"name": "sealed", "allowconn": False},
+    ]
+    port = _port(stack, _name("pg", toplevel))
+
+    rc = _reset(stack, fake_psql, env_file, toplevel, [*_PROFILE, *_DBS])
+
+    steps = [
+        c.sql or f"clear {c.db}"
+        for c in fake_psql.psql_calls()
+        if _arg(c, "-p") == port and (c.statements or "ALLOW_CONNECTIONS" in (c.sql or ""))
+    ]
+    assert rc == 0
+    assert steps == [
+        "clear postgres",
+        'ALTER DATABASE "sealed" ALLOW_CONNECTIONS true',
+        "clear sealed",
+        'ALTER DATABASE "sealed" ALLOW_CONNECTIONS false',
+    ]
+
+
+def test_reset_disallows_connections_again_when_the_cleanup_fails(
+    stack: FakeDocker, fake_psql: FakePsql, env_file: Path, toplevel: Path
+) -> None:
+    fake_psql.dbs = [{"name": "sealed", "allowconn": False}]
+    fake_psql.fail_on = "dbname='sealed'"
+
+    rc = _reset(stack, fake_psql, env_file, toplevel, [*_PROFILE, *_DBS])
+
+    alters = [c.sql for c in fake_psql.sql_calls() if "ALLOW_CONNECTIONS" in (c.sql or "")]
+    assert rc == 1
+    assert alters == [
+        'ALTER DATABASE "sealed" ALLOW_CONNECTIONS true',
+        'ALTER DATABASE "sealed" ALLOW_CONNECTIONS false',
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "expected"),
+    [
+        pytest.param(
+            "host=127.0.0.1 port=1 dbname=postgres",
+            "dbname='host=127.0.0.1 port=1 dbname=postgres'",
+            id="conninfo",
+        ),
+        pytest.param(
+            "postgresql://x@127.0.0.1:1/postgres",
+            "dbname='postgresql://x@127.0.0.1:1/postgres'",
+            id="url",
+        ),
+        pytest.param("it's a \\ db", "dbname='it\\'s a \\\\ db'", id="quote-and-backslash"),
+    ],
+)
+def test_reset_passes_a_hostile_database_name_only_as_a_conninfo_dbname(
+    stack: FakeDocker,
+    fake_psql: FakePsql,
+    env_file: Path,
+    toplevel: Path,
+    name: str,
+    expected: str,
+) -> None:
+    fake_psql.dbs = [{"name": name, "allowconn": True}]
+
+    rc = _reset(stack, fake_psql, env_file, toplevel, [*_PROFILE, *_DBS])
+
+    clears = fake_psql.owned_calls()
+    assert rc == 0
+    assert [_arg(c, "-d") for c in clears] == [expected] * 2
+    assert {_arg(c, "-p") for c in clears} == {
+        _port(stack, _name("pg", toplevel)),
+        _port(stack, _name("pg-disposable", toplevel)),
+    }
 
 
 def test_reset_skips_the_role_drop_when_no_role_is_droppable(
@@ -339,14 +448,20 @@ def test_reset_runs_the_steps_in_order_on_the_inspected_port(
     stack: FakeDocker, fake_psql: FakePsql, env_file: Path, toplevel: Path
 ) -> None:
     port = _port(stack, _name("pg", toplevel))
-    environ = {"TESTDB_PG_PORT": "1", "TESTDB_PG_HOST": "10.0.0.9", "PGHOST": "10.0.0.9"}
+    environ = {
+        "TESTDB_PG_PORT": "1",
+        "TESTDB_PG_HOST": "10.0.0.9",
+        "PGHOST": "10.0.0.9",
+        "PGCONNECT_TIMEOUT": "1",
+        "PG_OTEL_RO_PASSWORD": "otel-pw",
+    }
 
     _reset(stack, fake_psql, env_file, toplevel, [*_PROFILE, *_DBS], environ)
 
     steps = [
         (c.sql or "bootstrap").split(" ")[0] + " " + c.db
         for c in fake_psql.psql_calls()
-        if _arg(c, "-p") == port and not (c.sql or "").startswith(("SELECT", "REASSIGN"))
+        if _arg(c, "-p") == port and not c.statements and not (c.sql or "").startswith("SELECT")
     ]
     assert steps == [
         "DROP postgres",
@@ -359,6 +474,8 @@ def test_reset_runs_the_steps_in_order_on_the_inspected_port(
     ]
     assert {_arg(c, "-h") for c in fake_psql.psql_calls()} == {"127.0.0.1"}
     assert all("PGHOST" not in c.env for c in fake_psql.calls)
+    assert all("PGCONNECT_TIMEOUT" not in c.env for c in fake_psql.calls)
+    assert all(c.env["PG_OTEL_RO_PASSWORD"] == "otel-pw" for c in fake_psql.calls)
 
 
 def test_reset_drops_and_recreates_exactly_the_profile_databases(
@@ -524,3 +641,44 @@ def test_reset_redacts_passwords_from_a_failing_commands_output(
     assert "migrate journal_test (alembic) failed" in err
     for secret in ("testpass", "secret-app-pw", "other"):
         assert secret not in err
+
+
+def test_reset_redacts_a_password_in_a_migration_argv_from_its_label_and_failure(
+    stack: FakeDocker,
+    fake_psql: FakePsql,
+    env_file: Path,
+    toplevel: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake_psql.fail_on = "upgrade"
+    command = ["postgresql://u:argv-pw@h/d", "upgrade", "--password=secret-app-pw"]
+    argv = [*_PROFILE, *_DBS, "--migrate-dsn-env", "X", "--migrate", ".", *command]
+
+    rc = _reset(
+        stack, fake_psql, env_file, toplevel, argv, {"JOURNAL_DB_APP_PASSWORD": "secret-app-pw"}
+    )
+
+    out = capsys.readouterr()
+    assert rc == 1
+    assert "pg: migrate journal_test (postgresql://u:***@h/d upgrade --password=***)" in out.err
+    for secret in ("argv-pw", "secret-app-pw"):
+        assert secret not in out.out + out.err
+
+
+def test_reset_redacts_a_password_in_a_migration_step_label(
+    stack: FakeDocker,
+    fake_psql: FakePsql,
+    env_file: Path,
+    toplevel: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    argv = [*_PROFILE, *_DBS, "--migrate-dsn-env", "X", "--migrate", ".", "secret-app-pw"]
+
+    rc = _reset(
+        stack, fake_psql, env_file, toplevel, argv, {"JOURNAL_DB_APP_PASSWORD": "secret-app-pw"}
+    )
+
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "pg: migrate journal_test [1] *** " in out
+    assert "secret-app-pw" not in out
