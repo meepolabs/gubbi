@@ -8,11 +8,11 @@
 #   - gitleaks.yml (called): secret scan. It also keeps its own push and
 #     schedule triggers; its push runs are grouped per commit SHA, so a newer
 #     push that cancels this run never drops the scan of an earlier commit.
+#   - image-closure (this file): replays the production image's hash-pinned
+#     Poetry install when the diff can affect it
 #
-# Advisory and path-filtered workflows (dependency-scan.yml,
-# poetry-image-closure.yml) are deliberately NOT lanes of `required`: an
-# advisory finding must not block unrelated work, and a path-filtered
-# workflow never reports on most commits.
+# The advisory dependency-scan.yml is deliberately NOT a lane of `required`:
+# an advisory finding must not block unrelated work.
 
 name: ci
 
@@ -93,6 +93,60 @@ jobs:
       pull-requests: read
     secrets: inherit
 
+  # Proves the hash-pinned Poetry closure the production image installs still
+  # installs. The Dockerfile installs Poetry from a pip-compile lock of Poetry
+  # plus its transitive dependencies; bumps move only the `poetry` pin (with
+  # the Dockerfile's POETRY_VERSION) while the transitive pins stay frozen, so
+  # a Poetry release whose metadata conflicts with a frozen pin would otherwise
+  # first fail at image build time on deploy. No other job builds the image.
+  #
+  # The first step skips the install when the diff from the base touches none
+  # of the paths the decision script watches, and runs it whenever the base
+  # cannot be read. A skipped install leaves the job green, which `required`
+  # accepts. The full history is fetched so the base object is present.
+  #
+  # The base image is read from the Dockerfile's FROM line at run time, so a
+  # base-image bump cannot leave this testing a different interpreter than the
+  # one the image ships.
+  image-closure:
+    name: poetry closure installs
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DOCKERFILE: deployment/Dockerfile
+      REQUIREMENTS: deployment/poetry-requirements.txt
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Standard library only, on the runner's own python3: nothing to install.
+      - name: decide whether the closure can be affected
+        id: decide
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: python3 tools/image_closure_needed.py --base "$BASE_SHA" --github-output "$GITHUB_OUTPUT"
+
+      - name: Install the Poetry closure in the image's base
+        if: ${{ steps.decide.outputs.run != 'false' }}
+        run: |
+          set -eu
+          base_image=$(sed -n 's/^FROM[[:space:]]\{1,\}\([^[:space:]]*\).*/\1/p' "$DOCKERFILE")
+          test -n "$base_image"
+          test "$(printf '%s\n' "$base_image" | wc -l)" -eq 1
+          docker run --rm -v "$GITHUB_WORKSPACE:/workspace:ro" \
+            -e DOCKERFILE -e REQUIREMENTS "$base_image" sh -eu -c '
+            docker_version=$(sed -n "s/^[[:space:]]*POETRY_VERSION=\([^[:space:]]*\).*/\1/p" "/workspace/$DOCKERFILE")
+            requirements_version=$(sed -n "s/^poetry==\([^[:space:]]*\).*/\1/p" "/workspace/$REQUIREMENTS")
+            if [ -z "$docker_version" ] || [ "$docker_version" != "$requirements_version" ]; then
+              echo "POETRY_VERSION in $DOCKERFILE (\"$docker_version\") does not match the poetry pin in $REQUIREMENTS (\"$requirements_version\")" >&2
+              exit 1
+            fi
+            python -m venv /tmp/poetry
+            /tmp/poetry/bin/pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r "/workspace/$REQUIREMENTS"
+            /tmp/poetry/bin/poetry --version'
+
   # Branch protection names only this job, so renaming or adding a lane is an
   # edit to `needs` below rather than to the protection settings. It must run
   # even when a lane fails (`always()`): a skipped required check counts as
@@ -109,6 +163,7 @@ jobs:
       - lint
       - security-tests
       - secret-scan
+      - image-closure
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:

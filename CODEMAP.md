@@ -171,9 +171,10 @@ its tables.
   marker-driven -- `-m "not hosted_live"`; `hosted_live` tests (live
   Hydra + Kratos + cloud-api) run in Tier-2 on the testbench, not here.
   Its shape is pinned by `tests/unit/test_ci_workflow_contract.py`.
-- Image closure gate (`.github/workflows/poetry-image-closure.yml`):
-  on changes to `deployment/Dockerfile` or
-  `deployment/poetry-requirements.txt`, installs the hash-pinned Poetry
+- Image closure gate (`image-closure` job in `ci.yml`, a lane of
+  `required`): `tools/image_closure_needed.py` diffs against the PR base
+  or push `before` and skips only when no watched path changed (an
+  unreadable base runs it); otherwise installs the hash-pinned Poetry
   closure in the Dockerfile's base image and checks `POETRY_VERSION`
   matches the lock's `poetry` pin.
 - Dependency scan (`.github/workflows/dependency-scan.yml`): advisory

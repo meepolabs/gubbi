@@ -27,9 +27,9 @@ _CI = _WORKFLOWS / "ci.yml"
 _AGGREGATOR = "required"
 _AGGREGATOR_STEP = "every required job succeeded"
 
-# Workflows that must never gate `required`: advisory scans and path-filtered
-# workflows that do not report on most commits.
-_NEVER_REQUIRED = ("dependency-scan.yml", "poetry-image-closure.yml")
+# Workflows that must never gate `required`: advisory scans, which must not
+# block unrelated work.
+_NEVER_REQUIRED = ("dependency-scan.yml",)
 
 # Called lanes that are call-only (no triggers of their own).
 _CALL_ONLY = ("security-tests.yml",)
@@ -117,7 +117,7 @@ def test_required_always_runs_and_is_named_for_branch_protection() -> None:
 
 
 @pytest.mark.parametrize("workflow", _NEVER_REQUIRED)
-def test_advisory_and_path_filtered_workflows_are_not_lanes(workflow: str) -> None:
+def test_advisory_workflows_are_not_lanes(workflow: str) -> None:
     assert workflow not in _called_workflows().values()
 
 
