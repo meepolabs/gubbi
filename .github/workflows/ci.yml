@@ -70,13 +70,13 @@ jobs:
         run: poetry install --no-interaction --no-root
 
       - name: ruff check
-        run: poetry run ruff check gubbi/ tests/
+        run: poetry run ruff check gubbi/ tests/ tools/
 
       - name: ruff format --check
-        run: poetry run ruff format --check gubbi/ tests/
+        run: poetry run ruff format --check gubbi/ tests/ tools/
 
       - name: mypy
-        run: poetry run mypy gubbi/
+        run: poetry run mypy gubbi/ tools/
 
   security-tests:
     name: security-tests
