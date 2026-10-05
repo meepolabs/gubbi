@@ -51,7 +51,10 @@ gubbi/
   deployment/             Dockerfile (builds the gubbi MCP server image -- used by docker-compose.yml and the prod Kamal deploy), entrypoint, nginx snippet;
                           deployment/scripts/ holds init.sql, grants.sql,
                           restore-db.sh, verify-db-invariants.sh
-  tools/                  standalone helpers (env-contract checker);
+  tools/                  standalone helpers (env-contract checker;
+                          run_db_suites.py, the stdlib runner for every
+                          DB-backed pytest stage CI runs: testdb reset, the
+                          integration suites, the coverage gate);
                           tools/testdb/ holds testdb.env (pinned test DB
                           images), bootstrap.sql (test role bootstrap) and
                           testdb.py (stdlib controller: per-checkout docker
