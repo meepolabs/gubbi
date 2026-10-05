@@ -144,6 +144,8 @@ def wrapper_copy(tmp_path: Path) -> Path:
     shutil.copy2(TESTDB_TOOL, tool_dir / "testdb.py")
     shutil.copy2(_WRAPPER, tool_dir / "bin" / "psql")
     (tool_dir / "testdb.env").write_bytes(_ENV_BYTES)
+    (tmp_path / "deployment" / "scripts").mkdir(parents=True)
+    (tmp_path / ".env").write_text("SECRET=x\n", encoding="ascii")
     return tool_dir / "bin" / "psql"
 
 
@@ -196,16 +198,57 @@ def test_wrapper_runs_the_pinned_image_with_psql_args_last(
     assert argv[argv.index("--workdir") + 1] == str(tmp_path.resolve())
 
 
-def test_wrapper_mounts_the_temp_dir_read_only(
+_MOUNT_FLAGS = ("--volume", "-v", "--mount")
+
+
+def _mount_args(argv: list[str]) -> list[str]:
+    head = argv[: argv.index("--")]
+    return [head[i + 1] for i, arg in enumerate(head) if arg in _MOUNT_FLAGS]
+
+
+def test_wrapper_mounts_only_the_sql_dirs_read_only(
     wrapper_copy: Path, fake_docker: Path, tmp_path: Path
 ) -> None:
     _run_wrapper(wrapper_copy, fake_docker, tmp_path, "--version")
 
+    root = tmp_path.resolve()
+    sql_dirs = [root / "deployment" / "scripts", root / "tools" / "testdb"]
+    assert _mount_args(_docker_argv(fake_docker)) == [f"{d}:{d}:ro" for d in sql_dirs]
+
+
+def test_wrapper_does_not_mount_the_checkout_root_or_temp_dir(
+    wrapper_copy: Path, fake_docker: Path, tmp_path: Path
+) -> None:
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S603, S607
+    temp_dir = tmp_path / "tmp"
+    temp_dir.mkdir()
+
+    _run_wrapper(wrapper_copy, fake_docker, tmp_path, "--version", TMPDIR=str(temp_dir))
+
+    sources = [Path(mount.split(":")[0]) for mount in _mount_args(_docker_argv(fake_docker))]
+    assert sources
+    for exposed in (tmp_path.resolve(), temp_dir.resolve()):
+        assert not any(exposed.is_relative_to(source) for source in sources), exposed
+
+
+def test_wrapper_skips_a_missing_sql_dir(
+    wrapper_copy: Path, fake_docker: Path, tmp_path: Path
+) -> None:
+    (tmp_path / "deployment" / "scripts").rmdir()
+
+    _run_wrapper(wrapper_copy, fake_docker, tmp_path, "--version")
+
+    tool_dir = (tmp_path / "tools" / "testdb").resolve()
+    assert _mount_args(_docker_argv(fake_docker)) == [f"{tool_dir}:{tool_dir}:ro"]
+
+
+def test_wrapper_keeps_a_subdirectory_working_dir(
+    wrapper_copy: Path, fake_docker: Path, tmp_path: Path
+) -> None:
+    _run_wrapper(wrapper_copy, fake_docker, tmp_path / "deployment", "--version")
+
     argv = _docker_argv(fake_docker)
-    volumes = [argv[i + 1] for i, arg in enumerate(argv) if arg == "--volume"]
-    real = tmp_path.resolve()
-    assert f"{real}:{real}:ro" in volumes
-    assert all(volume.endswith(":ro") for volume in volumes)
+    assert argv[argv.index("--workdir") + 1] == str((tmp_path / "deployment").resolve())
 
 
 def test_wrapper_passes_pg_and_journal_db_env_by_name_only(

@@ -3,10 +3,15 @@
 # container, for machines without a host psql of PG_MAJOR. `testdb.py psql-path`
 # decides whether this directory belongs on PATH.
 #
-# The container shares the host network, so 127.0.0.1 DSNs work unchanged. The
-# git toplevel of the working directory and the temp dir are mounted read-only
-# at their host paths and the working directory is kept, so relative and
-# absolute -f / \i paths under either resolve. stdin is passed through.
+# The container shares the host network, so 127.0.0.1 DSNs work unchanged.
+# Mounted, read-only and at their host paths: only this repository's SQL input
+# directories, deployment/scripts and tools/testdb, located from this script
+# rather than from git so they hold even outside a checkout. Nothing else is
+# mounted -- not the checkout root, the temp dir or $HOME -- because the client
+# needs only these SQL files and the rest of the tree holds ignored local
+# credentials. The working directory is kept, so relative and absolute -f / \i
+# paths into those directories resolve from the repo root or any directory
+# beneath it; any other file path is not found. stdin and -c are passed through.
 set -euo pipefail
 
 bin_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
@@ -30,11 +35,14 @@ if [[ -z $image ]]; then
     exit 2
 fi
 
-tmp_dir=$(cd -- "${TMPDIR:-/tmp}" && pwd -P)
-mounts=(--volume "$tmp_dir:$tmp_dir:ro")
-if toplevel=$(git rev-parse --show-toplevel 2>/dev/null) && [[ $toplevel != "$tmp_dir" ]]; then
-    mounts+=(--volume "$toplevel:$toplevel:ro")
-fi
+# A missing host dir is skipped: docker would create it, root-owned, on the host.
+repo_root=$(cd -- "$bin_dir/../../.." && pwd -P)
+mounts=()
+for sql_dir in "$repo_root/deployment/scripts" "$repo_root/tools/testdb"; do
+    if [[ -d $sql_dir ]]; then
+        mounts+=(--volume "$sql_dir:$sql_dir:ro")
+    fi
+done
 
 # libpq reads PG*; bootstrap.sql reads its role passwords with \getenv. The
 # ${a[@]+...} expansions keep empty arrays safe under set -u on bash < 4.4.
@@ -52,5 +60,5 @@ fi
 
 exec docker run --rm --interactive --quiet --network host \
     ${tty_args[@]+"${tty_args[@]}"} ${env_args[@]+"${env_args[@]}"} \
-    "${mounts[@]}" --workdir "$PWD" \
+    ${mounts[@]+"${mounts[@]}"} --workdir "$PWD" \
     -- "$image" psql "$@"
