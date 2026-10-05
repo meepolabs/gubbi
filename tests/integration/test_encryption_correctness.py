@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -58,6 +59,16 @@ async def _insert_user(admin_pool: asyncpg.Pool, email: str) -> UUID:
     if row is None:
         raise RuntimeError("failed to insert test user")
     return UUID(str(row["id"]))
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def _truncate_tables(clean_rls_db: asyncpg.Pool) -> AsyncIterator[None]:
+    """Truncate tenant tables + users around each case.
+
+    Every case inserts a fixed-email user; without the truncate, rows left by a
+    previous run collide on the users email unique index.
+    """
+    yield
 
 
 @pytest_asyncio.fixture
