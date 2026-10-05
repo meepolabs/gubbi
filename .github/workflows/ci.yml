@@ -76,7 +76,7 @@ jobs:
         run: poetry run ruff format --check gubbi/ tests/ tools/
 
       - name: mypy
-        run: poetry run mypy gubbi/ tools/
+        run: poetry run mypy gubbi/ tools/ --strict
 
   security-tests:
     name: security-tests

@@ -45,3 +45,12 @@ def test_lint_step_checks_tools(step_name: str, tool_args: list[str]) -> None:
     assert command[: 2 + len(tool_args)] == ["poetry", "run", *tool_args]
     paths = command[2 + len(tool_args) :]
     assert TOOLS_PATH in paths, f"{step_name!r} does not check {TOOLS_PATH}: {command}"
+
+
+def test_mypy_step_is_strict() -> None:
+    # pyproject sets most strict flags individually so the isolated pre-commit
+    # hook stays quiet; only `--strict` in CI turns on the rest (unused ignores,
+    # untyped decorators), so the lane must pass it.
+    command = _lint_step_command("mypy")
+
+    assert "--strict" in command, f"CI mypy must run --strict: {command}"
