@@ -6,8 +6,8 @@
 #   - security-tests.yml (called): env-contract check, unit suite, and the
 #     Postgres-backed security suite with its coverage gate
 #   - gitleaks.yml (called): secret scan. It also keeps its own push and
-#     schedule triggers so every pushed commit is scanned even when a newer
-#     push cancels this run.
+#     schedule triggers; its push runs are grouped per commit SHA, so a newer
+#     push that cancels this run never drops the scan of an earlier commit.
 #
 # Advisory and path-filtered workflows (dependency-scan.yml,
 # poetry-image-closure.yml) are deliberately NOT lanes of `required`: an

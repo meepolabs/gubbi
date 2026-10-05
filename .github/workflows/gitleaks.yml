@@ -1,10 +1,12 @@
-# Secret scanning -- adopted from meepo-conventions baseline.
+# Secret scanning.
 #
-# ci.yml calls this workflow as a lane of its `required` check, which is how
-# pull requests are scanned. It also keeps its own push trigger, so every
-# pushed commit is scanned even when a newer push cancels the ci run, plus a
-# weekly full-history scan to catch anything historical that slipped past
-# the diff scans.
+# Pull requests are scanned through ci.yml, whose `secret-scan` job calls
+# this workflow as a dependency of its `required` job. Pushes to main/develop
+# are scanned both there and by this workflow's own push trigger: the ci.yml
+# run is cancelled by a newer push, this one is not, and its concurrency
+# group is keyed on the commit SHA, so a newer push can neither cancel nor
+# displace the scan of an earlier one. A weekly full-history scan catches
+# anything historical that slipped past the diff scans.
 
 name: gitleaks
 
@@ -21,17 +23,19 @@ on:
   workflow_dispatch:
 
 
-# Cancel redundant runs on the same branch. Keyed on event_name too so the
-# weekly scheduled full-history scan is never cancelled by a push to the same
-# ref (and vice versa).
-# Only pull-request runs are cancelled: the newer PR head rescans the same
-# diff, but a cancelled push scan would leave its commits unscanned until
-# the weekly run.
-# When called from ci.yml, `github.workflow` and `github.event_name` are the
-# caller's. The event segment keeps this group distinct from ci.yml's own
-# group; were they equal, the called scan would cancel its caller.
+# Keyed on event_name, so a push never cancels the weekly full-history scan
+# (and vice versa) -- they scan different things and the cron is the only
+# one that sees history. Push runs are keyed on the commit SHA rather than
+# the ref: a group holds one running and one pending run, and a newer run
+# replaces the pending one even without cancel-in-progress, so a ref key
+# would drop the scan of a commit pushed during a busy window. Only
+# pull-request runs are cancelled: the newer PR head rescans the same diff.
+# When called from ci.yml, `github.workflow` is the caller's name and
+# `github.event_name` the caller's event; the event segment keeps this group
+# distinct from the caller's own, so the scan never cancels the run that
+# called it.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:

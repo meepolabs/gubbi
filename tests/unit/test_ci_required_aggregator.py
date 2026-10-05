@@ -38,6 +38,7 @@ _CALL_ONLY = ("security-tests.yml",)
 # commit is scanned even when the ci run is cancelled; pull requests reach it
 # only through ci.yml.
 _SECRET_SCAN = "gitleaks.yml"
+_SECRET_SCAN_JOB = "secret-scan"
 _SECRET_SCAN_TRIGGERS = {"workflow_call", "push", "schedule", "workflow_dispatch"}
 
 
@@ -186,13 +187,35 @@ def test_secret_scan_concurrency_group_differs_from_the_callers() -> None:
     caller = _load(_CI)["concurrency"]["group"]
     callee = _load(_WORKFLOWS / _SECRET_SCAN)["concurrency"]["group"]
 
+    assert "github.event_name" in callee
+    assert "github.event_name" not in caller
     assert callee != caller
+
+
+def test_secret_scan_push_runs_are_grouped_per_commit() -> None:
+    """A ref-keyed push group lets a newer push displace the pending scan of an older one."""
+    concurrency = _load(_WORKFLOWS / _SECRET_SCAN)["concurrency"]
+
+    assert concurrency["group"] == (
+        "${{ github.workflow }}-${{ github.event_name }}-"
+        "${{ github.event_name == 'push' && github.sha || github.ref }}"
+    )
+    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+
+
+def test_the_secret_scan_lane_is_the_canonical_required_job() -> None:
+    """The job id and display name are what branch protection and tooling expect."""
+    jobs = _ci_jobs()
+
+    assert _SECRET_SCAN_JOB in _needs()
+    assert jobs[_SECRET_SCAN_JOB]["name"] == "secret scan"
+    assert _called_workflows()[_SECRET_SCAN_JOB] == _SECRET_SCAN
 
 
 def test_secret_scan_caller_grants_what_the_callee_declares() -> None:
     """A called workflow cannot exceed the permissions its calling job grants."""
     callee = _load(_WORKFLOWS / _SECRET_SCAN)["permissions"]
-    caller = _ci_jobs()["secret-scan"]["permissions"]
+    caller = _ci_jobs()[_SECRET_SCAN_JOB]["permissions"]
 
     assert caller == callee
 
