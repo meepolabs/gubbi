@@ -156,7 +156,13 @@ def _ctx(docker: FakeDocker, env_file: Path, toplevel: Path = _TOPLEVEL, uid: in
         uid=uid,
         checkout=testdb.checkout_from_toplevel(toplevel),
         env_file=env_file,
+        run_env=_no_run_env,
+        environ={},
     )
+
+
+def _no_run_env(argv: Sequence[str], *_args: Any) -> Any:
+    raise AssertionError(f"unexpected psql or migration call {list(argv)!r}")
 
 
 def _main(docker: FakeDocker, env_file: Path, argv: list[str], **kwargs: Any) -> int:

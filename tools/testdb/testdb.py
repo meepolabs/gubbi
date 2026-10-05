@@ -11,6 +11,8 @@ Usage::
     testdb.py env       PROFILE
     testdb.py check-env [--file PATH] [--github-output PATH]
     testdb.py psql-path [--file PATH]
+    testdb.py reset     PROFILE [--ci] [--bootstrap-var NAME=VALUE ...]
+                        [--migrate-dsn-env NAME ...] [--migrate DIR ARGV... ...]
 
 PROFILE is ``--repo NAME --role ROLE [--role ROLE ...] [--db NAME ...]``:
 
@@ -77,6 +79,64 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             PG_MAJOR in ``psql --version``; otherwise prints nothing. Consumers
             prepend a non-empty result to PATH.
 
+``reset``   returns every pg cluster of the profile to a fresh state, in order:
+            drops the ``--db`` databases (``WITH (FORCE)``); drops every role
+            that is not a superuser, not ``pg_*`` and not the user it connects
+            as, after ``REASSIGN OWNED`` to that user and ``DROP OWNED`` in each
+            surviving database (roles are cluster-global); recreates the
+            ``--db`` databases; runs ``bootstrap.sql`` (``psql -v
+            ON_ERROR_STOP=1 -f``) in each of them, since the vector extension
+            is per database; then runs each migration against each of them.
+            Only ``--db`` databases are dropped or bootstrapped, so a suffixed
+            pg role's cluster is left with no non-superuser roles at all. It
+            refuses a ``--db`` of ``postgres``, ``template0`` or ``template1``.
+            It never starts a container. It prints each step's name and
+            duration and never a password: failure output is redacted.
+
+            Targets. Locally (the default) every container in the profile must
+            be running with this checkout's full label set and current
+            env-sha256, as ``env`` requires; host and port come from ``docker
+            container inspect`` of those containers, never from ``.testdb.env``
+            or the environment. With ``--ci`` the targets come from the
+            environment instead, and only when ``GITHUB_ACTIONS=true``: per pg
+            role R, ``TESTDB_R_URL`` (the same names ``.testdb.env`` uses, e.g.
+            ``TESTDB_PG_URL``, ``TESTDB_PG_DISPOSABLE_URL``) holds a
+            ``postgresql://user[:password]@host[:port]/db`` URL of a superuser
+            on that cluster. A host other than ``127.0.0.1`` or ``localhost``
+            is a refusal.
+
+            psql is the first ``psql`` on PATH when it reports PG_MAJOR, else
+            the ``bin/psql`` wrapper (as ``psql-path`` decides). psql and the
+            migrations run with an environment stripped of libpq ``PG*``
+            settings and of every variable holding a postgres URL.
+
+            ``--bootstrap-var NAME=VALUE`` passes a boolean bootstrap.sql
+            variable (``admin_createrole``, ``grant_app_to_admin``,
+            ``with_otel_ro``); omitted ones take bootstrap.sql's defaults.
+            Role passwords reach bootstrap.sql only through its environment
+            variables (``JOURNAL_DB_APP_PASSWORD``, ``JOURNAL_DB_ADMIN_PASSWORD``,
+            ``PG_OTEL_RO_PASSWORD``), never on an argv.
+
+            ``--migrate DIR ARGV...`` adds one migration command, run with
+            working directory DIR (relative to the checkout root) and no
+            shell. Repeat it for several chains; they run in the order given.
+            Every ``--migrate`` must come after all other options, since each
+            one runs to the next ``--migrate`` or the end of the arguments.
+            Each command sees the database's superuser DSN in every
+            ``--migrate-dsn-env NAME`` (at least one is required with
+            ``--migrate``). For example::
+
+                testdb.py reset --repo gubbi --role pg --role pg-disposable \\
+                    --db journal_test --db journal_rls_test \\
+                    --migrate-dsn-env JOURNAL_DB_MIGRATION_URL \\
+                    --migrate . poetry run alembic upgrade head
+
+            and two chains, the second from a sibling checkout::
+
+                ... --migrate-dsn-env JOURNAL_DB_ADMIN_URL \\
+                    --migrate ../gubbi poetry run alembic upgrade head \\
+                    --migrate . poetry run alembic upgrade head
+
 ``.testdb.env`` is bash-sourceable (``set -a; . ./.testdb.env``); every value
 is single-quoted and contains no quote, space or control character. Per role R
 (upper-cased, ``-`` as ``_``): ``TESTDB_R_CONTAINER``, ``TESTDB_R_HOST``,
@@ -91,6 +151,7 @@ the offending line).
 from __future__ import annotations
 
 import argparse
+import functools
 import hashlib
 import json
 import os
@@ -100,6 +161,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -166,6 +228,33 @@ _LINE_RULE = re.compile(r"[A-Z][A-Z0-9_]*=[!-~]+", re.ASCII)
 _CONTROL_CHAR = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]", re.ASCII)
 _PG_MAJOR_RULE = re.compile(r"[1-9][0-9]*", re.ASCII)
 _PSQL_VERSION = re.compile(r"psql \(PostgreSQL\) ([0-9]+)", re.ASCII)
+
+BOOTSTRAP_SQL = Path(__file__).resolve().parent / "bootstrap.sql"
+MIGRATE_FLAG = "--migrate"
+BOOTSTRAP_BOOL_VARS = frozenset({"admin_createrole", "grant_app_to_admin", "with_otel_ro"})
+# bootstrap.sql reads role passwords from these with \getenv; reset redacts them.
+BOOTSTRAP_PASSWORD_ENVS = (
+    "JOURNAL_DB_APP_PASSWORD",
+    "JOURNAL_DB_ADMIN_PASSWORD",
+    "PG_OTEL_RO_PASSWORD",
+)
+PROTECTED_DBS = frozenset({PG_MAINTENANCE_DB, "template0", "template1"})
+CI_HOSTS = frozenset({LOOPBACK, "localhost"})
+PSQL_TIMEOUT_S = 300.0
+MIGRATE_TIMEOUT_S = 1800.0
+ROLE_LIST_SQL = (
+    "SELECT coalesce(json_agg(json_build_object('name', rolname, 'super', rolsuper)"
+    " ORDER BY rolname), '[]') FROM pg_roles"
+)
+DB_LIST_SQL = (
+    "SELECT coalesce(json_agg(datname ORDER BY datname), '[]') FROM pg_database WHERE datallowconn"
+)
+_BOOL_VALUE = re.compile(r"true|false|on|off|yes|no|1|0", re.ASCII)
+_ENV_NAME_RULE = re.compile(r"[A-Z][A-Z0-9_]{0,63}", re.ASCII)
+# libpq connection settings (PGHOST, PGSERVICE, PGOPTIONS, ...); none has an underscore.
+_LIBPQ_ENV = re.compile(r"PG[A-Z]+", re.ASCII)
+_PG_DSN_VALUE = re.compile(r"\s*postgres(ql)?(\+[a-z0-9]+)?://", re.ASCII | re.IGNORECASE)
+_URL_PASSWORD = re.compile(r"(://[^:/@\s]*):[^@\s]*@")
 
 
 class ConfigError(Exception):
@@ -271,8 +360,17 @@ class CommandResult:
     stderr: str
 
 
-def run_command(argv: Sequence[str], timeout: float | None) -> CommandResult:
-    """Run ``argv`` without a shell; a missing binary or a timeout is a failed result."""
+def run_command(
+    argv: Sequence[str],
+    timeout: float | None,
+    env: Mapping[str, str] | None = None,
+    cwd: Path | None = None,
+) -> CommandResult:
+    """Run ``argv`` without a shell; a missing binary or a timeout is a failed result.
+
+    ``env`` None inherits this process's environment; otherwise it is the whole
+    environment, and its PATH is the one ``argv[0]`` is looked up on.
+    """
     try:
         done = subprocess.run(  # noqa: S603 - argument array, never a shell
             list(argv),
@@ -282,6 +380,8 @@ def run_command(argv: Sequence[str], timeout: float | None) -> CommandResult:
             errors="replace",
             timeout=timeout,
             check=False,
+            env=None if env is None else dict(env),
+            cwd=cwd,
         )
     except FileNotFoundError:
         return CommandResult(127, "", f"{argv[0]}: command not found")
@@ -326,6 +426,9 @@ class Context:
     uid: int
     checkout: Checkout
     env_file: Path
+    # Runs psql and migration commands: (argv, timeout, env, cwd).
+    run_env: Callable[[Sequence[str], float | None, Mapping[str, str], Path | None], CommandResult]
+    environ: Mapping[str, str]
 
 
 def make_profile(repo: str, roles: Sequence[str], dbs: Sequence[str]) -> Profile:
@@ -899,12 +1002,370 @@ def psql_path_prefix(
 def cmd_psql_path(env_file: Path) -> int:
     """Print the wrapper dir when PATH lacks a host psql of PG_MAJOR."""
     pins = load_pins(env_file)
+    prefix = psql_path_prefix(run_command, os.environ.get("PATH", ""), _pg_major(pins, env_file))
+    if prefix is not None:
+        sys.stdout.write(f"{prefix}\n")
+    return EXIT_OK
+
+
+def _pg_major(pins: Pins, env_file: Path) -> str:
     pg_major = pins.values.get("PG_MAJOR", "")
     if not _PG_MAJOR_RULE.fullmatch(pg_major):
         raise ConfigError(f"{env_file}: PG_MAJOR={pg_major} must match {_PG_MAJOR_RULE.pattern}")
-    prefix = psql_path_prefix(run_command, os.environ.get("PATH", ""), pg_major)
+    return pg_major
+
+
+# ---------------------------------------------------------------------------
+# reset
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Migration:
+    """One migration command: its working directory and argument array."""
+
+    cwd: Path
+    argv: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ResetOptions:
+    """Everything ``reset`` takes beyond the profile."""
+
+    ci: bool
+    bootstrap_vars: tuple[tuple[str, str], ...]
+    dsn_envs: tuple[str, ...]
+    migrations: tuple[Migration, ...]
+
+
+@dataclass(frozen=True)
+class PgTarget:
+    """One cluster ``reset`` works on, and the profile databases it holds."""
+
+    role: str
+    host: str
+    port: int
+    user: str
+    password: str | None
+    dbs: tuple[str, ...]
+
+    def dsn(self, db: str) -> str:
+        """Return a libpq URL for ``db``; it carries the password, so never print it."""
+        user = urllib.parse.quote(self.user, safe="")
+        if self.password is None:
+            return f"postgresql://{user}@{self.host}:{self.port}/{db}"
+        auth = f"{user}:{urllib.parse.quote(self.password, safe='')}"
+        return f"postgresql://{auth}@{self.host}:{self.port}/{db}"
+
+
+@dataclass(frozen=True)
+class ResetRuntime:
+    """The resolved psql binary, the child environment and the strings to redact."""
+
+    psql: str
+    env: Mapping[str, str]
+    secrets: tuple[str, ...]
+
+
+def split_migrations(argv: Sequence[str]) -> tuple[list[str], tuple[Migration, ...]]:
+    """Split ``reset`` argv at each ``--migrate`` into the head and the migration commands."""
+    args = list(argv)
+    if not args or args[0] != "reset" or MIGRATE_FLAG not in args:
+        return args, ()
+    first = args.index(MIGRATE_FLAG)
+    segments: list[list[str]] = []
+    for token in args[first:]:
+        if token == MIGRATE_FLAG:
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    for segment in segments:
+        if len(segment) < 2:
+            raise ConfigError(f"{MIGRATE_FLAG} needs a working directory and a command")
+    return args[:first], tuple(Migration(Path(s[0]), tuple(s[1:])) for s in segments)
+
+
+def make_reset_options(
+    args: argparse.Namespace, migrations: Sequence[Migration], toplevel: Path
+) -> ResetOptions:
+    """Validate the reset options; raise ConfigError before anything runs."""
+    pairs: list[tuple[str, str]] = []
+    for item in args.bootstrap_vars:
+        name, _, value = item.partition("=")
+        if name not in BOOTSTRAP_BOOL_VARS or not _BOOL_VALUE.fullmatch(value):
+            raise ConfigError(
+                f"--bootstrap-var {item!r} must be NAME=VALUE with NAME in "
+                f"{sorted(BOOTSTRAP_BOOL_VARS)} and VALUE a boolean"
+            )
+        pairs.append((name, value))
+    for name in args.dsn_envs:
+        if not _ENV_NAME_RULE.fullmatch(name):
+            raise ConfigError(f"--migrate-dsn-env {name!r} must match {_ENV_NAME_RULE.pattern}")
+    if migrations and not args.dsn_envs:
+        raise ConfigError(f"{MIGRATE_FLAG} needs at least one --migrate-dsn-env")
+    resolved = tuple(Migration(toplevel / m.cwd, m.argv) for m in migrations)
+    for migration in resolved:
+        if not migration.cwd.is_dir():
+            raise ConfigError(f"{MIGRATE_FLAG} directory {migration.cwd} is not a directory")
+    return ResetOptions(args.ci, tuple(pairs), tuple(args.dsn_envs), resolved)
+
+
+def _check_reset_dbs(profile: Profile) -> None:
+    protected = sorted(set(profile.dbs) & PROTECTED_DBS)
+    if protected:
+        raise ConfigError(f"reset never drops {protected}; remove them from --db")
+
+
+def _pg_roles(profile: Profile) -> list[str]:
+    return [role for role in profile.roles if role_kind(role) == "pg"]
+
+
+def _role_dbs(profile: Profile, role: str) -> tuple[str, ...]:
+    return profile.dbs if role == PRIMARY_PG_ROLE else ()
+
+
+def local_targets(ctx: Context, profile: Profile) -> list[PgTarget]:
+    """Return this checkout's verified running clusters; never starts a container."""
+    live = _running_stack(ctx, profile, load_pins(ctx.env_file))
+    return [
+        PgTarget(role, LOOPBACK, host_port(live[role], role), PG_USER, PG_PASSWORD, dbs)
+        for role in _pg_roles(profile)
+        for dbs in (_role_dbs(profile, role),)
+    ]
+
+
+def ci_url_env(role: str) -> str:
+    """Return the env var a CI job sets to the cluster DSN of ``role``."""
+    return f"TESTDB_{_env_key(role)}_URL"
+
+
+def parse_ci_target(role: str, url: str, dbs: tuple[str, ...]) -> PgTarget:
+    """Parse a CI cluster DSN; refuse anything but a loopback postgres URL."""
+    name = ci_url_env(role)
+    try:
+        parts = urllib.parse.urlsplit(url)
+        port = parts.port or 5432
+    except ValueError as exc:
+        raise ConfigError(f"{name} is not a valid URL") from exc
+    if parts.scheme not in {"postgres", "postgresql"}:
+        raise ConfigError(f"{name} must be a postgresql:// URL")
+    if parts.hostname not in CI_HOSTS:
+        raise StackError(f"{name} host {parts.hostname!r} is not one of {sorted(CI_HOSTS)}")
+    if not parts.username:
+        raise ConfigError(f"{name} must name a user")
+    user = urllib.parse.unquote(parts.username)
+    password = None if parts.password is None else urllib.parse.unquote(parts.password)
+    return PgTarget(role, parts.hostname, port, user, password, dbs)
+
+
+def ci_targets(ctx: Context, profile: Profile) -> list[PgTarget]:
+    """Return the CI service clusters named by environment variables."""
+    if ctx.environ.get("GITHUB_ACTIONS") != "true":
+        raise ConfigError("--ci is refused unless GITHUB_ACTIONS=true")
+    targets = []
+    for role in _pg_roles(profile):
+        url = ctx.environ.get(ci_url_env(role))
+        if not url:
+            raise ConfigError(f"--ci needs {ci_url_env(role)} set")
+        targets.append(parse_ci_target(role, url, _role_dbs(profile, role)))
+    return targets
+
+
+def redact(text: str, secrets: Sequence[str]) -> str:
+    """Mask every secret and every URL password in ``text``."""
+    for secret in secrets:
+        text = text.replace(secret, "***")
+    return _URL_PASSWORD.sub(r"\1:***@", text)
+
+
+def reset_runtime(ctx: Context, targets: Sequence[PgTarget]) -> ResetRuntime:
+    """Resolve psql (host psql of PG_MAJOR, else the wrapper) and the child environment."""
+    pg_major = _pg_major(load_pins(ctx.env_file), ctx.env_file)
+    path = ctx.environ.get("PATH", "")
+
+    def version_run(argv: Sequence[str], timeout: float | None) -> CommandResult:
+        return ctx.run_env(argv, timeout, ctx.environ, None)
+
+    prefix = psql_path_prefix(version_run, path, pg_major)
     if prefix is not None:
-        sys.stdout.write(f"{prefix}\n")
+        path = os.pathsep.join(p for p in (str(prefix), path) if p)
+    psql = shutil.which("psql", path=path) if prefix is None else str(prefix / "psql")
+    if psql is None:
+        raise ConfigError("no psql on PATH")
+    return ResetRuntime(psql, child_env(ctx.environ, path), reset_secrets(ctx, targets))
+
+
+def child_env(environ: Mapping[str, str], path: str) -> Mapping[str, str]:
+    """Return the environment for psql and migrations, minus anything naming a database.
+
+    libpq settings (PGHOST, PGSERVICE, ...) could point psql at another server, and
+    an inherited postgres URL (say JOURNAL_DB_MIGRATION_URL) could win over the one
+    reset sets for a migration. Migrations see only the DSNs reset passes them.
+    """
+    env = {
+        key: value
+        for key, value in environ.items()
+        if not _LIBPQ_ENV.fullmatch(key) and not _PG_DSN_VALUE.match(value)
+    }
+    return MappingProxyType({**env, "PATH": path})
+
+
+def reset_secrets(ctx: Context, targets: Sequence[PgTarget]) -> tuple[str, ...]:
+    """Return every password reset may see, longest first so redaction masks it whole."""
+    found = {t.password for t in targets if t.password}
+    found |= {ctx.environ[k] for k in BOOTSTRAP_PASSWORD_ENVS if ctx.environ.get(k)}
+    return tuple(sorted(found, key=len, reverse=True))
+
+
+def _run_checked(
+    ctx: Context,
+    rt: ResetRuntime,
+    argv: Sequence[str],
+    what: str,
+    env: Mapping[str, str],
+    cwd: Path | None = None,
+    timeout: float = PSQL_TIMEOUT_S,
+) -> CommandResult:
+    result = ctx.run_env(argv, timeout, env, cwd)
+    if result.returncode != 0:
+        tail = "\n".join((result.stderr or result.stdout).strip().splitlines()[-20:])
+        raise StackError(f"{what} failed (exit {result.returncode}): {redact(tail, rt.secrets)}")
+    return result
+
+
+def _psql_env(rt: ResetRuntime, target: PgTarget) -> dict[str, str]:
+    env = dict(rt.env)
+    if target.password is not None:
+        env["PGPASSWORD"] = target.password
+    return env
+
+
+def _psql_conn(rt: ResetRuntime, target: PgTarget, db: str) -> list[str]:
+    conn = ["-h", target.host, "-p", str(target.port), "-U", target.user, "-d", db]
+    return [rt.psql, "-X", "-q", "-v", "ON_ERROR_STOP=1", *conn]
+
+
+def psql_sql(ctx: Context, rt: ResetRuntime, target: PgTarget, db: str, sql: str) -> str:
+    """Run one SQL string in ``db`` and return its unaligned, tuples-only output."""
+    argv = [*_psql_conn(rt, target, db), "-tAc", sql]
+    what = f"{target.role}: psql in {db}"
+    return _run_checked(ctx, rt, argv, what, _psql_env(rt, target)).stdout
+
+
+def _json_rows(output: str, what: str) -> list[Any]:
+    try:
+        rows = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise StackError(f"{what}: unparseable psql output") from exc
+    if not isinstance(rows, list):
+        raise StackError(f"{what}: expected a JSON array")
+    return rows
+
+
+def quote_ident(name: str) -> str:
+    """Return ``name`` as a SQL identifier, doubling embedded quotes."""
+    return '"' + name.replace('"', '""') + '"'
+
+
+def droppable_roles(rows: Sequence[Any], bootstrap_user: str) -> list[str]:
+    """Return the roles reset drops: not a superuser, not ``pg_*``, not the bootstrap user."""
+    names = []
+    for row in rows:
+        if not (isinstance(row, dict) and isinstance(row.get("name"), str)):
+            raise StackError("role list: malformed row")
+        if not isinstance(row.get("super"), bool):
+            raise StackError(f"role list: rolsuper of {row['name']!r} is not a boolean")
+        name = row["name"]
+        if row["super"] or name.startswith("pg_") or name == bootstrap_user:
+            continue
+        names.append(name)
+    return names
+
+
+def drop_databases(ctx: Context, rt: ResetRuntime, target: PgTarget) -> None:
+    """Drop the target's profile databases, disconnecting any session in them."""
+    for db in target.dbs:
+        sql = f"DROP DATABASE IF EXISTS {quote_ident(db)} WITH (FORCE)"
+        psql_sql(ctx, rt, target, PG_MAINTENANCE_DB, sql)
+
+
+def drop_roles(ctx: Context, rt: ResetRuntime, target: PgTarget) -> None:
+    """Drop every droppable role, first clearing what it owns in every surviving database."""
+    out = psql_sql(ctx, rt, target, PG_MAINTENANCE_DB, ROLE_LIST_SQL)
+    roles = droppable_roles(_json_rows(out, f"{target.role}: role list"), target.user)
+    if not roles:
+        return
+    idents = ", ".join(quote_ident(role) for role in roles)
+    out = psql_sql(ctx, rt, target, PG_MAINTENANCE_DB, DB_LIST_SQL)
+    for db in _json_rows(out, f"{target.role}: database list"):
+        if not isinstance(db, str):
+            raise StackError(f"{target.role}: database list: malformed row")
+        sql = f"REASSIGN OWNED BY {idents} TO {quote_ident(target.user)}; DROP OWNED BY {idents}"
+        psql_sql(ctx, rt, target, db, sql)
+    psql_sql(ctx, rt, target, PG_MAINTENANCE_DB, f"DROP ROLE {idents}")
+
+
+def create_databases(ctx: Context, rt: ResetRuntime, target: PgTarget) -> None:
+    """Create the target's profile databases."""
+    for db in target.dbs:
+        psql_sql(ctx, rt, target, PG_MAINTENANCE_DB, f"CREATE DATABASE {quote_ident(db)}")
+
+
+def bootstrap_db(
+    ctx: Context, rt: ResetRuntime, target: PgTarget, db: str, options: ResetOptions
+) -> None:
+    """Run bootstrap.sql in ``db``; the vector extension is per database."""
+    variables = [arg for name, value in options.bootstrap_vars for arg in ("-v", f"{name}={value}")]
+    argv = [*_psql_conn(rt, target, db), *variables, "-f", str(BOOTSTRAP_SQL)]
+    _run_checked(ctx, rt, argv, f"{target.role}: bootstrap {db}", _psql_env(rt, target))
+
+
+def migrate_db(
+    ctx: Context,
+    rt: ResetRuntime,
+    target: PgTarget,
+    db: str,
+    migration: Migration,
+    dsn_envs: Sequence[str],
+) -> None:
+    """Run one migration command against ``db``, its DSN in each of ``dsn_envs``."""
+    env = {**rt.env, **{name: target.dsn(db) for name in dsn_envs}}
+    what = f"{target.role}: migrate {db} ({' '.join(migration.argv)})"
+    _run_checked(ctx, rt, migration.argv, what, env, migration.cwd, MIGRATE_TIMEOUT_S)
+
+
+def _timed(label: str, step: Callable[[], None]) -> None:
+    started = time.monotonic()
+    step()
+    sys.stdout.write(f"{label} {time.monotonic() - started:.2f}s\n")
+    sys.stdout.flush()
+
+
+def reset_target(ctx: Context, rt: ResetRuntime, target: PgTarget, options: ResetOptions) -> None:
+    """Drop, recreate, bootstrap and migrate one cluster, timing each step."""
+    name = target.role
+    _timed(f"{name}: drop databases", lambda: drop_databases(ctx, rt, target))
+    _timed(f"{name}: drop roles", lambda: drop_roles(ctx, rt, target))
+    _timed(f"{name}: create databases", lambda: create_databases(ctx, rt, target))
+    for db in target.dbs:
+        bootstrap = functools.partial(bootstrap_db, ctx, rt, target, db, options)
+        _timed(f"{name}: bootstrap {db}", bootstrap)
+        for index, migration in enumerate(options.migrations, start=1):
+            step = functools.partial(migrate_db, ctx, rt, target, db, migration, options.dsn_envs)
+            _timed(f"{name}: migrate {db} [{index}] {migration.argv[0]}", step)
+
+
+def cmd_reset(ctx: Context, profile: Profile, options: ResetOptions) -> int:
+    """Reset this stack's clusters (or, with --ci, the CI services) to a fresh state."""
+    _check_reset_dbs(profile)
+    targets = ci_targets(ctx, profile) if options.ci else local_targets(ctx, profile)
+    if not targets:
+        raise ConfigError("reset needs at least one pg --role")
+    rt = reset_runtime(ctx, targets)
+    started = time.monotonic()
+    for target in targets:
+        reset_target(ctx, rt, target, options)
+    sys.stdout.write(f"reset {time.monotonic() - started:.2f}s\n")
     return EXIT_OK
 
 
@@ -929,10 +1390,23 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--github-output", type=Path, default=None)
     psql_path = sub.add_parser("psql-path")
     psql_path.add_argument("--file", type=Path, default=TESTDB_ENV)
+    _add_reset_parser(sub)
     return parser
 
 
-def _dispatch(args: argparse.Namespace, ctx_factory: Callable[[], Context]) -> int:
+def _add_reset_parser(sub: Any) -> None:
+    reset = sub.add_parser("reset")
+    reset.add_argument("--repo", required=True)
+    reset.add_argument("--role", action="append", required=True, dest="roles")
+    reset.add_argument("--db", action="append", default=[], dest="dbs")
+    reset.add_argument("--ci", action="store_true")
+    reset.add_argument("--bootstrap-var", action="append", default=[], dest="bootstrap_vars")
+    reset.add_argument("--migrate-dsn-env", action="append", default=[], dest="dsn_envs")
+
+
+def _dispatch(
+    args: argparse.Namespace, ctx_factory: Callable[[], Context], migrations: Sequence[Migration]
+) -> int:
     if args.command == "check-env":
         return cmd_check_env(args.file, args.github_output)
     if args.command == "psql-path":
@@ -945,6 +1419,9 @@ def _dispatch(args: argparse.Namespace, ctx_factory: Callable[[], Context]) -> i
         return cmd_down(ctx, profile)
     if args.command == "status":
         return cmd_status(ctx, profile, require_ready=args.require_ready)
+    if args.command == "reset":
+        options = make_reset_options(args, migrations, ctx.checkout.toplevel)
+        return cmd_reset(ctx, profile, options)
     return cmd_env(ctx, profile)
 
 
@@ -956,6 +1433,8 @@ def default_context() -> Context:
         uid=os.getuid(),
         checkout=find_checkout(run_command),
         env_file=TESTDB_ENV,
+        run_env=run_command,
+        environ=MappingProxyType(dict(os.environ)),
     )
 
 
@@ -963,9 +1442,14 @@ def main(
     argv: Sequence[str] | None = None, ctx_factory: Callable[[], Context] = default_context
 ) -> int:
     """Parse ``argv`` and run one subcommand; see the module docstring for exit codes."""
-    args = build_parser().parse_args(argv)
     try:
-        return _dispatch(args, ctx_factory)
+        head, migrations = split_migrations(sys.argv[1:] if argv is None else argv)
+    except ConfigError as exc:
+        sys.stderr.write(f"testdb: {exc}\n")
+        return EXIT_INVALID
+    args = build_parser().parse_args(head)
+    try:
+        return _dispatch(args, ctx_factory, migrations)
     except ConfigError as exc:
         sys.stderr.write(f"testdb: {exc}\n")
         return EXIT_INVALID
