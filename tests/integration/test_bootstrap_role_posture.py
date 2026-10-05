@@ -28,7 +28,8 @@ from __future__ import annotations
 import os
 import subprocess
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -63,6 +64,8 @@ _DEPLOYED_ROLES = (_APP_ROLE, _ADMIN_ROLE)
 _MUTATING_PRIVILEGES = ("INSERT", "UPDATE", "DELETE", "TRUNCATE")
 _PROBE_TABLES = ("probe_before_bootstrap", "probe_after_bootstrap")
 _SCRATCH_PREFIX = "bootstrap_posture_"
+
+CleanupStep = tuple[str, Callable[[], Awaitable[None]]]
 
 
 async def _connect(dsn: str) -> asyncpg.Connection:
@@ -175,6 +178,42 @@ async def _bootstrap_between_probes(dsn: str, before: _DeployedRoleSnapshot) -> 
         await conn.close()
 
 
+async def _run_cleanup_steps(steps: tuple[CleanupStep, ...]) -> list[BaseException]:
+    failures: list[BaseException] = []
+    for label, step in steps:
+        try:
+            await step()
+        except BaseException as exc:  # pytest.fail raises a BaseException subclass
+            exc.add_note(f"raised by cleanup step: {label}")
+            failures.append(exc)
+    return failures
+
+
+def _note_cleanup_failures(target: BaseException, failures: list[BaseException]) -> None:
+    for failure in failures:
+        target.add_note(f"cleanup also failed: {type(failure).__name__}: {failure}")
+
+
+@asynccontextmanager
+async def cleanup_after(*steps: CleanupStep) -> AsyncIterator[None]:
+    """Run every step in order after the body, without masking the body's error.
+
+    A failing body is re-raised with each cleanup failure attached as a note. A
+    clean body with a failing step raises that step's error, later step failures
+    attached as notes. A failing step never stops the steps after it.
+    """
+    try:
+        yield
+    except BaseException as body_failure:
+        _note_cleanup_failures(body_failure, await _run_cleanup_steps(steps))
+        raise
+    failures = await _run_cleanup_steps(steps)
+    if failures:
+        first, *later = failures
+        _note_cleanup_failures(first, later)
+        raise first
+
+
 @pytest_asyncio.fixture(scope="module")
 async def bootstrapped_db() -> AsyncIterator[str]:
     """A scratch database where bootstrap.sql ran between two probe-table creations.
@@ -188,15 +227,20 @@ async def bootstrapped_db() -> AsyncIterator[str]:
     await probe.close()
     async with cluster_role_lock(TEST_DATABASE_URL) as lock_conn:
         before = await _snapshot_deployed_roles(lock_conn)
-        try:
-            try:
-                await lock_conn.execute(f'CREATE DATABASE "{name}"')
-                await _bootstrap_between_probes(dsn, before)
-                yield dsn
-            finally:
-                await lock_conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
-        finally:
+
+        async def drop_scratch_db() -> None:
+            await lock_conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+
+        async def restore_roles() -> None:
             await _restore_deployed_roles(lock_conn, before)
+
+        async with cleanup_after(
+            ("drop scratch database", drop_scratch_db),
+            ("restore deployed roles", restore_roles),
+        ):
+            await lock_conn.execute(f'CREATE DATABASE "{name}"')
+            await _bootstrap_between_probes(dsn, before)
+            yield dsn
 
 
 async def test_the_app_role_holds_neither_bypassrls_nor_superuser() -> None:
