@@ -19,7 +19,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TESTDB_ENV = _REPO_ROOT / "tools" / "testdb" / "testdb.env"
 _WORKFLOW = _REPO_ROOT / ".github" / "workflows" / "security-tests.yml"
 
-_LINE_RULE = re.compile(r"^[A-Z][A-Z0-9_]*=[^\s]+$")
+_LINE_RULE = re.compile(r"[A-Z][A-Z0-9_]*=[^\s\x00]+\Z")
 _REQUIRED_KEYS = ("PGVECTOR_IMAGE", "PG_MAJOR", "REDIS_IMAGE")
 _PGVECTOR_SERVICES = ("postgres", "postgres_disposable")
 
@@ -28,17 +28,21 @@ def _is_ignorable(line: str) -> bool:
     return line == "" or line.startswith("#")
 
 
+def _lines(text: str) -> list[str]:
+    # Split on LF only: splitlines() would also eat CR, VT, FF and other
+    # separators, hiding bytes the shell consumers do not tolerate.
+    return text.removesuffix("\n").split("\n")
+
+
 def _violations(text: str) -> list[str]:
-    return [
-        line for line in text.splitlines() if not _is_ignorable(line) and not _LINE_RULE.match(line)
-    ]
+    return [line for line in _lines(text) if not _is_ignorable(line) and not _LINE_RULE.match(line)]
 
 
 def _parse(text: str) -> dict[str, str]:
     bad = _violations(text)
     if bad:
         raise ValueError(f"testdb.env lines break the KEY=value rule: {bad!r}")
-    pairs = [line.split("=", 1) for line in text.splitlines() if not _is_ignorable(line)]
+    pairs = [line.split("=", 1) for line in _lines(text) if not _is_ignorable(line)]
     keys = [key for key, _ in pairs]
     duplicates = sorted({key for key in keys if keys.count(key) > 1})
     if duplicates:
@@ -97,6 +101,10 @@ def test_line_rule_accepts(line: str) -> None:
         pytest.param("export PG_MAJOR=17", id="shell-export"),
         pytest.param("  # indented comment", id="indented-comment"),
         pytest.param("   ", id="whitespace-only"),
+        pytest.param("PG_MAJOR=17\r", id="crlf"),
+        pytest.param("PG_MAJOR=1\v7", id="vertical-tab"),
+        pytest.param("PG_MAJOR=1\f7", id="form-feed"),
+        pytest.param("PG_MAJOR=1\x007", id="nul"),
     ],
 )
 def test_line_rule_rejects(line: str) -> None:
