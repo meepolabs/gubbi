@@ -15,10 +15,12 @@ produced, on the server itself, rather than the SQL text:
   ownership-reassigning suites run as that superuser.
 
 The bootstrap cases run bootstrap.sql in a scratch database on the working
-cluster. The roles are cluster-global, so the run holds the cluster role lock
-the other role-mutating fixtures take. It passes journal_admin's current
-CREATEROLE through and sets no password variable, so it leaves the cluster's
-roles as it found them.
+cluster. The roles are cluster-global, so the fixture holds the cluster role
+lock the other role-mutating fixtures take for as long as the scratch database
+lives. Under that lock it snapshots both deployed roles (existence, the
+attributes and memberships the harness tracks, password presence) before
+bootstrap.sql runs and restores exactly that snapshot afterwards, dropping a
+role the run created, even when a step in between fails.
 """
 
 from __future__ import annotations
@@ -27,6 +29,7 @@ import os
 import subprocess
 import uuid
 from collections.abc import AsyncIterator
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -35,7 +38,14 @@ import pytest
 import pytest_asyncio
 
 from tests.conftest import TEST_DATABASE_URL
-from tests.fixtures.cluster_roles import cluster_role_lock, maintenance_dsn
+from tests.fixtures.cluster_roles import (
+    ClusterRoleState,
+    capture_cluster_state,
+    cluster_role_lock,
+    maintenance_dsn,
+    quote_role,
+    restore_cluster_state,
+)
 from tests.fixtures.db_invariants import REPO_ROOT, psql_bin
 
 pytestmark = [
@@ -104,44 +114,89 @@ def _run_bootstrap(dsn: str, *, admin_createrole: bool) -> subprocess.CompletedP
     )
 
 
-async def _drop_database(maintenance: str, name: str) -> None:
-    conn = await asyncpg.connect(maintenance, timeout=5)
+@dataclass(frozen=True)
+class _DeployedRoleSnapshot:
+    """The deployed roles' cluster-global state, as of before bootstrap.sql ran."""
+
+    roles: ClusterRoleState
+    has_password: dict[str, bool]
+
+
+async def _password_presence(conn: asyncpg.Connection) -> dict[str, bool]:
+    rows = await conn.fetch(
+        "SELECT rolname, rolpassword IS NOT NULL AS has_password"
+        " FROM pg_authid WHERE rolname = ANY($1::text[])",
+        list(_DEPLOYED_ROLES),
+    )
+    return {str(row["rolname"]): bool(row["has_password"]) for row in rows}
+
+
+async def _snapshot_deployed_roles(conn: asyncpg.Connection) -> _DeployedRoleSnapshot:
+    return _DeployedRoleSnapshot(
+        roles=await capture_cluster_state(conn, _DEPLOYED_ROLES),
+        has_password=await _password_presence(conn),
+    )
+
+
+async def _restore_password_presence(
+    conn: asyncpg.Connection, before: _DeployedRoleSnapshot
+) -> None:
+    """Clear a password the run added; fail on one it removed, which cannot be recovered."""
+    current = await _password_presence(conn)
+    for role in sorted(before.roles.present & set(current)):
+        had, has = before.has_password.get(role, False), current[role]
+        if has and not had:
+            await conn.execute(f"ALTER ROLE {quote_role(role)} WITH PASSWORD NULL")
+        elif had and not has:
+            pytest.fail(f"bootstrap.sql removed the password of {role}; it cannot be restored")
+
+
+async def _restore_deployed_roles(conn: asyncpg.Connection, before: _DeployedRoleSnapshot) -> None:
+    created = [role for role in _DEPLOYED_ROLES if role not in before.roles.present]
+    await restore_cluster_state(conn, before.roles, _DEPLOYED_ROLES, disposable=created)
+    await _restore_password_presence(conn, before)
+
+
+async def _bootstrap_between_probes(dsn: str, before: _DeployedRoleSnapshot) -> None:
+    """Create one probe table, run bootstrap.sql, then create the other."""
+    admin_attributes = before.roles.attributes.get(_ADMIN_ROLE)
+    # An absent journal_admin is created by the run and dropped by the restore, so
+    # bootstrap.sql's own default is as good as any value for it.
+    admin_createrole = True if admin_attributes is None else admin_attributes.can_create_role
+    conn = await asyncpg.connect(dsn, timeout=5)
     try:
-        await conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
+        await conn.execute(f"CREATE TABLE public.{_PROBE_TABLES[0]} (id int)")
+        result = _run_bootstrap(dsn, admin_createrole=admin_createrole)
+        assert result.returncode == 0, (
+            f"bootstrap.sql failed in a scratch database:\n{result.stderr}"
+        )
+        await conn.execute(f"CREATE TABLE public.{_PROBE_TABLES[1]} (id int)")
     finally:
         await conn.close()
 
 
 @pytest_asyncio.fixture(scope="module")
 async def bootstrapped_db() -> AsyncIterator[str]:
-    """A scratch database where bootstrap.sql ran between two probe-table creations."""
-    maintenance = maintenance_dsn(TEST_DATABASE_URL)
+    """A scratch database where bootstrap.sql ran between two probe-table creations.
+
+    The scratch database is dropped and the deployed roles restored before the
+    cluster role lock is released, whichever step fails.
+    """
     name = f"{_SCRATCH_PREFIX}{uuid.uuid4().hex[:8]}"
     dsn = _with_database(TEST_DATABASE_URL, name)
-    admin = await _connect(maintenance)
-    try:
-        await admin.execute(f'CREATE DATABASE "{name}"')
-    finally:
-        await admin.close()
-    try:
-        conn = await asyncpg.connect(dsn, timeout=5)
+    probe = await _connect(maintenance_dsn(TEST_DATABASE_URL))
+    await probe.close()
+    async with cluster_role_lock(TEST_DATABASE_URL) as lock_conn:
+        before = await _snapshot_deployed_roles(lock_conn)
         try:
-            await conn.execute(f"CREATE TABLE public.{_PROBE_TABLES[0]} (id int)")
-            async with cluster_role_lock(TEST_DATABASE_URL) as lock_conn:
-                admin_createrole = await lock_conn.fetchval(
-                    "SELECT rolcreaterole FROM pg_roles WHERE rolname = $1", _ADMIN_ROLE
-                )
-                assert admin_createrole is not None, f"{_ADMIN_ROLE} does not exist"
-                result = _run_bootstrap(dsn, admin_createrole=bool(admin_createrole))
-            assert result.returncode == 0, (
-                f"bootstrap.sql failed in a scratch database:\n{result.stderr}"
-            )
-            await conn.execute(f"CREATE TABLE public.{_PROBE_TABLES[1]} (id int)")
+            try:
+                await lock_conn.execute(f'CREATE DATABASE "{name}"')
+                await _bootstrap_between_probes(dsn, before)
+                yield dsn
+            finally:
+                await lock_conn.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
         finally:
-            await conn.close()
-        yield dsn
-    finally:
-        await _drop_database(maintenance, name)
+            await _restore_deployed_roles(lock_conn, before)
 
 
 async def test_the_app_role_holds_neither_bypassrls_nor_superuser() -> None:
