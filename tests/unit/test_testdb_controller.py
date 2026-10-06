@@ -120,6 +120,8 @@ class FakeDocker:
         return testdb.CommandResult(0, "", "")
 
     def _exec(self, args: list[str]) -> Any:
+        while args[0] == "--env":
+            args = args[2:]
         self.by_id(args[0])
         if args[1] == "psql":
             return testdb.CommandResult(0, "", "")
@@ -185,6 +187,8 @@ def _labels(role: str, toplevel: Path = _TOPLEVEL, **overrides: str) -> dict[str
         "ai.gubbi.testdb.checkout": hashlib.sha256(str(toplevel).encode()).hexdigest(),
         "ai.gubbi.testdb.env-sha256": _ENV_DIGEST,
     }
+    if role.startswith("pg"):
+        labels["ai.gubbi.testdb.auth"] = "scram-sha-256"
     return {**labels, **overrides}
 
 
@@ -306,9 +310,13 @@ def test_up_starts_pg_with_labels_loopback_port_and_pinned_image(
             "--label", f"ai.gubbi.testdb.owner-uid={_UID}",
             "--label", f"ai.gubbi.testdb.checkout={hashlib.sha256(str(toplevel).encode()).hexdigest()}",
             "--label", f"ai.gubbi.testdb.env-sha256={_ENV_DIGEST}",
+            "--label", "ai.gubbi.testdb.auth=scram-sha-256",
             "--publish", "127.0.0.1::5432",
             "--env", "POSTGRES_USER=journal", "--env", "POSTGRES_DB=postgres",
-            "--env", "POSTGRES_PASSWORD=testpass", _PG_IMAGE,
+            "--env", "POSTGRES_PASSWORD=testpass",
+            "--env", "POSTGRES_HOST_AUTH_METHOD=scram-sha-256",
+            "--env", "POSTGRES_INITDB_ARGS=--auth-local=scram-sha-256 --auth-host=scram-sha-256",
+            _PG_IMAGE,
         ]
     ]  # fmt: skip
 
@@ -334,7 +342,9 @@ def test_up_probes_pg_over_tcp_and_creates_profile_databases(
     assert rc == 0
     assert [pg, "pg_isready", "-q", "-h", "127.0.0.1", "-U", "journal", "-d", "postgres"] in execs
     assert execs[-1][-1] == 'CREATE DATABASE "journal_test"'
-    assert all(call[0] == pg for call in execs if call[1] == "psql")
+    psql_calls = [call for call in execs if "psql" in call]
+    assert psql_calls
+    assert all(call[:4] == ["--env", "PGPASSWORD=testpass", pg, "psql"] for call in psql_calls)
 
 
 def test_up_writes_a_bash_sourceable_stack_env(
@@ -387,6 +397,47 @@ def test_up_refuses_a_container_started_from_another_testdb_env(
     assert [call[1] for call in docker.calls] == ["container"]
 
 
+@pytest.mark.parametrize(
+    "auth",
+    [
+        pytest.param(None, id="created-before-the-auth-label"),
+        pytest.param("trust", id="another-auth-method"),
+    ],
+)
+def test_up_refuses_a_pg_container_without_the_current_auth_label(
+    docker: FakeDocker,
+    env_file: Path,
+    tmp_path: Path,
+    auth: str | None,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    labels = _labels("pg", tmp_path)
+    del labels["ai.gubbi.testdb.auth"]
+    if auth is not None:
+        labels["ai.gubbi.testdb.auth"] = auth
+    docker.add(_name("pg", tmp_path), labels)
+
+    rc = _main(docker, env_file, ["up", "--repo", "gubbi", "--role", "pg"], toplevel=tmp_path)
+
+    err = capsys.readouterr().err
+    assert rc == 1
+    assert "stale auth label" in err
+    assert "run down, then up" in err
+    assert [call[1] for call in docker.calls] == ["container"]
+
+
+def test_up_refuses_a_redis_container_carrying_an_auth_label(
+    docker: FakeDocker, env_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    labels = _labels("redis", tmp_path, **{"ai.gubbi.testdb.auth": "scram-sha-256"})
+    docker.add(_name("redis", tmp_path), labels)
+
+    rc = _main(docker, env_file, ["up", "--repo", "gubbi", "--role", "redis"], toplevel=tmp_path)
+
+    assert rc == 1
+    assert "stale auth label" in capsys.readouterr().err
+
+
 def test_up_fails_after_bounded_readiness_attempts(
     docker: FakeDocker, env_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -421,7 +472,7 @@ def test_up_keeps_probing_while_the_service_starts(
 
     rc = _main(docker, env_file, ["up", "--repo", "gubbi", "--role", role], toplevel=tmp_path)
 
-    probes = [call for call in docker.calls if call[1] == "exec" and call[3] != "psql"]
+    probes = [call for call in docker.calls if call[1] == "exec" and "psql" not in call]
     assert rc == 0
     assert len(probes) == 3
 
@@ -537,6 +588,19 @@ def test_down_removes_a_container_with_a_stale_env_digest(
     assert docker.removed() == [container_id]
 
 
+def test_down_removes_a_pg_container_created_before_the_auth_label(
+    docker: FakeDocker, env_file: Path, tmp_path: Path
+) -> None:
+    labels = _labels("pg", tmp_path)
+    del labels["ai.gubbi.testdb.auth"]
+    container_id = docker.add(_name("pg", tmp_path), labels)
+
+    rc = _main(docker, env_file, ["down", "--repo", "gubbi", "--role", "pg"], toplevel=tmp_path)
+
+    assert rc == 0
+    assert docker.removed() == [container_id]
+
+
 def test_down_from_another_checkout_leaves_this_stack_running(
     docker: FakeDocker, env_file: Path, tmp_path: Path
 ) -> None:
@@ -597,6 +661,10 @@ def _stale(docker: FakeDocker, top: Path) -> None:
     _pg(docker, top)["Config"]["Labels"]["ai.gubbi.testdb.env-sha256"] = "0" * 64
 
 
+def _no_auth_label(docker: FakeDocker, top: Path) -> None:
+    del _pg(docker, top)["Config"]["Labels"]["ai.gubbi.testdb.auth"]
+
+
 def _unready(docker: FakeDocker, _top: Path) -> None:
     docker.ready = False
 
@@ -633,6 +701,7 @@ def _edit_stack_env(old: str, new: str) -> Any:
         pytest.param(_unready, id="not-ready"),
         pytest.param(_foreign, id="foreign-labels"),
         pytest.param(_stale, id="stale-env-digest"),
+        pytest.param(_no_auth_label, id="created-before-the-auth-label"),
         pytest.param(_daemon_down, id="docker-unavailable"),
         pytest.param(_public_port, id="non-loopback-port"),
         pytest.param(_moved_port, id="port-moved-since-up"),

@@ -35,7 +35,12 @@ this script. Each container is named
 ``testdb-<repo>-<first 8 hex of sha256(toplevel)>-<role>`` and carries the
 labels ``ai.gubbi.testdb.{repo,role,owner-uid,checkout,env-sha256}``: checkout
 is the full sha256 of the toplevel path, env-sha256 the sha256 of the raw
-testdb.env bytes it was started from. Ports are published on 127.0.0.1 only,
+testdb.env bytes it was started from. A pg container also carries
+``ai.gubbi.testdb.auth=scram-sha-256``: it is created with
+``POSTGRES_HOST_AUTH_METHOD=scram-sha-256`` and ``POSTGRES_INITDB_ARGS`` setting
+scram for local and host connections, so every connection to it, from inside the
+container over its unix socket or loopback as much as through the published
+port, must authenticate with a password. Ports are published on 127.0.0.1 only,
 with a docker-assigned host port read back from ``docker container inspect``.
 Ownership is checked on the inspected container, and every later docker call
 that changes or execs into it addresses that container's full ID, never the
@@ -49,19 +54,24 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             databases, and
             writes ``.testdb.env`` at the checkout root. It refuses to reuse a
             container whose labels differ in any way, a stale env-sha256
-            included; run ``down`` then ``up`` after testdb.env changes.
+            included; run ``down`` then ``up`` after testdb.env changes. A pg
+            container without the current auth label (one created before every
+            connection required a password) is refused the same way, by ``up``,
+            ``status``, ``env``, ``reset`` and ``psql-plan`` alike: run ``down``
+            then ``up`` to recreate it.
 ``down``    removes this checkout's containers and ``.testdb.env``. It only
             removes a container whose repo, role, owner-uid and checkout labels
             all match; any other container under the name is a refusal and
-            nothing is removed. A stale env-sha256 does not block ``down``, and
-            ``down`` never reads testdb.env, so a broken pin file cannot block
-            teardown.
+            nothing is removed. A stale env-sha256 or auth label does not block
+            ``down``, and ``down`` never reads testdb.env, so a broken pin file
+            cannot block teardown.
 ``status``  prints ``<role> <container> <state>`` per role. With
             ``--require-ready`` it prints nothing on success, and on any miss
             (container missing, stopped, not ready, foreign labels, stale
-            env-sha256, docker unavailable, ``.testdb.env`` missing or not
-            naming exactly the live containers and ports, as after a container
-            restart moved its port) prints exactly this line to stderr:
+            env-sha256 or auth label, docker unavailable, ``.testdb.env``
+            missing or not naming exactly the live containers and ports, as
+            after a container restart moved its port) prints exactly this line
+            to stderr:
 
                 test stack not running: make test-stack-up
 
@@ -91,10 +101,13 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             ``-o``/``-L`` is given, PGHOSTADDR/PGSERVICE/PGSERVICEFILE are
             unset, and that port is published by a running pg container that
             passes the same label check as ``env`` for the working directory's
-            checkout and current env-sha256, with exactly one IPv4 network
-            address. The target is then rewritten to that address on port 5432,
-            so the server applies the same pg_hba rule as to a published-port
-            client. One ``-f PATH`` becomes ``-f -`` with FILE the resolved
+            checkout, current env-sha256 and auth label, with exactly one IPv4
+            network address. The target is then rewritten to that address on
+            port 5432. That rewrite covers only the first connection: SQL on
+            stdin or in a file may ``\\connect`` anywhere the container
+            reaches, its own unix socket and loopback included, which is why
+            every pg_hba rule of a stack container requires scram-sha-256 and
+            none trusts. One ``-f PATH`` becomes ``-f -`` with FILE the resolved
             PATH, which must be a regular file under ``deployment/scripts`` or
             ``tools/testdb`` of the repository holding this script (exit 2
             otherwise). Anything else is ``run``. Takes psql's arguments as
@@ -218,6 +231,9 @@ ROLE_LABEL = f"{LABEL_PREFIX}role"
 UID_LABEL = f"{LABEL_PREFIX}owner-uid"
 CHECKOUT_LABEL = f"{LABEL_PREFIX}checkout"
 ENV_DIGEST_LABEL = f"{LABEL_PREFIX}env-sha256"
+AUTH_LABEL = f"{LABEL_PREFIX}auth"
+PG_AUTH_METHOD = "scram-sha-256"
+_PG_INITDB_AUTH = f"--auth-local={PG_AUTH_METHOD} --auth-host={PG_AUTH_METHOD}"
 
 LOOPBACK = "127.0.0.1"
 PG_USER = "journal"
@@ -534,20 +550,30 @@ def label_problem(
     """Return why ``labels`` do not belong to ``identity``, or None when they do.
 
     Only labels under the controller's prefix are compared, and their key set
-    must be exact. ``env_digest`` None skips the freshness comparison.
+    must be exact, except that the auth label may be absent. ``env_digest``
+    None skips the freshness comparison of both env-sha256 and the auth label,
+    so ``down`` still removes a container created before the auth label existed.
     """
     own = {key: value for key, value in labels.items() if key.startswith(LABEL_PREFIX)}
-    expected_keys = {*identity, ENV_DIGEST_LABEL}
-    if own.keys() != expected_keys:
-        return f"label keys {sorted(own)} differ from {sorted(expected_keys)}"
+    required_keys = {*identity, ENV_DIGEST_LABEL}
+    if not required_keys <= own.keys() <= {*required_keys, AUTH_LABEL}:
+        return f"label keys {sorted(own)} differ from {sorted({*required_keys, AUTH_LABEL})}"
     differing = sorted(key for key in identity if own[key] != identity[key])
     if differing:
         return f"labels {differing} belong to another stack"
     if not _SHA256_HEX.fullmatch(own[ENV_DIGEST_LABEL]):
         return f"label {ENV_DIGEST_LABEL} is not a sha256 digest"
-    if env_digest is not None and own[ENV_DIGEST_LABEL] != env_digest:
+    if env_digest is None:
+        return None
+    if own[ENV_DIGEST_LABEL] != env_digest:
         return "started from a different testdb.env (stale env-sha256)"
+    if own.get(AUTH_LABEL) != _expected_auth(identity):
+        return "started with another authentication setup (stale auth label)"
     return None
+
+
+def _expected_auth(identity: Mapping[str, str]) -> str | None:
+    return PG_AUTH_METHOD if role_kind(identity[ROLE_LABEL]) == "pg" else None
 
 
 # ---------------------------------------------------------------------------
@@ -716,13 +742,18 @@ def host_port(state: ContainerState, role: str) -> int:
 def run_argv(ctx: Context, profile: Profile, role: str, pins: Pins) -> list[str]:
     """Return the ``docker run`` argv that starts one role's container."""
     labels = {**identity_labels(ctx, profile, role), ENV_DIGEST_LABEL: pins.digest}
+    if role_kind(role) == "pg":
+        labels[AUTH_LABEL] = PG_AUTH_METHOD
     argv = ["docker", "run", "--detach", "--name", container_name(profile, ctx.checkout, role)]
     for key, value in labels.items():
         argv += ["--label", f"{key}={value}"]
     argv += ["--publish", f"{LOOPBACK}::{container_port(role).split('/')[0]}"]
     if role_kind(role) == "pg":
         argv += ["--env", f"POSTGRES_USER={PG_USER}", "--env", f"POSTGRES_DB={PG_MAINTENANCE_DB}"]
-        argv += ["--env", f"POSTGRES_PASSWORD={PG_PASSWORD}", pins.image("PGVECTOR_IMAGE")]
+        argv += ["--env", f"POSTGRES_PASSWORD={PG_PASSWORD}"]
+        argv += ["--env", f"POSTGRES_HOST_AUTH_METHOD={PG_AUTH_METHOD}"]
+        argv += ["--env", f"POSTGRES_INITDB_ARGS={_PG_INITDB_AUTH}"]
+        argv.append(pins.image("PGVECTOR_IMAGE"))
     else:
         argv.append(pins.image("REDIS_IMAGE"))
     return argv
@@ -773,7 +804,8 @@ def wait_ready(ctx: Context, state: ContainerState, role: str) -> None:
 
 
 def _psql_argv(container_id: str, sql: str) -> list[str]:
-    argv = ["exec", container_id, "psql", "-X", "-q", "-U", PG_USER, "-d", PG_MAINTENANCE_DB]
+    argv = ["exec", "--env", f"PGPASSWORD={PG_PASSWORD}", container_id, "psql", "-X", "-q"]
+    argv += ["-U", PG_USER, "-d", PG_MAINTENANCE_DB]
     return [*argv, "-v", "ON_ERROR_STOP=1", "-tAc", sql]
 
 
@@ -1227,7 +1259,10 @@ def _loopback_port(host: str | None, port: str | None) -> str:
 
 
 def _is_url(dbname: str | None) -> bool:
-    return dbname is not None and dbname.partition("://")[0] in _PSQL_URL_SCHEMES
+    if dbname is None:
+        return False
+    scheme, separator, _ = dbname.partition("://")
+    return bool(separator) and scheme in _PSQL_URL_SCHEMES
 
 
 def _split_url(url: str) -> tuple[urllib.parse.SplitResult, str, str]:

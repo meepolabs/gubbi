@@ -328,6 +328,7 @@ import json, sys
 state = json.load(open(sys.argv[1]))
 args = sys.argv[2:]
 if args[0] == "ps":
+    sys.stdin.read()
     print(state["ps"], end="")
 elif args[:2] == ["container", "inspect"]:
     print(json.dumps(state["inspect"]))
@@ -345,8 +346,9 @@ def stack_docker(tmp_path: Path, wrapper_copy: Path) -> Path:
     """Return a PATH dir whose ``docker`` reports one pg container of this checkout.
 
     ``ps`` and ``container inspect`` answer from the recorded inspect sample,
-    relabelled for the wrapper copy's checkout; ``exec`` and ``run`` record their
-    argv in docker.argv and their stdin in docker.stdin.
+    relabelled for the wrapper copy's checkout; ``ps`` also drains its stdin, so
+    any stdin the planner inherits is lost to psql. ``exec`` and ``run`` record
+    their argv in docker.argv and their stdin in docker.stdin.
     """
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S603, S607
     toplevel = str(tmp_path.resolve())
@@ -362,6 +364,7 @@ def stack_docker(tmp_path: Path, wrapper_copy: Path) -> Path:
         "ai.gubbi.testdb.owner-uid": str(os.getuid()),
         "ai.gubbi.testdb.checkout": digest,
         "ai.gubbi.testdb.env-sha256": hashlib.sha256(_ENV_BYTES).hexdigest(),
+        "ai.gubbi.testdb.auth": "scram-sha-256",
     }
     state = {
         "ps": f"{name}\n",

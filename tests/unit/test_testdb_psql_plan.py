@@ -276,6 +276,7 @@ def test_outside_a_git_checkout_runs(stack: FakeDocker, env_file: Path) -> None:
         pytest.param({"ai.gubbi.testdb.repo": "Bad Repo"}, id="invalid-repo"),
         pytest.param({"ai.gubbi.testdb.role": "redis"}, id="not-a-pg-role"),
         pytest.param({"ai.gubbi.testdb.env-sha256": "0" * 64}, id="stale-env-sha256"),
+        pytest.param({"ai.gubbi.testdb.auth": "trust"}, id="stale-auth-label"),
         pytest.param({"ai.gubbi.testdb.extra": "x"}, id="extra-label"),
     ],
 )
@@ -382,6 +383,18 @@ def test_a_redirecting_libpq_variable_runs(stack: FakeDocker, env_file: Path, na
     port = _port(stack, _name("pg"))
 
     _assert_run(_plan(["-c", "x", _url(port)], stack, env_file, environ={name: "x"}))
+
+
+@pytest.mark.parametrize("dbname", ["postgres", "postgresql"])
+def test_a_bare_database_named_like_a_url_scheme_is_not_a_url(
+    stack: FakeDocker, env_file: Path, dbname: str
+) -> None:
+    port = _port(stack, _name("pg"))
+
+    plan = _plan(["-h", "127.0.0.1", "-p", port, "-c", "x", "-d", dbname], stack, env_file)
+
+    assert plan.mode == "exec"
+    assert plan.argv[-6:] == ("-h", _SAMPLE_ADDRESS, "-p", "5432", "-d", dbname)
 
 
 def test_the_url_rewrite_keeps_userinfo_and_database() -> None:
