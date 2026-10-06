@@ -1,25 +1,42 @@
+# Every hook except `prepush` sets `stages: [pre-commit]` explicitly. An
+# upstream manifest's own `stages` overrides default_stages, so a rev bump
+# whose manifest adds pre-push would otherwise silently join the push run.
+# tests/unit/test_pre_commit_stages.py enforces this.
+
+default_install_hook_types: [pre-commit, pre-push]
+default_stages: [pre-commit]
+
 repos:
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # frozen: v5.0.0
     hooks:
       - id: trailing-whitespace
+        stages: [pre-commit]
       - id: end-of-file-fixer
+        stages: [pre-commit]
       - id: check-yaml
+        stages: [pre-commit]
       - id: check-added-large-files
+        stages: [pre-commit]
       - id: check-toml
+        stages: [pre-commit]
       - id: check-merge-conflict
+        stages: [pre-commit]
 
   - repo: https://github.com/astral-sh/ruff-pre-commit
     rev: 2700fd5671c633760d912769c041bfcde2b9a01b  # frozen: v0.15.22
     hooks:
       - id: ruff-check
+        stages: [pre-commit]
         args: [--fix]
       - id: ruff-format
+        stages: [pre-commit]
 
   - repo: https://github.com/pre-commit/mirrors-mypy
     rev: fc0f09a29bb495f4a91f00266155d6282d52485d  # frozen: v1.20.2
     hooks:
       - id: mypy
+        stages: [pre-commit]
         additional_dependencies:
           # Versions pinned from poetry.lock to keep the pre-commit mypy hook
           # (which runs in an isolated venv) deterministic across CI + local
@@ -42,10 +59,12 @@ repos:
     rev: 83d9cd684c87d95d656c1458ef04895a7f1cbd8e  # frozen: v8.30.1
     hooks:
       - id: gitleaks
+        stages: [pre-commit]
 
   - repo: local
     hooks:
       - id: env-contract-lint
+        stages: [pre-commit]
         name: env-contract-lint
         language: python
         entry: python tools/check_env_contract.py
@@ -57,9 +76,22 @@ repos:
       # env_prefix="JOURNAL_" silently produces JOURNAL_JOURNAL_<NAME>.
       # Allowlists JOURNAL_JOURNAL_TARGET_URL (rename deferred).
       - id: check-no-double-prefix
+        stages: [pre-commit]
         name: check-no-double-prefix
         language: python
         language_version: python3.12
         entry: python -m gubbi_common.tools.check_no_double_prefix
         additional_dependencies:
           - "gubbi-common @ git+https://github.com/meepolabs/gubbi-common.git@ce7e2a4"
+
+  # Every database-backed suite against the running test stack (see
+  # CONTRIBUTING.md). Fails fast when the stack is not up.
+  - repo: local
+    hooks:
+      - id: prepush
+        name: make prepush
+        entry: make prepush
+        language: system
+        stages: [pre-push]
+        always_run: true
+        pass_filenames: false
