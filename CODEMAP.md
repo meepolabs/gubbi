@@ -61,10 +61,12 @@ gubbi/
                           test stack up/down/status/env, reset (drop roles
                           and DBs, recreate, bootstrap, migrate; local or
                           --ci), check-env, the one testdb.env validator,
-                          and psql-path) and
-                          bin/psql (docker psql wrapper on PGVECTOR_IMAGE,
-                          put on PATH by psql-path when no host psql of
-                          PG_MAJOR exists)
+                          psql-path, and psql-plan) and
+                          bin/psql (docker psql wrapper, put on PATH by
+                          psql-path when no host psql of PG_MAJOR exists:
+                          docker exec into this checkout's own pg container
+                          when psql-plan verifies the target is one, else
+                          a throwaway PGVECTOR_IMAGE container)
   gubbi/                  Python package (see below)
   tests/                  unit / integration / e2e
 ```

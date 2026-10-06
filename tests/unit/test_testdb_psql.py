@@ -1,13 +1,16 @@
 """Tests for the docker psql wrapper in tools/testdb/bin and ``testdb.py psql-path``.
 
 docker is never run: ``psql-path`` is exercised against fake ``psql`` scripts on
-PATH, and the wrapper against a fake ``docker`` that records its argv, so the
-image pin, mounts, passed-through environment and psql arguments are all pinned
-without a daemon.
+PATH, and the wrapper against a fake ``docker`` that records its argv (and, for
+the exec path, answers ``ps`` and ``container inspect`` with one pg container of
+the test's checkout), so the image pin, mounts, passed-through environment,
+psql arguments and the exec-or-run choice are all pinned without a daemon.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import shutil
 import subprocess
@@ -26,6 +29,7 @@ _WRAPPER_DIR = TESTDB_TOOL.parent / "bin"
 _WRAPPER = _WRAPPER_DIR / "psql"
 _PG_IMAGE = "pgvector/pgvector@sha256:" + "a" * 64
 _ENV_BYTES = f"PGVECTOR_IMAGE={_PG_IMAGE}\nPG_MAJOR=17\n".encode()
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 
 def _write_script(path: Path, body: str) -> Path:
@@ -313,3 +317,171 @@ def test_wrapper_is_executable_in_git() -> None:
     )
 
     assert result.stdout.startswith("100755 ")
+
+
+# ---------------------------------------------------------------------------
+# bin/psql wrapper: docker exec into this checkout's stack
+# ---------------------------------------------------------------------------
+
+_FAKE_DOCKER_PY = """
+import json, sys
+state = json.load(open(sys.argv[1]))
+args = sys.argv[2:]
+if args[0] == "ps":
+    print(state["ps"], end="")
+elif args[:2] == ["container", "inspect"]:
+    print(json.dumps(state["inspect"]))
+else:
+    with open(state["log"], "w") as log:
+        log.write("\\n".join(args) + "\\n")
+    with open(state["stdin_log"], "w") as log:
+        log.write(sys.stdin.read())
+"""
+_STACK_PORT = "40001"
+
+
+@pytest.fixture
+def stack_docker(tmp_path: Path, wrapper_copy: Path) -> Path:
+    """Return a PATH dir whose ``docker`` reports one pg container of this checkout.
+
+    ``ps`` and ``container inspect`` answer from the recorded inspect sample,
+    relabelled for the wrapper copy's checkout; ``exec`` and ``run`` record their
+    argv in docker.argv and their stdin in docker.stdin.
+    """
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)  # noqa: S603, S607
+    toplevel = str(tmp_path.resolve())
+    digest = hashlib.sha256(toplevel.encode()).hexdigest()
+    name = f"testdb-gubbi-{digest[:8]}-pg"
+    entry = json.loads((_FIXTURES / "testdb_docker_inspect.json").read_text())["container_inspect"][
+        0
+    ]
+    entry["Name"] = f"/{name}"
+    entry["Config"]["Labels"] = {
+        "ai.gubbi.testdb.repo": "gubbi",
+        "ai.gubbi.testdb.role": "pg",
+        "ai.gubbi.testdb.owner-uid": str(os.getuid()),
+        "ai.gubbi.testdb.checkout": digest,
+        "ai.gubbi.testdb.env-sha256": hashlib.sha256(_ENV_BYTES).hexdigest(),
+    }
+    state = {
+        "ps": f"{name}\n",
+        "inspect": [entry],
+        "log": str(tmp_path / "docker.argv"),
+        "stdin_log": str(tmp_path / "docker.stdin"),
+    }
+    (tmp_path / "docker.json").write_text(json.dumps(state))
+    script = tmp_path / "fake_docker.py"
+    script.write_text(_FAKE_DOCKER_PY)
+    _write_script(
+        tmp_path / "stackbin" / "docker",
+        f"exec '{sys.executable}' '{script}' '{tmp_path / 'docker.json'}' \"$@\"",
+    )
+    return tmp_path / "stackbin"
+
+
+def _stack_id(tmp_path: Path) -> str:
+    state = json.loads((tmp_path / "docker.json").read_text())
+    container_id: str = state["inspect"][0]["Id"]
+    return container_id
+
+
+def _no_stack(tmp_path: Path) -> None:
+    state = json.loads((tmp_path / "docker.json").read_text())
+    (tmp_path / "docker.json").write_text(json.dumps({**state, "ps": ""}))
+
+
+def test_wrapper_execs_into_the_owned_stack_container(
+    wrapper_copy: Path, stack_docker: Path, tmp_path: Path
+) -> None:
+    url = f"postgresql://journal:pw@127.0.0.1:{_STACK_PORT}/journal_test"
+
+    result = _run_wrapper(
+        wrapper_copy, stack_docker, tmp_path, "-tAc", "select 1", url, PGPASSWORD="pw"
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = _docker_argv(stack_docker)
+    assert argv[:4] == ["exec", "--interactive", "--user", "65534:65534"]
+    assert _mount_args(argv) == []
+    assert argv[argv.index("--") :] == [
+        "--",
+        _stack_id(tmp_path),
+        "psql",
+        "-t",
+        "-A",
+        "-c",
+        "select 1",
+        "-d",
+        "postgresql://journal:pw@192.0.2.10:5432/journal_test",
+    ]
+    assert argv[argv.index("--env") + 1] == "PGPASSWORD"
+
+
+def test_wrapper_runs_a_throwaway_container_when_no_stack_container_is_found(
+    wrapper_copy: Path, stack_docker: Path, tmp_path: Path
+) -> None:
+    _no_stack(tmp_path)
+    url = f"postgresql://journal:pw@127.0.0.1:{_STACK_PORT}/journal_test"
+
+    result = _run_wrapper(wrapper_copy, stack_docker, tmp_path, "-tAc", "select 1", url)
+
+    assert result.returncode == 0, result.stderr
+    argv = _docker_argv(stack_docker)
+    assert argv[0] == "run"
+    assert argv[argv.index("--") :] == ["--", _PG_IMAGE, "psql", "-tAc", "select 1", url]
+
+
+def test_wrapper_feeds_an_sql_file_on_stdin_under_exec(
+    wrapper_copy: Path, stack_docker: Path, tmp_path: Path
+) -> None:
+    sql = tmp_path / "deployment" / "scripts" / "grants.sql"
+    sql.write_text("SELECT 'from the host file';\n", encoding="ascii")
+    url = f"postgresql://journal:pw@127.0.0.1:{_STACK_PORT}/journal_test"
+
+    result = _run_wrapper(
+        wrapper_copy, stack_docker, tmp_path, "-v", "ON_ERROR_STOP=1", "-f", str(sql), url
+    )
+
+    assert result.returncode == 0, result.stderr
+    argv = _docker_argv(stack_docker)
+    assert argv[0] == "exec"
+    assert argv[argv.index("psql") + 1 : argv.index("psql") + 5] == [
+        "-v",
+        "ON_ERROR_STOP=1",
+        "-f",
+        "-",
+    ]
+    assert (tmp_path / "docker.stdin").read_text() == "SELECT 'from the host file';\n"
+
+
+def test_wrapper_refuses_a_file_outside_the_sql_dirs_under_exec(
+    wrapper_copy: Path, stack_docker: Path, tmp_path: Path
+) -> None:
+    url = f"postgresql://journal:pw@127.0.0.1:{_STACK_PORT}/journal_test"
+
+    result = _run_wrapper(wrapper_copy, stack_docker, tmp_path, "-f", str(tmp_path / ".env"), url)
+
+    assert result.returncode == 2
+    assert "only regular files under" in result.stderr
+    assert not (tmp_path / "docker.argv").exists()
+
+
+def test_wrapper_passes_its_stdin_to_psql_under_exec(
+    wrapper_copy: Path, stack_docker: Path, tmp_path: Path
+) -> None:
+    url = f"postgresql://journal:pw@127.0.0.1:{_STACK_PORT}/journal_test"
+    path = os.pathsep.join([str(stack_docker), os.environ.get("PATH", "")])
+
+    result = subprocess.run(  # noqa: S603 -- the wrapper under test with literal args
+        [str(wrapper_copy), "-tA", url],
+        cwd=tmp_path,
+        env={"PATH": path},
+        input="select 42;\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert _docker_argv(stack_docker)[0] == "exec"
+    assert (tmp_path / "docker.stdin").read_text() == "select 42;\n"

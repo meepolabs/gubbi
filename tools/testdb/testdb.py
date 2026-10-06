@@ -11,6 +11,7 @@ Usage::
     testdb.py env       PROFILE
     testdb.py check-env [--file PATH] [--github-output PATH]
     testdb.py psql-path [--file PATH]
+    testdb.py psql-plan [PSQL-ARG ...]
     testdb.py reset     PROFILE [--ci] [--bootstrap-var NAME=VALUE ...]
                         [--migrate-dsn-env NAME ...] [--migrate DIR ARGV... ...]
 
@@ -78,6 +79,28 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             when no ``psql`` on PATH (``bin/`` itself excluded) reports major
             PG_MAJOR in ``psql --version``; otherwise prints nothing. Consumers
             prepend a non-empty result to PATH.
+``psql-plan`` decides how ``bin/psql`` runs one psql command line, and prints
+            the decision as NUL-terminated fields. ``exec ID FILE ARG...``: run
+            ``psql ARG...`` in the running pg container ID with ``docker exec``,
+            stdin read from FILE when FILE is not empty. ``run IMAGE``: run the
+            unchanged command line in a throwaway IMAGE (PGVECTOR_IMAGE)
+            container. exec is chosen only when every argument is a psql option
+            it knows, the target is ``127.0.0.1`` or ``localhost`` on an
+            explicit port (``-h``/``-p``, or the host of a ``postgresql://``
+            URL with no query; a conninfo may name only dbname and user), no
+            ``-o``/``-L`` is given, PGHOSTADDR/PGSERVICE/PGSERVICEFILE are
+            unset, and that port is published by a running pg container that
+            passes the same label check as ``env`` for the working directory's
+            checkout and current env-sha256, with exactly one IPv4 network
+            address. The target is then rewritten to that address on port 5432,
+            so the server applies the same pg_hba rule as to a published-port
+            client. One ``-f PATH`` becomes ``-f -`` with FILE the resolved
+            PATH, which must be a regular file under ``deployment/scripts`` or
+            ``tools/testdb`` of the repository holding this script (exit 2
+            otherwise). Anything else is ``run``. Takes psql's arguments as
+            given; no ``--`` separator. Under exec, psql meta-commands that
+            name a file (``\\i``, ``\\copy``, ``\\o``) see the container's
+            filesystem, not the host's.
 
 ``reset``   returns every pg cluster of the profile to a fresh state, in order:
             drops the ``--db`` databases (``WITH (FORCE)``); drops every role
@@ -162,6 +185,7 @@ from __future__ import annotations
 import argparse
 import functools
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -239,6 +263,10 @@ _PG_MAJOR_RULE = re.compile(r"[1-9][0-9]*", re.ASCII)
 _PSQL_VERSION = re.compile(r"psql \(PostgreSQL\) ([0-9]+)", re.ASCII)
 
 BOOTSTRAP_SQL = Path(__file__).resolve().parent / "bootstrap.sql"
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+# The only files bin/psql feeds a container: this repository's SQL inputs.
+PSQL_SQL_DIRS = (_REPO_ROOT / "deployment" / "scripts", _REPO_ROOT / "tools" / "testdb")
+PSQL_PLAN = "psql-plan"
 MIGRATE_FLAG = "--migrate"
 BOOTSTRAP_BOOL_VARS = frozenset({"admin_createrole", "grant_app_to_admin", "with_otel_ro"})
 # bootstrap.sql reads role passwords from these with \getenv; reset redacts them.
@@ -544,6 +572,7 @@ class ContainerState:
     labels: Mapping[str, str]
     running: bool
     ports: Mapping[str, tuple[PortBinding, ...]]
+    addresses: tuple[str, ...] = ()
 
 
 def _docker(
@@ -583,6 +612,15 @@ def _parse_ports(entry: dict[str, Any]) -> Mapping[str, tuple[PortBinding, ...]]
     return MappingProxyType({str(spec): _parse_bindings(spec, v) for spec, v in raw.items()})
 
 
+def _parse_addresses(entry: dict[str, Any]) -> tuple[str, ...]:
+    settings = _as_dict(entry.get("NetworkSettings"), "NetworkSettings")
+    networks = _as_dict(settings.get("Networks"), "Networks")
+    addresses = [_as_dict(net, "Networks entry").get("IPAddress") for net in networks.values()]
+    if not all(isinstance(address, str) for address in addresses):
+        raise StackError("docker inspect: Networks has a non-string IPAddress")
+    return tuple(str(address) for address in addresses if address)
+
+
 def _parse_labels(entry: dict[str, Any]) -> Mapping[str, str]:
     labels = _as_dict(_as_dict(entry.get("Config"), "Config").get("Labels"), "Labels")
     return MappingProxyType({str(k): str(v) for k, v in labels.items()})
@@ -605,7 +643,14 @@ def parse_inspect(name: str, stdout: str) -> ContainerState:
     running = _as_dict(entry.get("State"), "State").get("Running")
     if not isinstance(running, bool):
         raise StackError(f"docker inspect {name}: State.Running is not a boolean")
-    return ContainerState(container_id, name, _parse_labels(entry), running, _parse_ports(entry))
+    return ContainerState(
+        container_id,
+        name,
+        _parse_labels(entry),
+        running,
+        _parse_ports(entry),
+        _parse_addresses(entry),
+    )
 
 
 def inspect_container(
@@ -1024,6 +1069,367 @@ def _pg_major(pins: Pins, env_file: Path) -> str:
     if not _PG_MAJOR_RULE.fullmatch(pg_major):
         raise ConfigError(f"{env_file}: PG_MAJOR={pg_major} must match {_PG_MAJOR_RULE.pattern}")
     return pg_major
+
+
+# ---------------------------------------------------------------------------
+# psql-plan
+# ---------------------------------------------------------------------------
+
+# psql options bin/psql can carry into a stack container unchanged, keyed by
+# every spelling; the value is the short form re-emitted (``--csv`` has none).
+_PSQL_FLAGS = {
+    **{f"-{c}": f"-{c}" for c in "XqtAabeEnsSxz0wW1H"},
+    "--no-psqlrc": "-X",
+    "--quiet": "-q",
+    "--tuples-only": "-t",
+    "--no-align": "-A",
+    "--echo-all": "-a",
+    "--echo-errors": "-b",
+    "--echo-queries": "-e",
+    "--echo-hidden": "-E",
+    "--no-readline": "-n",
+    "--single-step": "-s",
+    "--single-line": "-S",
+    "--expanded": "-x",
+    "--field-separator-zero": "-z",
+    "--record-separator-zero": "-0",
+    "--no-password": "-w",
+    "--password": "-W",
+    "--single-transaction": "-1",
+    "--html": "-H",
+    "--csv": "--csv",
+}
+_PSQL_VALUED = {
+    **{f"-{c}": f"-{c}" for c in "cdfvhpUFRPTLo"},
+    "--command": "-c",
+    "--dbname": "-d",
+    "--file": "-f",
+    "--set": "-v",
+    "--variable": "-v",
+    "--host": "-h",
+    "--port": "-p",
+    "--username": "-U",
+    "--field-separator": "-F",
+    "--record-separator": "-R",
+    "--pset": "-P",
+    "--table-attr": "-T",
+    "--log-file": "-L",
+    "--output": "-o",
+}
+# They write host files, which inside a container would land in the container.
+_PSQL_HOST_OUTPUTS = frozenset({"-o", "-L"})
+# Each can send libpq to a server other than the one -h/-p or the URL names.
+_PSQL_REDIRECTING_ENV = ("PGHOSTADDR", "PGSERVICE", "PGSERVICEFILE")
+_PSQL_STDIN_TOKENS = frozenset({"--", "-"})
+_PSQL_URL_SCHEMES = frozenset({"postgresql", "postgres"})
+_CONNINFO = re.compile(r"\s*([a-z_]+)\s*=\s*('(?:[^'\\]|\\.)*'|[^\s']\S*)\s*", re.ASCII)
+_CONNINFO_KEYS = frozenset({"dbname", "user"})
+PG_CONTAINER_PORT = "5432"
+PLAN_EXEC = "exec"
+PLAN_RUN = "run"
+PLAN_END = "end"
+
+
+class _NotExecutable(Exception):
+    """The command line is outside what the exec path can carry; run it instead."""
+
+
+@dataclass(frozen=True)
+class PsqlCommand:
+    """A psql command line split into connection settings and everything else."""
+
+    options: tuple[tuple[str, str | None], ...]
+    host: str | None
+    port: str | None
+    user: str | None
+    dbname: str | None
+
+
+def _option_spelling(token: str) -> tuple[str, str | None]:
+    """Split one option token into (spelling, attached value or None)."""
+    if token.startswith("--"):
+        name, sep, value = token.partition("=")
+        return name, value if sep else None
+    return token[:2], token[2:] or None
+
+
+def _short_bundle(token: str, rest: list[str]) -> list[tuple[str, str | None]]:
+    """Expand ``-tAc SQL``-style bundles the way psql's getopt reads them."""
+    parsed: list[tuple[str, str | None]] = []
+    for index, char in enumerate(token[1:], start=1):
+        spelling = f"-{char}"
+        if spelling in _PSQL_FLAGS:
+            parsed.append((_PSQL_FLAGS[spelling], None))
+            continue
+        if spelling not in _PSQL_VALUED:
+            raise _NotExecutable(spelling)
+        attached = token[index + 1 :]
+        if not attached and not rest:
+            raise _NotExecutable(f"{spelling} without a value")
+        parsed.append((_PSQL_VALUED[spelling], attached or rest.pop(0)))
+        return parsed
+    return parsed
+
+
+def _parse_options(argv: Sequence[str]) -> tuple[list[tuple[str, str | None]], list[str]]:
+    """Return psql's options in order and its positional arguments."""
+    rest = list(argv)
+    options: list[tuple[str, str | None]] = []
+    positionals: list[str] = []
+    while rest:
+        token = rest.pop(0)
+        if token in _PSQL_STDIN_TOKENS:
+            raise _NotExecutable(token)
+        if not token.startswith("-"):
+            positionals.append(token)
+        elif token.startswith("--"):
+            spelling, value = _option_spelling(token)
+            if spelling in _PSQL_FLAGS and value is None:
+                options.append((_PSQL_FLAGS[spelling], None))
+            elif spelling in _PSQL_VALUED:
+                if value is None and not rest:
+                    raise _NotExecutable(f"{spelling} without a value")
+                options.append((_PSQL_VALUED[spelling], rest.pop(0) if value is None else value))
+            else:
+                raise _NotExecutable(spelling)
+        else:
+            options += _short_bundle(token, rest)
+    return options, positionals
+
+
+def parse_psql_command(argv: Sequence[str]) -> PsqlCommand:
+    """Parse a psql command line; raise _NotExecutable for anything unrecognized."""
+    parsed, positionals = _parse_options(argv)
+    connection: dict[str, str | None] = {"-h": None, "-p": None, "-U": None, "-d": None}
+    options: list[tuple[str, str | None]] = []
+    for name, value in parsed:
+        if name in connection:
+            if connection[name] is not None:
+                raise _NotExecutable(f"{name} given twice")
+            connection[name] = value
+        elif name in _PSQL_HOST_OUTPUTS:
+            raise _NotExecutable(name)
+        else:
+            options.append((name, value))
+    if len(positionals) > 2 or (positionals and connection["-d"] is not None):
+        raise _NotExecutable("positional connection arguments")
+    if len(positionals) == 2 and connection["-U"] is not None:
+        raise _NotExecutable("user given twice")
+    dbname = connection["-d"] if connection["-d"] is not None else next(iter(positionals), None)
+    user = connection["-U"] if len(positionals) < 2 else positionals[1]
+    return PsqlCommand(tuple(options), connection["-h"], connection["-p"], user, dbname)
+
+
+def _loopback_port(host: str | None, port: str | None) -> str:
+    if host not in CI_HOSTS or port is None or not _HOST_PORT.fullmatch(port):
+        raise _NotExecutable("target is not a loopback host on an explicit port")
+    return port
+
+
+def _is_url(dbname: str | None) -> bool:
+    return dbname is not None and dbname.partition("://")[0] in _PSQL_URL_SCHEMES
+
+
+def _split_url(url: str) -> tuple[urllib.parse.SplitResult, str, str]:
+    """Return the URL's parts, ``userinfo@`` prefix and loopback port."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.query or parts.fragment or "," in parts.netloc:
+        raise _NotExecutable("URL carries settings beyond user, host, port and dbname")
+    userinfo, at, hostport = parts.netloc.rpartition("@")
+    host, _, port = hostport.rpartition(":")
+    return parts, f"{userinfo}{at}", _loopback_port(host, port)
+
+
+def _rewrite_url(url: str, address: str) -> str:
+    """Point a ``postgresql://`` URL at ``address`` on the container port."""
+    parts, userinfo, _ = _split_url(url)
+    netloc = f"{userinfo}{address}:{PG_CONTAINER_PORT}"
+    return urllib.parse.urlunsplit(parts._replace(netloc=netloc))
+
+
+def _check_conninfo(dbname: str) -> None:
+    """Allow a ``key=value`` dbname only when it names nothing but dbname and user."""
+    if "=" not in dbname:
+        return
+    end, keys = 0, []
+    while end < len(dbname):
+        match = _CONNINFO.match(dbname, end)
+        if match is None or match.end() == end:
+            raise _NotExecutable("unparseable conninfo")
+        keys.append(match[1])
+        end = match.end()
+    if not set(keys) <= _CONNINFO_KEYS:
+        raise _NotExecutable("conninfo names connection settings")
+
+
+def target_port(command: PsqlCommand) -> str:
+    """Return the loopback host port the command connects to."""
+    if _is_url(command.dbname):
+        if command.host is not None or command.port is not None or command.user is not None:
+            raise _NotExecutable("both a URL and -h, -p or -U")
+        return _split_url(command.dbname or "")[2]
+    _check_conninfo(command.dbname or "")
+    return _loopback_port(command.host, command.port)
+
+
+def exec_argv(command: PsqlCommand, address: str, stdin_file: str | None) -> list[str]:
+    """Return the psql argv for the container: target rewritten, ``-f PATH`` as ``-f -``."""
+    argv: list[str] = []
+    for name, value in command.options:
+        if name == "-f" and stdin_file is not None:
+            argv += ["-f", "-"]
+        else:
+            argv += [name] if value is None else [name, value]
+    dbname = command.dbname
+    if dbname is not None and _is_url(dbname):
+        return [*argv, "-d", _rewrite_url(dbname, address)]
+    argv += ["-h", address, "-p", PG_CONTAINER_PORT]
+    if command.user is not None:
+        argv += ["-U", command.user]
+    return argv if dbname is None else [*argv, "-d", dbname]
+
+
+def sql_input_file(command: PsqlCommand, cwd: Path) -> str | None:
+    """Return the resolved ``-f`` file, or None when psql reads no file.
+
+    A file outside the repository's SQL directories is a ConfigError.
+    """
+    files = [value for name, value in command.options if name == "-f" and value is not None]
+    if len(files) > 1:
+        raise _NotExecutable("more than one -f")
+    if not files or files[0] == "-":
+        return None
+    try:
+        path = (cwd / files[0]).resolve(strict=True)
+    except OSError as exc:
+        raise ConfigError(f"-f {files[0]}: {exc.strerror or exc}") from exc
+    allowed = [d.resolve() for d in PSQL_SQL_DIRS]
+    if not path.is_file() or not any(path.is_relative_to(d) for d in allowed):
+        dirs = ", ".join(str(d) for d in allowed)
+        raise ConfigError(f"-f {files[0]}: only regular files under {dirs} can be passed")
+    return str(path)
+
+
+def _owned_pg_container(
+    run: Callable[[Sequence[str], float | None], CommandResult],
+    uid: int,
+    checkout: Checkout,
+    env_digest: str,
+    port: str,
+) -> ContainerState | None:
+    """Return this checkout's running pg container published on ``port``, or None."""
+    listed = run(
+        [
+            "docker", "ps", "--filter", f"label={CHECKOUT_LABEL}={checkout.digest}",
+            "--filter", f"label={UID_LABEL}={uid}", "--filter", f"publish={port}",
+            "--format", "{{.Names}}",
+        ],
+        PROBE_TIMEOUT_S,
+    )  # fmt: skip
+    names = listed.stdout.split() if listed.returncode == 0 else []
+    if len(names) != 1:
+        return None
+    inspected = run(["docker", "container", "inspect", names[0]], PROBE_TIMEOUT_S)
+    if inspected.returncode != 0:
+        return None
+    try:
+        state = parse_inspect(names[0], inspected.stdout)
+        return state if _is_exec_target(state, uid, checkout, env_digest, port) else None
+    except (StackError, ConfigError):
+        return None
+
+
+def _is_exec_target(
+    state: ContainerState, uid: int, checkout: Checkout, env_digest: str, port: str
+) -> bool:
+    """Apply the ``env`` ownership check to one container, plus port and address."""
+    repo, role = state.labels.get(REPO_LABEL, ""), state.labels.get(ROLE_LABEL, "")
+    if not _REPO_RULE.fullmatch(repo) or not _ROLE_RULE.fullmatch(role) or role_kind(role) != "pg":
+        return False
+    identity = {REPO_LABEL: repo, ROLE_LABEL: role, UID_LABEL: str(uid)}
+    identity[CHECKOUT_LABEL] = checkout.digest
+    profile = Profile(repo=repo, roles=(role,), dbs=())
+    return (
+        label_problem(state.labels, identity, env_digest) is None
+        and state.name == container_name(profile, checkout, role)
+        and state.running
+        and host_port(state, role) == int(port)
+        and container_address(state) is not None
+    )
+
+
+def container_address(state: ContainerState) -> str | None:
+    """Return the container's one IPv4 network address, or None."""
+    if len(state.addresses) != 1:
+        return None
+    try:
+        return str(ipaddress.IPv4Address(state.addresses[0]))
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True)
+class PsqlPlan:
+    """How bin/psql runs one command line; see ``psql-plan`` in the module docstring."""
+
+    mode: str
+    target: str
+    stdin_file: str | None = None
+    argv: tuple[str, ...] = ()
+
+    def fields(self) -> list[str]:
+        """Return the NUL-separated fields bin/psql reads."""
+        if self.mode == PLAN_RUN:
+            return [PLAN_RUN, self.target, PLAN_END]
+        return [PLAN_EXEC, self.target, self.stdin_file or "", *self.argv, PLAN_END]
+
+
+def plan_psql(
+    argv: Sequence[str],
+    *,
+    run: Callable[[Sequence[str], float | None], CommandResult],
+    uid: int,
+    environ: Mapping[str, str],
+    cwd: Path,
+    env_file: Path,
+) -> PsqlPlan:
+    """Decide between ``docker exec`` into this checkout's stack and ``docker run``."""
+    pins = load_pins(env_file)
+    fallback = PsqlPlan(PLAN_RUN, pins.image("PGVECTOR_IMAGE"))
+    try:
+        command = parse_psql_command(argv)
+        port = target_port(command)
+    except _NotExecutable:
+        return fallback
+    if any(name in environ for name in _PSQL_REDIRECTING_ENV):
+        return fallback
+    try:
+        checkout = find_checkout(run)
+    except ConfigError:
+        return fallback
+    state = _owned_pg_container(run, uid, checkout, pins.digest, port)
+    address = None if state is None else container_address(state)
+    if state is None or address is None:
+        return fallback
+    try:
+        stdin_file = sql_input_file(command, cwd)
+    except _NotExecutable:
+        return fallback
+    return PsqlPlan(PLAN_EXEC, state.id, stdin_file, tuple(exec_argv(command, address, stdin_file)))
+
+
+def cmd_psql_plan(argv: Sequence[str]) -> int:
+    """Print the plan for one psql command line as NUL-terminated fields."""
+    plan = plan_psql(
+        argv,
+        run=run_command,
+        uid=os.getuid(),
+        environ=os.environ,
+        cwd=Path.cwd(),
+        env_file=TESTDB_ENV,
+    )
+    sys.stdout.buffer.write(b"".join(os.fsencode(field) + b"\0" for field in plan.fields()))
+    return EXIT_OK
 
 
 # ---------------------------------------------------------------------------
@@ -1515,8 +1921,15 @@ def main(
     argv: Sequence[str] | None = None, ctx_factory: Callable[[], Context] = default_context
 ) -> int:
     """Parse ``argv`` and run one subcommand; see the module docstring for exit codes."""
+    args_in = sys.argv[1:] if argv is None else list(argv)
+    if args_in[:1] == [PSQL_PLAN]:
+        try:
+            return cmd_psql_plan(args_in[1:])
+        except ConfigError as exc:
+            sys.stderr.write(f"testdb: {exc}\n")
+            return EXIT_INVALID
     try:
-        head, migrations = split_migrations(sys.argv[1:] if argv is None else argv)
+        head, migrations = split_migrations(args_in)
     except ConfigError as exc:
         sys.stderr.write(f"testdb: {exc}\n")
         return EXIT_INVALID

@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
-# psql from the pinned PGVECTOR_IMAGE in testdb.env, run in a throwaway docker
-# container, for machines without a host psql of PG_MAJOR. `testdb.py psql-path`
-# decides whether this directory belongs on PATH.
+# psql for machines without a host psql of PG_MAJOR. `testdb.py psql-path`
+# decides whether this directory belongs on PATH; `testdb.py psql-plan` decides,
+# per command line, which of two ways it runs (see psql-plan in testdb.py).
 #
-# The container shares the host network, so 127.0.0.1 DSNs work unchanged.
+# exec: the command targets a port published by this checkout's own running pg
+# container, so psql runs inside that container with `docker exec`, as an
+# unprivileged user and with no mounts. The plan rewrites the target to the
+# container's own network address on port 5432 and turns one -f PATH (a file
+# under deployment/scripts or tools/testdb) into -f - with PATH on stdin.
+#
+# run: anything else runs unchanged in a throwaway container of the pinned
+# PGVECTOR_IMAGE on the host network, so 127.0.0.1 DSNs work as they are.
 # Mounted, read-only and at their host paths: only this repository's SQL input
 # directories, deployment/scripts and tools/testdb, located from this script
 # rather than from git so they hold even outside a checkout. Nothing else is
@@ -17,32 +24,20 @@ set -euo pipefail
 bin_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 testdb_py="$bin_dir/../testdb.py"
 
-# check-env is the one testdb.env validator and names the file on failure. Its
-# output may hold shell metacharacters, so the key is matched by name, never
-# eval'd or sourced.
-if ! pins=$(python3 -I "$testdb_py" check-env); then
-    echo "psql wrapper: cannot read PGVECTOR_IMAGE from testdb.env" >&2
+# NUL-separated fields ending in "end"; a missing terminator means the planner
+# failed (it has already named the problem on stderr). `read -d ''` rather than
+# mapfile keeps this working on bash 3.2. The planner gets no stdin: it is psql's.
+plan=()
+while IFS= read -r -d '' field; do
+    plan+=("$field")
+done < <(python3 -I "$testdb_py" psql-plan "$@" </dev/null)
+count=${#plan[@]}
+if ((count < 3)) || [[ ${plan[count - 1]} != end ]]; then
+    echo "psql wrapper: testdb.py psql-plan failed; see its message above" >&2
     exit 2
 fi
-image=""
-while IFS= read -r line; do
-    case $line in
-        PGVECTOR_IMAGE=*) image=${line#PGVECTOR_IMAGE=} ;;
-    esac
-done <<<"$pins"
-if [[ -z $image ]]; then
-    echo "psql wrapper: testdb.env does not declare PGVECTOR_IMAGE" >&2
-    exit 2
-fi
-
-# A missing host dir is skipped: docker would create it, root-owned, on the host.
-repo_root=$(cd -- "$bin_dir/../../.." && pwd -P)
-mounts=()
-for sql_dir in "$repo_root/deployment/scripts" "$repo_root/tools/testdb"; do
-    if [[ -d $sql_dir ]]; then
-        mounts+=(--volume "$sql_dir:$sql_dir:ro")
-    fi
-done
+mode=${plan[0]}
+target=${plan[1]}
 
 # libpq reads PG*; bootstrap.sql reads its role passwords with \getenv. The
 # ${a[@]+...} expansions keep empty arrays safe under set -u on bash < 4.4.
@@ -58,7 +53,36 @@ if [[ -t 0 && -t 1 ]]; then
     tty_args=(--tty)
 fi
 
+case $mode in
+    exec)
+        stdin_file=${plan[2]}
+        psql_args=("${plan[@]:3:count-4}")
+        if [[ -n $stdin_file ]]; then
+            exec docker exec --interactive --user 65534:65534 \
+                ${env_args[@]+"${env_args[@]}"} \
+                -- "$target" psql ${psql_args[@]+"${psql_args[@]}"} <"$stdin_file"
+        fi
+        exec docker exec --interactive --user 65534:65534 \
+            ${tty_args[@]+"${tty_args[@]}"} ${env_args[@]+"${env_args[@]}"} \
+            -- "$target" psql ${psql_args[@]+"${psql_args[@]}"}
+        ;;
+    run) ;;
+    *)
+        echo "psql wrapper: unknown psql-plan mode: $mode" >&2
+        exit 2
+        ;;
+esac
+
+# A missing host dir is skipped: docker would create it, root-owned, on the host.
+repo_root=$(cd -- "$bin_dir/../../.." && pwd -P)
+mounts=()
+for sql_dir in "$repo_root/deployment/scripts" "$repo_root/tools/testdb"; do
+    if [[ -d $sql_dir ]]; then
+        mounts+=(--volume "$sql_dir:$sql_dir:ro")
+    fi
+done
+
 exec docker run --rm --interactive --quiet --network host \
     ${tty_args[@]+"${tty_args[@]}"} ${env_args[@]+"${env_args[@]}"} \
     ${mounts[@]+"${mounts[@]}"} --workdir "$PWD" \
-    -- "$image" psql "$@"
+    -- "$target" psql "$@"
