@@ -142,6 +142,15 @@ def docker() -> FakeDocker:
     return FakeDocker()
 
 
+@pytest.fixture(autouse=True)
+def pgdg_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An empty PGDG bin root, so the host's ``/usr/lib/postgresql`` never picks the psql."""
+    root = tmp_path / "pgdg"
+    root.mkdir()
+    monkeypatch.setattr(testdb, "PGDG_BIN_ROOT", root)
+    return root
+
+
 @pytest.fixture
 def psql_bin(tmp_path: Path) -> Path:
     bin_dir = tmp_path / "hostbin"
@@ -523,6 +532,21 @@ def test_reset_passes_the_superuser_password_only_in_the_environment(
 
     assert all(c.env["PGPASSWORD"] == testdb.PG_PASSWORD for c in fake_psql.psql_calls())
     assert not [c for c in fake_psql.psql_calls() if any(testdb.PG_PASSWORD in a for a in c.argv)]
+
+
+def test_reset_prefers_the_pgdg_psql_of_pg_major_over_the_one_on_path(
+    stack: FakeDocker, psql_bin: Path, pgdg_root: Path, env_file: Path, toplevel: Path
+) -> None:
+    pgdg_bin = pgdg_root / "17" / "bin"
+    pgdg_bin.mkdir(parents=True)
+    (pgdg_bin / "psql").write_text("#!/bin/sh\nexit 1\n")
+    pgdg_psql = FakePsql(psql=str(pgdg_bin / "psql"))
+
+    rc = _reset(stack, pgdg_psql, env_file, toplevel, _PROFILE + _DBS, {"PATH": str(psql_bin)})
+
+    assert rc == 0
+    assert pgdg_psql.psql_calls()
+    assert {call.argv[0] for call in pgdg_psql.calls} == {pgdg_psql.psql}
 
 
 # ---------------------------------------------------------------------------
