@@ -239,6 +239,34 @@ def test_psql_path_falls_through_when_the_pgdg_psql_does_not_fit(
     assert result.stdout == (f"{_WRAPPER_DIR}\n" if expected == "wrapper" else "")
 
 
+@pytest.mark.parametrize(
+    ("on_path", "expected_stdout", "expected_stderr"),
+    [
+        pytest.param("psql (PostgreSQL) 17.4", "", "", id="host-fits"),
+        pytest.param(None, f"{_WRAPPER_DIR}\n", _wrapper_hint("17"), id="no-host"),
+    ],
+)
+def test_psql_path_falls_through_when_the_pgdg_psql_cannot_be_launched(
+    tmp_path: Path,
+    pgdg_root: Path,
+    on_path: str | None,
+    expected_stdout: str,
+    expected_stderr: str,
+    psql_path_cli: Callable[..., _Outcome],
+) -> None:
+    (_pgdg_psql(pgdg_root, "psql (PostgreSQL) 17.4") / "psql").chmod(0o644)
+    host = tmp_path / "host"
+    host.mkdir()
+    if on_path is not None:
+        _fake_psql(host, on_path)
+
+    result = psql_path_cli(str(host))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == expected_stdout
+    assert result.stderr == expected_stderr
+
+
 def test_psql_path_hints_at_the_client_package_when_it_picks_the_wrapper(
     tmp_path: Path, psql_path_cli: Callable[..., _Outcome]
 ) -> None:

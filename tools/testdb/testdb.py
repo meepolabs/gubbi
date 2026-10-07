@@ -1079,7 +1079,10 @@ def psql_major(
     run: Callable[[Sequence[str], float | None], CommandResult], psql: str
 ) -> str | None:
     """Return the major version ``psql --version`` reports, or None if it does not."""
-    result = run([psql, "--version"], PROBE_TIMEOUT_S)
+    try:
+        result = run([psql, "--version"], PROBE_TIMEOUT_S)
+    except OSError:
+        return None
     match = _PSQL_VERSION.match(result.stdout) if result.returncode == 0 else None
     return match[1] if match else None
 
