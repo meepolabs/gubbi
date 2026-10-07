@@ -25,10 +25,11 @@ disposable cluster URL is ``TEST_DISPOSABLE_CLUSTER_URL``.
 
 The caller supplies ``JOURNAL_OPERATOR_EMAIL`` and
 ``JOURNAL_ENCRYPTION_MASTER_KEY_V1``; the runner refuses to start without them.
-Every pytest child gets ``testdb.py psql-path`` prepended to PATH, and runs
-without ``PYTEST_ADDOPTS``, ``PYTEST_PLUGINS``, any ``TESTDB_*`` variable and
-any inherited suite DSN, so neither the caller's environment nor a stale DSN
-can change a stage's selection or target.
+Every pytest child gets ``testdb.py psql-path`` prepended to PATH (its stderr
+hint, if any, is relayed), and runs without ``PYTEST_ADDOPTS``,
+``PYTEST_PLUGINS``, any ``TESTDB_*`` variable and any inherited suite DSN, so
+neither the caller's environment nor a stale DSN can change a stage's
+selection or target.
 
 A pytest stage is green only when pytest exits 0 and its JUnit report parses,
 counts at least one test, records no failures or errors and at least one
@@ -306,6 +307,7 @@ def psql_path(environ: Mapping[str, str]) -> str:
     )
     if done.returncode != 0:
         raise ConfigError(f"testdb.py psql-path failed: {done.stderr.strip()}")
+    sys.stderr.write(done.stderr)
     prefix = done.stdout.strip()
     path = environ.get("PATH", "")
     return os.pathsep.join(p for p in (prefix, path) if p)

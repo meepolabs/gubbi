@@ -15,11 +15,16 @@ import os
 import shutil
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pytest
 
 from tests.fixtures.testdb_tool import TESTDB_TOOL, load_testdb_tool
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 pytestmark = pytest.mark.unit
 
@@ -43,13 +48,47 @@ def _fake_psql(directory: Path, version_line: str) -> Path:
     return _write_script(directory / "psql", f"echo '{version_line}'")
 
 
-def _psql_path(path: str, *extra: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 -- this interpreter running the controller
-        [sys.executable, str(TESTDB_TOOL), "psql-path", *extra],
-        env={"PATH": path},
-        capture_output=True,
-        text=True,
-        check=False,
+@dataclass(frozen=True)
+class _Outcome:
+    returncode: int
+    stdout: str
+    stderr: str
+
+
+@pytest.fixture
+def pgdg_root(tmp_path: Path) -> Path:
+    """The PGDG bin root ``psql-path`` probes; empty unless a test installs a psql."""
+    return tmp_path / "pgdg"
+
+
+@pytest.fixture
+def psql_path_cli(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], pgdg_root: Path
+) -> Callable[..., _Outcome]:
+    """Run ``testdb.py psql-path`` with PATH set and the PGDG root under tmp_path.
+
+    In-process, so a real ``/usr/lib/postgresql`` on the machine never decides a test.
+    """
+    monkeypatch.setattr(testdb, "PGDG_BIN_ROOT", pgdg_root)
+
+    def run(path: str, *extra: str) -> _Outcome:
+        monkeypatch.setenv("PATH", path)
+        capsys.readouterr()
+        code = testdb.main(["psql-path", *extra])
+        out, err = capsys.readouterr()
+        return _Outcome(code, out, err)
+
+    return run
+
+
+def _pgdg_psql(pgdg_root: Path, version_line: str) -> Path:
+    return _fake_psql(pgdg_root / "17" / "bin", version_line).parent
+
+
+def _wrapper_hint(pg_major: str) -> str:
+    return (
+        f"testdb: no host psql {pg_major}; using the docker wrapper (slow pre-push);"
+        f" install postgresql-client-{pg_major}\n"
     )
 
 
@@ -58,10 +97,12 @@ def _psql_path(path: str, *extra: str) -> subprocess.CompletedProcess[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_psql_path_prints_nothing_when_host_psql_matches_pg_major(tmp_path: Path) -> None:
+def test_psql_path_prints_nothing_when_host_psql_matches_pg_major(
+    tmp_path: Path, psql_path_cli: Callable[..., _Outcome]
+) -> None:
     host = _fake_psql(tmp_path / "host", "psql (PostgreSQL) 17.4 (Debian 17.4-1)").parent
 
-    result = _psql_path(str(host))
+    result = psql_path_cli(str(host))
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == ""
@@ -76,38 +117,44 @@ def test_psql_path_prints_nothing_when_host_psql_matches_pg_major(tmp_path: Path
     ],
 )
 def test_psql_path_prints_wrapper_dir_when_host_psql_is_another_major(
-    tmp_path: Path, version_line: str
+    tmp_path: Path, version_line: str, psql_path_cli: Callable[..., _Outcome]
 ) -> None:
     host = _fake_psql(tmp_path / "host", version_line).parent
 
-    result = _psql_path(str(host))
+    result = psql_path_cli(str(host))
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"{_WRAPPER_DIR}\n"
 
 
-def test_psql_path_prints_wrapper_dir_when_no_psql_on_path(tmp_path: Path) -> None:
+def test_psql_path_prints_wrapper_dir_when_no_psql_on_path(
+    tmp_path: Path, psql_path_cli: Callable[..., _Outcome]
+) -> None:
     (tmp_path / "empty").mkdir()
 
-    result = _psql_path(str(tmp_path / "empty"))
+    result = psql_path_cli(str(tmp_path / "empty"))
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"{_WRAPPER_DIR}\n"
 
 
-def test_psql_path_ignores_the_wrapper_itself_on_path(tmp_path: Path) -> None:
+def test_psql_path_ignores_the_wrapper_itself_on_path(
+    tmp_path: Path, psql_path_cli: Callable[..., _Outcome]
+) -> None:
     (tmp_path / "empty").mkdir()
 
-    result = _psql_path(os.pathsep.join([str(_WRAPPER_DIR), str(tmp_path / "empty")]))
+    result = psql_path_cli(os.pathsep.join([str(_WRAPPER_DIR), str(tmp_path / "empty")]))
 
     assert result.stdout == f"{_WRAPPER_DIR}\n"
 
 
-def test_psql_path_uses_the_first_psql_on_path(tmp_path: Path) -> None:
+def test_psql_path_uses_the_first_psql_on_path(
+    tmp_path: Path, psql_path_cli: Callable[..., _Outcome]
+) -> None:
     first = _fake_psql(tmp_path / "first", "psql (PostgreSQL) 16.8").parent
     second = _fake_psql(tmp_path / "second", "psql (PostgreSQL) 17.4").parent
 
-    result = _psql_path(os.pathsep.join([str(first), str(second)]))
+    result = psql_path_cli(os.pathsep.join([str(first), str(second)]))
 
     assert result.stdout == f"{_WRAPPER_DIR}\n"
 
@@ -122,17 +169,117 @@ def test_psql_path_uses_the_first_psql_on_path(tmp_path: Path) -> None:
         pytest.param(b"PG_MAJOR=17", "missing final newline", id="invalid-file"),
     ],
 )
-def test_psql_path_exits_2_on_a_bad_pg_major(tmp_path: Path, raw: bytes, named: str) -> None:
+def test_psql_path_exits_2_on_a_bad_pg_major(
+    tmp_path: Path, raw: bytes, named: str, psql_path_cli: Callable[..., _Outcome]
+) -> None:
     env_file = tmp_path / "testdb.env"
     env_file.write_bytes(raw)
     host = _fake_psql(tmp_path / "host", "psql (PostgreSQL) 17.4").parent
 
-    result = _psql_path(str(host), "--file", str(env_file))
+    result = psql_path_cli(str(host), "--file", str(env_file))
 
     assert result.returncode == 2
     assert named in result.stderr
     assert "testdb.env" in result.stderr
     assert result.stdout == ""
+
+
+@pytest.mark.parametrize(
+    "on_path",
+    [
+        pytest.param(None, id="nothing-on-path"),
+        pytest.param("psql (PostgreSQL) 17.4", id="matching-psql-on-path"),
+    ],
+)
+def test_psql_path_prefers_the_pgdg_bin_dir_of_pg_major(
+    tmp_path: Path, pgdg_root: Path, on_path: str | None, psql_path_cli: Callable[..., _Outcome]
+) -> None:
+    pgdg = _pgdg_psql(pgdg_root, "psql (PostgreSQL) 17.6 (Ubuntu 17.6-1.pgdg24.04+1)")
+    host = tmp_path / "host"
+    host.mkdir()
+    if on_path is not None:
+        _fake_psql(host, on_path)
+
+    result = psql_path_cli(str(host))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{pgdg}\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.parametrize(
+    ("pgdg_version", "on_path", "expected"),
+    [
+        pytest.param(
+            "psql (PostgreSQL) 16.8", "psql (PostgreSQL) 17.4", "", id="other-major-host-fits"
+        ),
+        pytest.param("psql (PostgreSQL) 16.8", None, "wrapper", id="other-major-no-host"),
+        pytest.param(None, "psql (PostgreSQL) 17.4", "", id="missing-host-fits"),
+        pytest.param(None, None, "wrapper", id="missing-no-host"),
+    ],
+)
+def test_psql_path_falls_through_when_the_pgdg_psql_does_not_fit(
+    tmp_path: Path,
+    pgdg_root: Path,
+    pgdg_version: str | None,
+    on_path: str | None,
+    expected: str,
+    psql_path_cli: Callable[..., _Outcome],
+) -> None:
+    if pgdg_version is not None:
+        _pgdg_psql(pgdg_root, pgdg_version)
+    host = tmp_path / "host"
+    host.mkdir()
+    if on_path is not None:
+        _fake_psql(host, on_path)
+
+    result = psql_path_cli(str(host))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (f"{_WRAPPER_DIR}\n" if expected == "wrapper" else "")
+
+
+def test_psql_path_hints_at_the_client_package_when_it_picks_the_wrapper(
+    tmp_path: Path, psql_path_cli: Callable[..., _Outcome]
+) -> None:
+    env_file = tmp_path / "testdb.env"
+    env_file.write_bytes(f"PGVECTOR_IMAGE={_PG_IMAGE}\nPG_MAJOR=18\n".encode())
+    host = _fake_psql(tmp_path / "host", "psql (PostgreSQL) 17.4").parent
+
+    result = psql_path_cli(str(host), "--file", str(env_file))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == f"{_WRAPPER_DIR}\n"
+    assert result.stderr == _wrapper_hint("18")
+
+
+@pytest.mark.parametrize(
+    ("install", "expected_stdout"),
+    [
+        pytest.param("pgdg", "pgdg", id="pgdg-psql"),
+        pytest.param("path", "", id="psql-on-path"),
+    ],
+)
+def test_psql_path_prints_no_hint_when_a_host_psql_is_chosen(
+    tmp_path: Path,
+    pgdg_root: Path,
+    install: str,
+    expected_stdout: str,
+    psql_path_cli: Callable[..., _Outcome],
+) -> None:
+    host = tmp_path / "host"
+    host.mkdir()
+    pgdg = pgdg_root / "17" / "bin"
+    if install == "pgdg":
+        _pgdg_psql(pgdg_root, "psql (PostgreSQL) 17.4")
+    else:
+        _fake_psql(host, "psql (PostgreSQL) 17.4")
+
+    result = psql_path_cli(str(host))
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == (f"{pgdg}\n" if expected_stdout == "pgdg" else "")
+    assert result.stderr == ""
 
 
 # ---------------------------------------------------------------------------

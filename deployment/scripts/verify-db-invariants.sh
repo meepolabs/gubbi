@@ -97,7 +97,7 @@ fail() {
 # Uses -tA so the returned value is unadorned.
 # ---------------------------------------------------------------------------
 q() {
-    psql -v ON_ERROR_STOP=1 -tAc "$1" "${DB_URL}"
+    psql -X -v ON_ERROR_STOP=1 -tAc "$1" "${DB_URL}"
 }
 
 # Returns 't' or 'f' for a single boolean assertion.
@@ -839,7 +839,7 @@ done
 echo "" >&2
 echo "Remedy:" >&2
 echo "  - For grants-only failure (most common):" >&2
-echo "      psql -v ON_ERROR_STOP=1 -f deployment/scripts/grants.sql \"\${JOURNAL_DB_MIGRATION_URL:-\${JOURNAL_DB_ADMIN_URL}}\"" >&2
+echo "      psql -X -v ON_ERROR_STOP=1 -f deployment/scripts/grants.sql \"\${JOURNAL_DB_MIGRATION_URL:-\${JOURNAL_DB_ADMIN_URL}}\"" >&2
 echo "  - For full restore + repair from a pg_dump:" >&2
 echo "      deployment/scripts/restore-db.sh --repair-grants <dump-file>" >&2
 echo "  - For schema drift (missing tables / RLS gone): re-run alembic upgrade head" >&2

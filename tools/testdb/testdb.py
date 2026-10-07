@@ -84,11 +84,14 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             charset, which still admits shell metacharacters: consumers must
             never eval or source it. Read specific keys instead (CI appends it
             to ``$GITHUB_OUTPUT``; make and bash consumers pick keys by name).
-``psql-path`` prints the absolute path of ``bin/`` next to this script, which
-            holds a ``psql`` wrapper running PGVECTOR_IMAGE's psql in docker,
-            when no ``psql`` on PATH (``bin/`` itself excluded) reports major
-            PG_MAJOR in ``psql --version``; otherwise prints nothing. Consumers
-            prepend a non-empty result to PATH.
+``psql-path`` prints ``/usr/lib/postgresql/PG_MAJOR/bin`` when its ``psql``
+            reports major PG_MAJOR in ``psql --version`` (the real binary, not
+            Debian's dispatcher). Else it prints nothing when the first ``psql``
+            on PATH (``bin/`` next to this script excluded) reports PG_MAJOR.
+            Else it prints the absolute path of that ``bin/``, which holds a
+            ``psql`` wrapper running PGVECTOR_IMAGE's psql in docker, and writes
+            a one-line hint to stderr naming the client package to install.
+            Consumers prepend a non-empty result to PATH.
 ``psql-plan`` decides how ``bin/psql`` runs one psql command line, and prints
             the decision as NUL-terminated fields. ``exec ID FILE ARG...``: run
             ``psql ARG...`` in the running pg container ID with ``docker exec``,
@@ -145,8 +148,9 @@ testdb.env image pins must be ``repo[:tag]@sha256:<digest>``.
             this checkout or to CI: any loopback server the URL names is
             wiped, so ``--ci`` must never be used outside CI.
 
-            psql is the first ``psql`` on PATH when it reports PG_MAJOR, else
-            the ``bin/psql`` wrapper (as ``psql-path`` decides). psql and the
+            psql is the one ``psql-path`` selects: the PGDG binary of
+            PG_MAJOR, else the first ``psql`` on PATH when it reports PG_MAJOR,
+            else the ``bin/psql`` wrapper. psql and the
             migrations run with an environment stripped of every ``PG*``
             variable (bootstrap.sql's password variables excepted) and of every
             variable holding a postgres URL. Every psql ``-d`` is a
@@ -218,6 +222,9 @@ if TYPE_CHECKING:
 
 TESTDB_ENV = Path(__file__).resolve().parent / "testdb.env"
 PSQL_WRAPPER_DIR = Path(__file__).resolve().parent / "bin"
+# Debian/Ubuntu (PGDG) install the real client binaries under <root>/<major>/bin;
+# /usr/bin/psql there is a Perl dispatcher that costs a startup per call.
+PGDG_BIN_ROOT = Path("/usr/lib/postgresql")
 STACK_ENV_NAME = ".testdb.env"
 NOT_RUNNING = "test stack not running: make test-stack-up"
 
@@ -1077,10 +1084,25 @@ def psql_major(
     return match[1] if match else None
 
 
+def pgdg_bin_dir(pg_major: str, pgdg_root: Path = PGDG_BIN_ROOT) -> Path:
+    """Return the directory a PGDG package installs PG_MAJOR's client binaries in."""
+    return pgdg_root / pg_major / "bin"
+
+
 def psql_path_prefix(
-    run: Callable[[Sequence[str], float | None], CommandResult], path: str, pg_major: str
+    run: Callable[[Sequence[str], float | None], CommandResult],
+    path: str,
+    pg_major: str,
+    pgdg_root: Path = PGDG_BIN_ROOT,
 ) -> Path | None:
-    """Return the wrapper dir to prepend to ``path``, or None when a host psql fits."""
+    """Return the dir to prepend to ``path``, or None when the host psql on it fits.
+
+    The PGDG bin dir of ``pg_major`` wins when its psql reports that major; else
+    None when the first psql on ``path`` does; else the wrapper dir.
+    """
+    pgdg = pgdg_bin_dir(pg_major, pgdg_root)
+    if (pgdg / "psql").is_file() and psql_major(run, str(pgdg / "psql")) == pg_major:
+        return pgdg
     host = _host_psql(path)
     if host is not None and psql_major(run, host) == pg_major:
         return None
@@ -1088,9 +1110,15 @@ def psql_path_prefix(
 
 
 def cmd_psql_path(env_file: Path) -> int:
-    """Print the wrapper dir when PATH lacks a host psql of PG_MAJOR."""
+    """Print the dir to prepend to PATH so ``psql`` is one of PG_MAJOR, if any."""
     pins = load_pins(env_file)
-    prefix = psql_path_prefix(run_command, os.environ.get("PATH", ""), _pg_major(pins, env_file))
+    pg_major = _pg_major(pins, env_file)
+    prefix = psql_path_prefix(run_command, os.environ.get("PATH", ""), pg_major, PGDG_BIN_ROOT)
+    if prefix == PSQL_WRAPPER_DIR:
+        sys.stderr.write(
+            f"testdb: no host psql {pg_major}; using the docker wrapper (slow pre-push);"
+            f" install postgresql-client-{pg_major}\n"
+        )
     if prefix is not None:
         sys.stdout.write(f"{prefix}\n")
     return EXIT_OK
@@ -1638,7 +1666,7 @@ def reset_runtime(ctx: Context, targets: Sequence[PgTarget]) -> ResetRuntime:
     def version_run(argv: Sequence[str], timeout: float | None) -> CommandResult:
         return ctx.run_env(argv, timeout, ctx.environ, None)
 
-    prefix = psql_path_prefix(version_run, path, pg_major)
+    prefix = psql_path_prefix(version_run, path, pg_major, PGDG_BIN_ROOT)
     if prefix is not None:
         path = os.pathsep.join(p for p in (str(prefix), path) if p)
     psql = shutil.which("psql", path=path) if prefix is None else str(prefix / "psql")

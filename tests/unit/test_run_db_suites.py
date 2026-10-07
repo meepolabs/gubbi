@@ -244,6 +244,36 @@ def test_required_job_variables_are_enforced(name: str) -> None:
         runner.check_required_env(environ)
 
 
+def _fake_controller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, body: str) -> None:
+    script = tmp_path / "testdb.py"
+    script.write_text(f"import sys\n{body}\n", encoding="ascii")
+    monkeypatch.setattr(runner, "TESTDB_PY", script)
+
+
+def test_psql_path_relays_the_controller_hint_to_stderr(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _fake_controller(
+        tmp_path,
+        monkeypatch,
+        "sys.stderr.write('testdb: hint\\n'); sys.stdout.write('/wrapper/bin\\n')",
+    )
+
+    path = runner.psql_path({"PATH": "/usr/bin"})
+
+    assert path == "/wrapper/bin:/usr/bin"
+    assert capsys.readouterr().err == "testdb: hint\n"
+
+
+def test_psql_path_raises_when_the_controller_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_controller(tmp_path, monkeypatch, "sys.stderr.write('bad pin\\n'); sys.exit(2)")
+
+    with pytest.raises(runner.ConfigError, match="psql-path failed: bad pin"):
+        runner.psql_path({"PATH": "/usr/bin"})
+
+
 # ---------------------------------------------------------------------------
 # Reset command
 # ---------------------------------------------------------------------------
