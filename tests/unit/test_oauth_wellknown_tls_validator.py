@@ -84,13 +84,22 @@ def _wellknown_route_present(app: FastAPI) -> bool:
 class TestModeThreeDeployedRejectsNonHttps:
     """Deployed Mode-3 hosted: validator runs, non-https URLs raise ValueError."""
 
-    def test_non_https_authorization_server_raises(self) -> None:
+    @pytest.mark.parametrize(
+        "server_url",
+        [
+            pytest.param("http://evil.example.com", id="non_https_authorization_server"),
+            pytest.param("http://localhost:4444", id="http_loopback_rejected_inside_gate"),
+        ],
+    )
+    def test_non_https_authorization_server_raises(self, server_url: str) -> None:
         """Mode 3 + production + http authorization server -> ValueError.
 
-        This is the headline case: a misconfigured Mode-3 deploy that
-        published a non-TLS authorization server would let MCP clients
-        carry credentials to it cleartext. The validator must reject at
-        lifespan setup so the misconfig never reaches a real client.
+        A misconfigured Mode-3 deploy that published a non-TLS authorization
+        server would let MCP clients carry credentials to it cleartext. The
+        ``http_loopback_rejected_inside_gate`` row pins that there is no
+        http-loopback allowlist inside the deployed Mode-3 gate: legitimate
+        hosted Mode-3 never runs Hydra on loopback, so a loopback URL here
+        means a deploy mistake or a config routing through a local interceptor.
         """
         # Arrange
         settings = _make_settings()
@@ -98,39 +107,28 @@ class TestModeThreeDeployedRejectsNonHttps:
 
         # Act + Assert
         with pytest.raises(ValueError, match="non-https"):
-            register(app, settings, [AnyHttpUrl("http://evil.example.com")])
+            register(app, settings, [AnyHttpUrl(server_url)])
         assert not _wellknown_route_present(app), (
             "Validator failed but route was inserted -- registration "
             "must abort before insertion when validation raises."
         )
 
-    def test_loopback_authorization_server_raises_inside_gate(self) -> None:
-        """Mode 3 + production + http://localhost authorization server -> ValueError.
+    @pytest.mark.parametrize(
+        "server_url",
+        [
+            pytest.param("https://localhost:4444", id="localhost"),
+            pytest.param("https://127.0.0.1:4444", id="ipv4_127_0_0_1"),
+            pytest.param("https://[::1]:4444", id="ipv6"),
+        ],
+    )
+    def test_https_loopback_authorization_server_raises(self, server_url: str) -> None:
+        """Mode 3 + production + https-wrapped loopback -> ValueError.
 
-        Pins the security-driven decision to reject loopback inside the
-        deployed Mode-3 gate (even though it kernel-loopback safe).
-        Legitimate hosted Mode-3 never runs Hydra on loopback, so a
-        loopback URL here means a deploy mistake or compromised config
-        routing through a local interceptor.
-        """
-        # Arrange
-        settings = _make_settings()
-        app = FastAPI()
-
-        # Act + Assert
-        with pytest.raises(ValueError, match="non-https"):
-            register(app, settings, [AnyHttpUrl("http://localhost:4444")])
-        assert not _wellknown_route_present(app)
-
-    def test_https_loopback_authorization_server_raises(self) -> None:
-        """Mode 3 + production + https://localhost -> ValueError.
-
-        Closes the gap where the validator's error message advertised
-        loopback rejection but ``_is_https`` alone admitted any
-        ``https://localhost*`` URL. A hosted Mode-3 deploy that publishes
-        an https-wrapped loopback authorization server is still routing
-        credential traffic through the local interface -- exactly the
-        downgrade vector the gate exists to block.
+        ``_is_https`` alone admits any ``https://<loopback>`` URL; a hosted
+        Mode-3 deploy publishing one still routes credential traffic through
+        the local interface. The rows cover the ``localhost`` hostname, the
+        IPv4 dotted quad, and the bracketed IPv6 form that ``urlparse``
+        exposes as ``parsed.hostname == "::1"``.
         """
         # Arrange
         settings = _make_settings()
@@ -138,39 +136,7 @@ class TestModeThreeDeployedRejectsNonHttps:
 
         # Act + Assert
         with pytest.raises(ValueError, match="loopback"):
-            register(app, settings, [AnyHttpUrl("https://localhost:4444")])
-        assert not _wellknown_route_present(app)
-
-    def test_https_loopback_127_0_0_1_raises(self) -> None:
-        """Mode 3 + production + https://127.0.0.1 -> ValueError.
-
-        IPv4 loopback companion to ``test_https_loopback_authorization_server_raises``;
-        pins that the loopback rejection covers the dotted-quad form as
-        well as the ``localhost`` hostname.
-        """
-        # Arrange
-        settings = _make_settings()
-        app = FastAPI()
-
-        # Act + Assert
-        with pytest.raises(ValueError, match="loopback"):
-            register(app, settings, [AnyHttpUrl("https://127.0.0.1:4444")])
-        assert not _wellknown_route_present(app)
-
-    def test_https_loopback_ipv6_raises(self) -> None:
-        """Mode 3 + production + https://[::1] -> ValueError.
-
-        IPv6 loopback companion; pins that ``_is_loopback_host``
-        recognises the bracketed-IPv6 form that ``urlparse`` exposes via
-        ``parsed.hostname == "::1"``.
-        """
-        # Arrange
-        settings = _make_settings()
-        app = FastAPI()
-
-        # Act + Assert
-        with pytest.raises(ValueError, match="loopback"):
-            register(app, settings, [AnyHttpUrl("https://[::1]:4444")])
+            register(app, settings, [AnyHttpUrl(server_url)])
         assert not _wellknown_route_present(app)
 
     def test_https_authorization_server_passes(self) -> None:
@@ -264,39 +230,26 @@ class TestValidatorBypass:
         # Assert
         assert _wellknown_route_present(app)
 
-    def test_self_host_mode_2_non_tls_passes(self) -> None:
-        """Self-host Mode 2 (production + password, no Hydra) on a LAN URL.
+    @pytest.mark.parametrize(
+        "password_hash",
+        [
+            pytest.param("$argon2id$dummy", id="self_host_mode_2"),
+            pytest.param("", id="self_host_mode_1"),
+        ],
+    )
+    def test_self_host_non_tls_passes(self, password_hash: str) -> None:
+        """Self-host (production, no Hydra) on a LAN URL -> validator skipped.
 
-        Operator deploys gubbi on their home server at e.g.
-        ``http://192.168.1.10:8100``. Without ``hydra_admin_url`` the
-        validator must skip even though ``is_deployed`` is True.
+        Mode 2 sets a password; Mode 1 is the minimal API-key-only deploy.
+        The operator runs gubbi at e.g. ``http://192.168.1.10:8100``; without
+        ``hydra_admin_url`` the validator must skip even though
+        ``is_deployed`` is True.
         """
         # Arrange
         settings = _make_settings(
             app_env="production",
             hydra_admin_url="",
-            password_hash="$argon2id$dummy",
-            api_key="x" * 32,
-            operator_email="op@example.com",
-        )
-        app = FastAPI()
-
-        # Act
-        register(app, settings, [AnyHttpUrl("http://192.168.1.10:8100")])
-
-        # Assert
-        assert _wellknown_route_present(app)
-
-    def test_self_host_mode_1_non_tls_passes(self) -> None:
-        """Self-host Mode 1 (production + API-key only, no Hydra, no password).
-
-        The minimal CLI-only deploy. Same LAN reasoning as Mode 2.
-        """
-        # Arrange
-        settings = _make_settings(
-            app_env="production",
-            hydra_admin_url="",
-            password_hash="",
+            password_hash=password_hash,
             api_key="x" * 32,
             operator_email="op@example.com",
         )
