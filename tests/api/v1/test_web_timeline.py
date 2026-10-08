@@ -276,12 +276,28 @@ class TestWebTimelineValidation:
             )
         assert resp.status_code == 401
 
-    async def test_missing_date_params_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """date_from / date_to are required -> 422 when absent."""
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({}, id="missing_date_params"),
+            pytest.param(
+                {"date_from": "2026-06-01", "date_to": "2026-06-30", "bucket": "week"},
+                id="bad_bucket",
+            ),
+        ],
+    )
+    async def test_query_constraint_violation_returns_422(
+        self, app_pool: asyncpg.Pool, params: dict[str, str]
+    ) -> None:
+        """Required date_from / date_to absent, or bucket outside {day, month} -> 422."""
         app = _make_app(app_pool, auth_user_id=_USER_A)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(TIMELINE_ENDPOINT, headers={"X-Auth-User-Id": str(_USER_A)})
+            resp = await ac.get(
+                TIMELINE_ENDPOINT,
+                params=params,
+                headers={"X-Auth-User-Id": str(_USER_A)},
+            )
         assert resp.status_code == 422
 
     async def test_invalid_date_format_returns_422(self, app_pool: asyncpg.Pool) -> None:
@@ -316,22 +332,6 @@ class TestWebTimelineValidation:
             resp = await ac.get(
                 TIMELINE_ENDPOINT,
                 params={"date_from": "2025-01-01", "date_to": "2026-12-31"},
-                headers={"X-Auth-User-Id": str(_USER_A)},
-            )
-        assert resp.status_code == 422
-
-    async def test_bad_bucket_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """bucket outside {day, month} -> 422 (Literal constraint)."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(
-                TIMELINE_ENDPOINT,
-                params={
-                    "date_from": "2026-06-01",
-                    "date_to": "2026-06-30",
-                    "bucket": "week",
-                },
                 headers={"X-Auth-User-Id": str(_USER_A)},
             )
         assert resp.status_code == 422

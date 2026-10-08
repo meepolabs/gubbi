@@ -291,26 +291,21 @@ class TestWebConversationsValidation:
             resp = await ac.get(LIST_ENDPOINT)
         assert resp.status_code == 401
 
-    async def test_limit_over_max_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """limit above the 100 cap -> 422 (Pydantic Query constraint)."""
+    @pytest.mark.parametrize(
+        "limit",
+        [
+            pytest.param(101, id="limit_over_max"),
+            pytest.param(0, id="limit_zero"),
+        ],
+    )
+    async def test_out_of_range_limit_returns_422(self, app_pool: asyncpg.Pool, limit: int) -> None:
+        """limit outside the Query bounds 1..100 -> 422."""
         app = _make_app(app_pool, auth_user_id=_USER_A)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get(
                 LIST_ENDPOINT,
-                params={"limit": 101},
-                headers={"X-Auth-User-Id": str(_USER_A)},
-            )
-        assert resp.status_code == 422
-
-    async def test_limit_zero_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """limit below 1 -> 422."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(
-                LIST_ENDPOINT,
-                params={"limit": 0},
+                params={"limit": limit},
                 headers={"X-Auth-User-Id": str(_USER_A)},
             )
         assert resp.status_code == 422

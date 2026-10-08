@@ -320,28 +320,22 @@ class TestWebEntriesValidation:
             resp = await ac.post(MOVE_ENDPOINT, json={"entry_ids": [1], "topic_id": 1})
         assert resp.status_code == 401
 
-    async def test_limit_over_max_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """limit above the 100 cap -> 422."""
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({"limit": 101}, id="limit_over_max"),
+            pytest.param({"limit": 0}, id="limit_zero"),
+            pytest.param({"sort": "sideways"}, id="bad_sort"),
+        ],
+    )
+    async def test_invalid_list_query_returns_422(
+        self, app_pool: asyncpg.Pool, params: dict[str, str | int]
+    ) -> None:
+        """A list query param outside its Query constraint (limit 1..100, sort pattern) -> 422."""
         app = _make_app(app_pool, auth_user_id=_USER_A)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(ENTRIES_ENDPOINT, params={"limit": 101}, headers=_HDR_A)
-        assert resp.status_code == 422
-
-    async def test_limit_zero_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """limit below 1 -> 422."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(ENTRIES_ENDPOINT, params={"limit": 0}, headers=_HDR_A)
-        assert resp.status_code == 422
-
-    async def test_bad_sort_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """An unrecognized sort value -> 422 (Query pattern constraint)."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(ENTRIES_ENDPOINT, params={"sort": "sideways"}, headers=_HDR_A)
+            resp = await ac.get(ENTRIES_ENDPOINT, params=params, headers=_HDR_A)
         assert resp.status_code == 422
 
     async def test_move_over_max_ids_returns_422(self, app_pool: asyncpg.Pool) -> None:

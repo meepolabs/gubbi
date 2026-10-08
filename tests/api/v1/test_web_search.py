@@ -255,58 +255,26 @@ class TestWebSearchValidation:
             resp = await ac.get(SEARCH_ENDPOINT, params={"q": "anything"})
         assert resp.status_code == 401
 
-    async def test_missing_q_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """Required ``q`` absent -> 422."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(SEARCH_ENDPOINT, headers={"X-Auth-User-Id": str(_USER_A)})
-        assert resp.status_code == 422
-
-    async def test_empty_q_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """Empty ``q`` (min_length 1) -> 422."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(
-                SEARCH_ENDPOINT,
-                params={"q": ""},
-                headers={"X-Auth-User-Id": str(_USER_A)},
-            )
-        assert resp.status_code == 422
-
-    async def test_q_over_max_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """``q`` over 2000 chars -> 422."""
+    @pytest.mark.parametrize(
+        "params",
+        [
+            pytest.param({}, id="missing_q"),
+            pytest.param({"q": ""}, id="empty_q"),
+            pytest.param({"q": "x" * 2001}, id="q_over_max"),
+            pytest.param({"q": "x", "limit": 51}, id="limit_over_max"),
+            pytest.param({"q": "x", "limit": 0}, id="limit_zero"),
+        ],
+    )
+    async def test_invalid_query_params_return_422(
+        self, app_pool: asyncpg.Pool, params: dict[str, str | int]
+    ) -> None:
+        """``q`` (required, 1..2000 chars) or limit (1..50) outside its Query constraint -> 422."""
         app = _make_app(app_pool, auth_user_id=_USER_A)
         transport = ASGITransport(app=app)
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get(
                 SEARCH_ENDPOINT,
-                params={"q": "x" * 2001},
-                headers={"X-Auth-User-Id": str(_USER_A)},
-            )
-        assert resp.status_code == 422
-
-    async def test_limit_over_max_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """limit above the 50 cap -> 422 (Pydantic Query constraint)."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(
-                SEARCH_ENDPOINT,
-                params={"q": "x", "limit": 51},
-                headers={"X-Auth-User-Id": str(_USER_A)},
-            )
-        assert resp.status_code == 422
-
-    async def test_limit_zero_returns_422(self, app_pool: asyncpg.Pool) -> None:
-        """limit below 1 -> 422."""
-        app = _make_app(app_pool, auth_user_id=_USER_A)
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as ac:
-            resp = await ac.get(
-                SEARCH_ENDPOINT,
-                params={"q": "x", "limit": 0},
+                params=params,
                 headers={"X-Auth-User-Id": str(_USER_A)},
             )
         assert resp.status_code == 422

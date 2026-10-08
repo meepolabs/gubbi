@@ -96,23 +96,19 @@ def client_fx(monkeypatch: pytest.MonkeyPatch) -> AsyncClient:
     return AsyncClient(transport=transport, base_url="http://test")
 
 
-async def test_entries_bad_date_from_returns_422(client_fx: AsyncClient) -> None:
-    """A malformed date_from on /entries yields 422, not 500."""
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({"date_from": "not-a-date"}, id="bad_date_from"),
+        pytest.param({"date_to": "2026-13-99"}, id="bad_date_to"),
+    ],
+)
+async def test_entries_bad_date_returns_422(client_fx: AsyncClient, params: dict[str, str]) -> None:
+    """A malformed date_from / date_to on /entries yields 422, not 500."""
     async with client_fx as client:
         resp = await client.get(
             f"{API_PREFIX}/entries",
-            params={"date_from": "not-a-date"},
-            headers={"X-Auth-User-Id": str(_USER)},
-        )
-    assert resp.status_code == 422
-
-
-async def test_entries_bad_date_to_returns_422(client_fx: AsyncClient) -> None:
-    """A malformed date_to on /entries yields 422, not 500."""
-    async with client_fx as client:
-        resp = await client.get(
-            f"{API_PREFIX}/entries",
-            params={"date_to": "2026-13-99"},
+            params=params,
             headers={"X-Auth-User-Id": str(_USER)},
         )
     assert resp.status_code == 422
