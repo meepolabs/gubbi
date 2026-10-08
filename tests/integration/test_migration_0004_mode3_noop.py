@@ -13,6 +13,7 @@ journal_admin, which exist there; the disposable cluster must stay free of them.
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 import sys
@@ -61,6 +62,11 @@ def _upgrade_head_without_operator_email(dsn: str) -> subprocess.CompletedProces
     )
 
 
+async def _migrate_off_the_loop(dsn: str) -> subprocess.CompletedProcess[str]:
+    """Run the blocking migration in a worker thread so the shared session loop keeps serving."""
+    return await asyncio.to_thread(_upgrade_head_without_operator_email, dsn)
+
+
 @pytest_asyncio.fixture(scope="module", loop_scope="session")
 async def mode3_database() -> AsyncIterator[Mode3Database]:
     """A per-module database migrated to head in Mode 3, dropped on teardown.
@@ -83,7 +89,7 @@ async def mode3_database() -> AsyncIterator[Mode3Database]:
                 await setup.execute("CREATE EXTENSION IF NOT EXISTS vector")
             finally:
                 await setup.close()
-            yield Mode3Database(dsn=dsn, upgrade=_upgrade_head_without_operator_email(dsn))
+            yield Mode3Database(dsn=dsn, upgrade=await _migrate_off_the_loop(dsn))
         finally:
             await admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
     finally:
@@ -126,3 +132,25 @@ async def test_mode3_noop_no_email(mode3_database: Mode3Database) -> None:
     assert row["is_nullable"] == "NO", (
         "entries.user_id is nullable but must be NOT NULL -- Phase 5 did not run"
     )
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_the_migration_subprocess_runs_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loops_seen: list[bool] = []
+
+    def record_loop(dsn: str) -> subprocess.CompletedProcess[str]:
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            loops_seen.append(False)
+        else:
+            loops_seen.append(True)
+        return subprocess.CompletedProcess([dsn], 0, "", "")
+
+    monkeypatch.setattr(sys.modules[__name__], "_upgrade_head_without_operator_email", record_loop)
+
+    await _migrate_off_the_loop("postgresql://unused")
+
+    assert loops_seen == [False], "the migration subprocess ran on the event loop thread"
