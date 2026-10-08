@@ -187,11 +187,12 @@ jobs:
       # that construct a real cipher from the env loader. Pre-encoded 32-byte
       # key that base64-decodes to 32 bytes of 0x01 -- reproducible, not secret.
       JOURNAL_ENCRYPTION_MASTER_KEY_V1: AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE=
-      # The 1 MB < 100 ms AES-GCM perf test (tests/unit/test_crypto.py) is
-      # already skipped by default via the ``slow`` pytest marker. If we ever
-      # want CI to exercise it, opt in with ``-m slow`` and add a CI-only
-      # relaxation; shared GitHub runners sometimes emulate AES and can
-      # exceed 100 ms even for correct implementations.
+      # The 1 MB < 100 ms AES-GCM perf test (tests/unit/test_crypto.py) carries
+      # the ``slow`` marker, but no lane deselects ``slow``: it runs in the unit
+      # lane above and again in this job's coverage stage, which includes
+      # tests/unit. Shared GitHub runners sometimes emulate AES and can exceed
+      # 100 ms even for correct implementations; if it flakes there, deselect
+      # it with ``-m "not slow"`` rather than relaxing the bound.
 
     steps:
       - name: Checkout

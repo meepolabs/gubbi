@@ -28,7 +28,7 @@ from gubbi.main import app
 
 pytestmark = pytest.mark.unit
 
-SNAPSHOT_PATH = Path(__file__).parent / "fixtures" / "openapi_snapshot.json"
+SNAPSHOT_PATH = Path(__file__).parent.parent / "fixtures" / "openapi_snapshot.json"
 
 _REGEN_INSTRUCTIONS = (
     "The live OpenAPI schema has drifted from the committed snapshot.\n"
