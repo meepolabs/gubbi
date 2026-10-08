@@ -287,7 +287,10 @@ def test_reset_command_uses_gubbis_profile(ci: bool, has_ci_flag: bool) -> None:
     assert argv[1:3] == [str(runner.TESTDB_PY), "reset"]
     assert ("--ci" in argv) is has_ci_flag
     assert argv[migrate:] == ["--migrate", ".", "poetry", "run", "alembic", "upgrade", "head"]
-    assert "admin_createrole=true" in argv
+    assert [argv[i + 1] for i, a in enumerate(argv) if a == "--bootstrap-var"] == [
+        "admin_createrole=true",
+        "with_otel_ro=true",
+    ]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--role"] == ["pg", "pg-disposable"]
     assert [argv[i + 1] for i, a in enumerate(argv) if a == "--db"] == [
         "journal_test",

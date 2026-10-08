@@ -3,7 +3,7 @@
 Covers:
 - Empty state: no jobs -> 200 with all-zero / null response
 - Mixed statuses: pending + running + completed + failed -> correct counts
-- Auth: missing token -> 401; token without journal:read -> 403
+- Auth: missing token -> 401
 - RLS isolation: user A's jobs invisible to user B
 - Cache-Control header is no-store
 
@@ -262,62 +262,6 @@ class TestExtractionMeAuth:
         async with AsyncClient(transport=transport, base_url="http://test") as ac:
             resp = await ac.get(ENDPOINT)
         assert resp.status_code == 401
-
-    async def test_valid_api_key_without_journal_read_returns_403(
-        self, app_pool: asyncpg.Pool
-    ) -> None:
-        """API key auth with no scopes -> 403 (journal:read required)."""
-        # Build an app that uses an API key strategy with an empty scope set.
-        # The easiest way: use the settings-based api_key strategy which
-        # grants the configured scopes. If we want to test 403, we need a
-        # token that authenticates but lacks journal:read.
-        #
-        # The test harness trusts X-Auth-User-Id when trust_gateway=True and
-        # grants all scopes to the operator. To force a missing-scope 403
-        # we create an app with a real API key strategy (trust_gateway=False)
-        # and call with the correct API key -- the api-key strategy grants
-        # scopes based on Settings.auth.scopes. If Settings has no scopes
-        # for the key, check_scope returns False.
-        #
-        # In practice, the require_scope("journal:read") dep rejects a token
-        # that has no scopes. We simulate this by passing an unsupported
-        # scope check against the configured key.
-        #
-        # Simplest approach: trust_gateway=True but pass an X-Auth-User-Id
-        # for a user that does not exist in users table -> authentication
-        # succeeds (gateway trust) but the operator_user_id is set to None so
-        # the gateway header is the only source. That still resolves a user_id.
-        # Actually the 403 path needs a token with a *different* scope set.
-        #
-        # Use the real API key strategy: pass Bearer <api_key> but wrap the
-        # app so the api-key strategy returns scopes=frozenset() (no scopes).
-        # This is tested via the actual require_scope() dependency.
-        #
-        # Simplest reliable path: mock require_scope to raise 403 is wrong.
-        # Instead, call the endpoint with a valid Bearer token that has only
-        # 'journal:write' scope, not 'journal:read'. The Hydra path is not
-        # available in unit tests. Use the API key strategy directly and
-        # patch the scope resolution.
-        #
-        # For this test suite we use the API key strategy. When the api_key
-        # matches, ``gubbi/auth/strategies.py`` grants scopes from the
-        # settings. We override to grant only ``journal:write`` by overriding
-        # the settings scopes field if available, or accept that this coverage
-        # is adequately tested at the unit-auth layer.
-        #
-        # Pragmatic: verify that calling with an entirely wrong api key (not
-        # even authenticating) does yield 401, not 403. The 403 path is hit
-        # when auth succeeds but scope is wrong. We document this as a
-        # limitations note below and rely on the auth module unit tests for
-        # the 403 case.
-        #
-        # Actually let's keep it simple: verify 401 for no-creds, and
-        # document that 403 is covered by require_scope unit tests.
-        pytest.skip(
-            "403 path (authenticated but lacking journal:read scope) is covered "
-            "by require_scope unit tests in tests/auth/. Skipping here to avoid "
-            "duplicating auth-layer machinery."
-        )
 
 
 # ---------------------------------------------------------------------------

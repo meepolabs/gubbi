@@ -84,7 +84,12 @@ PROFILE = (
     "--db",
     "journal_rls_test",
 )
-RESET_OPTIONS = ("--bootstrap-var", "admin_createrole=true")
+RESET_OPTIONS = (
+    "--bootstrap-var",
+    "admin_createrole=true",
+    "--bootstrap-var",
+    "with_otel_ro=true",
+)
 MIGRATION = (
     "--migrate-dsn-env",
     "JOURNAL_DB_MIGRATION_URL",

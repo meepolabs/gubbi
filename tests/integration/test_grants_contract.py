@@ -130,10 +130,9 @@ async def test_otel_ro_posture(admin_pool: asyncpg.Pool) -> None:
     """otel_ro role exists, LOGIN, member of pg_monitor, no data-table SELECT.
 
     otel_ro is bootstrapped out-of-band by the deploy/testbench init scripts,
-    NOT by the squashed baseline migration. In gubbi-only CI (the raw Postgres
-    service that only pre-creates journal_app/journal_admin) the role is absent,
-    so skip cleanly there; the testbench Tier-2 run, which bootstraps otel_ro,
-    exercises this posture contract.
+    NOT by the squashed baseline migration. tools/run_db_suites.py resets the
+    test clusters with bootstrap.sql's ``with_otel_ro`` set, so the DB lane
+    always has the role; the skip only covers an ad hoc database without it.
     """
     failures: list[str] = []
 
@@ -143,8 +142,8 @@ async def test_otel_ro_posture(admin_pool: asyncpg.Pool) -> None:
         )
         if not exists:
             pytest.skip(
-                "otel_ro role not present -- bootstrapped by testbench/prod init "
-                "scripts, not the squashed baseline; posture is asserted in Tier-2"
+                "otel_ro role not present -- reset the database with "
+                "tools/run_db_suites.py, which bootstraps it"
             )
 
         can_login = await conn.fetchval(
