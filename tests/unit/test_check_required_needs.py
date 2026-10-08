@@ -1,13 +1,14 @@
-"""Tests for ``tools/check_required_needs.py`` and the step that runs it in ``required``.
+"""Wiring tests for ``tools/check_required_needs.py`` against this repo's workflow.
 
-The checker is the branch-protection guard, so every layout it does not accept
-must fail closed, and its line parse of the real workflow is welded to a
-PyYAML parse here: a disagreement would mean it checks a different job set
-from the one GitHub runs.
+The checker's full behavior suite lives with its canonical copy in gubbi-common
+(``tests/tools/test_check_required_needs.py``). This file pins this repo's copy
+to those bytes, welds the checker's line parse of the real workflow to a PyYAML
+parse, and pins the step that runs it inside ``required``.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import shlex
 import subprocess
@@ -27,6 +28,7 @@ _ROOT = Path(__file__).resolve().parents[2]
 _WORKFLOW = ".github/workflows/ci.yml"
 
 _TOOL = _ROOT / "tools" / "check_required_needs.py"
+_TOOL_SHA256 = "0a783a673dc82818ff16e0eb2098536f5532c536a71a7f19d97f6e6d899c2159"
 _NEEDS_STEP = "needs lists every other job"
 _VERDICT_STEP = "every required job succeeded"
 _COMMAND = ["python3", "tools/check_required_needs.py", "--self-test", _WORKFLOW]
@@ -43,82 +45,28 @@ def _load_checker() -> ModuleType:
 
 checker = _load_checker()
 
-# Every accepted variation in one valid workflow: trailing comments, blank and
-# comment lines, another job with its own block-list `needs`, and block-scalar
-# bodies holding text (a tab-indented line, `needs:`, `- ghost`, `ghost:`) that
-# would be a layout error or a phantom entry if it were read as structure.
-_COMPLETE = """\
-name: ci  # fixture
-on: push
-
-jobs:  # every job
-  lint:  # first lane
-    runs-on: ubuntu-latest
-    steps:
-      - run: |
-          needs:
-            - ghost
-          \tprintf 'tab-indented shell'
-          ghost:
-      - run: >-
-          folded
-
-  # a comment between jobs
-  tests:
-    needs:
-      - lint
-    uses: ./.github/workflows/tests.yml
-
-  required:  # the aggregator
-    if: ${{ always() }}
-    needs:  # every other job
-      - lint  # first lane
-
-      # a comment inside needs
-      - tests
-    steps:
-      - run: "true"
-"""
-
-_REQUIRED_TESTS = "      - tests\n"
-
-
-def _replace(old: str, new: str, source: str = _COMPLETE) -> str:
-    assert source.count(old) == 1, f"{old!r} is not unique in the fixture"
-    return source.replace(old, new)
-
-
-def _line_of(source: str, text: str) -> int:
-    matches = [no for no, line in enumerate(source.splitlines(), start=1) if line == text]
-    assert len(matches) == 1, f"{text!r} is not one line of the fixture"
-    return matches[0]
-
 
 def _names(entries: list[Any]) -> list[str]:
     return [str(entry.name) for entry in entries]
 
 
+# -- this copy is the canonical one ---------------------------------------------
+
+
+def test_the_checker_is_byte_identical_to_the_canonical_copy() -> None:
+    """The behavior suite runs only against the canonical bytes, so a drifted copy is untested."""
+    digest = hashlib.sha256(_TOOL.read_bytes()).hexdigest()
+
+    assert digest == _TOOL_SHA256, (
+        "tools/check_required_needs.py differs from the canonical copy. Edit "
+        "gubbi-common tools/check_required_needs.py first (its full suite is "
+        "tests/tools/test_check_required_needs.py there), copy the new bytes into "
+        "every repo that carries the checker, then update _TOOL_SHA256 in each copy "
+        "of this test."
+    )
+
+
 # -- what the parse reads -------------------------------------------------------
-
-
-def test_a_complete_workflow_has_no_problems() -> None:
-    assert checker.find_problems(_COMPLETE) == []
-
-
-def test_block_scalar_bodies_and_comments_are_never_read_as_structure() -> None:
-    workflow = checker.parse_workflow(_COMPLETE)
-
-    assert _names(workflow.jobs) == ["lint", "tests", "required"]
-    assert _names(workflow.needs) == ["lint", "tests"]
-
-
-def test_the_fixture_parses_the_same_with_pyyaml() -> None:
-    """The fixture is a valid workflow, so its accepted shapes are ones GitHub accepts."""
-    parsed = yaml.safe_load(_COMPLETE)["jobs"]
-    workflow = checker.parse_workflow(_COMPLETE)
-
-    assert _names(workflow.jobs) == list(parsed)
-    assert _names(workflow.needs) == parsed["required"]["needs"]
 
 
 def test_the_line_parse_agrees_with_pyyaml_on_the_real_workflow() -> None:
@@ -137,193 +85,15 @@ def test_the_real_workflow_is_complete() -> None:
     assert checker.find_problems((_ROOT / _WORKFLOW).read_text(encoding="utf-8")) == []
 
 
-# -- findings: exit 1 -----------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("source", "line", "message"),
-    [
-        pytest.param(
-            _replace(_REQUIRED_TESTS, ""),
-            "  tests:",
-            "job `tests` is missing from `required.needs`",
-            id="missing",
-        ),
-        pytest.param(
-            _replace(_REQUIRED_TESTS, _REQUIRED_TESTS + "      - deploy\n"),
-            "      - deploy",
-            "`deploy` in `needs` is not a job in this workflow",
-            id="unknown",
-        ),
-        pytest.param(
-            _replace(_REQUIRED_TESTS, _REQUIRED_TESTS + "      - lint  # again\n"),
-            "      - lint  # again",
-            "`lint` is listed in `needs` more than once",
-            id="duplicate",
-        ),
-        pytest.param(
-            _replace(_REQUIRED_TESTS, _REQUIRED_TESTS + "      - required\n"),
-            "      - required",
-            "`required` lists itself in `needs`",
-            id="self-listed",
-        ),
-        pytest.param(
-            "jobs:\n  required:\n    needs:\n    steps:\n      - run: x\n",
-            "  required:",
-            "`required` has no other job to aggregate",
-            id="nothing-to-aggregate",
-        ),
-    ],
-)
-def test_each_finding_is_reported_on_its_line(source: str, line: str, message: str) -> None:
-    assert checker.find_problems(source) == [f"line {_line_of(source, line)}: {message}"]
-
-
-# -- layouts that fail closed: exit 2 -------------------------------------------
-
-
-@pytest.mark.parametrize(
-    "source",
-    [
-        pytest.param(
-            _replace(
-                '    steps:\n      - run: "true"\n',
-                '    needs:\n      - lint\n    steps:\n      - run: "true"\n',
-            ),
-            id="second-needs-key-after-a-complete-one",
-        ),
-        pytest.param(
-            _replace("\n  required:", '\n  "ungated":\n    runs-on: ubuntu-latest\n\n  required:'),
-            id="double-quoted-job-key-after-a-job",
-        ),
-        pytest.param(
-            _replace("\n  required:", "\n  'ungated':\n    runs-on: ubuntu-latest\n\n  required:"),
-            id="single-quoted-job-key-after-a-job",
-        ),
-        pytest.param(
-            _replace(
-                "    needs:  # every other job\n      - lint  # first lane\n",
-                "    needs: [lint, tests]\n",
-            ).replace(_REQUIRED_TESTS, ""),
-            id="flow-list-needs",
-        ),
-        pytest.param(
-            _replace(
-                "    needs:  # every other job\n      - lint  # first lane\n",
-                "    needs: lint\n",
-            ),
-            id="scalar-needs",
-        ),
-        pytest.param(_replace(_REQUIRED_TESTS, '      - "tests"\n'), id="double-quoted-entry"),
-        pytest.param(_replace(_REQUIRED_TESTS, "      - 'tests'\n"), id="single-quoted-entry"),
-        pytest.param(_replace(_REQUIRED_TESTS, "     - tests\n"), id="entry-at-five-spaces"),
-        pytest.param(_replace(_REQUIRED_TESTS, "       - tests\n"), id="entry-at-seven-spaces"),
-        pytest.param(_replace("  tests:\n", "   tests:\n"), id="job-at-three-spaces"),
-        pytest.param(_replace("    if: ${{", "\tif: ${{"), id="tab-indentation"),
-        pytest.param(_replace("    if: ${{", "    - if: ${{"), id="non-key-in-required"),
-        pytest.param(_replace("jobs:  # every job\n", "workflows:\n"), id="no-jobs-key"),
-        pytest.param(_replace("jobs:  # every job\n", '"jobs":\n'), id="quoted-jobs-key"),
-        pytest.param(_replace("  required:  # the aggregator", "  verdict:"), id="no-required-job"),
-        pytest.param(_replace("    needs:  # every other job", "    depends:"), id="no-needs-key"),
-        pytest.param(
-            _replace("    needs:  # every other job", '    "needs":'), id="quoted-needs-key"
-        ),
-        pytest.param(_COMPLETE + "  lint:\n    runs-on: ubuntu-latest\n", id="duplicate-job-id"),
-        pytest.param(_COMPLETE + "jobs:\n  extra:\n    runs-on: x\n", id="second-jobs-key"),
-        pytest.param(_COMPLETE + "- stray\n", id="non-key-after-jobs"),
-        pytest.param(
-            _replace(_REQUIRED_TESTS, "      - lint\u2028      - tests\n"), id="foreign-line-break"
-        ),
-    ],
-)
-def test_an_unaccepted_layout_fails_closed(source: str) -> None:
-    with pytest.raises(checker.LayoutError):
-        checker.find_problems(source)
-
-
-# -- the self-test --------------------------------------------------------------
-
-
-def test_the_self_test_passes_when_another_job_has_its_own_needs() -> None:
-    """Only the ``required`` block is mutated, so `tests`' own `- lint` is never dropped."""
-    assert checker.self_test_failures(_COMPLETE) == []
-
-
-def test_the_self_test_fails_a_check_that_reports_nothing(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(checker, "find_problems", lambda _source: [])
-    workflow = tmp_path / "ci.yml"
-    workflow.write_text(_COMPLETE, encoding="utf-8")
-
-    failures = checker.self_test_failures(_COMPLETE)
-
-    assert failures == [
-        f"line {_line_of(_COMPLETE, '      - lint  # first lane')}: "
-        "dropping `lint` from `needs` went unreported",
-        f"line {_line_of(_COMPLETE, '      - tests')}: dropping `tests` from `needs` went unreported",
-    ]
-    assert checker.main(["--self-test", str(workflow)]) == 1
-
-
-# -- exit codes -----------------------------------------------------------------
-
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
-        pytest.param(_COMPLETE, 0, id="complete"),
-        pytest.param(_replace(_REQUIRED_TESTS, ""), 1, id="finding"),
-        pytest.param(
-            _replace("\n  required:", '\n  "ungated":\n    runs-on: x\n\n  required:'),
-            2,
-            id="layout",
-        ),
-        pytest.param(b"jobs:\n  \xff:\n", 2, id="not-utf8"),
-    ],
-)
-def test_main_exit_code(source: str | bytes, expected: int, tmp_path: Path) -> None:
-    workflow = tmp_path / "ci.yml"
-    if isinstance(source, bytes):
-        workflow.write_bytes(source)
-    else:
-        workflow.write_text(source, encoding="utf-8")
-
-    assert checker.main(["--self-test", str(workflow)]) == expected
-
-
-def test_main_reports_an_unreadable_file_as_exit_2(tmp_path: Path) -> None:
-    assert checker.main([str(tmp_path / "absent.yml")]) == 2
-
-
-def test_main_without_a_workflow_is_a_usage_error() -> None:
-    with pytest.raises(SystemExit) as exc:
-        checker.main([])
-
-    assert exc.value.code == 2
-
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
-    [
-        pytest.param(None, 0, id="real-workflow"),
-        pytest.param(_replace(_REQUIRED_TESTS, ""), 1, id="finding"),
-    ],
-)
-def test_the_script_runs_standalone(source: str | None, expected: int, tmp_path: Path) -> None:
-    workflow = _ROOT / _WORKFLOW
-    if source is not None:
-        workflow = tmp_path / "ci.yml"
-        workflow.write_text(source, encoding="utf-8")
-
+def test_the_script_runs_standalone_on_the_real_workflow() -> None:
     result = subprocess.run(  # noqa: S603 -- this repo's own tool
-        [sys.executable, "-I", str(_TOOL), "--self-test", str(workflow)],
+        [sys.executable, "-I", str(_TOOL), "--self-test", str(_ROOT / _WORKFLOW)],
         capture_output=True,
         text=True,
         check=False,
     )
 
-    assert result.returncode == expected, result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 # -- the step that runs it inside `required` -----------------------------------

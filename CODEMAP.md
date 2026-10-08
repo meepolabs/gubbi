@@ -55,6 +55,10 @@ gubbi/
                           deployment/scripts/ holds init.sql, grants.sql,
                           restore-db.sh, verify-db-invariants.sh
   tools/                  standalone helpers (env-contract checker;
+                          check_required_needs.py, the required-needs
+                          checker the `required` CI job runs -- a byte
+                          copy of gubbi-common's, sha256-pinned by
+                          tests/unit/test_check_required_needs.py;
                           run_db_suites.py, the stdlib runner for every
                           DB-backed pytest stage CI runs: testdb reset, the
                           integration suites, the coverage gate);
