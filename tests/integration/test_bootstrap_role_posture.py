@@ -243,21 +243,30 @@ async def bootstrapped_db() -> AsyncIterator[str]:
             yield dsn
 
 
-async def test_the_app_role_holds_neither_bypassrls_nor_superuser() -> None:
-    is_superuser, bypasses_rls = await _role_flags(_APP_ROLE)
+@pytest.mark.parametrize(
+    ("role", "expected", "contract"),
+    [
+        pytest.param(
+            _APP_ROLE,
+            (False, False),
+            "NOSUPERUSER NOBYPASSRLS, or RLS does not apply to it",
+            id="app_role_neither_bypassrls_nor_superuser",
+        ),
+        pytest.param(
+            _ADMIN_ROLE,
+            (False, True),
+            "NOSUPERUSER BYPASSRLS",
+            id="admin_role_bypasses_rls_without_superuser",
+        ),
+    ],
+)
+async def test_the_deployed_role_holds_its_posture_flags(
+    role: str, expected: tuple[bool, bool], contract: str
+) -> None:
+    is_superuser, bypasses_rls = await _role_flags(role)
 
-    assert (is_superuser, bypasses_rls) == (False, False), (
-        f"{_APP_ROLE} must be NOSUPERUSER NOBYPASSRLS, or RLS does not apply to it: "
-        f"rolsuper={is_superuser} rolbypassrls={bypasses_rls}"
-    )
-
-
-async def test_the_admin_role_bypasses_rls_without_superuser() -> None:
-    is_superuser, bypasses_rls = await _role_flags(_ADMIN_ROLE)
-
-    assert (is_superuser, bypasses_rls) == (False, True), (
-        f"{_ADMIN_ROLE} must be NOSUPERUSER BYPASSRLS: "
-        f"rolsuper={is_superuser} rolbypassrls={bypasses_rls}"
+    assert (is_superuser, bypasses_rls) == expected, (
+        f"{role} must be {contract}: rolsuper={is_superuser} rolbypassrls={bypasses_rls}"
     )
 
 

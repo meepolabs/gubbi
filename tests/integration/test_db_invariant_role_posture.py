@@ -468,100 +468,77 @@ async def test_invariant_script_passes_every_role_posture_check_on_an_intact_dat
 # ---------------------------------------------------------------------------
 
 
-async def test_invariant_script_flags_a_superuser_app_role(posture_dsn: str) -> None:
-    """SUPERUSER on journal_app makes every grant and policy assertion advisory."""
+@pytest.mark.parametrize(
+    ("role", "alter_clause", "mutated", "tag", "sibling_tag"),
+    [
+        # SUPERUSER on journal_app makes every grant and policy assertion advisory.
+        pytest.param(
+            _APP_ROLE,
+            "SUPERUSER",
+            (True, False),
+            _APP_SUPERUSER_TAG,
+            _APP_BYPASSRLS_TAG,
+            id="superuser_app_role",
+        ),
+        # BYPASSRLS on journal_app turns every tenant-isolation policy into a no-op.
+        pytest.param(
+            _APP_ROLE,
+            "BYPASSRLS",
+            (False, True),
+            _APP_BYPASSRLS_TAG,
+            _APP_SUPERUSER_TAG,
+            id="bypassrls_app_role",
+        ),
+        # journal_admin needs BYPASSRLS, never SUPERUSER, which voids every ACL check.
+        pytest.param(
+            _ADMIN_ROLE,
+            "SUPERUSER",
+            (True, True),
+            _ADMIN_SUPERUSER_TAG,
+            _ADMIN_BYPASSRLS_TAG,
+            id="superuser_admin_role",
+        ),
+        # The one boolean that fails when WEAKENED: without BYPASSRLS the
+        # maintenance paths stall. A verifier that only ever asserted
+        # ``NOT rolbypassrls`` for both roles would pass the three broadening
+        # rows and still be wrong here.
+        pytest.param(
+            _ADMIN_ROLE,
+            "NOBYPASSRLS",
+            (False, False),
+            _ADMIN_BYPASSRLS_TAG,
+            _ADMIN_SUPERUSER_TAG,
+            id="admin_role_without_bypassrls",
+        ),
+    ],
+)
+async def test_invariant_script_flags_a_broken_posture_boolean(
+    posture_dsn: str,
+    role: str,
+    alter_clause: str,
+    mutated: tuple[bool, bool],
+    tag: str,
+    sibling_tag: str,
+) -> None:
+    """Each posture boolean is flagged alone; the untouched sibling stays green."""
     # Arrange
-    assert_clean_of(posture_dsn, _APP_SUPERUSER_TAG)
-    await _execute(posture_dsn, f"ALTER ROLE {_APP_ROLE} WITH SUPERUSER")
-    assert await _role_booleans(posture_dsn, _APP_ROLE) == (True, False), (
-        "the mutation must move rolsuper alone, leaving rolbypassrls false"
+    assert_clean_of(posture_dsn, tag)
+    await _execute(posture_dsn, f"ALTER ROLE {role} WITH {alter_clause}")
+    assert await _role_booleans(posture_dsn, role) == mutated, (
+        f"the mutation must move exactly one boolean of {role} to {mutated}"
     )
 
     # Act
     degraded = verifier_failure_tags(posture_dsn)
 
     # Assert
-    await _assert_still_mutated(posture_dsn, _APP_ROLE, (True, False))
-    assert _EXPECTED_POSTURE_LINES[_APP_SUPERUSER_TAG] in degraded, (
-        f"verifier did not emit the exact superuser-app diagnostic: {sorted(degraded)}"
+    await _assert_still_mutated(posture_dsn, role, mutated)
+    assert _EXPECTED_POSTURE_LINES[tag] in degraded, (
+        f"verifier did not emit the exact {tag} diagnostic: {sorted(degraded)}"
     )
-    assert not any(_APP_BYPASSRLS_TAG in tag for tag in degraded), (
-        "rolbypassrls is untouched here, so its check must stay green -- otherwise "
+    assert not any(sibling_tag in t for t in degraded), (
+        f"{sibling_tag} is untouched here, so its check must stay green -- otherwise "
         f"neither boolean is independently pinned: {sorted(degraded)}"
-    )
-
-
-async def test_invariant_script_flags_a_bypassrls_app_role(posture_dsn: str) -> None:
-    """BYPASSRLS on journal_app turns every tenant-isolation policy into a no-op."""
-    # Arrange
-    assert_clean_of(posture_dsn, _APP_BYPASSRLS_TAG)
-    await _execute(posture_dsn, f"ALTER ROLE {_APP_ROLE} WITH BYPASSRLS")
-    assert await _role_booleans(posture_dsn, _APP_ROLE) == (False, True), (
-        "the mutation must move rolbypassrls alone, leaving rolsuper false"
-    )
-
-    # Act
-    degraded = verifier_failure_tags(posture_dsn)
-
-    # Assert
-    await _assert_still_mutated(posture_dsn, _APP_ROLE, (False, True))
-    assert _EXPECTED_POSTURE_LINES[_APP_BYPASSRLS_TAG] in degraded, (
-        f"verifier did not emit the exact bypassrls-app diagnostic: {sorted(degraded)}"
-    )
-    assert not any(_APP_SUPERUSER_TAG in tag for tag in degraded), (
-        "rolsuper is untouched here, so its check must stay green -- otherwise "
-        f"neither boolean is independently pinned: {sorted(degraded)}"
-    )
-
-
-async def test_invariant_script_flags_a_superuser_admin_role(posture_dsn: str) -> None:
-    """journal_admin needs BYPASSRLS, never SUPERUSER -- the latter voids every ACL check."""
-    # Arrange
-    assert_clean_of(posture_dsn, _ADMIN_SUPERUSER_TAG)
-    await _execute(posture_dsn, f"ALTER ROLE {_ADMIN_ROLE} WITH SUPERUSER")
-    assert await _role_booleans(posture_dsn, _ADMIN_ROLE) == (True, True), (
-        "the mutation must move rolsuper alone, leaving rolbypassrls as the contract has it"
-    )
-
-    # Act
-    degraded = verifier_failure_tags(posture_dsn)
-
-    # Assert
-    await _assert_still_mutated(posture_dsn, _ADMIN_ROLE, (True, True))
-    assert _EXPECTED_POSTURE_LINES[_ADMIN_SUPERUSER_TAG] in degraded, (
-        f"verifier did not emit the exact superuser-admin diagnostic: {sorted(degraded)}"
-    )
-    assert not any(_ADMIN_BYPASSRLS_TAG in tag for tag in degraded), (
-        "the admin BYPASSRLS check is satisfied here, so it must stay green -- "
-        f"otherwise the two admin booleans are not independently pinned: {sorted(degraded)}"
-    )
-
-
-async def test_invariant_script_flags_an_admin_role_without_bypassrls(posture_dsn: str) -> None:
-    """This boolean fails when WEAKENED: without BYPASSRLS the maintenance paths stall.
-
-    The other three posture booleans are broadening failures; this one is the
-    inverse, so a verifier that only ever asserted ``NOT rolbypassrls`` for both
-    roles would pass all the broadening tests and still be wrong here.
-    """
-    # Arrange
-    assert_clean_of(posture_dsn, _ADMIN_BYPASSRLS_TAG)
-    await _execute(posture_dsn, f"ALTER ROLE {_ADMIN_ROLE} WITH NOBYPASSRLS")
-    assert await _role_booleans(posture_dsn, _ADMIN_ROLE) == (False, False), (
-        "the mutation must move rolbypassrls alone, leaving rolsuper false"
-    )
-
-    # Act
-    degraded = verifier_failure_tags(posture_dsn)
-
-    # Assert
-    await _assert_still_mutated(posture_dsn, _ADMIN_ROLE, (False, False))
-    assert _EXPECTED_POSTURE_LINES[_ADMIN_BYPASSRLS_TAG] in degraded, (
-        f"verifier did not emit the exact admin-bypassrls diagnostic: {sorted(degraded)}"
-    )
-    assert not any(_ADMIN_SUPERUSER_TAG in tag for tag in degraded), (
-        "rolsuper is untouched here, so its check must stay green -- otherwise "
-        f"neither admin boolean is independently pinned: {sorted(degraded)}"
     )
 
 
@@ -571,25 +548,41 @@ async def test_invariant_script_flags_an_admin_role_without_bypassrls(posture_ds
 
 
 @pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS"])
-async def test_invariant_script_flags_a_set_only_reachable_defeating_role(
-    posture_dsn: str, attribute: str
+@pytest.mark.parametrize(
+    ("probe_role", "grant_options", "reports_usage"),
+    [
+        # pg_has_role(journal_app, probe, 'USAGE') is FALSE across a SET-only
+        # edge, so a USAGE-only reachability test reports clean here while
+        # journal_app can still SET ROLE at will.
+        pytest.param(_SET_PROBE_ROLE, " WITH INHERIT FALSE, SET TRUE", False, id="set_only"),
+        # Neither inheritance nor SET: the right to administer the membership is
+        # enough for journal_app to give itself SET and then assume the role.
+        pytest.param(
+            _ADMIN_PROBE_ROLE,
+            " WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
+            False,
+            id="admin_only",
+        ),
+        # The default GRANT carries INHERIT and SET -- the edge a USAGE-only test
+        # does see. Pinned anyway so a walk narrowed to SET and ADMIN edges fails.
+        pytest.param(_INHERIT_PROBE_ROLE, "", True, id="inherit"),
+    ],
+)
+async def test_invariant_script_flags_a_reachable_defeating_role(
+    posture_dsn: str,
+    probe_role: str,
+    grant_options: str,
+    reports_usage: bool,
+    attribute: str,
 ) -> None:
-    """A SET-only edge grants no privileges by inheritance, yet one SET ROLE defeats RLS.
-
-    ``pg_has_role(journal_app, probe, 'USAGE')`` is FALSE across a SET-only edge,
-    so a USAGE-only reachability test reports clean here while journal_app can
-    still assume the role at will. This is the case the shortcut misses.
-    """
+    """A role journal_app can assume over a single edge is flagged with its capability."""
     # Arrange
     assert_clean_of(posture_dsn, _REACHABLE_TAG)
-    await _create_probe_role(posture_dsn, _SET_PROBE_ROLE, attribute)
-    await _execute(
-        posture_dsn,
-        f"GRANT {_SET_PROBE_ROLE} TO {_APP_ROLE} WITH INHERIT FALSE, SET TRUE",
-    )
-    assert not await _has_usage(posture_dsn, _APP_ROLE, _SET_PROBE_ROLE), (
-        "a SET-only edge must NOT report USAGE -- otherwise this case is not "
-        "exercising what a pg_has_role(USAGE) shortcut misses"
+    await _create_probe_role(posture_dsn, probe_role, attribute)
+    await _execute(posture_dsn, f"GRANT {probe_role} TO {_APP_ROLE}{grant_options}")
+    assert await _has_usage(posture_dsn, _APP_ROLE, probe_role) is reports_usage, (
+        f"the {probe_role} edge must report USAGE={reports_usage} -- otherwise this "
+        "row is not exercising the edge kind it names"
     )
 
     # Act
@@ -597,70 +590,8 @@ async def test_invariant_script_flags_a_set_only_reachable_defeating_role(
 
     # Assert
     flagged = _reachable_tags(run.tags)
-    assert flagged, f"verifier did not flag the SET-only reachable role: {sorted(run.tags)}"
-    assert all(_SET_PROBE_ROLE in tag and attribute in tag for tag in flagged), (
-        f"the diagnostic must name the reachable role and its capability: {flagged}"
-    )
-
-
-@pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS"])
-async def test_invariant_script_flags_an_admin_only_reachable_defeating_role(
-    posture_dsn: str, attribute: str
-) -> None:
-    """ADMIN authority lets journal_app GRANT itself SET, so an ADMIN edge is assumable.
-
-    Neither inheritance nor a SET option is present here: the only thing
-    journal_app holds is the right to administer the membership, which is enough
-    to give itself the SET option and then assume the role.
-    """
-    # Arrange
-    assert_clean_of(posture_dsn, _REACHABLE_TAG)
-    await _create_probe_role(posture_dsn, _ADMIN_PROBE_ROLE, attribute)
-    await _execute(
-        posture_dsn,
-        f"GRANT {_ADMIN_PROBE_ROLE} TO {_APP_ROLE} WITH ADMIN TRUE, INHERIT FALSE, SET FALSE",
-    )
-    assert not await _has_usage(posture_dsn, _APP_ROLE, _ADMIN_PROBE_ROLE), (
-        "an ADMIN-only edge must NOT report USAGE -- otherwise this case is not "
-        "exercising what a pg_has_role(USAGE) shortcut misses"
-    )
-
-    # Act
-    run = verifier_run(posture_dsn)
-
-    # Assert
-    flagged = _reachable_tags(run.tags)
-    assert flagged, f"verifier did not flag the ADMIN-only reachable role: {sorted(run.tags)}"
-    assert all(_ADMIN_PROBE_ROLE in tag and attribute in tag for tag in flagged), (
-        f"the diagnostic must name the reachable role and its capability: {flagged}"
-    )
-
-
-@pytest.mark.parametrize("attribute", ["SUPERUSER", "BYPASSRLS"])
-async def test_invariant_script_flags_an_inherit_reachable_defeating_role(
-    posture_dsn: str, attribute: str
-) -> None:
-    """The default GRANT carries INHERIT and SET, so the role is assumable and flagged.
-
-    This is the edge a USAGE-only test DOES see. It is asserted anyway so the
-    three edge kinds are pinned independently -- a regression that narrowed the
-    walk to SET and ADMIN edges only would otherwise go unnoticed.
-    """
-    # Arrange
-    assert_clean_of(posture_dsn, _REACHABLE_TAG)
-    await _create_probe_role(posture_dsn, _INHERIT_PROBE_ROLE, attribute)
-    await _execute(posture_dsn, f"GRANT {_INHERIT_PROBE_ROLE} TO {_APP_ROLE}")
-    assert await _has_usage(posture_dsn, _APP_ROLE, _INHERIT_PROBE_ROLE), (
-        "the default GRANT must report USAGE -- this case is the inherit arm"
-    )
-
-    # Act
-    run = verifier_run(posture_dsn)
-
-    # Assert
-    flagged = _reachable_tags(run.tags)
-    assert flagged, f"verifier did not flag the inherited reachable role: {sorted(run.tags)}"
-    assert all(_INHERIT_PROBE_ROLE in tag and attribute in tag for tag in flagged), (
+    assert flagged, f"verifier did not flag the reachable {probe_role}: {sorted(run.tags)}"
+    assert all(probe_role in tag and attribute in tag for tag in flagged), (
         f"the diagnostic must name the reachable role and its capability: {flagged}"
     )
 

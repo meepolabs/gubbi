@@ -1011,30 +1011,34 @@ async def test_invariant_script_flags_a_dropped_select_policy(scratch_dsn: str) 
     )
 
 
-async def test_invariant_script_flags_a_revoked_conflict_target_column(scratch_dsn: str) -> None:
+@pytest.mark.parametrize(
+    ("statement", "flag_marker"),
+    [
+        pytest.param(
+            "REVOKE SELECT (metadata) ON TABLE public.audit_log FROM journal_app",
+            "column_grant audit_log.metadata",
+            id="revoked_conflict_target_column",
+        ),
+        pytest.param(
+            "GRANT SELECT (ip_address) ON TABLE public.audit_log TO journal_app",
+            "ip_address",
+            id="extra_granted_column",
+        ),
+    ],
+)
+async def test_invariant_script_flags_a_wrong_column_grant(
+    scratch_dsn: str, statement: str, flag_marker: str
+) -> None:
     # Arrange
     _assert_clean_of(scratch_dsn, "column_grant audit_log")
-    _psql(scratch_dsn, "REVOKE SELECT (metadata) ON TABLE public.audit_log FROM journal_app")
+    _psql(scratch_dsn, statement)
 
     # Act
     degraded = _verifier_failure_tags(scratch_dsn)
 
     # Assert
-    flagged = _tags_mentioning(degraded, "column_grant audit_log.metadata")
-    assert flagged, f"verifier did not flag the revoked column: {sorted(degraded)}"
-
-
-async def test_invariant_script_flags_an_extra_granted_column(scratch_dsn: str) -> None:
-    # Arrange
-    _assert_clean_of(scratch_dsn, "column_grant audit_log")
-    _psql(scratch_dsn, "GRANT SELECT (ip_address) ON TABLE public.audit_log TO journal_app")
-
-    # Act
-    degraded = _verifier_failure_tags(scratch_dsn)
-
-    # Assert
-    flagged = _tags_mentioning(degraded, "ip_address")
-    assert flagged, f"verifier did not flag the extra granted column: {sorted(degraded)}"
+    flagged = _tags_mentioning(degraded, flag_marker)
+    assert flagged, f"verifier did not flag {flag_marker!r}: {sorted(degraded)}"
 
 
 async def test_invariant_script_flags_a_predicate_broadened_to_using_true(
@@ -1059,77 +1063,79 @@ async def test_invariant_script_flags_a_predicate_broadened_to_using_true(
     )
 
 
-async def test_invariant_script_flags_a_second_permissive_select_policy(
-    scratch_dsn: str,
+@pytest.mark.parametrize(
+    "policy_sql",
+    [
+        # A second permissive SELECT policy OR-widens the read surface to every row.
+        pytest.param(
+            "CREATE POLICY audit_log_app_select_wide ON public.audit_log "
+            "FOR SELECT TO journal_app USING (true)",
+            id="second_permissive_select_policy",
+        ),
+        # A FOR ALL policy applies to SELECT too, so it widens the read surface.
+        pytest.param(
+            "CREATE POLICY audit_log_app_all_wide ON public.audit_log "
+            "FOR ALL TO journal_app USING (true)",
+            id="extra_for_all_policy",
+        ),
+        # A policy TO a parent role applies to journal_app as well. Measured on
+        # PostgreSQL 17 this holds even with journal_app NOINHERIT, so matching
+        # polroles against journal_app alone would report green.
+        pytest.param(
+            f"CREATE POLICY audit_log_probe_parent_select ON public.audit_log "
+            f"FOR SELECT TO {_PARENT_ROLE} USING (true)",
+            id="inherited_role_select_policy",
+        ),
+        pytest.param(
+            f"CREATE POLICY audit_log_probe_parent_all ON public.audit_log "
+            f"FOR ALL TO {_PARENT_ROLE} USING (true)",
+            id="inherited_role_for_all_policy",
+        ),
+    ],
+)
+async def test_invariant_script_flags_an_extra_select_applicable_policy(
+    scratch_dsn: str, policy_sql: str
 ) -> None:
-    """A second permissive SELECT policy OR-widens the read surface to every row."""
+    """Any further policy applying to journal_app's SELECT OR-widens its read surface."""
     # Arrange
     _assert_clean_of(scratch_dsn, "policy_set audit_log")
-    _psql(
-        scratch_dsn,
-        "CREATE POLICY audit_log_app_select_wide ON public.audit_log "
-        "FOR SELECT TO journal_app USING (true)",
-    )
+    _psql(scratch_dsn, policy_sql)
 
     # Act
     degraded = _verifier_failure_tags(scratch_dsn)
 
     # Assert
     assert _tags_mentioning(degraded, "policy_set audit_log"), (
-        f"verifier did not flag the extra permissive SELECT policy: {sorted(degraded)}"
+        f"verifier did not flag the extra SELECT-applicable policy: {sorted(degraded)}"
     )
 
 
-async def test_invariant_script_flags_an_extra_for_all_policy(scratch_dsn: str) -> None:
-    """A ``FOR ALL`` policy applies to SELECT too, so it widens the read surface."""
+@pytest.mark.parametrize(
+    ("policy_clause", "flag_tag"),
+    [
+        # AS RESTRICTIVE the policy ANDs instead of ORs -- the dedup read dies.
+        pytest.param(
+            "AS RESTRICTIVE FOR SELECT TO journal_app",
+            "policy_permissive",
+            id="restrictive_select_policy",
+        ),
+        # TO PUBLIC exposes the read surface beyond journal_app.
+        pytest.param("FOR SELECT", "policy_roles", id="wrong_role_scoped_policy"),
+        # FOR ALL no longer pins the read surface to SELECT.
+        pytest.param("FOR ALL TO journal_app", "policy_cmd", id="wrong_command_policy"),
+    ],
+)
+async def test_invariant_script_flags_a_recreated_select_policy_posture(
+    scratch_dsn: str, policy_clause: str, flag_tag: str
+) -> None:
+    """The self-only policy recreated with one posture attribute changed is flagged."""
     # Arrange
-    _assert_clean_of(scratch_dsn, "policy_set audit_log")
-    _psql(
-        scratch_dsn,
-        "CREATE POLICY audit_log_app_all_wide ON public.audit_log "
-        "FOR ALL TO journal_app USING (true)",
-    )
-
-    # Act
-    degraded = _verifier_failure_tags(scratch_dsn)
-
-    # Assert
-    assert _tags_mentioning(degraded, "policy_set audit_log"), (
-        f"verifier did not flag the extra FOR ALL policy: {sorted(degraded)}"
-    )
-
-
-async def test_invariant_script_flags_a_restrictive_select_policy(scratch_dsn: str) -> None:
-    """Recreated AS RESTRICTIVE the policy ANDs instead of ORs -- the dedup read dies."""
-    # Arrange
-    _assert_clean_of(scratch_dsn, "policy_permissive")
-    _psql(
-        scratch_dsn,
-        f"DROP POLICY {_SELECT_POLICY_NAME} ON public.audit_log; "
-        f"CREATE POLICY {_SELECT_POLICY_NAME} ON public.audit_log AS RESTRICTIVE "
-        "FOR SELECT TO journal_app USING ("
-        "actor_id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')) "
-        "AND actor_id <> '' AND actor_type = 'user')",
-    )
-
-    # Act
-    degraded = _verifier_failure_tags(scratch_dsn)
-
-    # Assert
-    assert _tags_mentioning(degraded, "policy_permissive"), (
-        f"verifier did not flag the restrictive policy posture: {sorted(degraded)}"
-    )
-
-
-async def test_invariant_script_flags_a_wrong_role_scoped_policy(scratch_dsn: str) -> None:
-    """Recreated ``TO PUBLIC`` the policy exposes the read surface beyond journal_app."""
-    # Arrange
-    _assert_clean_of(scratch_dsn, "policy_roles")
+    _assert_clean_of(scratch_dsn, flag_tag)
     _psql(
         scratch_dsn,
         f"DROP POLICY {_SELECT_POLICY_NAME} ON public.audit_log; "
         f"CREATE POLICY {_SELECT_POLICY_NAME} ON public.audit_log "
-        "FOR SELECT USING ("
+        f"{policy_clause} USING ("
         "actor_id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')) "
         "AND actor_id <> '' AND actor_type = 'user')",
     )
@@ -1138,30 +1144,8 @@ async def test_invariant_script_flags_a_wrong_role_scoped_policy(scratch_dsn: st
     degraded = _verifier_failure_tags(scratch_dsn)
 
     # Assert
-    assert _tags_mentioning(degraded, "policy_roles"), (
-        f"verifier did not flag the TO PUBLIC policy scope: {sorted(degraded)}"
-    )
-
-
-async def test_invariant_script_flags_a_wrong_command_policy(scratch_dsn: str) -> None:
-    """Recreated ``FOR ALL`` the policy no longer pins the read surface to SELECT."""
-    # Arrange
-    _assert_clean_of(scratch_dsn, "policy_cmd")
-    _psql(
-        scratch_dsn,
-        f"DROP POLICY {_SELECT_POLICY_NAME} ON public.audit_log; "
-        f"CREATE POLICY {_SELECT_POLICY_NAME} ON public.audit_log "
-        "FOR ALL TO journal_app USING ("
-        "actor_id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')) "
-        "AND actor_id <> '' AND actor_type = 'user')",
-    )
-
-    # Act
-    degraded = _verifier_failure_tags(scratch_dsn)
-
-    # Assert
-    assert _tags_mentioning(degraded, "policy_cmd"), (
-        f"verifier did not flag the wrong policy command: {sorted(degraded)}"
+    assert _tags_mentioning(degraded, flag_tag), (
+        f"verifier did not flag {flag_tag}: {sorted(degraded)}"
     )
 
 
@@ -1176,81 +1160,35 @@ async def test_invariant_script_flags_a_wrong_command_policy(scratch_dsn: str) -
 
 
 @pytest.mark.parametrize(
-    "grantee",
-    ["PUBLIC", _PARENT_ROLE],
-    ids=["public", "inherited_role"],
-)
-async def test_invariant_script_flags_an_extra_column_grant_reaching_the_app_role(
-    scratch_dsn: str, grantee: str
-) -> None:
-    """An extra column readable via PUBLIC or a parent role is flagged with its grantee."""
-    # Arrange
-    _assert_clean_of(scratch_dsn, "inherited_grant audit_log")
-    _psql(scratch_dsn, f"GRANT SELECT (ip_address) ON TABLE public.audit_log TO {grantee}")
-
-    # Act
-    degraded = _verifier_failure_tags(scratch_dsn)
-
-    # Assert
-    flagged = _tags_mentioning(degraded, "inherited_grant audit_log")
-    assert flagged, f"verifier did not flag the {grantee} column grant: {sorted(degraded)}"
-    assert any(grantee in tag and "ip_address" in tag for tag in flagged), (
-        f"the flagged tag must name the grantee and the column: {sorted(flagged)}"
-    )
-
-
-@pytest.mark.parametrize(
-    "grantee",
-    ["PUBLIC", _PARENT_ROLE],
-    ids=["public", "inherited_role"],
-)
-async def test_invariant_script_flags_a_table_wide_grant_reaching_the_app_role(
-    scratch_dsn: str, grantee: str
-) -> None:
-    """Table-wide SELECT via PUBLIC or a parent role exposes every audit column."""
-    # Arrange
-    _assert_clean_of(scratch_dsn, "inherited_grant audit_log")
-    _psql(scratch_dsn, f"GRANT SELECT ON TABLE public.audit_log TO {grantee}")
-
-    # Act
-    degraded = _verifier_failure_tags(scratch_dsn)
-
-    # Assert
-    flagged = _tags_mentioning(degraded, "inherited_grant audit_log")
-    assert flagged, f"verifier did not flag the {grantee} table grant: {sorted(degraded)}"
-    assert any(grantee in tag and "table SELECT" in tag for tag in flagged), (
-        f"the flagged tag must name the grantee: {sorted(flagged)}"
-    )
-
-
-@pytest.mark.parametrize(
-    "policy_sql",
+    ("privilege", "flag_marker"),
     [
-        f"CREATE POLICY audit_log_probe_parent_select ON public.audit_log "
-        f"FOR SELECT TO {_PARENT_ROLE} USING (true)",
-        f"CREATE POLICY audit_log_probe_parent_all ON public.audit_log "
-        f"FOR ALL TO {_PARENT_ROLE} USING (true)",
+        # An extra column readable via the grantee is flagged with that column.
+        pytest.param("SELECT (ip_address)", "ip_address", id="column"),
+        # Table-wide SELECT via the grantee exposes every audit column.
+        pytest.param("SELECT", "table SELECT", id="table_wide"),
     ],
-    ids=["select_policy", "for_all_policy"],
 )
-async def test_invariant_script_flags_a_policy_scoped_to_an_inherited_role(
-    scratch_dsn: str, policy_sql: str
+@pytest.mark.parametrize(
+    "grantee",
+    ["PUBLIC", _PARENT_ROLE],
+    ids=["public", "inherited_role"],
+)
+async def test_invariant_script_flags_a_grant_reaching_the_app_role(
+    scratch_dsn: str, grantee: str, privilege: str, flag_marker: str
 ) -> None:
-    """A policy TO a parent role applies to journal_app and OR-widens its read surface.
-
-    Measured on PostgreSQL 17 this holds even with journal_app NOINHERIT, so
-    matching polroles against journal_app alone would report green.
-    """
+    """SELECT reaching journal_app via PUBLIC or a parent role is flagged with its grantee."""
     # Arrange
-    _assert_clean_of(scratch_dsn, "policy_set audit_log")
-    _psql(scratch_dsn, policy_sql)
+    _assert_clean_of(scratch_dsn, "inherited_grant audit_log")
+    _psql(scratch_dsn, f"GRANT {privilege} ON TABLE public.audit_log TO {grantee}")
 
     # Act
     degraded = _verifier_failure_tags(scratch_dsn)
 
     # Assert
-    assert _tags_mentioning(degraded, "policy_set audit_log"), (
-        f"verifier did not flag the inherited-role policy: {sorted(degraded)}"
+    flagged = _tags_mentioning(degraded, "inherited_grant audit_log")
+    assert flagged, f"verifier did not flag the {grantee} {privilege} grant: {sorted(degraded)}"
+    assert any(grantee in tag and flag_marker in tag for tag in flagged), (
+        f"the flagged tag must name the grantee and {flag_marker!r}: {sorted(flagged)}"
     )
 
 

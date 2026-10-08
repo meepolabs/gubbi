@@ -70,31 +70,29 @@ async def test_target_id_without_target_kind_rejected_at_db(admin_pool: asyncpg.
             )
 
 
-async def test_target_id_with_target_kind_accepted_at_db(admin_pool: asyncpg.Pool) -> None:
-    """The happy path -- both set -- must still succeed."""
-    async with admin_pool.acquire() as conn:
-        await conn.execute(
-            """
-            INSERT INTO audit_log
-                (actor_type, actor_id, action, target_type, target_id, target_kind,
-                 reason, metadata, ip_address, user_agent)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::inet, $10)
-            """,
-            "system",
-            "system:check-test",
+@pytest.mark.parametrize(
+    ("action", "target_type", "target_id", "target_kind"),
+    [
+        # The happy path -- both set -- must still succeed.
+        pytest.param(
             "secret.rotated",
             "secret",
             "00000000-0000-0000-0000-0000000000ff",
             "secret",
-            None,
-            "{}",
-            None,
-            None,
-        )
-
-
-async def test_both_null_accepted_at_db(admin_pool: asyncpg.Pool) -> None:
-    """target_id NULL with target_kind NULL is allowed (system-level events)."""
+            id="target_id_with_target_kind",
+        ),
+        # target_id NULL with target_kind NULL is allowed (system-level events).
+        pytest.param("admin.query_executed", None, None, None, id="both_null"),
+    ],
+)
+async def test_allowed_target_shape_accepted_at_db(
+    admin_pool: asyncpg.Pool,
+    action: str,
+    target_type: str | None,
+    target_id: str | None,
+    target_kind: str | None,
+) -> None:
+    """A row the CHECK constraint permits inserts without error."""
     async with admin_pool.acquire() as conn:
         await conn.execute(
             """
@@ -105,10 +103,10 @@ async def test_both_null_accepted_at_db(admin_pool: asyncpg.Pool) -> None:
             """,
             "system",
             "system:check-test",
-            "admin.query_executed",
-            None,
-            None,  # target_id NULL
-            None,  # target_kind NULL -- allowed
+            action,
+            target_type,
+            target_id,
+            target_kind,
             None,
             "{}",
             None,

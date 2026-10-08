@@ -41,37 +41,24 @@ async def _insert_test_row(conn: asyncpg.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Trigger blocks UPDATE
+# Triggers block UPDATE and DELETE
 # ---------------------------------------------------------------------------
 
 
-async def test_update_raises_append_only(admin_pool: asyncpg.Pool) -> None:
-    """UPDATE on any audit_log row must raise via trigger."""
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("UPDATE audit_log SET reason = 'tampered' WHERE id = $1", id="update"),
+        pytest.param("DELETE FROM audit_log WHERE id = $1", id="delete"),
+    ],
+)
+async def test_mutation_raises_append_only(admin_pool: asyncpg.Pool, statement: str) -> None:
+    """UPDATE or DELETE on any audit_log row must raise via its trigger."""
     async with admin_pool.acquire() as conn:
         row_id = await _insert_test_row(conn)
 
         with pytest.raises(asyncpg.RaiseError, match=_APPEND_ONLY_MSG):
-            await conn.execute(
-                "UPDATE audit_log SET reason = 'tampered' WHERE id = $1",
-                row_id,
-            )
-
-
-# ---------------------------------------------------------------------------
-# Trigger blocks DELETE
-# ---------------------------------------------------------------------------
-
-
-async def test_delete_raises_append_only(admin_pool: asyncpg.Pool) -> None:
-    """DELETE on any audit_log row must raise via trigger."""
-    async with admin_pool.acquire() as conn:
-        row_id = await _insert_test_row(conn)
-
-        with pytest.raises(asyncpg.RaiseError, match=_APPEND_ONLY_MSG):
-            await conn.execute(
-                "DELETE FROM audit_log WHERE id = $1",
-                row_id,
-            )
+            await conn.execute(statement, row_id)
 
 
 # ---------------------------------------------------------------------------
