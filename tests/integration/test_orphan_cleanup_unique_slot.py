@@ -1,12 +1,12 @@
-"""Integration test: orphan-pending rows are cleaned up and unique slot is freed.
+"""Integration test: orphan cleanup sweeps stale rows and frees the unique slot.
 
-Seeds a pending extraction_jobs row with created_at past the threshold,
-runs one cleanup cycle, then verifies:
-  1. The row flips to status='failed' with error_code='enqueue_lost'.
-  2. A second pending row for the same (user_id, conversation_id, source) can
-     be inserted after cleanup (the partial unique index slot is freed).
-
-Requires a running PostgreSQL instance with migrations applied through head.
+Seeds extraction_jobs rows for a real tenant conversation, runs exactly one
+cleanup cycle against the database, then verifies:
+  1. A stale pending row flips to status='failed' with error_code='enqueue_lost'.
+  2. The partial unique index holds the (user_id, conversation_id, source) slot
+     while the stale row is pending, and frees it once the sweep has run.
+  3. A stuck running row flips to 'failed'/worker_lost with a zero-cost refund.
+  4. A recent running row is left untouched.
 """
 
 from __future__ import annotations
@@ -14,229 +14,144 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
 
+from gubbi.extraction import orphan_cleanup
 from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
+from tests.fixtures.tenants import TenantSeed
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
     pytest.mark.integration,
 ]
 
-_USER_UUID = UUID("cccccccc-dddd-eeee-ffff-000000000001")
+# ``patch`` on the module's ``asyncio.sleep`` replaces the attribute on the
+# shared asyncio module, so the fake only intercepts calls carrying this
+# value and delegates every other sleep to the real implementation.
+_CYCLE_SLEEP_SECONDS = 7
+_PENDING_THRESHOLD_MINUTES = 30
+_real_sleep = asyncio.sleep
 
 
-async def _seed_pending_row(
-    conn: asyncpg.Connection,
-    *,
-    conversation_id: int,
-    user_id: UUID,
-    created_at: datetime,
-) -> UUID:
-    """Insert a pending extraction_jobs row with a specific created_at."""
-    job_id = uuid4()
-    await conn.execute(
-        """
-        INSERT INTO extraction_jobs
-            (id, user_id, conversation_id, source, status, period_start, created_at, updated_at)
-        VALUES ($1, $2, $3, 'test', 'pending', '2026-05-01'::date, $4, $4)
-        """,
-        job_id,
-        user_id,
-        conversation_id,
-        created_at,
-    )
-    return job_id
+async def _run_one_cycle(admin_pool: asyncpg.Pool, *, budget_helper: Any = None) -> None:
+    """Run exactly one sweep: the first loop sleep returns, the second parks until cancel."""
+    body_done = asyncio.Event()
+    cycle_sleeps = 0
 
+    async def _fake_sleep(seconds: float, *args: Any, **kwargs: Any) -> Any:
+        nonlocal cycle_sleeps
+        if seconds != _CYCLE_SLEEP_SECONDS:
+            return await _real_sleep(seconds, *args, **kwargs)
+        cycle_sleeps += 1
+        if cycle_sleeps > 1:
+            body_done.set()
+            await asyncio.Event().wait()
+        return None
 
-@pytest.mark.skip(reason="Requires live DB with extraction_jobs table and partial unique index")
-async def test_stale_pending_row_flipped_to_failed(admin_pool: asyncpg.Pool) -> None:
-    """Orphan cleanup flips a stale pending row to failed with error_code='enqueue_lost'."""
-    # Arrange: seed a pending row with created_at 35 minutes ago
-    conversation_id = await admin_pool.fetchval("SELECT nextval('conversations_id_seq')")
-    stale_time = datetime.now(UTC) - timedelta(minutes=35)
-
-    async with admin_pool.acquire() as conn:
-        job_id = await _seed_pending_row(
-            conn,
-            conversation_id=conversation_id,
-            user_id=_USER_UUID,
-            created_at=stale_time,
-        )
-
-    # Act: run one cleanup cycle with 30min threshold
-    async def _single_cycle(seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_single_cycle):
-        task = asyncio.create_task(
-            run_orphan_cleanup(admin_pool, threshold_minutes=30, sleep_seconds=1)
-        )
-        with suppress(asyncio.CancelledError):
-            await task
-
-    # Assert: row is now failed with enqueue_lost
-    row = await admin_pool.fetchrow(
-        "SELECT status, error_code FROM extraction_jobs WHERE id = $1",
-        job_id,
-    )
-    assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "enqueue_lost"
-
-
-@pytest.mark.skip(reason="Requires live DB with extraction_jobs table and partial unique index")
-async def test_unique_slot_freed_after_cleanup(admin_pool: asyncpg.Pool) -> None:
-    """After cleanup, a second pending row for the same (user_id, conversation_id) can be inserted."""
-    conversation_id = await admin_pool.fetchval("SELECT nextval('conversations_id_seq')")
-    stale_time = datetime.now(UTC) - timedelta(minutes=35)
-
-    async with admin_pool.acquire() as conn:
-        await _seed_pending_row(
-            conn,
-            conversation_id=conversation_id,
-            user_id=_USER_UUID,
-            created_at=stale_time,
-        )
-
-    async def _single_cycle(seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_single_cycle):
-        task = asyncio.create_task(
-            run_orphan_cleanup(admin_pool, threshold_minutes=30, sleep_seconds=1)
-        )
-        with suppress(asyncio.CancelledError):
-            await task
-
-    # Now the slot should be free -- a new pending row must insert successfully
-    async with admin_pool.acquire() as conn:
-        new_job_id = await _seed_pending_row(
-            conn,
-            conversation_id=conversation_id,
-            user_id=_USER_UUID,
-            created_at=datetime.now(UTC),
-        )
-
-    row = await admin_pool.fetchrow(
-        "SELECT status FROM extraction_jobs WHERE id = $1",
-        new_job_id,
-    )
-    assert row is not None
-    assert row["status"] == "pending"
-
-
-# ---------------------------------------------------------------------------
-# Stuck-running reaper
-# ---------------------------------------------------------------------------
-
-
-async def _seed_running_row(
-    conn: asyncpg.Connection,
-    *,
-    conversation_id: int,
-    user_id: UUID,
-    started_at: datetime,
-) -> UUID:
-    """Insert a 'running' extraction_jobs row with a specific started_at."""
-    job_id = uuid4()
-    await conn.execute(
-        """
-        INSERT INTO extraction_jobs
-            (id, user_id, conversation_id, source, status, period_start,
-             created_at, updated_at, started_at)
-        VALUES ($1, $2, $3, 'test', 'running', '2026-05-01'::date, $4, $4, $4)
-        """,
-        job_id,
-        user_id,
-        conversation_id,
-        started_at,
-    )
-    return job_id
-
-
-@pytest.mark.skip(reason="Requires live DB with extraction_jobs table")
-async def test_stuck_running_row_flipped_to_worker_lost(admin_pool: asyncpg.Pool) -> None:
-    """Orphan cleanup flips 'running' rows older than 2 * ARQ_JOB_TIMEOUT_SECS to 'failed'/worker_lost."""
-    from unittest.mock import MagicMock
-
-    conversation_id = await admin_pool.fetchval("SELECT nextval('conversations_id_seq')")
-    # 25 minutes ago is well past the 20-minute reaper threshold.
-    stuck_time = datetime.now(UTC) - timedelta(minutes=25)
-
-    async with admin_pool.acquire() as conn:
-        job_id = await _seed_running_row(
-            conn,
-            conversation_id=conversation_id,
-            user_id=_USER_UUID,
-            started_at=stuck_time,
-        )
-
-    # Stub a budget helper -- the reaper should call record_actual_cost once
-    # per swept row with actual_cents=0.
-    helper = MagicMock()
-    helper.record_actual_cost = AsyncMock()
-
-    async def _single_cycle(seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_single_cycle):
+    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_fake_sleep):
         task = asyncio.create_task(
             run_orphan_cleanup(
                 admin_pool,
-                threshold_minutes=30,
-                sleep_seconds=1,
-                budget_helper=helper,
+                threshold_minutes=_PENDING_THRESHOLD_MINUTES,
+                sleep_seconds=_CYCLE_SLEEP_SECONDS,
+                budget_helper=budget_helper,
             )
         )
+        await asyncio.wait_for(body_done.wait(), timeout=10)
+        task.cancel()
         with suppress(asyncio.CancelledError):
             await task
 
-    row = await admin_pool.fetchrow(
-        "SELECT status, error_code FROM extraction_jobs WHERE id = $1",
+
+async def _seed_job(
+    admin_pool: asyncpg.Pool,
+    seed: TenantSeed,
+    *,
+    status: str,
+    at: datetime,
+) -> UUID:
+    """Insert an extraction_jobs row for ``seed``'s conversation, timestamped ``at``."""
+    assert seed.conversation_id is not None
+    job_id = uuid4()
+    await admin_pool.execute(
+        """
+        INSERT INTO extraction_jobs
+            (id, user_id, conversation_id, source, status, period_start,
+             created_at, started_at)
+        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6)
+        """,
         job_id,
+        seed.user_id,
+        seed.conversation_id,
+        status,
+        at,
+        at if status == "running" else None,
+    )
+    return job_id
+
+
+async def _job_state(admin_pool: asyncpg.Pool, job_id: UUID) -> tuple[str, str | None]:
+    row = await admin_pool.fetchrow(
+        "SELECT status, error_code FROM extraction_jobs WHERE id = $1", job_id
     )
     assert row is not None
-    assert row["status"] == "failed"
-    assert row["error_code"] == "worker_lost"
+    return row["status"], row["error_code"]
 
-    # Refund attempted with actual=0 against PRE_CHARGE_CENTS estimate.
+
+async def test_stale_pending_row_flipped_to_failed(
+    admin_pool: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    """A pending row older than the threshold becomes failed/enqueue_lost."""
+    stale = datetime.now(UTC) - timedelta(minutes=_PENDING_THRESHOLD_MINUTES + 5)
+    job_id = await _seed_job(admin_pool, seeded_a, status="pending", at=stale)
+
+    await _run_one_cycle(admin_pool)
+
+    assert await _job_state(admin_pool, job_id) == ("failed", "enqueue_lost")
+
+
+async def test_unique_slot_freed_after_cleanup(
+    admin_pool: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    """The stale pending row blocks a second pending row until the sweep fails it."""
+    stale = datetime.now(UTC) - timedelta(minutes=_PENDING_THRESHOLD_MINUTES + 5)
+    await _seed_job(admin_pool, seeded_a, status="pending", at=stale)
+    with pytest.raises(asyncpg.UniqueViolationError):
+        await _seed_job(admin_pool, seeded_a, status="pending", at=datetime.now(UTC))
+
+    await _run_one_cycle(admin_pool)
+
+    new_job_id = await _seed_job(admin_pool, seeded_a, status="pending", at=datetime.now(UTC))
+    assert await _job_state(admin_pool, new_job_id) == ("pending", None)
+
+
+async def test_stuck_running_row_flipped_to_worker_lost(
+    admin_pool: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    """A running row past 2 * ARQ_JOB_TIMEOUT_SECS becomes failed/worker_lost and is refunded."""
+    stuck = datetime.now(UTC) - timedelta(seconds=orphan_cleanup._RUNNING_THRESHOLD_SECS + 300)
+    job_id = await _seed_job(admin_pool, seeded_a, status="running", at=stuck)
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock()
+
+    await _run_one_cycle(admin_pool, budget_helper=helper)
+
+    assert await _job_state(admin_pool, job_id) == ("failed", "worker_lost")
     helper.record_actual_cost.assert_awaited_once()
-    kwargs = helper.record_actual_cost.await_args.kwargs
-    assert kwargs["actual_cents"] == 0
+    assert helper.record_actual_cost.await_args.kwargs["user_id"] == seeded_a.user_id
+    assert helper.record_actual_cost.await_args.kwargs["actual_cents"] == 0
 
 
-@pytest.mark.skip(reason="Requires live DB with extraction_jobs table")
-async def test_recent_running_row_untouched(admin_pool: asyncpg.Pool) -> None:
-    """Running rows newer than the 20-minute threshold remain unchanged."""
-    conversation_id = await admin_pool.fetchval("SELECT nextval('conversations_id_seq')")
-    recent_time = datetime.now(UTC) - timedelta(minutes=5)
+async def test_recent_running_row_untouched(admin_pool: asyncpg.Pool, seeded_a: TenantSeed) -> None:
+    """A running row newer than the reaper threshold stays running."""
+    recent = datetime.now(UTC) - timedelta(minutes=5)
+    job_id = await _seed_job(admin_pool, seeded_a, status="running", at=recent)
 
-    async with admin_pool.acquire() as conn:
-        job_id = await _seed_running_row(
-            conn,
-            conversation_id=conversation_id,
-            user_id=_USER_UUID,
-            started_at=recent_time,
-        )
+    await _run_one_cycle(admin_pool)
 
-    async def _single_cycle(seconds: float) -> None:
-        raise asyncio.CancelledError
-
-    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_single_cycle):
-        task = asyncio.create_task(
-            run_orphan_cleanup(admin_pool, threshold_minutes=30, sleep_seconds=1)
-        )
-        with suppress(asyncio.CancelledError):
-            await task
-
-    row = await admin_pool.fetchrow(
-        "SELECT status FROM extraction_jobs WHERE id = $1",
-        job_id,
-    )
-    assert row is not None
-    assert row["status"] == "running"
+    assert await _job_state(admin_pool, job_id) == ("running", None)

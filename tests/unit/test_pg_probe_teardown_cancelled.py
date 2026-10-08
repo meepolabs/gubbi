@@ -1,34 +1,32 @@
-"""Lifespan / worker startup teardown propagates CancelledError intact.
+"""Startup teardown swallows a cancelled close() so the probe failure propagates.
 
-The pg_log_probe handlers in both ``gubbi.main`` (HTTP lifespan) and
-``gubbi.extraction.worker`` (Arq worker startup) catch ``BaseException``
-so a probe-time cancellation still trips pool teardown before unwinding.
-The teardown itself (``pool.close()``) is best-effort and was previously
-guarded by ``with suppress(Exception)``.
+When a required startup probe fails, both ``gubbi.main.lifespan`` (through
+``teardown_lifespan_resources``) and ``gubbi.extraction.worker.startup``
+close what they opened, best-effort, before re-raising. ``CancelledError``
+is a ``BaseException``, so a teardown guarded only by ``suppress(Exception)``
+would let a cancellation arriving inside ``close()`` escape and replace the
+``ProbeFailure`` the caller is meant to see.
 
-That guard was wrong: under Python 3.8+, ``asyncio.CancelledError`` is
-a ``BaseException``, not an ``Exception``. A second cancellation
-arriving INSIDE ``pool.close()`` would therefore escape the suppress
-block and clobber the original cancellation that the surrounding
-``raise`` is meant to re-raise.
-
-These tests pin the new behaviour: if ``pool.close()`` raises
-``CancelledError`` mid-teardown, the suppress block swallows it, the
-pool's ``close()`` is still awaited, and the original probe error
-propagates.
+Each test drives the real ``StartupRunner`` into a required-probe failure,
+makes one ``close()`` raise ``CancelledError``, and asserts that the
+``ProbeFailure`` propagates and that the remaining teardown still ran.
 """
 
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterator
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+import redis.exceptions as redis_exc
 from asgi_lifespan import LifespanManager
 from fastapi import FastAPI
+from gubbi_common.bootstrap import PgLogProbeError, ProbeFailure, StartupRunner
 
 import gubbi.main
+from gubbi.config import get_settings
 from gubbi.extraction import worker as worker_module
 from tests.extraction.test_worker_startup_pg_probe import _patch_worker_dependencies
 from tests.unit.test_lifespan_boot import (
@@ -36,143 +34,83 @@ from tests.unit.test_lifespan_boot import (
     _patch_lifespan_dependencies,
 )
 
-
-class _ProbeBoom(Exception):
-    """Distinct exception class so we can assert it is the propagated error."""
+pytestmark = pytest.mark.unit
 
 
-@pytest.mark.unit
-@pytest.mark.skip(
-    reason=(
-        "T1 moved the gubbi.main PG probe + cancel-suppress chain into "
-        "gubbi_common.bootstrap.StartupRunner, whose own test suite covers "
-        "this contract directly. The lifespan-side cancellation handling "
-        "is now implicit (the runner downgrades raises inside probe.run() "
-        "to FAIL outcomes; the lifespan teardown helper guards each close "
-        "with suppress(Exception, asyncio.CancelledError))."
+@pytest.fixture(autouse=True)
+def _fresh_settings() -> Iterator[None]:
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def _fail_lifespan_redis_probe(monkeypatch: pytest.MonkeyPatch, handles: dict[str, Any]) -> None:
+    """Make the lifespan's required Redis probe fail under the real runner."""
+    handles["redis_client"].ping = AsyncMock(
+        side_effect=redis_exc.ConnectionError("simulated_redis_unreachable")
     )
-)
-async def test_lifespan_pool_close_cancelled_error_does_not_mask_probe_error(
+    monkeypatch.setattr("gubbi.main.StartupRunner", StartupRunner)
+
+
+async def test_lifespan_pool_close_cancelled_error_does_not_mask_probe_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A CancelledError from ``pool.close()`` must NOT escape the suppress block.
-
-    Wire the probe to raise a plain ``Exception`` ("ProbeBoom"); wire
-    ``pool.close`` to raise ``CancelledError``. The original probe error
-    must still propagate -- not the cancellation.
-    """
+    """A cancelled ``pool.close()`` leaves the lifespan's ``ProbeFailure`` intact."""
     _drop_optional_env(monkeypatch)
     handles = _patch_lifespan_dependencies(monkeypatch)
-
-    # Probe raises a sentinel error.
-    probe_mock = AsyncMock(side_effect=_ProbeBoom("simulated unsafe log_statement"))
-    monkeypatch.setattr("gubbi.main.probe_pg_log_settings", probe_mock)
-
-    # Pool close raises CancelledError mid-teardown. The suppress block
-    # in main.py must catch it (BaseException-aware suppress) so the
-    # original ProbeBoom propagates.
+    _fail_lifespan_redis_probe(monkeypatch, handles)
     handles["pool"].close = AsyncMock(side_effect=asyncio.CancelledError())
 
     app = FastAPI(lifespan=gubbi.main.lifespan)
-
-    with pytest.raises(_ProbeBoom):
+    with pytest.raises(ProbeFailure):
         async with LifespanManager(app):
             pass
 
-    # Pool close was attempted (best-effort teardown ran) before the
-    # original error propagated.
+    handles["redis_client"].aclose.assert_awaited_once()
+    handles["oauth_storage"].close.assert_awaited_once()
     handles["pool"].close.assert_awaited_once()
 
 
-@pytest.mark.unit
-@pytest.mark.skip(
-    reason=(
-        "T3 migrated gubbi.extraction.worker startup off the direct "
-        "probe_pg_log_settings call onto gubbi_common.bootstrap.StartupRunner "
-        "(mirroring T1's gubbi.main migration). The runner downgrades raises "
-        "inside probe.run() to FAIL outcomes; the worker's outer "
-        "try/except BaseException + suppress(Exception, asyncio.CancelledError) "
-        "still guards pool.close() against cancellations. The runner's own "
-        "test suite covers the cancellation contract directly."
-    )
-)
-async def test_worker_startup_pool_close_cancelled_error_does_not_mask_probe_error(
+async def test_lifespan_cancelled_pool_close_still_closes_admin_pool(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Worker variant: ``CancelledError`` from ``pool.close`` is suppressed."""
+    """Teardown continues past a cancelled ``pool.close()`` to a cancelled admin pool close."""
+    _drop_optional_env(monkeypatch)
+    handles = _patch_lifespan_dependencies(monkeypatch)
+    _fail_lifespan_redis_probe(monkeypatch, handles)
+
+    admin_pool = MagicMock()
+    admin_pool.get_max_size = MagicMock(return_value=2)
+    admin_pool.close = AsyncMock(side_effect=asyncio.CancelledError())
+    _, _, _, mcp = handles["build_app_ctx"].return_value
+    handles["build_app_ctx"].return_value = (handles["app_ctx"], handles["pool"], admin_pool, mcp)
+    handles["pool"].close = AsyncMock(side_effect=asyncio.CancelledError())
+
+    app = FastAPI(lifespan=gubbi.main.lifespan)
+    with pytest.raises(ProbeFailure):
+        async with LifespanManager(app):
+            pass
+
+    handles["pool"].close.assert_awaited_once()
+    admin_pool.close.assert_awaited_once()
+
+
+async def test_worker_startup_pool_close_cancelled_error_does_not_mask_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Worker variant: a cancelled ``pool.close()`` leaves ``ProbeFailure`` intact."""
     handles = _patch_worker_dependencies(monkeypatch)
-
-    probe_mock = AsyncMock(side_effect=_ProbeBoom("simulated unsafe log_statement"))
-    monkeypatch.setattr(worker_module, "probe_pg_log_settings", probe_mock)
-
+    monkeypatch.setattr(worker_module, "_configure_worker_telemetry", MagicMock())
+    monkeypatch.setattr(
+        "gubbi_common.bootstrap.probes.pg_log._probe_pg_log_settings",
+        AsyncMock(side_effect=PgLogProbeError("unsafe log_statement=all")),
+    )
     handles["pool"].close = AsyncMock(side_effect=asyncio.CancelledError())
 
     ctx: dict[str, Any] = {}
-    with pytest.raises(_ProbeBoom):
+    with pytest.raises(ProbeFailure):
         await worker_module.startup(ctx)  # type: ignore[arg-type]
 
+    handles["redis_client"].aclose.assert_awaited_once()
+    handles["redis_pool"].aclose.assert_awaited_once()
     handles["pool"].close.assert_awaited_once()
-
-
-@pytest.mark.unit
-@pytest.mark.skip(
-    reason=(
-        "T1 moved the gubbi.main PG probe + cancel-suppress chain into "
-        "gubbi_common.bootstrap.StartupRunner, whose own test suite covers "
-        "this contract directly. Admin-pool cancel-suppress is now folded "
-        "into gubbi.bootstrap._teardown.teardown_lifespan_resources via "
-        "the same suppress(Exception, asyncio.CancelledError) guard."
-    )
-)
-async def test_lifespan_admin_pool_close_cancelled_error_is_suppressed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Admin pool close raising ``CancelledError`` must not mask the probe error.
-
-    The lifespan path checks ``admin_pool is not None`` before attempting
-    its close; this test wires both pools so both close() calls run.
-    """
-    _drop_optional_env(monkeypatch)
-    handles = _patch_lifespan_dependencies(monkeypatch)
-
-    # Inject an admin_pool into the build_app_ctx return so the optional
-    # close() branch fires. The original mock returned (app_ctx, pool, None, mcp);
-    # rebuild a tuple with admin_pool populated. Pull the original return
-    # value off the existing AsyncMock (call_count is 0 here).
-    original_app_ctx = handles["app_ctx"]
-    original_pool = handles["pool"]
-    # Reuse a fresh MagicMock for mcp since handles dict doesn't expose it.
-    from contextlib import asynccontextmanager
-
-    mcp_app = MagicMock()
-    mcp = MagicMock()
-    mcp.streamable_http_app = MagicMock(return_value=mcp_app)
-
-    @asynccontextmanager
-    async def _session_run() -> Any:
-        yield None
-
-    mcp.session_manager = MagicMock()
-    mcp.session_manager.run = _session_run
-
-    admin_pool = MagicMock()
-    admin_pool.close = AsyncMock(side_effect=asyncio.CancelledError())
-
-    build_app_ctx_mock = AsyncMock(return_value=(original_app_ctx, original_pool, admin_pool, mcp))
-    monkeypatch.setattr("gubbi.main._build_app_ctx", build_app_ctx_mock)
-
-    probe_mock = AsyncMock(side_effect=_ProbeBoom("unsafe"))
-    monkeypatch.setattr("gubbi.main.probe_pg_log_settings", probe_mock)
-
-    # Make the regular pool's close cleanly succeed so we isolate the
-    # admin-pool branch.
-    original_pool.close = AsyncMock()
-
-    app = FastAPI(lifespan=gubbi.main.lifespan)
-
-    with pytest.raises(_ProbeBoom):
-        async with LifespanManager(app):
-            pass
-
-    original_pool.close.assert_awaited_once()
-    admin_pool.close.assert_awaited_once()
