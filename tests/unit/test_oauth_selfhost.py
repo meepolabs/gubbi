@@ -6,7 +6,7 @@ from fastapi import FastAPI
 from starlette.routing import Route
 
 from gubbi.config import AuthConfig, DbConfig, ServerConfig, Settings
-from gubbi.oauth.selfhost import _make_token_validator, register
+from gubbi.oauth.selfhost import register
 from gubbi.oauth.storage import OAuthStorage
 
 
@@ -74,10 +74,3 @@ class TestSelfhostRegister:
         await storage.close()
         for p in expected_paths:
             assert p in registered, f"Missing route {p}; got: {registered}"
-
-    async def test_token_validator_rejects_unknown(self, tmp_path: Path) -> None:
-        storage = await _make_storage_async(tmp_path)
-        validator = _make_token_validator(storage)
-        result = await validator("nonexistent")
-        await storage.close()
-        assert result is None

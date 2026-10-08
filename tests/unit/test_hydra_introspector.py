@@ -350,31 +350,39 @@ class TestIntrospectErrors:
         with pytest.raises(HydraUnreachable):
             await introspector.introspect(FAKE_TOKEN)
 
-    async def test_500_response_raises_unreachable(
-        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
+    @pytest.mark.parametrize(
+        ("status_code", "body"),
+        [
+            pytest.param(500, {"error": "internal"}, id="500"),
+            pytest.param(503, {"error": "service unavailable"}, id="503"),
+        ],
+    )
+    async def test_5xx_response_raises_unreachable(
+        self,
+        introspector: HydraIntrospector,
+        mock_httpx_client: MagicMock,
+        status_code: int,
+        body: dict,
     ) -> None:
-        mock_httpx_client.post.return_value = _make_response(500, {"error": "internal"})
+        mock_httpx_client.post.return_value = _make_response(status_code, body)
         with pytest.raises(HydraUnreachable):
             await introspector.introspect(FAKE_TOKEN)
 
-    async def test_503_response_raises_unreachable(
-        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
+    @pytest.mark.parametrize(
+        ("status_code", "body"),
+        [
+            pytest.param(400, {"error": "bad request"}, id="400"),
+            pytest.param(401, {"error": "unauthorized"}, id="401"),
+        ],
+    )
+    async def test_4xx_response_raises_unreachable(
+        self,
+        introspector: HydraIntrospector,
+        mock_httpx_client: MagicMock,
+        status_code: int,
+        body: dict,
     ) -> None:
-        mock_httpx_client.post.return_value = _make_response(503, {"error": "service unavailable"})
-        with pytest.raises(HydraUnreachable):
-            await introspector.introspect(FAKE_TOKEN)
-
-    async def test_400_response_raises_unreachable(
-        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
-    ) -> None:
-        mock_httpx_client.post.return_value = _make_response(400, {"error": "bad request"})
-        with pytest.raises(HydraUnreachable):
-            await introspector.introspect(FAKE_TOKEN)
-
-    async def test_401_response_raises_unreachable(
-        self, introspector: HydraIntrospector, mock_httpx_client: MagicMock
-    ) -> None:
-        mock_httpx_client.post.return_value = _make_response(401, {"error": "unauthorized"})
+        mock_httpx_client.post.return_value = _make_response(status_code, body)
         with pytest.raises(HydraUnreachable):
             await introspector.introspect(FAKE_TOKEN)
 
