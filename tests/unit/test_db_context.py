@@ -12,19 +12,40 @@ PostgreSQL is not reachable at ``TEST_DATABASE_URL``.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 
 import asyncpg
 import pytest
+import pytest_asyncio
 from gubbi_common.db.user_scoped import MissingUserIdError, user_scoped_connection
 
 from gubbi.auth_context import current_user_id
+from tests.conftest import TEST_DATABASE_URL
 
 # The ``pool`` fixture is session-scoped. pytest-asyncio 0.25+ requires every
 # test using session-scoped async fixtures to explicitly pin the loop scope,
 # otherwise each test gets a fresh loop and the shared pool raises
 # "cannot perform operation: another operation is in progress" at teardown.
 pytestmark = pytest.mark.asyncio(loop_scope="session")
+
+
+@pytest_asyncio.fixture
+async def single_connection_pool(pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Pool]:
+    """A one-connection pool no other test has used.
+
+    Backends of the shared ``pool`` carry state from earlier tests: once one of
+    them touches the ``vector`` type, pgvector is loaded into that backend and
+    ``hnsw.ef_search`` reads its extension default (``40``) instead of ``''``.
+    One connection also guarantees the re-acquire below gets the backend the
+    scoped block used. Depends on ``pool`` for its skip and migration.
+    """
+    isolated: asyncpg.Pool = await asyncpg.create_pool(
+        TEST_DATABASE_URL, statement_cache_size=0, min_size=1, max_size=1
+    )
+    try:
+        yield isolated
+    finally:
+        await isolated.close()
 
 
 @pytest.fixture
@@ -55,15 +76,22 @@ async def test_custom_hnsw_ef_search(pool: asyncpg.Pool) -> None:
         assert bound_ef == "250"
 
 
-async def test_cleared_after_commit(pool: asyncpg.Pool) -> None:
+async def test_cleared_after_commit(single_connection_pool: asyncpg.Pool) -> None:
     """SET LOCAL does not leak -- new transactions start clean after commit."""
     user_a = uuid.uuid4()
-    async with user_scoped_connection(pool, user_id=user_a) as conn:
+    async with user_scoped_connection(single_connection_pool, user_id=user_a) as conn:
         assert await conn.fetchval("SELECT current_setting('app.current_user_id', true)") == str(
             user_a
         )
+        # Commit the scoped transaction here, before the context manager's own
+        # RESETs and the pool's release-time RESET ALL run: those would also
+        # clear a session-level SET, so only this read tells the two apart.
+        await conn.execute("COMMIT")
+        assert await conn.fetchval("SELECT current_setting('app.current_user_id', true)") == ""
+        assert await conn.fetchval("SELECT current_setting('hnsw.ef_search', true)") == ""
+        await conn.execute("BEGIN")
 
-    async with pool.acquire() as conn:
+    async with single_connection_pool.acquire() as conn:
         assert await conn.fetchval("SELECT current_setting('app.current_user_id', true)") == ""
         assert await conn.fetchval("SELECT current_setting('hnsw.ef_search', true)") == ""
 
