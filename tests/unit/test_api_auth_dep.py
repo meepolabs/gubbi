@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from gubbi.api.v1.auth import require_scope
+from gubbi.auth.hydra import TokenClaims
 from gubbi.auth.strategies import (
     ApiKeyStrategy,
     HydraStrategy,
@@ -210,28 +211,28 @@ class TestTrustGatewayEnvelopeVerification:
         assert resp.status_code == 200
         assert resp.json()["user_id"] == str(TEST_USER_ID)
 
-    async def test_tampered_signature_returns_401(self) -> None:
+    @pytest.mark.parametrize(
+        ("signing_user", "signing_secret"),
+        [
+            pytest.param(
+                UUID("99999999-9999-9999-9999-999999999999"),
+                None,
+                id="tampered_signature_returns_401",
+            ),
+            pytest.param(TEST_USER_ID, b"\x99" * 32, id="wrong_secret_returns_401"),
+        ],
+    )
+    async def test_signature_mismatch_returns_401(
+        self, signing_user: UUID, signing_secret: bytes | None
+    ) -> None:
         app = _make_app(
             trust_gateway=True,
             gateway_require_signature=True,
             gateway_secret=self._SECRET,
         )
         client = TestClient(app)
-        other_user = UUID("99999999-9999-9999-9999-999999999999")
-        headers = self._signed_headers(other_user)
+        headers = self._signed_headers(signing_user, secret=signing_secret)
         headers["X-Auth-User-Id"] = str(TEST_USER_ID)
-        resp = client.get("/test-auth", headers=headers)
-        assert resp.status_code == 401
-        assert "Invalid gateway signature" in resp.json()["detail"]
-
-    async def test_wrong_secret_returns_401(self) -> None:
-        app = _make_app(
-            trust_gateway=True,
-            gateway_require_signature=True,
-            gateway_secret=self._SECRET,
-        )
-        client = TestClient(app)
-        headers = self._signed_headers(TEST_USER_ID, secret=b"\x99" * 32)
         resp = client.get("/test-auth", headers=headers)
         assert resp.status_code == 401
         assert "Invalid gateway signature" in resp.json()["detail"]
@@ -535,48 +536,44 @@ class TestRouteIntegration:
 class TestTrustGatewayBoundarySecurity:
     """Security boundary: trust-gateway deploy MUST NOT accept other auth modes."""
 
-    async def test_hydra_token_rejected_when_trust_gateway(self) -> None:
-        """When trust_gateway=True, a Hydra bearer token should not be accepted."""
-        from gubbi.auth.hydra import TokenClaims
-
-        mock_iv = AsyncMock()
-        mock_iv.introspect = AsyncMock(
-            return_value=TokenClaims(
-                sub=TEST_USER_ID,
-                scope="journal:read journal:write",
-                exp=9999999999,
-            )
-        )
-        app = _make_app(
-            trust_gateway=True,
-            api_key=TEST_API_KEY,
-            hydra_introspector=mock_iv,
-            operator_user_id=TEST_OP_ID,
-        )
+    @pytest.mark.parametrize(
+        ("app_kwargs", "authorization"),
+        [
+            pytest.param(
+                {
+                    "api_key": TEST_API_KEY,
+                    "hydra_introspector": AsyncMock(
+                        introspect=AsyncMock(
+                            return_value=TokenClaims(
+                                sub=TEST_USER_ID,
+                                scope="journal:read journal:write",
+                                exp=9999999999,
+                            )
+                        )
+                    ),
+                },
+                f"Bearer {TEST_ORY_TOKEN}",
+                id="hydra_token_rejected_when_trust_gateway",
+            ),
+            pytest.param(
+                {"api_key": TEST_API_KEY},
+                f"Bearer {TEST_API_KEY}",
+                id="api_key_rejected_when_trust_gateway",
+            ),
+            pytest.param(
+                {
+                    "api_key": "",
+                    "selfhost_token_validator": AsyncMock(return_value=frozenset({"journal:read"})),
+                },
+                "Bearer some_token",
+                id="selfhost_rejected_when_trust_gateway",
+            ),
+        ],
+    )
+    async def test_other_auth_mode_rejected_when_trust_gateway(
+        self, app_kwargs: dict[str, object], authorization: str
+    ) -> None:
+        app = _make_app(trust_gateway=True, operator_user_id=TEST_OP_ID, **app_kwargs)
         client = TestClient(app)
-        resp = client.get("/test-auth", headers={"Authorization": f"Bearer {TEST_ORY_TOKEN}"})
-        assert resp.status_code == 401
-
-    async def test_api_key_rejected_when_trust_gateway(self) -> None:
-        """When trust_gateway=True, a valid API key bearer should not be accepted."""
-        app = _make_app(
-            trust_gateway=True,
-            api_key=TEST_API_KEY,
-            operator_user_id=TEST_OP_ID,
-        )
-        client = TestClient(app)
-        resp = client.get("/test-auth", headers={"Authorization": f"Bearer {TEST_API_KEY}"})
-        assert resp.status_code == 401
-
-    async def test_selfhost_rejected_when_trust_gateway(self) -> None:
-        """When trust_gateway=True, a self-host token should not be accepted."""
-        mock_validator = AsyncMock(return_value=frozenset({"journal:read"}))
-        app = _make_app(
-            trust_gateway=True,
-            api_key="",
-            operator_user_id=TEST_OP_ID,
-            selfhost_token_validator=mock_validator,
-        )
-        client = TestClient(app)
-        resp = client.get("/test-auth", headers={"Authorization": "Bearer some_token"})
+        resp = client.get("/test-auth", headers={"Authorization": authorization})
         assert resp.status_code == 401

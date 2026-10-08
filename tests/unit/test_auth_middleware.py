@@ -287,9 +287,16 @@ class TestHydraMode:
 
 
 class TestScopeCheck:
-    async def test_missing_required_scope_returns_403(self) -> None:
-        """Scope 'openid email' should NOT satisfy 'journal' requirement."""
-        claims = TokenClaims(sub=TEST_SUB, scope="openid email", exp=9999999999)
+    @pytest.mark.parametrize(
+        ("token_scope", "expected_status"),
+        [
+            pytest.param("openid email", 403, id="missing_required_scope_returns_403"),
+            pytest.param("openid journal email", 200, id="scope_contains_required_returns_200"),
+            pytest.param("journaling read", 403, id="scope_substring_rejected"),
+        ],
+    )
+    async def test_required_scope_check(self, token_scope: str, expected_status: int) -> None:
+        claims = TokenClaims(sub=TEST_SUB, scope=token_scope, exp=9999999999)
         mock_iv = AsyncMock(spec=HydraIntrospector)
         mock_iv.introspect = AsyncMock(return_value=claims)
         mw = BearerAuthMiddleware(
@@ -301,43 +308,20 @@ class TestScopeCheck:
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
             resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
-        assert resp.status_code == 403
-
-    async def test_scope_contains_required_returns_200(self) -> None:
-        """Scope 'openid journal email' satisfies 'journal' requirement."""
-        claims = TokenClaims(sub=TEST_SUB, scope="openid journal email", exp=9999999999)
-        mock_iv = AsyncMock(spec=HydraIntrospector)
-        mock_iv.introspect = AsyncMock(return_value=claims)
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
-            required_scope="journal",
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=mw), base_url="http://test"
-        ) as client:
-            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
-        assert resp.status_code == 200
-
-    async def test_scope_substring_rejected(self) -> None:
-        """'journaling' must NOT satisfy strict 'journal' scope check."""
-        claims = TokenClaims(sub=TEST_SUB, scope="journaling read", exp=9999999999)
-        mock_iv = AsyncMock(spec=HydraIntrospector)
-        mock_iv.introspect = AsyncMock(return_value=claims)
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            strategies=_build_test_strategies(api_key=TEST_API_KEY, introspector=mock_iv),
-            required_scope="journal",
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=mw), base_url="http://test"
-        ) as client:
-            resp = await client.get("/", headers={"Authorization": f"Bearer {TEST_TOKEN}"})
-        assert resp.status_code == 403
+        assert resp.status_code == expected_status
 
 
 class TestMissingAndOversizedTokens:
-    async def test_missing_authorization_returns_401(self) -> None:
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            pytest.param(None, id="missing_authorization_returns_401"),
+            pytest.param({"Authorization": ""}, id="empty_authorization_returns_401"),
+        ],
+    )
+    async def test_absent_or_empty_authorization_returns_401(
+        self, headers: dict[str, str] | None
+    ) -> None:
         mw = BearerAuthMiddleware(
             _asgi_app(),
             strategies=[
@@ -351,24 +335,7 @@ class TestMissingAndOversizedTokens:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
-            resp = await client.get("/")
-        assert resp.status_code == 401
-
-    async def test_empty_authorization_returns_401(self) -> None:
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            strategies=[
-                ApiKeyStrategy(
-                    api_key=TEST_API_KEY,
-                    api_key_scopes=("journal:read", "journal:write"),
-                    operator_user_id=TEST_OP_ID,
-                )
-            ],
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=mw), base_url="http://test"
-        ) as client:
-            resp = await client.get("/", headers={"Authorization": ""})
+            resp = await client.get("/", headers=headers)
         assert resp.status_code == 401
 
     async def test_oversized_token_returns_401(self) -> None:
@@ -729,8 +696,14 @@ class TestTrustGateway:
         assert resp.status_code == 200
         assert captured == [str(self.TEST_USER_UUID)]
 
-    async def test_missing_header_returns_401(self) -> None:
-        """Missing X-Auth-User-Id header -> 401."""
+    @pytest.mark.parametrize(
+        "headers",
+        [
+            pytest.param(None, id="missing_header_returns_401"),
+            pytest.param({"X-Auth-User-Id": ""}, id="empty_header_returns_401"),
+        ],
+    )
+    async def test_absent_or_empty_header_returns_401(self, headers: dict[str, str] | None) -> None:
         mw = BearerAuthMiddleware(
             _asgi_app(),
             strategies=[
@@ -743,25 +716,7 @@ class TestTrustGateway:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw), base_url="http://test"
         ) as client:
-            resp = await client.get("/")
-        assert resp.status_code == 401
-        assert resp.json() == {"error": "Missing X-Auth-User-Id header"}
-
-    async def test_empty_header_returns_401(self) -> None:
-        """Empty X-Auth-User-Id header -> 401."""
-        mw = BearerAuthMiddleware(
-            _asgi_app(),
-            strategies=[
-                self.TrustGatewayStrategy(
-                    gateway_secret=None,
-                    gateway_require_signature=False,
-                ),
-            ],
-        )
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=mw), base_url="http://test"
-        ) as client:
-            resp = await client.get("/", headers={"X-Auth-User-Id": ""})
+            resp = await client.get("/", headers=headers)
         assert resp.status_code == 401
         assert resp.json() == {"error": "Missing X-Auth-User-Id header"}
 
