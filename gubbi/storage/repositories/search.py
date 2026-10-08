@@ -1,4 +1,4 @@
-"""Search repository - FTS and topic prefix lookup SQL."""
+"""Search repository - FTS SQL."""
 
 from __future__ import annotations
 
@@ -10,18 +10,6 @@ from gubbi.storage.repositories.base import _add_param, _escape_like
 
 if TYPE_CHECKING:
     import asyncpg
-
-
-async def get_topic_ids_by_prefix(
-    conn: asyncpg.Connection,
-    topic_prefix: str,
-) -> list[int]:
-    """Return all topic ids whose path starts with the given prefix (LIKE-escaped)."""
-    rows = await conn.fetch(
-        "SELECT id FROM topics WHERE path LIKE $1 ESCAPE '!'",
-        _escape_like(topic_prefix) + "%",
-    )
-    return [r["id"] for r in rows]
 
 
 async def fts_search(

@@ -11,13 +11,6 @@ Type notes:
     return type to a union (``ErrorResult | dict[str, Any]``) would cascade
     through 40+ callsites AND change what FastMCP reports as the structured
     schema.
-
-    For callers that genuinely need to narrow on ``Literal[False]`` (e.g.
-    a future code path that does ``if not result["success"]: return result``
-    and wants type-checker support), use the ``ToolResult`` alias below and
-    cast the helper output at the boundary.  Until such a caller appears,
-    the cast inside each helper is the correct + minimal trade-off and
-    matches the rest of the codebase's narrowing patterns.
 """
 
 from __future__ import annotations
@@ -34,20 +27,6 @@ class ErrorResult(TypedDict):
     success: Literal[False]
     suggestions: list[str]
     input: NotRequired[str]
-
-
-# Union alias for any code path that wants narrowing semantics.  Not used
-# as the helper return type for the reason explained in the module
-# docstring above; provided so callers can opt in:
-#
-#     from gubbi.tools.errors import ErrorResult, ToolResult, validation_error
-#     result: ToolResult = cast(ErrorResult, validation_error("..."))
-#     if not result["success"]:        # narrowed to ErrorResult
-#         return result
-#
-# Adding it here keeps the type vocabulary discoverable without forcing
-# every caller to relearn the envelope shape.
-ToolResult = ErrorResult | dict[str, Any]
 
 
 def _topic_suggestions(raw: str) -> list[str]:

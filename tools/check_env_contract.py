@@ -226,11 +226,6 @@ def _extract_env_prefix(node: ast.ClassDef) -> str:
     return ""
 
 
-def _is_field_annassign(node: ast.stmt) -> bool:
-    """Return True if *node* is a class-level field annotation."""
-    return isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
-
-
 def _extract_field_info(
     node: ast.AnnAssign,
 ) -> tuple[str, bool, str | None]:

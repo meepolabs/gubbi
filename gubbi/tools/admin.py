@@ -2,8 +2,6 @@
 
 import asyncio
 import time
-from datetime import UTC
-from datetime import datetime as datetime_cls
 from typing import Any
 
 import asyncpg
@@ -28,27 +26,6 @@ logger = structlog.get_logger(__name__)
 # works but must be positive to avoid conflicting with PG's negative-range API.
 _REINDEX_ADVISORY_LOCK_KEY: int = 2048976971  # large prime, not pi
 
-_REINDEX_COOLDOWN_SECONDS = 60
-
-
-async def _db_reindex_cooldown(pool: asyncpg.Pool) -> int | None:
-    """Return seconds until cooldown expires, or None if reindex is allowed.
-
-    Uses MAX(indexed_at) from entries as a shared proxy for last reindex time -
-    accurate across all workers since the value lives in PostgreSQL.
-    """
-    async with safe_acquire(pool) as conn:
-        max_indexed = await entry_repo.get_max_indexed_at(conn)
-    if max_indexed is None:
-        return None
-    now_utc = datetime_cls.now(UTC)
-    if max_indexed.tzinfo is None:
-        max_indexed = max_indexed.replace(tzinfo=UTC)
-    elapsed = (now_utc - max_indexed).total_seconds()
-    if elapsed < _REINDEX_COOLDOWN_SECONDS:
-        return int(_REINDEX_COOLDOWN_SECONDS - elapsed)
-    return None
-
 
 async def _run_reindex(
     app_ctx: AppContext, admin_pool: asyncpg.Pool, cipher: ContentCipher
@@ -61,9 +38,7 @@ async def _run_reindex(
     Callers MUST acquire ``pg_try_advisory_lock(_REINDEX_ADVISORY_LOCK_KEY)``
     before invoking and release it after; the advisory lock is kept as
     defense-in-depth so a stray manual ``_run_reindex`` invocation does
-    not race the production caller. The cooldown check in
-    ``_db_reindex_cooldown`` is time-based and does not serialize
-    concurrent callers on its own.
+    not race the production caller.
 
     The ``FOR UPDATE SKIP LOCKED`` clause in ``get_unindexed`` is the
     correctness boundary for multi-worker safety; the advisory lock at
