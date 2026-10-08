@@ -50,7 +50,7 @@ def _names(entries: list[Any]) -> list[str]:
     return [str(entry.name) for entry in entries]
 
 
-# -- this copy is the canonical one ---------------------------------------------
+# -- this copy matches the canonical bytes --------------------------------------
 
 
 def test_the_checker_is_byte_identical_to_the_canonical_copy() -> None:
