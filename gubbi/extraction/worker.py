@@ -67,6 +67,9 @@ _WORKER_TELEMETRY_CONFIGURED: bool = False
 # How long shutdown waits for cancelled jobs' budget and job-state cleanups
 # before cancelling them; they need the Redis client and the PG pool open.
 _CANCEL_CLEANUP_DRAIN_SECS: Final = 5.0
+# How long shutdown then waits for the cancelled cleanups to unwind; a cleanup
+# that swallows the cancellation is left behind so the clients still close.
+_CANCEL_CLEANUP_UNWIND_SECS: Final = 1.0
 
 
 def _reset_worker_telemetry_guard() -> None:
@@ -393,7 +396,7 @@ async def startup(ctx: ExtractionContext) -> None:
 
 
 async def _drain_cancel_cleanups(ctx: ExtractionContext) -> None:
-    """Wait a bounded time for cancelled jobs' cleanups, then cancel and await the rest."""
+    """Wait a bounded time for cancelled jobs' cleanups, then cancel the rest and wait again."""
     cleanups = set(ctx.get("cancel_cleanups", ()))
     if not cleanups:
         return
@@ -403,7 +406,9 @@ async def _drain_cancel_cleanups(ctx: ExtractionContext) -> None:
     await logger.warning("extraction_cancel_cleanups_abandoned", count=len(pending))
     for task in pending:
         task.cancel()
-    await asyncio.gather(*pending, return_exceptions=True)
+    _done, unresponsive = await asyncio.wait(pending, timeout=_CANCEL_CLEANUP_UNWIND_SECS)
+    if unresponsive:
+        await logger.warning("extraction_cancel_cleanups_unresponsive", count=len(unresponsive))
 
 
 async def shutdown(ctx: ExtractionContext) -> None:

@@ -68,6 +68,36 @@ async def test_shutdown_cancels_a_stuck_cleanup_after_its_bound_then_closes() ->
     assert events == ["cleanup_cancelled", "redis_closed", "redis_pool_closed", "pg_pool_closed"]
 
 
+async def test_shutdown_leaves_a_cleanup_that_ignores_cancellation_and_closes() -> None:
+    events: list[str] = []
+    ctx = _ctx(events)
+    release = asyncio.Event()
+
+    async def stubborn() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            events.append("cancel_ignored")
+            await release.wait()
+            events.append("cleanup_released")
+
+    task = asyncio.create_task(stubborn())
+    ctx["cancel_cleanups"].add(task)
+
+    try:
+        with (
+            patch.object(worker_module, "_CANCEL_CLEANUP_DRAIN_SECS", 0.05),
+            patch.object(worker_module, "_CANCEL_CLEANUP_UNWIND_SECS", 0.05),
+        ):
+            await asyncio.wait_for(worker_module.shutdown(ctx), 2)  # type: ignore[arg-type]
+
+        assert not task.done()
+        assert events == ["cancel_ignored", "redis_closed", "redis_pool_closed", "pg_pool_closed"]
+    finally:
+        release.set()
+        await asyncio.wait_for(task, 2)
+
+
 async def test_shutdown_without_cleanups_closes_clients() -> None:
     events: list[str] = []
 
