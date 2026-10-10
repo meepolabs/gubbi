@@ -35,6 +35,14 @@ ADMIN_POOL_SIZE_MAX: Final = 5  # admin-role pool maximum size (same bounds as a
 # -- Worker / job timeouts ------------------------------------------------------
 
 ARQ_JOB_TIMEOUT_SECS: Final = 600  # Arq worker job timeout (seconds)
+# Extraction gets its own Arq timeout, sized as chunks x attempts x per-attempt
+# LLM timeout: a >100k-token conversation splits into ~4 chunks, each call
+# makes up to 3 attempts of ~120 s, so 4 x 3 x 120 s = 1440 s of worst-case
+# LLM time. The job starts no new LLM call past the deadline (1440 s plus
+# backoff headroom); the 300 s margin up to the Arq timeout holds the tail of
+# the call in flight at the deadline and the persist step.
+EXTRACTION_JOB_DEADLINE_SECS: Final = 1500
+EXTRACTION_JOB_TIMEOUT_SECS: Final = 1800
 
 # -- LLM retry budgets ----------------------------------------------------------
 

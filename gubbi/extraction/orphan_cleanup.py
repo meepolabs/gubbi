@@ -10,13 +10,16 @@ Periodically marks stuck rows as failed:
   running sweep  -- error_code='worker_lost'
     A row stays in 'running' indefinitely if the Arq worker dies between
     mark_running and the SAVEPOINT commit (OOM, container kill, hard crash).
-    The threshold is 2 * ARQ_JOB_TIMEOUT_SECS (20 minutes), well past any
-    legitimate completion. Each swept row also triggers a best-effort budget
-    refund so the user does not lose budget the worker never spent.
+    The threshold is EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
+    (40 minutes): past the extraction function's own Arq timeout, at which
+    Arq cancels the job, so a live long-running job is never swept. Each
+    swept row also triggers a best-effort budget refund so the user does not
+    lose budget the worker never spent.
 
 Cadence: every {sleep_seconds} seconds. Threshold: {threshold_minutes} minutes
 (config-tunable via llm.orphan_cleanup_threshold_minutes for the pending
-sweep; the running-sweep threshold is fixed at 2 * ARQ_JOB_TIMEOUT_SECS).
+sweep; the running-sweep threshold is fixed, derived from the extraction
+job timeout).
 """
 
 from __future__ import annotations
@@ -30,7 +33,7 @@ import structlog
 from gubbi_common.budget import PRE_CHARGE_CENTS
 from opentelemetry.metrics import Counter, get_meter
 
-from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
+from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
 
 __all__: list[str] = ["run_orphan_cleanup"]
 
@@ -58,8 +61,10 @@ def _get_orphan_cleanup_swept_counter() -> Counter:
 
 # Stuck-running threshold: any row still 'running' beyond this is presumed
 # worker-lost (worker died between mark_running and SAVEPOINT commit).
-# 2x the Arq job timeout leaves headroom for legitimate slow runs.
-_RUNNING_THRESHOLD_SECS: int = 2 * ARQ_JOB_TIMEOUT_SECS
+# Arq cancels extract_conversation at EXTRACTION_JOB_TIMEOUT_SECS, so no live
+# run outlasts it; the extra ARQ_JOB_TIMEOUT_SECS is margin past that hard
+# cancel so a row is only swept once its job can no longer be running.
+_RUNNING_THRESHOLD_SECS: int = EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
 
 
 async def _refund_swept_row(
@@ -100,7 +105,7 @@ async def run_orphan_cleanup(
     """Forever-loop cron: marks stale pending rows failed, then stale running rows failed.
 
     pending  -> error_code='enqueue_lost' (threshold_minutes)
-    running  -> error_code='worker_lost'  (2 * ARQ_JOB_TIMEOUT_SECS, refund per row)
+    running  -> error_code='worker_lost'  (_RUNNING_THRESHOLD_SECS, refund per row)
 
     Uses admin_pool (BYPASSRLS) so the sweep is cross-tenant.
     Runs until the task is cancelled (e.g. lifespan teardown).

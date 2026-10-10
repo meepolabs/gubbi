@@ -11,18 +11,19 @@ import logging
 import os
 import threading
 from contextlib import suppress
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import redis.asyncio as aioredis
 import structlog
 from arq.connections import RedisSettings
+from arq.worker import func
 from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
 from gubbi.bootstrap import ReplicaCountWarnProbe
 from gubbi.config import Settings, get_settings
-from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
+from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     import asyncpg
+    from arq.typing import WorkerCoroutine
 
     from gubbi.extraction.context import ExtractionContext
     from gubbi.extraction.llm.provider import LLMProvider
@@ -395,7 +397,14 @@ class WorkerSettings:
     # arq reads this attribute on the class (never instantiates WorkerSettings),
     # so the list is functionally a configuration constant, not a mutable
     # instance attribute. Annotating with ClassVar is overkill here.
-    functions = [extract_conversation]  # noqa: RUF012
+    # The cast bridges arq's ``ctx: dict[Any, Any]`` protocol and the job's
+    # TypedDict context, which mypy does not treat as assignable.
+    functions = [  # noqa: RUF012
+        func(
+            cast("WorkerCoroutine", extract_conversation),
+            timeout=EXTRACTION_JOB_TIMEOUT_SECS,
+        )
+    ]
     on_startup = startup
     on_shutdown = shutdown
     max_jobs = 10

@@ -133,7 +133,7 @@ async def test_unique_slot_freed_after_cleanup(
 async def test_stuck_running_row_flipped_to_worker_lost(
     admin_pool: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
-    """A running row past 2 * ARQ_JOB_TIMEOUT_SECS becomes failed/worker_lost and is refunded."""
+    """A running row past the running-sweep threshold becomes failed/worker_lost and is refunded."""
     stuck = datetime.now(UTC) - timedelta(seconds=orphan_cleanup._RUNNING_THRESHOLD_SECS + 300)
     job_id = await _seed_job(admin_pool, seeded_a, status="running", at=stuck)
     helper = MagicMock()

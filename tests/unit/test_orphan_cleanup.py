@@ -193,11 +193,11 @@ async def test_otel_counter_none_attribute() -> None:
 
 
 @pytest.mark.asyncio
-async def test_running_sweep_uses_2x_arq_timeout_threshold() -> None:
-    """Running sweep threshold == 2 * ARQ_JOB_TIMEOUT_SECS (1200 seconds)."""
-    from gubbi.constants import ARQ_JOB_TIMEOUT_SECS
+async def test_running_sweep_threshold_derives_from_extraction_timeout() -> None:
+    """Running sweep threshold == extraction Arq timeout + shared Arq timeout (2400 seconds)."""
+    from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
 
-    assert _RUNNING_THRESHOLD_SECS == 2 * ARQ_JOB_TIMEOUT_SECS == 1200
+    assert _RUNNING_THRESHOLD_SECS == EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS == 2400
 
 
 @pytest.mark.asyncio
