@@ -9,7 +9,7 @@ worker boots against this in-process stub and the suite does not dial
 exercise the real provider.
 
 Failure injection is via a marker substring in the conversation
-content. Two markers:
+content. Four markers:
 
   - ``FAKE_LLM_FAIL`` -- raises :class:`LLMTransientError`. The
     extraction retry loop classifies this as transient, retries, and
@@ -19,6 +19,13 @@ content. Two markers:
   - ``FAKE_LLM_FAIL_PERMANENT`` -- raises :class:`LLMPermanentError`,
     skipping retries and going straight to the permanent-failure
     path.
+  - ``FAKE_LLM_REFUSE`` -- raises :class:`LLMRefusalError`, as a model
+    declining to answer would.
+  - ``FAKE_LLM_TRUNCATE`` -- raises :class:`LLMTruncatedError`, as a
+    model hitting its output-token cap would.
+
+Refusal and truncation errors carry the canned usage, since such calls
+still bill.
 
 Markers are checked against the JOINED content of all messages so the
 test can plant the marker in any role (user message, assistant turn).
@@ -45,8 +52,11 @@ from gubbi.extraction.llm.provider import (
     LLMMessage,
     LLMPermanentError,
     LLMProvider,
+    LLMRefusalError,
     LLMResponse,
     LLMTransientError,
+    LLMTruncatedError,
+    LLMUsage,
 )
 
 if TYPE_CHECKING:
@@ -64,6 +74,7 @@ _DEFAULT_MODEL = "fake-haiku-1"
 # below depends on these being constant per call.
 _CANNED_INPUT_TOKENS = 100
 _CANNED_OUTPUT_TOKENS = 50
+_CANNED_USAGE = LLMUsage(input=_CANNED_INPUT_TOKENS, output=_CANNED_OUTPUT_TOKENS)
 
 # Haiku 4.5 pricing per gubbi/extraction/llm/anthropic_provider.py:104-106
 # ($1/MTok input, $5/MTok output). Hardcoded here rather than imported
@@ -84,6 +95,8 @@ class FakeLLMProvider(LLMProvider):
 
     FAIL_MARKER: str = "FAKE_LLM_FAIL"
     PERMANENT_MARKER: str = "FAKE_LLM_FAIL_PERMANENT"
+    REFUSE_MARKER: str = "FAKE_LLM_REFUSE"
+    TRUNCATE_MARKER: str = "FAKE_LLM_TRUNCATE"
 
     def __init__(self, model: str = _DEFAULT_MODEL) -> None:
         self._model = model
@@ -107,6 +120,10 @@ class FakeLLMProvider(LLMProvider):
             raise LLMTransientError(
                 f"FakeLLMProvider: transient-failure marker {self.FAIL_MARKER!r} found in messages"
             )
+        if self.REFUSE_MARKER in joined_content:
+            raise LLMRefusalError("FakeLLMProvider: refusal marker found", usage=_CANNED_USAGE)
+        if self.TRUNCATE_MARKER in joined_content:
+            raise LLMTruncatedError("FakeLLMProvider: truncation marker found", usage=_CANNED_USAGE)
 
         content = _canned_content_for_schema(output_schema)
         return LLMResponse(
@@ -133,10 +150,10 @@ def _canned_content_for_schema(
 ) -> str | dict[str, Any]:
     """Return the dict that ExtractionService expects for this schema.
 
-    Two schema shapes are exercised today (gubbi/extraction/service.py:37
-    and :57): the categorize schema (topic_path / topic_title / summary
-    / confidence) and the extract-entries schema (entries: [{content,
-    reasoning, tags, ...}]). Distinguished by the property set so a
+    Three schema shapes are exercised: the single-call chunk schema
+    (topic_path ... plus entries), the categorize schema (topic_path /
+    topic_title / summary / confidence) and the extract-entries schema
+    (entries: [{content, reasoning, tags, ...}]). Distinguished by the property set so a
     future third schema with a fresh property name surfaces as
     "FakeLLMProvider canned response shape drift" rather than silently
     returning the wrong dict.
@@ -148,6 +165,23 @@ def _canned_content_for_schema(
         return "fake free-form response from FakeLLMProvider"
 
     properties = output_schema.get("properties", {})
+    # The chunk schema carries both topic_path and entries, so it must be
+    # matched before the categorize and extract-entries branches.
+    if "topic_path" in properties and "entries" in properties:
+        return {
+            "topic_path": "testbench/fake",
+            "topic_title": "Testbench Fake Topic",
+            "summary": "Canned chunk summary from FakeLLMProvider.",
+            "entries": [
+                {
+                    "content": "fake decision marker from FakeLLMProvider",
+                    "why": "canned reasoning from FakeLLMProvider",
+                    "tags": ["fake", "testbench"],
+                    "event_date": None,
+                    "source_message_index": 0,
+                }
+            ],
+        }
     if "topic_path" in properties:
         return {
             "topic_path": "testbench/fake",

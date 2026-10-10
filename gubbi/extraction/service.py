@@ -4,7 +4,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, cast
 
-from gubbi.extraction.llm.provider import LLMMessage, LLMProvider
+from gubbi.extraction.chunk_extraction import (
+    CHUNK_EXTRACTION_SCHEMA,
+    ChunkExtraction,
+    parse_chunk_extraction,
+)
+from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMUsage
 
 
 @dataclass
@@ -150,6 +155,36 @@ class ExtractionService:
             output_tokens=response.output_tokens,
         )
 
+    async def extract_chunk(
+        self,
+        chunk_text: str,
+        existing_topics: list[str],
+        prior_entries_text: str,
+    ) -> ChunkExtraction:
+        """Pick a topic and extract significant entries from one transcript chunk.
+
+        ``chunk_text`` is the serialized chunk (``[index] [date] role: text``
+        lines); ``prior_entries_text`` lists entries already extracted from
+        earlier chunks so the model does not repeat them. An empty
+        ``entries`` tuple means the chunk holds nothing worth recording.
+
+        Raises:
+            LLMSchemaError: the model output does not match the chunk schema.
+        """
+        system_prompt = self._read_prompt("extract_single.md")
+        user_msg: LLMMessage = {
+            "role": "user",
+            "content": _chunk_user_content(chunk_text, existing_topics, prior_entries_text),
+        }
+        response = await self._llm.complete([user_msg], system_prompt, CHUNK_EXTRACTION_SCHEMA)
+        usage = LLMUsage(
+            input=response.input_tokens,
+            output=response.output_tokens,
+            cached_input=response.cached_input_tokens,
+            reasoning=response.reasoning_tokens,
+        )
+        return parse_chunk_extraction(response.content, usage)
+
     @staticmethod
     def _parse_content(content: str | dict[str, Any]) -> dict[str, Any]:
         if isinstance(content, dict):
@@ -169,3 +204,18 @@ class ExtractionService:
     def _read_prompt(self, filename: str) -> str:
         path = self._prompts_dir / filename
         return path.read_text(encoding="utf-8")
+
+
+_NONE_LABEL = "(none)"
+
+
+def _chunk_user_content(
+    chunk_text: str, existing_topics: list[str], prior_entries_text: str
+) -> str:
+    topics = "\n".join(f"- {topic}" for topic in existing_topics) or _NONE_LABEL
+    prior = prior_entries_text or _NONE_LABEL
+    return (
+        f"## Existing topics\n{topics}\n\n"
+        f"## Entries already recorded from earlier parts of this conversation\n{prior}\n\n"
+        f"## Transcript\n{chunk_text}"
+    )
