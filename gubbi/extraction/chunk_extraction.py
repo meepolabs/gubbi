@@ -69,13 +69,15 @@ class ChunkEntry:
 
 @dataclass(frozen=True)
 class ChunkExtraction:
-    """Topic, summary and entries for one chunk, plus the call's token usage."""
+    """Topic, summary and entries for one chunk, plus the call's usage and outcome."""
 
     topic_path: str
     topic_title: str
     summary: str
     entries: tuple[ChunkEntry, ...]
     usage: LLMUsage
+    finish_reason: str = "stop"
+    attempts: int = 1
 
 
 class _EntryOutput(BaseModel):
@@ -102,7 +104,13 @@ _KNOWN_FIELDS: Final[frozenset[str]] = frozenset(_ChunkOutput.model_fields) | fr
 )
 
 
-def parse_chunk_extraction(content: str | Mapping[str, Any], usage: LLMUsage) -> ChunkExtraction:
+def parse_chunk_extraction(
+    content: str | Mapping[str, Any],
+    usage: LLMUsage,
+    *,
+    finish_reason: str = "stop",
+    attempts: int = 1,
+) -> ChunkExtraction:
     """Validate model output against the chunk schema and return a ChunkExtraction.
 
     Raises:
@@ -124,6 +132,8 @@ def parse_chunk_extraction(content: str | Mapping[str, Any], usage: LLMUsage) ->
         summary=output.summary,
         entries=tuple(_to_entry(entry) for entry in output.entries),
         usage=usage,
+        finish_reason=finish_reason,
+        attempts=attempts,
     )
 
 

@@ -169,6 +169,11 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "model_name",
             "prompt_size",
             "completion_size",
+            "cached_prompt_size",
+            "reasoning_size",
+            "finish_reason",
+            "attempts",
+            "chunk_index",
             "latency_ms",
             "correlation_id",
         }

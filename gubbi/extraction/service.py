@@ -183,7 +183,12 @@ class ExtractionService:
             cached_input=response.cached_input_tokens,
             reasoning=response.reasoning_tokens,
         )
-        return parse_chunk_extraction(response.content, usage)
+        return parse_chunk_extraction(
+            response.content,
+            usage,
+            finish_reason=response.finish_reason,
+            attempts=response.attempts,
+        )
 
     @staticmethod
     def _parse_content(content: str | dict[str, Any]) -> dict[str, Any]:
