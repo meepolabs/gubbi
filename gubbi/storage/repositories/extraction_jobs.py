@@ -255,8 +255,17 @@ async def mark_completed(
     topics_created: int,
     entries_created: int,
     cents_spent: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    llm_calls: int = 0,
+    chunks: int = 0,
 ) -> bool:
     """Transition job to 'completed' and record final counters + timestamp.
+
+    The usage counters are the job's totals over every model call, failed
+    attempts included.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'. This makes the function safe
@@ -269,6 +278,12 @@ async def mark_completed(
             topics_created = $2,
             entries_created = $3,
             cents_spent = $4,
+            input_tokens = $5,
+            output_tokens = $6,
+            cached_input_tokens = $7,
+            reasoning_tokens = $8,
+            llm_calls = $9,
+            chunks = $10,
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')
@@ -277,6 +292,12 @@ async def mark_completed(
         topics_created,
         entries_created,
         cents_spent,
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        reasoning_tokens,
+        llm_calls,
+        chunks,
     )
     return str(result) == "UPDATE 1"
 
@@ -291,8 +312,17 @@ async def mark_failed(
     job_id: UUID,
     *,
     error_code: str,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    cached_input_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    llm_calls: int = 0,
+    chunks: int = 0,
 ) -> bool:
     """Transition job to 'failed' and record the error_code.
+
+    The usage counters are the job's totals over every model call made before
+    the failure, failed attempts included.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'.
@@ -302,12 +332,24 @@ async def mark_failed(
         UPDATE extraction_jobs
         SET status = 'failed',
             error_code = $2,
+            input_tokens = $3,
+            output_tokens = $4,
+            cached_input_tokens = $5,
+            reasoning_tokens = $6,
+            llm_calls = $7,
+            chunks = $8,
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')
         """,
         job_id,
         error_code,
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        reasoning_tokens,
+        llm_calls,
+        chunks,
     )
     return str(result) == "UPDATE 1"
 

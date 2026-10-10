@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
@@ -38,11 +39,13 @@ if TYPE_CHECKING:
 
 __all__: list[str] = [
     "DECRYPTION_FAILED_SENTINEL",
+    "ExtractionState",
     "SaveConversationResult",
     "count_conversations",
     "delete_superseded_json_archive",
     "exists_by_platform_id",
     "get_conversation",
+    "get_extraction_state",
     "get_processed_at",
     "get_title_summary",
     "get_titles_summaries",
@@ -52,6 +55,7 @@ __all__: list[str] = [
     "read_conversation_by_id",
     "read_conversation_by_id_paginated",
     "save_conversation",
+    "set_extraction_state",
     "set_platform_metadata",
 ]
 
@@ -877,6 +881,64 @@ async def mark_processed(
         "UPDATE conversations SET processed_at = now() WHERE id = $1 AND processed_at IS NULL",
         conversation_id,
     )
+
+
+@dataclass(frozen=True)
+class ExtractionState:
+    """What extraction needs to know about a conversation before it runs.
+
+    ``extracted_content_hash`` and ``extraction_version`` record the content and
+    extractor version of the last completed extraction; both are None until one
+    completes.
+    """
+
+    platform: str | None
+    source: str
+    created_at: datetime_cls
+    extracted_content_hash: str | None
+    extraction_version: int | None
+
+
+async def get_extraction_state(
+    conn: asyncpg.Connection,
+    conversation_id: int,
+) -> ExtractionState | None:
+    """Return the conversation's ExtractionState, or None if it is missing or another user's."""
+    row = await conn.fetchrow(
+        "SELECT platform, source, created_at, extracted_content_hash, extraction_version"
+        " FROM conversations WHERE id = $1",
+        conversation_id,
+    )
+    if row is None:
+        return None
+    return ExtractionState(
+        platform=row["platform"],
+        source=row["source"],
+        created_at=row["created_at"],
+        extracted_content_hash=row["extracted_content_hash"],
+        extraction_version=row["extraction_version"],
+    )
+
+
+async def set_extraction_state(
+    conn: asyncpg.Connection,
+    conversation_id: int,
+    content_hash: str,
+    version: int,
+) -> bool:
+    """Record the content hash and extractor version of a completed extraction.
+
+    Returns True iff the conversation was updated; False when it is missing or
+    another user's (RLS).
+    """
+    result = await conn.execute(
+        "UPDATE conversations SET extracted_content_hash = $2, extraction_version = $3"
+        " WHERE id = $1",
+        conversation_id,
+        content_hash,
+        version,
+    )
+    return str(result) == "UPDATE 1"
 
 
 async def get_titles_summaries(

@@ -47,6 +47,7 @@ __all__: list[str] = [
     "get_texts",
     "get_timeline_counts",
     "get_unindexed",
+    "link_to_conversation",
     "list_entries",
     "mark_indexed",
     "mark_indexed_batch",
@@ -87,11 +88,19 @@ async def append(
     reasoning: str | None = None,
     tags: Sequence[str] | None = None,
     date: str | None = None,
+    *,
+    client: str | None = None,
+    duplicate_of_entry_id: int | None = None,
+    source_conversation_id: int | None = None,
 ) -> int:
     """Append a dated entry to a topic. Returns the new entry_id.
 
     Single query: INSERT the entry and UPDATE topics.updated_at atomically
     via a CTE. No COUNT, no separate round-trip.
+
+    ``client`` names the AI client the entry came from; ``duplicate_of_entry_id``
+    flags a near-duplicate of that entry; ``source_conversation_id`` links an
+    entry extracted from a conversation. Each stays NULL when omitted.
 
     Raises TopicNotFoundError if the topic does not exist.
     """
@@ -112,11 +121,13 @@ async def append(
             INSERT INTO entries
                 (topic_id, date, content_encrypted, content_nonce,
                  reasoning_encrypted, reasoning_nonce,
-                 tags, user_id, created_at, updated_at, search_vector)
+                 tags, user_id, created_at, updated_at, search_vector,
+                 client, duplicate_of_entry_id, source_conversation_id)
             VALUES (
                 $1, $2, $3, $4, $5, $6, $7,
                 (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
-                $8, $8, to_tsvector('english', $9)
+                $8, $8, to_tsvector('english', $9),
+                $10, $11, $12
             )
             RETURNING id
         ),
@@ -135,10 +146,33 @@ async def append(
         tags or [],
         now,
         content,
+        client,
+        duplicate_of_entry_id,
+        source_conversation_id,
     )
     if row is None:
         raise RuntimeError("INSERT entries failed: no row returned")
     return int(row["id"])
+
+
+async def link_to_conversation(
+    conn: asyncpg.Connection,
+    entry_id: int,
+    conversation_id: int,
+) -> bool:
+    """Link an entry to the conversation it was drawn from.
+
+    Sets ``source_conversation_id`` only while it is NULL, so an existing link is
+    never overwritten. Returns True iff this call set the link; False when the
+    entry is already linked, deleted, missing, or another user's (RLS).
+    """
+    result = await conn.execute(
+        "UPDATE entries SET source_conversation_id = $2"
+        " WHERE id = $1 AND source_conversation_id IS NULL AND deleted_at IS NULL",
+        entry_id,
+        conversation_id,
+    )
+    return str(result) == "UPDATE 1"
 
 
 async def read(
