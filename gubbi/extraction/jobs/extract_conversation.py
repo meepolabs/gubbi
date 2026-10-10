@@ -294,8 +294,8 @@ def _classify_error(exc: BaseException) -> str:
     """Map an exception to a short error_code string for extraction_jobs.error_code.
 
     Uses the provider-agnostic LLM* hierarchy so this layer does not import
-    vendor SDKs. Anthropic-specific exceptions are translated to LLM* at the
-    AnthropicProvider boundary (see gubbi.extraction.llm.anthropic_provider).
+    vendor SDKs. Vendor exceptions are translated to LLM* at the provider
+    boundary (see gubbi.extraction.llm.openai_compatible).
     """
     if isinstance(exc, LLMRateLimitError):
         return "llm_rate_limited"

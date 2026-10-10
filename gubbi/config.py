@@ -286,8 +286,26 @@ class LLMConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     api_key: str = Field(default="", validation_alias="JOURNAL_LLM_API_KEY")
-    provider: str = Field(default="anthropic", validation_alias="JOURNAL_LLM_PROVIDER")
+    # ``openai_compatible`` targets any OpenAI-compatible chat-completions
+    # endpoint at ``base_url``; ``fake`` is the in-process test stub.
+    provider: str = Field(default="openai_compatible", validation_alias="JOURNAL_LLM_PROVIDER")
+    base_url: str = Field(default="", validation_alias="JOURNAL_LLM_BASE_URL")
     model: str = Field(default="", validation_alias="JOURNAL_LLM_MODEL")
+    # Prices (USD per million tokens) feed the cents estimate charged
+    # against the LLM budget.
+    input_price_per_mtok: float = Field(
+        default=1.00, ge=0, validation_alias="JOURNAL_LLM_INPUT_PRICE_PER_MTOK"
+    )
+    output_price_per_mtok: float = Field(
+        default=5.00, ge=0, validation_alias="JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK"
+    )
+    # Temporary switch, kept until the single-call and two-call extraction
+    # paths have been compared on real conversations; one will then be removed.
+    extraction_mode: Literal["single", "two_call"] = Field(
+        default="single", validation_alias="JOURNAL_EXTRACTION_MODE"
+    )
+    # One small "anything worth recording?" call before extraction.
+    extraction_triage: bool = Field(default=False, validation_alias="JOURNAL_EXTRACTION_TRIAGE")
     # Gates budget delta writes from worker (hosted: True; self-host: False).
     llm_budget_enabled: bool = Field(default=False, validation_alias="JOURNAL_LLM_BUDGET_ENABLED")
     # Stale pending-job sweep window.

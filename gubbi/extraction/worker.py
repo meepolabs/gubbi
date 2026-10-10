@@ -27,9 +27,10 @@ from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
-from gubbi.extraction.llm.anthropic_provider import AnthropicProvider
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
+from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.service import ExtractionService
+from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import rebind_metrics_after_configure
 from gubbi.telemetry.logger import initialize_logger
@@ -81,13 +82,54 @@ def _reset_worker_telemetry_guard() -> None:
 # pair to register a new provider; the worker switch logic itself does
 # not change.
 #
-# Default key is ``"anthropic"`` so an unset env var in prod yields the
-# real provider. Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER:
+# Default key is ``"openai_compatible"`` so an unset env var in prod yields
+# the real provider. Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER:
 # fake`` to opt into the in-process stub.
+def _build_openai_compatible_provider(settings: Settings) -> LLMProvider:
+    """Build the OpenAI-compatible provider, refusing to start without an endpoint."""
+    llm = settings.llm
+    missing = [
+        name
+        for name, value in (
+            ("JOURNAL_LLM_BASE_URL", llm.base_url),
+            ("JOURNAL_LLM_MODEL", llm.model),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        raise ValueError(
+            f"JOURNAL_LLM_PROVIDER=openai_compatible requires {', '.join(missing)} to be set"
+        )
+    return OpenAICompatibleProvider(
+        base_url=llm.base_url,
+        api_key=llm.api_key,
+        model=llm.model,
+        input_price_per_mtok=llm.input_price_per_mtok,
+        output_price_per_mtok=llm.output_price_per_mtok,
+    )
+
+
 _PROVIDER_FACTORIES: dict[str, Callable[[Settings], LLMProvider]] = {
-    "anthropic": lambda s: AnthropicProvider(s.llm),
+    "openai_compatible": _build_openai_compatible_provider,
     "fake": lambda _s: FakeLLMProvider(),
 }
+
+
+def _build_llm_provider(settings: Settings) -> LLMProvider:
+    """Select and build the provider named by ``JOURNAL_LLM_PROVIDER``.
+
+    Read via ``settings.llm.provider`` so the env var participates in the
+    env-contract lint sweep (``tools/check_env_contract.py``). An unknown
+    name or an incomplete provider config raises ``ValueError``.
+    """
+    provider_name = settings.llm.provider.lower()
+    factory = _PROVIDER_FACTORIES.get(provider_name)
+    if factory is None:
+        raise ValueError(
+            f"Unknown JOURNAL_LLM_PROVIDER={provider_name!r}; expected "
+            f"one of {sorted(_PROVIDER_FACTORIES)}"
+        )
+    return factory(settings)
 
 
 def _redis_url() -> str:
@@ -132,7 +174,7 @@ def _configure_worker_telemetry(settings: Settings) -> None:
     After wiring, ``rebind_metrics_after_configure()`` is invoked so the
     ``gateway.replica_count_warning`` counter -- and the three
     orphan-counter factories (orphan_cleanup, extract_conversation,
-    anthropic_provider) -- bind to the live MeterProvider and actually
+    openai_compatible) -- bind to the live MeterProvider and actually
     export.
 
     Deploy dependency: because this enables OTLP export, the worker's
@@ -175,7 +217,7 @@ def _configure_worker_telemetry(settings: Settings) -> None:
         # MeterProvider. Goes through ``rebind_metrics_after_configure`` --
         # the same hook the FastAPI lifespan uses -- so the canonical
         # ``initialize_metrics`` lru_cache AND the three orphan-counter
-        # factories (orphan_cleanup, extract_conversation, anthropic_provider)
+        # factories (orphan_cleanup, extract_conversation, openai_compatible)
         # all bind to the SDK provider rather than a stale NoOp handle.
         # The cache_clear + re-prime sequence is NOT atomic, but it is safe
         # here only because the health-server thread started later in
@@ -229,6 +271,10 @@ async def startup(ctx: ExtractionContext) -> None:
     # OTEL_EXPORTER_OTLP_ENDPOINT in the deploy. One-shot + best-effort:
     # never blocks boot. See _configure_worker_telemetry.
     _configure_worker_telemetry(settings)
+
+    # Resolved before any pool or thread exists so a misconfigured provider
+    # fails startup with nothing to tear down.
+    llm_provider = _build_llm_provider(settings)
 
     pool: asyncpg.Pool | None = None
     redis_pool: aioredis.ConnectionPool | None = None
@@ -295,28 +341,12 @@ async def startup(ctx: ExtractionContext) -> None:
         cipher = _build_content_cipher()
         ctx["cipher"] = cipher
 
-        # Extraction service.
-        # The LLM provider is selected by the ``JOURNAL_LLM_PROVIDER`` env
-        # var (default ``anthropic`` so a missing env in prod stays safe).
-        # Read via ``settings.llm.provider`` so the env var participates in
-        # the env-contract lint sweep (``tools/check_env_contract.py``)
-        # alongside the rest of the ``LLMConfig`` keys; legacy direct
-        # ``os.environ`` reads slipped past that lint by design.
-        # Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER=fake`` so the
-        # worker boots against the in-process FakeLLMProvider stub instead
-        # of dialling api.anthropic.com -- keeps D-tier hermetic and avoids
-        # accidental spend if a leaked ANTHROPIC_API_KEY is in scope.
-        # Adding a new provider is a one-line append to ``_PROVIDER_FACTORIES``.
-        provider_name = settings.llm.provider.lower()
-        factory = _PROVIDER_FACTORIES.get(provider_name)
-        if factory is None:
-            raise ValueError(
-                f"Unknown JOURNAL_LLM_PROVIDER={provider_name!r}; expected "
-                f"one of {sorted(_PROVIDER_FACTORIES)}"
-            )
-        llm_provider: LLMProvider = factory(settings)
+        # Extraction service. Testbench D-tier compose sets
+        # ``JOURNAL_LLM_PROVIDER=fake`` so the worker boots against the
+        # in-process FakeLLMProvider and never calls a real endpoint.
         extraction_service = ExtractionService(llm_provider)
         ctx["extraction_service"] = extraction_service
+        ctx["embedding_service"] = EmbeddingService()
 
         # BudgetHelper -- worker invokes only record_actual_cost, but we
         # register the Lua script anyway (cheapest option; no API split).

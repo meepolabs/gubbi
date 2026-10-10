@@ -34,10 +34,10 @@ class LLMResponse:
 # ---------------------------------------------------------------------------
 # Provider-agnostic exception hierarchy.
 #
-# Concrete providers (anthropic_provider, future LLM gateway client) translate
-# vendor SDK exceptions into these classes at the provider boundary so that
-# callers (extract_conversation, retry loops, _classify_error) reason about
-# transient/permanent classification without importing vendor SDKs.
+# Concrete providers (openai_compatible) translate vendor SDK exceptions into
+# these classes at the provider boundary so that callers (extract_conversation,
+# retry loops, _classify_error) reason about transient/permanent
+# classification without importing vendor SDKs.
 # ---------------------------------------------------------------------------
 
 

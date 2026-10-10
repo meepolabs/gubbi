@@ -46,9 +46,6 @@ EXTRACTION_JOB_TIMEOUT_SECS: Final = 1800
 
 # -- LLM retry budgets ----------------------------------------------------------
 
-ANTHROPIC_MAX_RETRIES: Final = 5  # Anthropic SDK retry budget on RateLimitError
-ANTHROPIC_REQUEST_TIMEOUT_SECS: Final = 120  # Anthropic SDK per-request timeout (seconds)
-
 LLM_MAX_ATTEMPTS: Final = 3  # Total requests per completion, first attempt included
 LLM_REQUEST_TIMEOUT_SECS: Final = 120  # Per-attempt timeout (seconds)
 LLM_BACKOFF_BASE_SECS: Final = 1.0  # Backoff before the second attempt; doubles per retry

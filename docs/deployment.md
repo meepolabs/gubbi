@@ -83,6 +83,20 @@ Generate a bcrypt password hash via the built-in CLI:
 docker compose exec gubbi python -m gubbi.oauth.crypto 'your-password'
 ```
 
+### Extraction worker (optional)
+
+The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns saved conversations into entries. It calls any OpenAI-compatible chat-completions endpoint; with the default provider it refuses to start when `JOURNAL_LLM_BASE_URL` or `JOURNAL_LLM_MODEL` is unset. The HTTP server does not read these variables.
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `JOURNAL_LLM_PROVIDER` | no | `openai_compatible` (default) or `fake` (in-process stub for tests; never calls a model). | `openai_compatible` |
+| `JOURNAL_LLM_BASE_URL` | yes (worker) | Base URL of the OpenAI-compatible endpoint, including the version path. | `https://llm.example.com/v1` |
+| `JOURNAL_LLM_MODEL` | yes (worker) | Model name sent with every request. | `your-model-name` |
+| `JOURNAL_LLM_API_KEY` | depends on endpoint | Bearer key sent to the endpoint. | (random) |
+| `JOURNAL_LLM_INPUT_PRICE_PER_MTOK` / `JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK` | no | USD per million input / output tokens, used for cost accounting. Defaults `1.00` / `5.00`. | `0.40` |
+| `JOURNAL_EXTRACTION_MODE` | no | `single` (default: one structured call per chunk) or `two_call` (categorize, then extract). Temporary switch while the two paths are compared; one will be removed. | `single` |
+| `JOURNAL_EXTRACTION_TRIAGE` | no | `true` adds one small "anything worth recording?" call before extraction. Default `false`. | `false` |
+
 ### Operator provisioning
 
 Operator row is auto-scaffolded by the app on Mode 1 / Mode 2 startup. No manual

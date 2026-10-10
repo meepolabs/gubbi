@@ -45,6 +45,9 @@ from gubbi.extraction import worker as worker_module
 # production-configured size.
 _STUB_APP_POOL_MAX = 12
 
+_STUB_LLM_BASE_URL = "https://llm.example.test/v1"
+_STUB_LLM_MODEL = "stub-model"
+
 
 @pytest.fixture(autouse=True)
 def _reset_worker_telemetry_guard_between_tests() -> Iterator[None]:
@@ -135,10 +138,18 @@ def _patch_worker_dependencies(
     monkeypatch.setattr(worker_module, "initialize_logger", MagicMock())
     monkeypatch.setattr(worker_module, "_build_content_cipher", MagicMock(return_value=None))
 
-    # The Anthropic provider is constructed inside ``startup`` -- patch
-    # it to a no-op so no real API client is built.
-    monkeypatch.setattr(worker_module, "AnthropicProvider", MagicMock(return_value=MagicMock()))
+    # The default provider refuses to start without an endpoint and model;
+    # give it placeholders and stub the class so no API client is built.
+    # Tests that exercise provider selection override these afterwards.
+    monkeypatch.setenv("JOURNAL_LLM_BASE_URL", _STUB_LLM_BASE_URL)
+    monkeypatch.setenv("JOURNAL_LLM_MODEL", _STUB_LLM_MODEL)
+    monkeypatch.setattr(
+        worker_module, "OpenAICompatibleProvider", MagicMock(return_value=MagicMock())
+    )
     monkeypatch.setattr(worker_module, "ExtractionService", MagicMock(return_value=MagicMock()))
+    # The real EmbeddingService loads (and on a cold cache downloads) the
+    # ONNX model.
+    monkeypatch.setattr(worker_module, "EmbeddingService", MagicMock(return_value=MagicMock()))
 
     # The probe outcome counter helper is bound at import time; tests
     # that don't care about counter emission need a no-op so the runner
@@ -354,8 +365,8 @@ async def test_worker_startup_selects_fake_provider_when_env_is_fake(
     """``JOURNAL_LLM_PROVIDER=fake`` instantiates ``FakeLLMProvider``.
 
     Pinned because the testbench D-tier compose sets this env var to
-    keep the worker hermetic (no api.anthropic.com round-trip, no
-    accidental spend on a leaked ANTHROPIC_API_KEY). A regression that
+    keep the worker hermetic (no real endpoint round-trip, no accidental
+    spend on a leaked JOURNAL_LLM_API_KEY). A regression that
     drops ``"fake"`` from ``_PROVIDER_FACTORIES`` would silently boot
     against the real provider with the testbench's stub key.
     """
@@ -410,6 +421,99 @@ async def test_worker_startup_raises_for_unknown_provider(
     ctx: dict[str, Any] = {}
     with pytest.raises(ValueError, match="Unknown JOURNAL_LLM_PROVIDER"):
         await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_worker_startup_builds_openai_compatible_provider_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default provider is built from the JOURNAL_LLM_* settings."""
+    monkeypatch.delenv("JOURNAL_LLM_PROVIDER", raising=False)
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    monkeypatch.setenv("JOURNAL_LLM_API_KEY", "stub-key")
+    monkeypatch.setenv("JOURNAL_LLM_INPUT_PRICE_PER_MTOK", "0.25")
+    monkeypatch.setenv("JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK", "2.5")
+    built_provider = MagicMock()
+    provider_cls = MagicMock(return_value=built_provider)
+    monkeypatch.setattr(worker_module, "OpenAICompatibleProvider", provider_cls)
+    service_cls = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(worker_module, "ExtractionService", service_cls)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    provider_cls.assert_called_once_with(
+        base_url=_STUB_LLM_BASE_URL,
+        api_key="stub-key",
+        model=_STUB_LLM_MODEL,
+        input_price_per_mtok=0.25,
+        output_price_per_mtok=2.5,
+    )
+    service_cls.assert_called_once_with(built_provider)
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "missing_env",
+    ["JOURNAL_LLM_BASE_URL", "JOURNAL_LLM_MODEL"],
+)
+async def test_worker_startup_fails_fast_when_openai_compatible_config_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_env: str,
+) -> None:
+    """openai_compatible without an endpoint or model aborts before any pool opens."""
+    monkeypatch.delenv("JOURNAL_LLM_PROVIDER", raising=False)
+    handles = _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    monkeypatch.delenv(missing_env)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ValueError, match=missing_env):
+        await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    worker_module.init_pool.assert_not_called()  # type: ignore[attr-defined]
+    handles["pool"].close.assert_not_called()
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+async def test_worker_startup_puts_embedding_service_on_ctx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``startup`` builds one EmbeddingService and stores it on the job context."""
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", "fake")
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    embedding_service = MagicMock()
+    embedding_cls = MagicMock(return_value=embedding_service)
+    monkeypatch.setattr(worker_module, "EmbeddingService", embedding_cls)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    embedding_cls.assert_called_once_with()
+    assert ctx["embedding_service"] is embedding_service
 
     get_settings.cache_clear()
 

@@ -3,10 +3,10 @@
 Selected by the worker via the ``JOURNAL_LLM_PROVIDER`` env var (factory
 registry at ``gubbi/extraction/worker.py:_PROVIDER_FACTORIES``). The
 testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER=fake`` so the
-worker boots against this in-process stub and the suite does not dial
-``api.anthropic.com``. Set ``JOURNAL_LLM_PROVIDER=anthropic`` (with
-``ANTHROPIC_API_KEY`` set) for occasional pre-release manual runs that
-exercise the real provider.
+worker boots against this in-process stub and the suite never calls a
+real endpoint. Set ``JOURNAL_LLM_PROVIDER=openai_compatible`` (with
+``JOURNAL_LLM_BASE_URL`` / ``JOURNAL_LLM_MODEL`` / ``JOURNAL_LLM_API_KEY``)
+for occasional pre-release manual runs that exercise the real provider.
 
 Failure injection is via a marker substring in the conversation
 content. Four markers:
@@ -38,10 +38,11 @@ property set, so the provider returns the right canned dict regardless
 of call order or worker concurrency. State-free / safe under ARQ
 ``max_jobs=10``.
 
-Token-count and cost estimates mirror Haiku 4.5 pricing exactly
-($1/MTok input, $5/MTok output) so the budget pre-charge math matches
-what the production AnthropicProvider would report -- a regression in
-``BudgetHelper`` accounting surfaces the same way under either provider.
+Cost estimates use the default per-million-token prices of the real
+provider settings ($1/MTok input, $5/MTok output) so the budget pre-charge
+math matches what an OpenAICompatibleProvider at default pricing would
+report -- a regression in ``BudgetHelper`` accounting surfaces the same way
+under either provider.
 """
 
 from __future__ import annotations
@@ -76,10 +77,10 @@ _CANNED_INPUT_TOKENS = 100
 _CANNED_OUTPUT_TOKENS = 50
 _CANNED_USAGE = LLMUsage(input=_CANNED_INPUT_TOKENS, output=_CANNED_OUTPUT_TOKENS)
 
-# Haiku 4.5 pricing per gubbi/extraction/llm/anthropic_provider.py:104-106
-# ($1/MTok input, $5/MTok output). Hardcoded here rather than imported
-# so a regression in AnthropicProvider's pricing constant does not
-# silently change the fake's behaviour.
+# Default JOURNAL_LLM_INPUT_PRICE_PER_MTOK / JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK
+# ($1/MTok input, $5/MTok output). Hardcoded here rather than read from
+# settings so a change to those defaults does not silently change the
+# fake's behaviour.
 _INPUT_PRICE_PER_MILLION = 1.00
 _OUTPUT_PRICE_PER_MILLION = 5.00
 
@@ -134,7 +135,7 @@ class FakeLLMProvider(LLMProvider):
         )
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
-        """Mirror AnthropicProvider Haiku 4.5 pricing for deterministic budget math."""
+        """Price at the default per-Mtok settings for deterministic budget math."""
         # ``round`` to 6 decimals matches the production rounding
         # convention. Determinism is the invariant the pre-charge /
         # refund test depends on.
@@ -159,7 +160,7 @@ def _canned_content_for_schema(
     returning the wrong dict.
 
     A ``None`` schema (free-form completion) returns a string so the
-    contract matches AnthropicProvider's text-mode return shape.
+    contract matches the real provider's text-mode return shape.
     """
     if output_schema is None:
         return "fake free-form response from FakeLLMProvider"

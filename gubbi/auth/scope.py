@@ -156,7 +156,7 @@ def insufficient_scope_response(
 
     The ``_meta`` field carries the ``www_authenticate`` value per the MCP
     spec. When present, ChatGPT triggers its tool-level OAuth re-consent UI.
-    Anthropic ignores it (harmless).
+    Claude clients ignore it (harmless).
     """
     description = detail or f"Token scope does not include {required_scope}"
     return CallToolResult(

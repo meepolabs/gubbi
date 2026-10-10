@@ -12,12 +12,14 @@ if TYPE_CHECKING:
 
     from gubbi.crypto.cipher import ContentCipher
     from gubbi.extraction.service import ExtractionService
+    from gubbi.storage.embedding_service import EmbeddingService
 
 
 class ExtractionContext(TypedDict):
     pool: asyncpg.Pool
     cipher: ContentCipher | None
     extraction_service: ExtractionService
+    embedding_service: EmbeddingService
     redis: RedisClient
     redis_pool: RedisConnectionPool
     health_thread: NotRequired[threading.Thread]

@@ -79,13 +79,11 @@ def _restore_otel_globals() -> Iterator[None]:
         from gubbi.extraction.jobs.extract_conversation import (
             _get_extraction_refund_skipped_counter,
         )
-        from gubbi.extraction.llm.anthropic_provider import _get_anthropic_retry_counter
         from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
         from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
 
         _get_orphan_cleanup_swept_counter.cache_clear()
         _get_extraction_refund_skipped_counter.cache_clear()
-        _get_anthropic_retry_counter.cache_clear()
         _get_llm_retry_counter.cache_clear()
 
 
@@ -522,7 +520,7 @@ def test_validate_metric_attrs_empty_input() -> None:
 #
 #   1. extraction_jobs.orphan_cleanup_swept_total
 #   2. extraction.refund_skipped_total
-#   3. anthropic.retry_count_total
+#   3. llm.retry_count_total
 #
 # Each test below pins the contract: after ``configure_otel`` runs (modeled
 # here by a ``_set_provider`` swap + ``rebind_metrics_after_configure``
@@ -644,49 +642,6 @@ def test_extraction_refund_skipped_counter_rebinds_to_real_provider() -> None:
     # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
 
 
-def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
-    """``anthropic.retry_count_total`` lands in real reader after rebind.
-
-    Most beta-relevant of the three -- LLM retry storms are invisible
-    at HyperDX without this rebind. The Anthropic provider is on the hot
-    path of every extraction job; a rate-limit cascade would drive the
-    counter but the alarm rule would never fire.
-    """
-    from gubbi.extraction.llm.anthropic_provider import _get_anthropic_retry_counter
-    from gubbi.telemetry import rebind_metrics_after_configure
-
-    _set_provider(NoOpMeterProvider())
-    _get_anthropic_retry_counter.cache_clear()
-    _get_anthropic_retry_counter().add(
-        1, attributes={"result": "retried", "error_class": "LLMTransientError"}
-    )
-    sealed = _get_anthropic_retry_counter()
-    assert type(sealed).__name__.startswith("NoOp"), (
-        "precondition: factory must be sealed against NoOp"
-    )
-
-    reader = InMemoryMetricReader()
-    real_provider = MeterProvider(metric_readers=[reader])
-    _set_provider(real_provider)
-
-    rebind_metrics_after_configure()
-
-    _get_anthropic_retry_counter().add(
-        1, attributes={"result": "exhausted", "error_class": "LLMTransientError"}
-    )
-    found, total = _walk_counter_total(reader, "anthropic.retry_count_total")
-
-    assert found, (
-        "anthropic.retry_count_total not found in exported metrics -- "
-        "factory still bound to NoOp; rebind hook is not wiring this counter"
-    )
-    assert total == 1, f"expected counter sum == 1 after rebind+add, got {total}"
-    rebound = _get_anthropic_retry_counter()
-    assert isinstance(rebound, Counter)
-    assert not type(rebound).__name__.startswith("NoOp")
-    # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
-
-
 def test_llm_retry_counter_rebinds_to_real_provider() -> None:
     """``llm.retry_count_total`` lands in a real reader after rebind."""
     from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
@@ -734,7 +689,6 @@ def test_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
     """
     from gubbi.extraction import orphan_cleanup
     from gubbi.extraction.jobs import extract_conversation
-    from gubbi.extraction.llm import anthropic_provider
 
     assert not hasattr(orphan_cleanup, "ORPHAN_CLEANUP_SWEPT"), (
         "orphan_cleanup.ORPHAN_CLEANUP_SWEPT was re-introduced as a "
@@ -745,9 +699,4 @@ def test_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
         "extract_conversation.EXTRACTION_REFUND_SKIPPED was re-introduced as a "
         "module-scope counter; it must live behind "
         "_get_extraction_refund_skipped_counter()"
-    )
-    assert not hasattr(anthropic_provider, "ANTHROPIC_RETRY_COUNT"), (
-        "anthropic_provider.ANTHROPIC_RETRY_COUNT was re-introduced as a "
-        "module-scope counter; it must live behind "
-        "_get_anthropic_retry_counter()"
     )

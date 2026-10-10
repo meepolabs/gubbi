@@ -3,7 +3,6 @@
 Covers:
   - LLMProvider Protocol runtime isinstance checks with mock provider.
   - ExtractionService builds correct prompts and parses structured output.
-  - AnthropicProvider constructs correct API call (mock anthropic client).
   - Health endpoint returns 200.
 """
 
@@ -11,16 +10,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
 import pytest
-from anthropic import RateLimitError
 from starlette.testclient import TestClient
 
-from gubbi.config import LLMConfig
 from gubbi.extraction.health import app as health_app
-from gubbi.extraction.llm import AnthropicProvider
 from gubbi.extraction.llm.provider import LLMMessage, LLMProvider, LLMResponse
 from gubbi.extraction.service import (
     CategorizationResult,
@@ -143,160 +137,6 @@ async def test_extraction_service_extract_entries() -> None:
     assert result.entries[0].tags == ["exercise", "health"]
     assert result.entries[0].entry_date == "2026-04-15"
     assert result.entries[1].entry_date is None
-
-
-# ---------------------------------------------------------------------------
-# AnthropicProvider -- verifies correct API call construction via mock
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_anthropic_provider_calls_api_with_expected_kwargs() -> None:
-    """Verify the provider constructs correct API kwargs for the anthropic SDK."""
-    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-
-        # Build a fake response that mimics anthropic SDK's Message
-        fake_content_block = MagicMock()
-        fake_content_block.text = '{"result": "ok"}'
-
-        fake_response = MagicMock()
-        fake_response.content = [fake_content_block]
-        fake_response.usage.input_tokens = 5
-        fake_response.usage.output_tokens = 10
-        fake_response.model = "claude-haiku-4-5-20251001"
-
-        mock_client.messages.create = AsyncMock(return_value=fake_response)
-
-        provider = _make_anthropic_provider()
-        result = await provider.complete(
-            [{"role": "user", "content": "hello"}],
-            "Be helpful",
-        )
-
-        # Without output_schema, content is the raw text from the API
-        assert result.content == '{"result": "ok"}'
-        assert result.input_tokens == 5
-        assert result.output_tokens == 10
-        assert result.model == "claude-haiku-4-5-20251001"
-
-        mock_client.messages.create.assert_called_once()
-        call_kwargs = mock_client.messages.create.call_args[1]
-        assert call_kwargs["model"] == "test-model"
-        assert len(call_kwargs["system"]) == 1
-        assert call_kwargs["system"][0]["type"] == "text"
-        assert call_kwargs["system"][0]["cache_control"] == {"type": "ephemeral"}
-        # No output_schema -> no tools
-        assert "tools" not in call_kwargs
-
-
-@pytest.mark.asyncio
-async def test_anthropic_provider_uses_tool_use_for_structured_output() -> None:
-    """When output_schema is provided, the API call should include tools + tool_choice."""
-    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-
-        fake_tool_block = MagicMock()
-        fake_tool_block.name = "respond"
-        fake_tool_block.input = {"answer": 42}
-
-        fake_response = MagicMock()
-        fake_response.content = [fake_tool_block]
-        fake_response.usage.input_tokens = 5
-        fake_response.usage.output_tokens = 10
-        fake_response.model = "claude-haiku-4-5-20251001"
-
-        mock_client.messages.create = AsyncMock(return_value=fake_response)
-
-        provider = _make_anthropic_provider()
-        schema = {
-            "type": "object",
-            "properties": {"answer": {"type": "integer"}},
-            "required": ["answer"],
-        }
-        result = await provider.complete(
-            [{"role": "user", "content": "what is 6*7?"}],
-            "Answer math questions",
-            output_schema=schema,
-        )
-
-        assert result.content == {"answer": 42}
-        call_kwargs = mock_client.messages.create.call_args[1]
-        assert "tools" in call_kwargs
-        assert len(call_kwargs["tools"]) == 1
-        assert call_kwargs["tools"][0]["name"] == "respond"
-        assert call_kwargs["tools"][0]["input_schema"] == schema
-        assert call_kwargs["tool_choice"] == {"type": "tool", "name": "respond"}
-
-
-@pytest.mark.asyncio
-async def test_anthropic_provider_retries_on_429() -> None:
-    """Verify exponential backoff retry on 429 status."""
-    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic") as mock_cls:
-        mock_client = MagicMock()
-        mock_cls.return_value = mock_client
-
-        _req = httpx.Request("GET", "https://api.anthropic.com")
-        _resp = httpx.Response(429, request=_req)
-        _rate_limit_err = RateLimitError("too fast", response=_resp, body=None)
-
-        fake_text_block = MagicMock()
-        fake_text_block.text = "ok"
-        fake_response = MagicMock()
-        fake_response.content = [fake_text_block]
-        fake_response.usage.input_tokens = 1
-        fake_response.usage.output_tokens = 1
-        fake_response.model = "test-model"
-
-        mock_client.messages.create = AsyncMock(
-            side_effect=[_rate_limit_err, _rate_limit_err, fake_response]
-        )
-
-        provider = _make_anthropic_provider()
-        result = await provider.complete(
-            [{"role": "user", "content": "hi"}],
-            "System prompt",
-        )
-
-        assert result.content == "ok"
-        assert mock_client.messages.create.call_count == 3
-
-
-@pytest.mark.asyncio
-async def test_anthropic_provider_estimate_cost() -> None:
-    with patch("gubbi.extraction.llm.anthropic_provider.AsyncAnthropic"):
-        provider = _make_anthropic_provider()
-        cost = provider.estimate_cost_cents(1_000_000, 500_000)
-        # Haiku: $1.00/M input, $5.00/M output
-        # Input: 1M * 1.00 / 1M * 100 = 100 cents
-        # Output: 500K * 5.00 / 1M * 100 = 250 cents
-        assert cost == 350.0
-
-
-def _make_anthropic_provider() -> AnthropicProvider:
-    """Helper: create an AnthropicProvider and return it.
-
-    The client class is already patched; we just need to ensure
-    the init args are fixed for deterministic tests.
-
-    LLMConfig is a pydantic-settings BaseSettings whose fields use
-    ``validation_alias`` for the flat env-var names. Plain Python
-    kwargs that match the field names (``api_key``, ``model``) are
-    silently ignored -- only the alias keys populate the fields.
-    Build via ``model_validate`` with a dict so the alias keys are
-    matched explicitly without relying on ``__init__`` accepting
-    arbitrary kwargs (which type-checkers reject).
-    """
-    return AnthropicProvider(
-        LLMConfig.model_validate(
-            {
-                "JOURNAL_LLM_API_KEY": "test-api-key",
-                "JOURNAL_LLM_MODEL": "test-model",
-            }
-        )
-    )
 
 
 # ---------------------------------------------------------------------------
