@@ -85,12 +85,12 @@ docker compose exec gubbi python -m gubbi.oauth.crypto 'your-password'
 
 ### Extraction worker (optional)
 
-The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns saved conversations into entries. It calls any OpenAI-compatible chat-completions endpoint; with the default provider it refuses to start when `JOURNAL_LLM_BASE_URL` or `JOURNAL_LLM_MODEL` is unset. The HTTP server does not read these variables.
+The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns saved conversations into entries. It calls any OpenAI-compatible chat-completions endpoint; with the default provider it refuses to start when `JOURNAL_LLM_BASE_URL` or `JOURNAL_LLM_MODEL` is unset. The HTTP server does not use these variables, but it shares the settings model, so a `JOURNAL_LLM_BASE_URL` that fails the scheme rule below refuses startup of every process that loads it.
 
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
 | `JOURNAL_LLM_PROVIDER` | no | `openai_compatible` (default) or `fake` (in-process stub for tests; never calls a model). | `openai_compatible` |
-| `JOURNAL_LLM_BASE_URL` | yes (worker) | Base URL of the OpenAI-compatible endpoint, including the version path. | `https://llm.example.com/v1` |
+| `JOURNAL_LLM_BASE_URL` | yes (worker) | Base URL of the OpenAI-compatible endpoint, including the version path. Must be `https`; plain `http` is accepted only for `localhost`, loopback (`127.0.0.0/8`, `::1`), private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) or unique-local IPv6 (`fc00::/7`) addresses. Any other value refuses startup. Not checked when `JOURNAL_LLM_PROVIDER=fake`. | `https://llm.example.com/v1` |
 | `JOURNAL_LLM_MODEL` | yes (worker) | Model name sent with every request. | `your-model-name` |
 | `JOURNAL_LLM_API_KEY` | depends on endpoint | Bearer key sent to the endpoint. Leave unset for endpoints that need no key; the worker then sends the placeholder bearer `unused`. | (random) |
 | `JOURNAL_LLM_INPUT_PRICE_PER_MTOK` / `JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK` | no | USD per million input / output tokens, used for cost accounting. Defaults `1.00` / `5.00`. | `0.40` |

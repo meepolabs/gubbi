@@ -25,6 +25,8 @@ class ExtractionService:
         chunk_text: str,
         existing_topics: list[str],
         prior_entries_text: str,
+        *,
+        time_budget: float | None = None,
     ) -> ChunkExtraction:
         """Pick a topic and extract significant entries from one transcript chunk.
 
@@ -32,6 +34,7 @@ class ExtractionService:
         lines); ``prior_entries_text`` lists entries already extracted from
         earlier chunks so the model does not repeat them. An empty
         ``entries`` tuple means the chunk holds nothing worth recording.
+        ``time_budget`` bounds the provider call in seconds, retries included.
 
         Raises:
             LLMSchemaError: the model output does not match the chunk schema.
@@ -41,7 +44,9 @@ class ExtractionService:
             "role": "user",
             "content": _chunk_user_content(chunk_text, existing_topics, prior_entries_text),
         }
-        response = await self._llm.complete([user_msg], system_prompt, CHUNK_EXTRACTION_SCHEMA)
+        response = await self._llm.complete(
+            [user_msg], system_prompt, CHUNK_EXTRACTION_SCHEMA, time_budget=time_budget
+        )
         return parse_chunk_extraction(
             response.content,
             _usage_of(response),
@@ -50,7 +55,7 @@ class ExtractionService:
         )
 
     async def categorize_chunk(
-        self, chunk_text: str, existing_topics: list[str]
+        self, chunk_text: str, existing_topics: list[str], *, time_budget: float | None = None
     ) -> ChunkExtraction:
         """Pick a topic and summarize the conversation from one transcript chunk.
 
@@ -64,7 +69,9 @@ class ExtractionService:
             "role": "user",
             "content": _categorize_user_content(chunk_text, existing_topics),
         }
-        response = await self._llm.complete([user_msg], system_prompt, CHUNK_CATEGORIZE_SCHEMA)
+        response = await self._llm.complete(
+            [user_msg], system_prompt, CHUNK_CATEGORIZE_SCHEMA, time_budget=time_budget
+        )
         return parse_chunk_categorization(
             response.content,
             _usage_of(response),
@@ -77,6 +84,8 @@ class ExtractionService:
         chunk_text: str,
         topic_path: str,
         prior_entries_text: str,
+        *,
+        time_budget: float | None = None,
     ) -> ChunkExtraction:
         """Extract significant entries from one transcript chunk under a known topic.
 
@@ -92,7 +101,9 @@ class ExtractionService:
             "role": "user",
             "content": _entries_user_content(chunk_text, topic_path, prior_entries_text),
         }
-        response = await self._llm.complete([user_msg], system_prompt, CHUNK_ENTRIES_SCHEMA)
+        response = await self._llm.complete(
+            [user_msg], system_prompt, CHUNK_ENTRIES_SCHEMA, time_budget=time_budget
+        )
         return parse_chunk_entries(
             response.content,
             _usage_of(response),
@@ -101,7 +112,7 @@ class ExtractionService:
             attempts=response.attempts,
         )
 
-    async def triage(self, chunk_text: str) -> TriageVerdict:
+    async def triage(self, chunk_text: str, *, time_budget: float | None = None) -> TriageVerdict:
         """Ask whether one transcript chunk holds anything worth recording.
 
         Raises:
@@ -109,7 +120,9 @@ class ExtractionService:
         """
         system_prompt = self._read_prompt("triage.md")
         user_msg: LLMMessage = {"role": "user", "content": f"{_TRANSCRIPT_HEADING}{chunk_text}"}
-        response = await self._llm.complete([user_msg], system_prompt, TRIAGE_SCHEMA)
+        response = await self._llm.complete(
+            [user_msg], system_prompt, TRIAGE_SCHEMA, time_budget=time_budget
+        )
         return parse_triage(
             response.content,
             _usage_of(response),

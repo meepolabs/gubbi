@@ -8,7 +8,8 @@ the topic comes from the first chunk extracted; later chunks' topic fields
 are ignored. With triage enabled, each chunk is first screened by a small
 call and a chunk screened out gets no extraction call. A chunk whose
 extraction output is truncated is split in two and each half retried once; a
-second truncation fails the run. No new call starts past the deadline.
+second truncation fails the run. No new call starts past the deadline, and
+each call gets the time left before it as its budget, retries included.
 
 Every failure surfaces as :class:`PipelineFailure` carrying the token usage
 of every call made, the failed call included, so the job can account for it.
@@ -27,6 +28,7 @@ from opentelemetry import trace
 from gubbi.extraction.chunking import Chunk, chunk_messages, render_prior_entries, split_in_two
 from gubbi.extraction.dating import resolve_event_date
 from gubbi.extraction.llm.provider import (
+    LLMDeadlineError,
     LLMProviderError,
     LLMRefusalError,
     LLMTruncatedError,
@@ -96,7 +98,7 @@ class PipelineOutcome:
 
 
 class PipelineDeadlineError(Exception):
-    """The job deadline passed before the next LLM call could start."""
+    """The job deadline passed before an LLM call could start or finish."""
 
 
 class PipelineFailure(Exception):
@@ -151,6 +153,10 @@ class _CallResult(Protocol):
     def attempts(self) -> int: ...
 
 
+class _Request[R](Protocol):
+    def __call__(self, *, time_budget: float) -> Awaitable[R]: ...
+
+
 class _CallFailedError(Exception):
     def __init__(self, error: Exception, progress: _Progress) -> None:
         super().__init__(type(error).__name__)
@@ -173,7 +179,8 @@ async def run_pipeline(
     """Extract topic, summary and dated entry candidates from a role-filtered transcript.
 
     ``deadline`` is a reading of ``clock`` (``time.monotonic`` by default)
-    after which no further LLM call starts. ``source_message_index`` on each
+    after which no further LLM call starts; a call in flight gets the time
+    left as its budget, so its retries end at the deadline too. ``source_message_index`` on each
     candidate indexes ``messages``. ``mode`` picks one structured call per
     chunk (``single``) or a categorize call followed by an entries call per
     chunk (``two_call``); ``triage_enabled`` screens each chunk first. Triage
@@ -246,7 +253,7 @@ async def _extract_chunk_step(
 
 async def _extract(run: _Run, progress: _Progress, chunk: Chunk, chunk_index: int) -> _Progress:
     prior = render_prior_entries(progress.candidates)
-    request: Callable[[], Awaitable[ChunkExtraction]]
+    request: _Request[ChunkExtraction]
     if run.mode == "two_call":
         topic_path = progress.extractions[0].topic_path
         request = partial(run.service.extract_chunk_entries, chunk.text, topic_path, prior)
@@ -265,10 +272,11 @@ async def _call[R: _CallResult](
     progress: _Progress,
     chunk_index: int,
     stage: str,
-    request: Callable[[], Awaitable[R]],
+    request: _Request[R],
 ) -> tuple[R, _Progress]:
     """Make one LLM call under its span; account its usage and requests, failed or not."""
-    if run.clock() >= run.deadline:
+    time_budget = run.deadline - run.clock()
+    if time_budget <= 0:
         raise _CallFailedError(PipelineDeadlineError("job deadline passed"), progress)
     span_name = SpanNames.EXTRACTION_LLM_CALL
     start_ns = time.monotonic_ns()
@@ -279,12 +287,12 @@ async def _call[R: _CallResult](
             {"provider_name": run.service.provider_name, "model_name": run.service.model_name},
         )
         try:
-            result = await request()
+            result = await request(time_budget=time_budget)
         except Exception as exc:
             usage = exc.usage if isinstance(exc, LLMProviderError) else None
             failed = _account(progress, LLMUsage() if usage is None else usage, _attempts_of(exc))
             await _report_failure(span, exc, usage, chunk_index, stage, _latency_ms(start_ns))
-            raise _CallFailedError(exc, failed) from exc
+            raise _CallFailedError(_pipeline_error(exc), failed) from exc
         attrs = {
             **_usage_attrs(result.usage),
             "finish_reason": result.finish_reason,
@@ -317,6 +325,12 @@ async def _report_failure(
     await logger.warning(
         "extraction_llm_call", outcome="failed", error_type=type(exc).__name__, **attrs
     )
+
+
+def _pipeline_error(exc: Exception) -> Exception:
+    if isinstance(exc, LLMDeadlineError):
+        return PipelineDeadlineError("job deadline passed during an LLM call")
+    return exc
 
 
 def _finish_reason_of(exc: Exception) -> str | None:

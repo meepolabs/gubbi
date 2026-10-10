@@ -91,3 +91,64 @@ def test_invalid_value_is_rejected(
 
     with pytest.raises(ValidationError, match=env_var):
         LLMConfig()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("https://llm.example.test/v1", id="https-public"),
+        pytest.param("https://203.0.113.7/v1", id="https-public-ip"),
+        pytest.param("http://localhost:11434/v1", id="http-localhost"),
+        pytest.param("http://127.0.0.1:8080/v1", id="http-loopback-v4"),
+        pytest.param("http://127.8.9.10/v1", id="http-loopback-v4-range"),
+        pytest.param("http://[::1]:8080/v1", id="http-loopback-v6"),
+        pytest.param("http://10.1.2.3/v1", id="http-rfc1918-10"),
+        pytest.param("http://172.16.0.5/v1", id="http-rfc1918-172-low"),
+        pytest.param("http://172.31.255.254/v1", id="http-rfc1918-172-high"),
+        pytest.param("http://192.168.1.20:8000/v1", id="http-rfc1918-192"),
+        pytest.param("http://[fd12:3456::1]/v1", id="http-ula"),
+        pytest.param("", id="unset"),
+    ],
+)
+def test_base_url_accepted(clean_llm_env: pytest.MonkeyPatch, url: str) -> None:
+    clean_llm_env.setenv("JOURNAL_LLM_BASE_URL", url)
+
+    assert LLMConfig().base_url == url
+
+
+_CREDENTIAL = "s3cret-pass"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "url",
+    [
+        pytest.param("http://llm.example.test/v1", id="http-public-name"),
+        pytest.param("http://203.0.113.7/v1", id="http-public-ip"),
+        pytest.param("http://172.32.0.1/v1", id="http-just-outside-rfc1918-172"),
+        pytest.param("http://169.254.169.254/v1", id="http-link-local"),
+        pytest.param("http://[2001:db8::1]/v1", id="http-public-v6"),
+        pytest.param("http://localhost.example.test/v1", id="http-localhost-lookalike"),
+        pytest.param("ftp://llm.example.test/v1", id="other-scheme"),
+        pytest.param("llm.example.test/v1", id="no-scheme"),
+        pytest.param("https:///v1", id="no-host"),
+        pytest.param(f"http://user:{_CREDENTIAL}@llm.example.test/v1", id="http-with-userinfo"),
+    ],
+)
+def test_base_url_rejected_without_echoing_it(clean_llm_env: pytest.MonkeyPatch, url: str) -> None:
+    clean_llm_env.setenv("JOURNAL_LLM_BASE_URL", url)
+
+    with pytest.raises(ValidationError, match="JOURNAL_LLM_BASE_URL") as caught:
+        LLMConfig()
+
+    assert url not in str(caught.value)
+    assert _CREDENTIAL not in str(caught.value)
+
+
+@pytest.mark.unit
+def test_base_url_unchecked_for_fake_provider(clean_llm_env: pytest.MonkeyPatch) -> None:
+    clean_llm_env.setenv("JOURNAL_LLM_PROVIDER", "fake")
+    clean_llm_env.setenv("JOURNAL_LLM_BASE_URL", "http://llm.example.test/v1")
+
+    assert LLMConfig().base_url == "http://llm.example.test/v1"

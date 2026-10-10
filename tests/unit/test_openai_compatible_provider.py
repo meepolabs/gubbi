@@ -8,10 +8,13 @@ reasoning tokens as top-level usage fields, which is the shape under test.
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import email.utils
 import json
 import pathlib
+import time
+import traceback
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -23,6 +26,7 @@ from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
 from gubbi.extraction.llm import openai_compatible
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.llm.provider import (
+    LLMDeadlineError,
     LLMMessage,
     LLMPermanentError,
     LLMProviderError,
@@ -71,11 +75,18 @@ def _json_response(body: dict[str, Any], status: int = 200) -> Callable[..., htt
 
 
 class _SleepLog:
+    """Records each wait and advances a fake clock by it."""
+
     def __init__(self) -> None:
         self.delays: list[float] = []
+        self.now = 0.0
 
     async def __call__(self, seconds: float) -> None:
         self.delays.append(seconds)
+        self.now += seconds
+
+    def clock(self) -> float:
+        return self.now
 
 
 def _sequence(*responders: Callable[[httpx2.Request], httpx2.Response]) -> _Recorder:
@@ -100,8 +111,12 @@ def _status(status: int, headers: dict[str, str] | None = None) -> Callable[...,
 
 
 def _provider(
-    recorder: _Recorder, sleep: _SleepLog | None = None, api_key: str = "test-key"
+    recorder: _Recorder,
+    sleep: _SleepLog | None = None,
+    api_key: str = "test-key",
+    clock: Callable[[], float] | None = None,
 ) -> OpenAICompatibleProvider:
+    sleep = sleep or _SleepLog()
     return OpenAICompatibleProvider(
         base_url="https://llm.example.test/v1",
         api_key=api_key,
@@ -111,7 +126,8 @@ def _provider(
         max_output_tokens=512,
         timeout=5.0,
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(recorder)),
-        sleep=sleep or _SleepLog(),
+        sleep=sleep,
+        clock=clock or sleep.clock,
     )
 
 
@@ -521,3 +537,112 @@ async def test_raised_error_carries_the_number_of_requests_made(
 
     assert excinfo.value.attempts == expected_attempts
     assert len(recorder.requests) == expected_attempts
+
+
+# -- Time budget -------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("budget", "retry_after"),
+    [
+        pytest.param(5.0, "7", id="retry-after-past-budget"),
+        pytest.param(7.0, "7", id="retry-after-equal-to-budget"),
+    ],
+)
+async def test_retry_wait_past_the_time_budget_raises_deadline_without_sleeping(
+    budget: float, retry_after: str
+) -> None:
+    recorder = _Recorder(_status(429, {"Retry-After": retry_after}))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMDeadlineError) as excinfo:
+        await _provider(recorder, sleep).complete(
+            _MESSAGES, "system prompt", _SCHEMA, time_budget=budget
+        )
+
+    assert sleep.delays == []
+    assert len(recorder.requests) == 1
+    assert excinfo.value.attempts == 1
+    assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
+
+
+async def test_retry_wait_inside_the_time_budget_still_retries() -> None:
+    recorder = _sequence(_status(429, {"Retry-After": "7"}), _json_response(_stop_body()))
+    sleep = _SleepLog()
+
+    response = await _provider(recorder, sleep).complete(
+        _MESSAGES, "system prompt", _SCHEMA, time_budget=30.0
+    )
+
+    assert response.attempts == 2
+    assert len(sleep.delays) == 1
+    assert 7.0 <= sleep.delays[0] < 30.0
+
+
+async def test_spent_time_budget_makes_no_request() -> None:
+    recorder = _Recorder(_json_response(_stop_body()))
+
+    with pytest.raises(LLMDeadlineError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA, time_budget=0.0)
+
+    assert recorder.requests == []
+    assert excinfo.value.attempts == 0
+
+
+async def test_attempt_is_cut_off_at_the_time_budget() -> None:
+    async def respond_slowly(request: httpx2.Request) -> httpx2.Response:
+        await asyncio.sleep(5.0)
+        return httpx2.Response(200, json=_stop_body())
+
+    recorder = _Recorder(respond_slowly)  # type: ignore[arg-type]
+    started = time.monotonic()
+
+    with pytest.raises(LLMDeadlineError) as excinfo:
+        await _provider(recorder, clock=time.monotonic).complete(
+            _MESSAGES, "system prompt", _SCHEMA, time_budget=0.2
+        )
+
+    assert time.monotonic() - started < 2.0
+    assert excinfo.value.attempts == 1
+
+
+async def test_unusable_finish_inside_the_time_budget_keeps_its_usage() -> None:
+    body = _length_body()
+    recorder = _Recorder(_json_response(body))
+
+    with pytest.raises(LLMTruncatedError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA, time_budget=60.0)
+
+    assert excinfo.value.usage == _wire_usage(body)
+
+
+# -- Upstream text stays out of raised errors ----------------------------------------
+
+
+def _malformed_completion(_request: httpx2.Request) -> httpx2.Response:
+    body = _stop_body()
+    body["choices"][0]["finish_reason"] = _OUTPUT_SENTINEL
+    return httpx2.Response(200, json=body)
+
+
+@pytest.mark.parametrize(
+    "responder",
+    [
+        pytest.param(_status(400), id="permanent-status-body"),
+        pytest.param(_status(503), id="retryable-status-body"),
+        pytest.param(_status(429, {"Retry-After": "1"}), id="rate-limit-body"),
+        pytest.param(_malformed_completion, id="schema-invalid-completion"),
+    ],
+)
+async def test_upstream_body_never_reaches_the_raised_error_or_its_traceback(
+    responder: Callable[[httpx2.Request], httpx2.Response],
+) -> None:
+    recorder = _Recorder(responder)
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert _OUTPUT_SENTINEL not in str(excinfo.value)
+    assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None

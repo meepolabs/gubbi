@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import traceback
 from collections.abc import Iterator, Mapping
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -205,6 +206,7 @@ def test_schema_violation_raises_schema_error_with_usage_and_no_content(
     assert caught.value.usage == _USAGE
     assert location in message
     assert _SECRET not in message
+    assert _SECRET not in "".join(traceback.format_exception(caught.value))
     assert caught.value.__context__ is None
     assert caught.value.__cause__ is None
 
@@ -222,7 +224,7 @@ def test_non_object_output_raises_schema_error_with_usage_and_no_content(content
         parse_chunk_extraction(content, _USAGE)
 
     assert caught.value.usage == _USAGE
-    assert _SECRET not in str(caught.value)
+    assert _SECRET not in "".join(traceback.format_exception(caught.value))
     assert caught.value.__context__ is None
 
 
@@ -349,7 +351,7 @@ def test_two_call_and_triage_schema_violations_raise_schema_error_without_conten
 
     assert caught.value.usage == _USAGE
     assert location in str(caught.value)
-    assert _SECRET not in str(caught.value)
+    assert _SECRET not in "".join(traceback.format_exception(caught.value))
     assert caught.value.__context__ is None
 
 

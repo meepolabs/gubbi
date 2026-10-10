@@ -1,3 +1,4 @@
+import ipaddress
 import logging
 import re
 from functools import lru_cache
@@ -6,7 +7,7 @@ from typing import Annotated, Any, Final, Literal, Self
 from urllib.parse import urlsplit
 
 from gubbi_common.bootstrap import PgLogProbeMode
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 __all__: list[str] = [
@@ -207,6 +208,54 @@ def _origin_problem(origin: str) -> str | None:
     return None
 
 
+# Plain-http LLM endpoints are accepted only on these networks: loopback,
+# RFC 1918 private IPv4 and IPv6 unique-local addresses. Anything else must
+# be https so prompts and the bearer key never cross a public network in the
+# clear.
+_PLAIN_HTTP_LLM_NETWORKS: Final[tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]] = (
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("fc00::/7"),
+)
+_LOCALHOST: Final[str] = "localhost"
+
+
+def _llm_base_url_problem(url: str) -> str | None:
+    """Return why *url* is not an acceptable LLM endpoint, else None.
+
+    Problems name the rule broken, never the value, so a URL carrying
+    credentials is not echoed into startup logs.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return "it is not a parseable URL"
+    if not host:
+        return "it has no host"
+    if parts.scheme == "https":
+        return None
+    if parts.scheme != "http":
+        return "the scheme must be https"
+    if host == _LOCALHOST or _is_plain_http_llm_address(host):
+        return None
+    return (
+        "plain http is accepted only for localhost, loopback, private (RFC 1918) "
+        "or unique-local IPv6 addresses; use https"
+    )
+
+
+def _is_plain_http_llm_address(host: str) -> bool:
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return any(address in network for network in _PLAIN_HTTP_LLM_NETWORKS)
+
+
 class ServerConfig(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
@@ -283,7 +332,8 @@ class LLMConfig(BaseSettings):
     do not use extraction can ignore them entirely.
     """
 
-    model_config = SettingsConfigDict(extra="ignore")
+    # Validation errors must not echo inputs: the base URL can carry userinfo.
+    model_config = SettingsConfigDict(extra="ignore", hide_input_in_errors=True)
 
     api_key: str = Field(default="", validation_alias="JOURNAL_LLM_API_KEY")
     # ``openai_compatible`` targets any OpenAI-compatible chat-completions
@@ -312,6 +362,21 @@ class LLMConfig(BaseSettings):
     orphan_cleanup_threshold_minutes: int = Field(
         default=30, validation_alias="JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES"
     )
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str, info: ValidationInfo) -> str:
+        """Require https, except for plain http to a local or private address.
+
+        Skipped when unset (the worker reports the missing value) and for the
+        ``fake`` provider, which never calls an endpoint.
+        """
+        if not v.strip() or info.data.get("provider") == "fake":
+            return v
+        problem = _llm_base_url_problem(v.strip())
+        if problem is not None:
+            raise ValueError(f"JOURNAL_LLM_BASE_URL is not accepted: {problem}")
+        return v
 
 
 # Canonical Environment Literal (mirrored byte-for-byte across gubbi + gubbi-cloud).

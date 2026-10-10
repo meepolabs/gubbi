@@ -17,6 +17,7 @@ from gubbi.extraction.chunk_extraction import (
 )
 from gubbi.extraction.chunking import chunk_messages, split_in_two
 from gubbi.extraction.llm.provider import (
+    LLMDeadlineError,
     LLMMessage,
     LLMProviderError,
     LLMRefusalError,
@@ -70,15 +71,19 @@ class _ScriptedProvider:
         self._attempts = attempts
         self.user_contents: list[str] = []
         self.schemas: list[Mapping[str, Any] | None] = []
+        self.time_budgets: list[float | None] = []
 
     async def complete(
         self,
         messages: list[LLMMessage],
         system_prompt: str,
         output_schema: Mapping[str, Any] | None = None,
+        *,
+        time_budget: float | None = None,
     ) -> LLMResponse:
         self.user_contents.append(messages[0]["content"])
         self.schemas.append(output_schema)
+        self.time_budgets.append(time_budget)
         step = self._steps.pop(0)
         if isinstance(step, Exception):
             raise step
@@ -423,6 +428,27 @@ async def test_deadline_already_passed_makes_no_call() -> None:
     assert isinstance(failure.error, PipelineDeadlineError)
     assert provider.user_contents == []
     assert failure.usage_so_far == LLMUsage()
+
+
+async def test_each_call_gets_the_time_left_before_the_deadline_as_its_budget() -> None:
+    messages = _large_conversation()
+    chunks = chunk_messages(messages)
+    readings = iter(float(10 * i) for i in range(len(chunks)))
+    provider = _ScriptedProvider([_output() for _ in chunks])
+
+    await _run(provider, messages, deadline=1000.0, clock=lambda: next(readings))
+
+    assert provider.time_budgets == [1000.0 - 10 * i for i in range(len(chunks))]
+
+
+async def test_provider_running_out_of_budget_fails_as_deadline_with_usage() -> None:
+    provider = _ScriptedProvider([LLMDeadlineError("budget spent", usage=FAILED_USAGE, attempts=2)])
+
+    failure = await _failure(provider, _small_conversation())
+
+    assert isinstance(failure.error, PipelineDeadlineError)
+    assert failure.usage_so_far == FAILED_USAGE
+    assert failure.llm_calls == 2
 
 
 # -- Telemetry -------------------------------------------------------------------

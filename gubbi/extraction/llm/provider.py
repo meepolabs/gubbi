@@ -71,7 +71,20 @@ class LLMTransientError(LLMProviderError):
 
     Examples: connection reset, timeout, 5xx server error, upstream overload.
     Retry budgets and backoff policy live in the provider's own retry loop.
+    ``retry_after`` is the wait in seconds the upstream asked for, when it
+    asked for one.
     """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        usage: LLMUsage | None = None,
+        attempts: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message, usage=usage, attempts=attempts)
+        self.retry_after = retry_after
 
 
 class LLMRateLimitError(LLMTransientError):
@@ -110,6 +123,14 @@ class LLMTruncatedError(LLMProviderError):
     """
 
 
+class LLMDeadlineError(LLMProviderError):
+    """The call's time budget ran out before a usable response arrived.
+
+    Raised instead of starting, waiting for, or continuing an attempt that
+    would end past the budget. Not retryable: the budget is spent.
+    """
+
+
 @runtime_checkable
 class LLMProvider(Protocol):
     async def complete(
@@ -117,8 +138,16 @@ class LLMProvider(Protocol):
         messages: list[LLMMessage],
         system_prompt: str,
         output_schema: Mapping[str, Any] | None = None,
+        *,
+        time_budget: float | None = None,
     ) -> LLMResponse:
-        """Complete the chat sequence; constrain to output_schema when supplied."""
+        """Complete the chat sequence; constrain to output_schema when supplied.
+
+        ``time_budget`` bounds the whole call in seconds, every attempt and
+        every wait between attempts included; ``None`` leaves it unbounded.
+        When the budget cannot cover another attempt the call raises
+        :class:`LLMDeadlineError`.
+        """
         ...
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:

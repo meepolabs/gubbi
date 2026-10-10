@@ -27,6 +27,8 @@ def test_mock_concrete_provider_works() -> None:
             messages: list[LLMMessage],
             system_prompt: str,
             output_schema: Mapping[str, Any] | None = None,
+            *,
+            time_budget: float | None = None,
         ) -> LLMResponse:
             return LLMResponse(content="ok", input_tokens=0, output_tokens=0, model="mock")
 

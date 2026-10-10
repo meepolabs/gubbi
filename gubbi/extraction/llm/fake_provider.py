@@ -107,6 +107,8 @@ class FakeLLMProvider(LLMProvider):
         messages: list[LLMMessage],
         system_prompt: str,
         output_schema: Mapping[str, Any] | None = None,
+        *,
+        time_budget: float | None = None,
     ) -> LLMResponse:
         """Return a canned LLMResponse, or raise per the failure markers above."""
         joined_content = " ".join(m.get("content", "") for m in messages)

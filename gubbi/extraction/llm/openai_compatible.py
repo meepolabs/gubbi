@@ -4,6 +4,10 @@ The only retry loop is the one in ``complete()``: the OpenAI SDK's own retries
 are disabled and PydanticAI is called through its direct request API, so no
 output validation re-prompt can issue a hidden extra call. Each attempt is one
 HTTP request.
+
+Translated errors never chain the PydanticAI or SDK exception they replace:
+those carry upstream error bodies and response validation input, which can
+echo conversation text into tracebacks.
 """
 
 from __future__ import annotations
@@ -14,6 +18,7 @@ import email.utils
 import functools
 import json
 import random
+import time
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -44,6 +49,7 @@ from gubbi.constants import (
     LLM_REQUEST_TIMEOUT_SECS,
 )
 from gubbi.extraction.llm.provider import (
+    LLMDeadlineError,
     LLMMessage,
     LLMPermanentError,
     LLMProvider,
@@ -113,7 +119,12 @@ class OpenAICompatibleProvider(LLMProvider):
     waiting at least as long as a ``Retry-After`` header asks. Every other
     failure, including refusal, truncation and unparseable output, is raised
     after the request that produced it. Raised errors carry the number of
-    requests made in ``attempts``.
+    requests made in ``attempts`` and the usage of every request that
+    reported any in ``usage``.
+
+    A ``time_budget`` passed to ``complete()`` caps each attempt at the time
+    left and ends the call with :class:`LLMDeadlineError` when no time is
+    left for another attempt, including after the wait a retry needs.
 
     An empty ``api_key`` sends a placeholder bearer, for endpoints that need
     no key.
@@ -130,9 +141,11 @@ class OpenAICompatibleProvider(LLMProvider):
         timeout: float = LLM_REQUEST_TIMEOUT_SECS,
         http_client: httpx2.AsyncClient | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._model = model
         self._sleep = sleep
+        self._clock = clock
         self._input_price_per_mtok = input_price_per_mtok
         self._output_price_per_mtok = output_price_per_mtok
         self._max_output_tokens = max_output_tokens
@@ -150,22 +163,37 @@ class OpenAICompatibleProvider(LLMProvider):
         messages: list[LLMMessage],
         system_prompt: str,
         output_schema: Mapping[str, Any] | None = None,
+        *,
+        time_budget: float | None = None,
     ) -> LLMResponse:
         """Complete the chat, retrying transient failures; constrain to output_schema."""
         model_messages = _to_model_messages(messages, system_prompt)
         parameters = _request_parameters(output_schema)
+        ends_at = None if time_budget is None else self._clock() + time_budget
+        remaining = self._remaining(ends_at)
+        if remaining is not None and remaining <= 0:
+            raise LLMDeadlineError("time budget spent before the first attempt", attempts=0)
         for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
             try:
-                response = await self._attempt(model_messages, parameters, output_schema)
+                response = await self._attempt(model_messages, parameters, output_schema, remaining)
             except LLMProviderError as exc:
                 exc.attempts = attempt
                 if not isinstance(exc, LLMTransientError):
                     raise
-                delay = _retry_delay(attempt, _retry_after_seconds(exc.__cause__))
-                await self._record_retry(attempt, exc, delay)
+                delay = _retry_delay(attempt, exc.retry_after)
+                remaining = self._remaining(ends_at)
+                if _budget_ends_retries(delay, remaining):
+                    await self._record_retry(attempt, exc, "deadline", None)
+                    raise LLMDeadlineError(
+                        "time budget too short for another attempt", attempts=attempt
+                    ) from None
+                await self._record_retry(
+                    attempt, exc, "exhausted" if delay is None else "retried", delay
+                )
                 if delay is None:
                     raise
                 await self._sleep(delay)
+                remaining = self._remaining(ends_at)
                 continue
             return dataclasses.replace(response, attempts=attempt)
         raise AssertionError("retry loop exited without returning or raising")
@@ -176,24 +204,41 @@ class OpenAICompatibleProvider(LLMProvider):
         output_cost = output_tokens / 1_000_000 * self._output_price_per_mtok * 100
         return round(input_cost + output_cost, 6)
 
+    def _remaining(self, ends_at: float | None) -> float | None:
+        return None if ends_at is None else ends_at - self._clock()
+
     async def _attempt(
         self,
         model_messages: list[ModelMessage],
         parameters: ModelRequestParameters,
         output_schema: Mapping[str, Any] | None,
+        time_limit: float | None,
     ) -> LLMResponse:
         settings: ModelSettings = {"max_tokens": self._max_output_tokens}
+        translated: LLMProviderError
         try:
-            response = await model_request(
-                self._chat_model,
-                model_messages,
-                model_settings=settings,
-                model_request_parameters=parameters,
-                instrument=False,
-            )
+            async with asyncio.timeout(time_limit):
+                response = await model_request(
+                    self._chat_model,
+                    model_messages,
+                    model_settings=settings,
+                    model_request_parameters=parameters,
+                    instrument=False,
+                )
+        except TimeoutError:
+            translated = LLMTimeoutError("upstream request timed out")
         except (ModelAPIError, UnexpectedModelBehavior) as exc:
-            raise _translate_error(exc) from exc
+            translated = _translate_error(exc)
+        else:
+            return await self._to_response(response, output_schema)
+        # Raised outside the except block so the upstream exception, whose
+        # text can quote request content, is neither chained nor attached
+        # as context.
+        raise translated
 
+    async def _to_response(
+        self, response: ModelResponse, output_schema: Mapping[str, Any] | None
+    ) -> LLMResponse:
         usage = _map_usage(response.usage)
         await self._check_finish_reason(response, usage)
         return LLMResponse(
@@ -207,13 +252,12 @@ class OpenAICompatibleProvider(LLMProvider):
         )
 
     async def _record_retry(
-        self, attempt: int, error: LLMTransientError, delay: float | None
+        self, attempt: int, error: LLMTransientError, result: str, delay: float | None
     ) -> None:
         error_class = type(error).__name__
-        result = "exhausted" if delay is None else "retried"
         _get_llm_retry_counter().add(1, attributes={"result": result, "error_class": error_class})
         await logger.info(
-            "llm_retry_exhausted" if delay is None else "llm_retry_attempt",
+            "llm_retry_attempt" if result == "retried" else f"llm_retry_{result}",
             model=self._model,
             attempt=attempt,
             error_class=error_class,
@@ -256,9 +300,20 @@ def _retry_delay(attempt: int, retry_after: float | None) -> float | None:
     return max(backoff, retry_after or 0.0)
 
 
-def _retry_after_seconds(exc: BaseException | None) -> float | None:
+def _budget_ends_retries(delay: float | None, remaining: float | None) -> bool:
+    """True when the time budget is spent, or the next retry's wait would spend it.
+
+    Checked even when retries are otherwise over, so a final attempt cut
+    short by the budget reports the budget, not a timeout.
+    """
+    if remaining is None:
+        return False
+    return remaining <= 0 or (delay is not None and delay >= remaining)
+
+
+def _retry_after_seconds(exc: ModelHTTPError) -> float | None:
     """Parse ``Retry-After`` (delta-seconds or HTTP-date) from an HTTP error."""
-    if not isinstance(exc, ModelHTTPError) or not exc.headers:
+    if not exc.headers:
         return None
     value = exc.headers.get(_RETRY_AFTER_HEADER, "").strip()
     if not value:
@@ -339,15 +394,16 @@ def _translate_error(exc: ModelAPIError | UnexpectedModelBehavior) -> LLMProvide
     """Map a PydanticAI error onto the provider-agnostic hierarchy.
 
     Messages name only the failure class and status code: upstream error
-    bodies can echo request content, so they are never copied.
+    bodies can echo request content, so they are never copied. The
+    ``Retry-After`` wait is copied onto retryable errors.
     """
     if isinstance(exc, ModelHTTPError):
         status = exc.status_code
         message = f"upstream returned HTTP {status}"
         if status == _RATE_LIMIT_STATUS:
-            return LLMRateLimitError(message)
+            return LLMRateLimitError(message, retry_after=_retry_after_seconds(exc))
         if status in _RETRYABLE_STATUS_CODES or status >= _SERVER_ERROR_FLOOR:
-            return LLMTransientError(message)
+            return LLMTransientError(message, retry_after=_retry_after_seconds(exc))
         return LLMPermanentError(message)
     if isinstance(exc, ModelAPIError):
         if isinstance(exc.__cause__, APITimeoutError):

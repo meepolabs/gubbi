@@ -116,6 +116,8 @@ class ScriptedProvider:
         messages: list[LLMMessage],
         system_prompt: str,
         output_schema: Mapping[str, Any] | None = None,
+        *,
+        time_budget: float | None = None,
     ) -> LLMResponse:
         self.user_contents.append(messages[0]["content"])
         self.schemas.append(output_schema)
