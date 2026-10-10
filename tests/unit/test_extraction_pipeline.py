@@ -59,8 +59,9 @@ Step = Mapping[str, Any] | Exception
 class _ScriptedProvider:
     """Replays one scripted step per call; records every user message it receives."""
 
-    def __init__(self, steps: list[Step]) -> None:
+    def __init__(self, steps: list[Step], *, attempts: int = 1) -> None:
         self._steps = list(steps)
+        self._attempts = attempts
         self.user_contents: list[str] = []
 
     async def complete(
@@ -80,7 +81,7 @@ class _ScriptedProvider:
             model="scripted",
             cached_input_tokens=CALL_USAGE.cached_input,
             reasoning_tokens=CALL_USAGE.reasoning,
-            attempts=2,
+            attempts=self._attempts,
         )
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
@@ -345,6 +346,40 @@ async def test_non_truncation_failure_is_not_retried_and_counts_the_failed_call(
     assert failure.chunks == len(chunk_messages(messages))
 
 
+async def test_llm_calls_count_provider_retries_on_success() -> None:
+    provider = _ScriptedProvider([_output()], attempts=3)
+
+    outcome = await _run(provider, _small_conversation())
+
+    assert outcome.llm_calls == 3
+
+
+@pytest.mark.parametrize(
+    ("error", "expected_calls"),
+    [
+        pytest.param(LLMTransientError("down", attempts=3), 3, id="exhausted-retries"),
+        pytest.param(LLMTransientError("down"), 1, id="attempts-unknown"),
+    ],
+)
+async def test_llm_calls_count_the_failed_calls_requests(
+    error: LLMProviderError, expected_calls: int
+) -> None:
+    provider = _ScriptedProvider([error])
+
+    failure = await _failure(provider, _small_conversation())
+
+    assert failure.llm_calls == expected_calls
+
+
+async def test_schema_failure_counts_the_responses_requests() -> None:
+    provider = _ScriptedProvider([{"topic_path": "x"}], attempts=2)
+
+    failure = await _failure(provider, _small_conversation())
+
+    assert isinstance(failure.error, LLMSchemaError)
+    assert failure.llm_calls == 2
+
+
 async def test_empty_transcript_fails_without_calling_the_model() -> None:
     provider = _ScriptedProvider([])
 
@@ -406,7 +441,7 @@ async def test_successful_call_span_keeps_every_attribute_through_the_allowlist(
     in_memory_tracer: tuple[Any, InMemoryExporter],
 ) -> None:
     _, exporter = in_memory_tracer
-    provider = _ScriptedProvider([_output()])
+    provider = _ScriptedProvider([_output()], attempts=2)
 
     await _run(provider, _small_conversation())
 

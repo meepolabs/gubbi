@@ -49,12 +49,21 @@ class LLMProviderError(Exception):
 
     ``usage`` carries the token counts of the call that produced the error
     when the upstream reported any: a refused or truncated call still bills.
-    Messages never carry model output or refusal text.
+    ``attempts`` is the number of upstream requests the call made before
+    failing, when the provider tracks it. Messages never carry model output
+    or refusal text.
     """
 
-    def __init__(self, message: str = "", *, usage: LLMUsage | None = None) -> None:
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        usage: LLMUsage | None = None,
+        attempts: int | None = None,
+    ) -> None:
         super().__init__(message)
         self.usage = usage
+        self.attempts = attempts
 
 
 class LLMTransientError(LLMProviderError):

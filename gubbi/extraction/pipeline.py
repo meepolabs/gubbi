@@ -74,6 +74,7 @@ class PipelineOutcome:
     candidates: tuple[ExtractedCandidate, ...]
     usage: LLMUsage
     llm_calls: int
+    """Upstream requests made, provider retries included."""
     chunks: int
     """Chunks the transcript was cut into, a truncation split counting as two."""
 
@@ -202,7 +203,7 @@ async def _call(run: _Run, progress: _Progress, chunk: Chunk, chunk_index: int) 
             )
         except Exception as exc:
             usage = exc.usage if isinstance(exc, LLMProviderError) else None
-            failed = _account(progress, LLMUsage() if usage is None else usage)
+            failed = _account(progress, LLMUsage() if usage is None else usage, _attempts_of(exc))
             await _report_failure(span, exc, usage, chunk_index, _latency_ms(start_ns))
             raise _CallFailedError(exc, failed) from exc
         attrs = {
@@ -215,7 +216,7 @@ async def _call(run: _Run, progress: _Progress, chunk: Chunk, chunk_index: int) 
         safe_set_attributes(span_name, span, attrs)
         await logger.info("extraction_llm_call", outcome="ok", **attrs)
     return replace(
-        _account(progress, extraction.usage),
+        _account(progress, extraction.usage, extraction.attempts),
         extractions=(*progress.extractions, extraction),
         candidates=(*progress.candidates, *_candidates(run, extraction)),
     )
@@ -262,7 +263,14 @@ def _latency_ms(start_ns: int) -> float:
     return round((time.monotonic_ns() - start_ns) / _NS_PER_MS, 2)
 
 
-def _account(progress: _Progress, usage: LLMUsage) -> _Progress:
+def _attempts_of(exc: Exception) -> int:
+    """Upstream requests a failed call made; 1 when the error does not say."""
+    if isinstance(exc, LLMProviderError) and exc.attempts is not None:
+        return exc.attempts
+    return 1
+
+
+def _account(progress: _Progress, usage: LLMUsage, requests: int) -> _Progress:
     return replace(
         progress,
         usage=LLMUsage(
@@ -271,7 +279,7 @@ def _account(progress: _Progress, usage: LLMUsage) -> _Progress:
             cached_input=progress.usage.cached_input + usage.cached_input,
             reasoning=progress.usage.reasoning + usage.reasoning,
         ),
-        llm_calls=progress.llm_calls + 1,
+        llm_calls=progress.llm_calls + requests,
     )
 
 

@@ -255,7 +255,11 @@ async def startup(ctx: ExtractionContext) -> None:
     """
     settings = get_settings()
 
-    # Configure structured logging FIRST -- emits below would crash with
+    # Resolved before logging, telemetry, pools or threads are set up so a
+    # misconfigured provider fails startup with nothing to tear down.
+    llm_provider = _build_llm_provider(settings)
+
+    # Configure structured logging before any emit -- emits would crash with
     # "AttributeError: 'NoneType' object has no attribute 'msg'" otherwise,
     # because Arq workers don't run the FastAPI lifespan that initializes
     # structlog in the HTTP server. Tests pass via conftest's autouse
@@ -271,10 +275,6 @@ async def startup(ctx: ExtractionContext) -> None:
     # OTEL_EXPORTER_OTLP_ENDPOINT in the deploy. One-shot + best-effort:
     # never blocks boot. See _configure_worker_telemetry.
     _configure_worker_telemetry(settings)
-
-    # Resolved before any pool or thread exists so a misconfigured provider
-    # fails startup with nothing to tear down.
-    llm_provider = _build_llm_provider(settings)
 
     pool: asyncpg.Pool | None = None
     redis_pool: aioredis.ConnectionPool | None = None

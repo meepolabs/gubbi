@@ -493,6 +493,42 @@ async def test_worker_startup_fails_fast_when_openai_compatible_config_missing(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provider_env", "missing_env"),
+    [
+        pytest.param("unknown_xyz", None, id="unknown-provider"),
+        pytest.param("openai_compatible", "JOURNAL_LLM_BASE_URL", id="missing-base-url"),
+    ],
+)
+async def test_worker_startup_rejects_invalid_provider_before_logging_or_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_env: str,
+    missing_env: str | None,
+) -> None:
+    """Invalid provider settings abort startup before logging or OTel are wired."""
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", provider_env)
+    _patch_worker_dependencies(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    if missing_env is not None:
+        monkeypatch.delenv(missing_env)
+    configure_telemetry = MagicMock()
+    monkeypatch.setattr(worker_module, "_configure_worker_telemetry", configure_telemetry)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ValueError, match="JOURNAL_LLM_"):
+        await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    configure_telemetry.assert_not_called()
+    worker_module.initialize_logger.assert_not_called()  # type: ignore[attr-defined]
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
 async def test_worker_startup_puts_embedding_service_on_ctx(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

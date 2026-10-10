@@ -54,10 +54,12 @@ _OUTPUT_SENTINEL = "OUTPUT-SENTINEL"
 class _Recorder:
     def __init__(self, respond: Callable[[httpx2.Request], httpx2.Response]) -> None:
         self.requests: list[dict[str, Any]] = []
+        self.authorizations: list[str | None] = []
         self._respond = respond
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(json.loads(request.content))
+        self.authorizations.append(request.headers.get("authorization"))
         return self._respond(request)
 
 
@@ -97,10 +99,12 @@ def _status(status: int, headers: dict[str, str] | None = None) -> Callable[...,
     return respond
 
 
-def _provider(recorder: _Recorder, sleep: _SleepLog | None = None) -> OpenAICompatibleProvider:
+def _provider(
+    recorder: _Recorder, sleep: _SleepLog | None = None, api_key: str = "test-key"
+) -> OpenAICompatibleProvider:
     return OpenAICompatibleProvider(
         base_url="https://llm.example.test/v1",
-        api_key="test-key",
+        api_key=api_key,
         model="fixture-model",
         input_price_per_mtok=1.0,
         output_price_per_mtok=5.0,
@@ -475,3 +479,45 @@ def test_estimate_cost_uses_configured_prices() -> None:
     provider = _provider(_Recorder(_json_response(_stop_body())))
 
     assert provider.estimate_cost_cents(1_000_000, 1_000_000) == pytest.approx(600.0)
+
+
+@pytest.mark.parametrize(
+    ("api_key", "expected_authorization"),
+    [
+        pytest.param("", "Bearer unused", id="empty-key-sends-placeholder"),
+        pytest.param("real-key", "Bearer real-key", id="set-key-passed-through"),
+    ],
+)
+async def test_api_key_is_optional_and_passed_through_when_set(
+    monkeypatch: pytest.MonkeyPatch, api_key: str, expected_authorization: str
+) -> None:
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    recorder = _Recorder(_json_response(_stop_body()))
+
+    await _provider(recorder, api_key=api_key).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert recorder.authorizations == [expected_authorization]
+
+
+@pytest.mark.parametrize(
+    ("responders", "expected_attempts"),
+    [
+        pytest.param((_status(503),), LLM_MAX_ATTEMPTS, id="exhausted-retries"),
+        pytest.param((_status(400),), 1, id="permanent-first-attempt"),
+        pytest.param((_status(503), _status(400)), 2, id="permanent-after-a-retry"),
+        pytest.param(
+            (_status(503), _json_response(_length_body())), 2, id="truncated-after-a-retry"
+        ),
+    ],
+)
+async def test_raised_error_carries_the_number_of_requests_made(
+    responders: tuple[Callable[[httpx2.Request], httpx2.Response], ...],
+    expected_attempts: int,
+) -> None:
+    recorder = _sequence(*responders)
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert excinfo.value.attempts == expected_attempts
+    assert len(recorder.requests) == expected_attempts

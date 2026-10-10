@@ -116,7 +116,7 @@ def parse_chunk_extraction(
     Raises:
         LLMSchemaError: the output is not a JSON object matching the schema.
     """
-    decoded = _decode(content, usage)
+    decoded = _decode(content, usage, attempts)
     errors: list[ErrorDetails] = []
     try:
         output = _ChunkOutput.model_validate(decoded)
@@ -125,7 +125,7 @@ def parse_chunk_extraction(
     if errors:
         # Raised outside the except block so no exception context (which
         # embeds the offending values) is chained onto the schema error.
-        raise LLMSchemaError(_describe(errors), usage=usage)
+        raise LLMSchemaError(_describe(errors), usage=usage, attempts=attempts)
     return ChunkExtraction(
         topic_path=output.topic_path,
         topic_title=output.topic_title,
@@ -137,7 +137,7 @@ def parse_chunk_extraction(
     )
 
 
-def _decode(content: str | Mapping[str, Any], usage: LLMUsage) -> Mapping[str, Any]:
+def _decode(content: str | Mapping[str, Any], usage: LLMUsage, attempts: int) -> Mapping[str, Any]:
     if isinstance(content, Mapping):
         return content
     try:
@@ -145,7 +145,9 @@ def _decode(content: str | Mapping[str, Any], usage: LLMUsage) -> Mapping[str, A
     except json.JSONDecodeError:
         decoded = None
     if not isinstance(decoded, dict):
-        raise LLMSchemaError("chunk extraction output is not a JSON object", usage=usage)
+        raise LLMSchemaError(
+            "chunk extraction output is not a JSON object", usage=usage, attempts=attempts
+        )
     return decoded
 
 

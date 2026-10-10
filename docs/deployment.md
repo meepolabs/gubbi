@@ -92,10 +92,10 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_LLM_PROVIDER` | no | `openai_compatible` (default) or `fake` (in-process stub for tests; never calls a model). | `openai_compatible` |
 | `JOURNAL_LLM_BASE_URL` | yes (worker) | Base URL of the OpenAI-compatible endpoint, including the version path. | `https://llm.example.com/v1` |
 | `JOURNAL_LLM_MODEL` | yes (worker) | Model name sent with every request. | `your-model-name` |
-| `JOURNAL_LLM_API_KEY` | depends on endpoint | Bearer key sent to the endpoint. | (random) |
+| `JOURNAL_LLM_API_KEY` | depends on endpoint | Bearer key sent to the endpoint. Leave unset for endpoints that need no key; the worker then sends the placeholder bearer `unused`. | (random) |
 | `JOURNAL_LLM_INPUT_PRICE_PER_MTOK` / `JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK` | no | USD per million input / output tokens, used for cost accounting. Defaults `1.00` / `5.00`. | `0.40` |
-| `JOURNAL_EXTRACTION_MODE` | no | `single` (default: one structured call per chunk) or `two_call` (categorize, then extract). Temporary switch while the two paths are compared; one will be removed. | `single` |
-| `JOURNAL_EXTRACTION_TRIAGE` | no | `true` adds one small "anything worth recording?" call before extraction. Default `false`. | `false` |
+| `JOURNAL_EXTRACTION_MODE` | no | Accepted values `single` (default: one structured call per chunk) and `two_call`. `two_call` is experimental and not yet used by the worker; leave the default. | `single` |
+| `JOURNAL_EXTRACTION_TRIAGE` | no | Accepted setting, default `false`. Triage is experimental and not yet used by the worker. | `false` |
 
 ### Operator provisioning
 

@@ -84,6 +84,11 @@ _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_FLOOR = 500
 _RETRY_AFTER_HEADER = "retry-after"
 
+# AsyncOpenAI refuses to construct without a key, but many self-hosted
+# endpoints need none. This stand-in satisfies the client and is not a
+# credential.
+_PLACEHOLDER_API_KEY = "unused"
+
 
 @functools.lru_cache(maxsize=1)
 def _get_llm_retry_counter() -> Counter:
@@ -107,7 +112,11 @@ class OpenAICompatibleProvider(LLMProvider):
     ``LLM_MAX_ATTEMPTS`` total requests with jittered exponential backoff,
     waiting at least as long as a ``Retry-After`` header asks. Every other
     failure, including refusal, truncation and unparseable output, is raised
-    after the request that produced it.
+    after the request that produced it. Raised errors carry the number of
+    requests made in ``attempts``.
+
+    An empty ``api_key`` sends a placeholder bearer, for endpoints that need
+    no key.
     """
 
     def __init__(
@@ -129,7 +138,7 @@ class OpenAICompatibleProvider(LLMProvider):
         self._max_output_tokens = max_output_tokens
         client = AsyncOpenAI(
             base_url=base_url,
-            api_key=api_key,
+            api_key=api_key or _PLACEHOLDER_API_KEY,
             max_retries=0,
             timeout=timeout,
             http_client=http_client,
@@ -148,7 +157,10 @@ class OpenAICompatibleProvider(LLMProvider):
         for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
             try:
                 response = await self._attempt(model_messages, parameters, output_schema)
-            except LLMTransientError as exc:
+            except LLMProviderError as exc:
+                exc.attempts = attempt
+                if not isinstance(exc, LLMTransientError):
+                    raise
                 delay = _retry_delay(attempt, _retry_after_seconds(exc.__cause__))
                 await self._record_retry(attempt, exc, delay)
                 if delay is None:
