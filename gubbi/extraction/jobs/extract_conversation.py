@@ -36,7 +36,7 @@ from gubbi.extraction.llm.provider import (
     LLMProviderError,
     LLMRateLimitError,
 )
-from gubbi.storage.exceptions import TopicNotFoundError
+from gubbi.extraction.persist import ensure_topic
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import extraction_jobs
@@ -388,17 +388,7 @@ async def _persist_extraction(
     never committed.  Retries after that are safe: the SAVEPOINT re-runs from
     the start of Phase 3.
     """
-    # Topic upsert (get_id / create with race-tolerance).
-    topic_created = False
-    try:
-        await topic_repo.get_id(conn, topic_path)
-    except TopicNotFoundError:
-        topic_created = True
-        try:
-            await topic_repo.create(conn, topic_path, title=categorization.topic_title)
-        except topic_repo.TopicAlreadyExists as exc:
-            topic_created = False
-            await log.debug("Topic race on create, proceeding", error=str(exc))
+    _topic_id, topic_created = await ensure_topic(conn, topic_path, categorization.topic_title)
 
     # Persist entries (append loop -- no LLM calls here).
     entries_created = 0

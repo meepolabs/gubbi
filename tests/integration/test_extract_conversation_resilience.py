@@ -281,16 +281,6 @@ async def test_persistence_rollback_leaves_no_partial_state(
     assert processed_at is None, "processed_at should be NULL after rollback"
 
 
-@pytest.mark.skip(
-    reason="QUARANTINE (prod-code concurrency gap, not test-only): under concurrent "
-    "workers the topic-create race in _persist_extraction "
-    "(gubbi/extraction/jobs/extract_conversation.py:388) catches TopicAlreadyExists, "
-    "but the failing INSERT has already aborted the enclosing SAVEPOINT transaction, "
-    "so the next statement raises InFailedSQLTransactionError. Recovering after a "
-    "constraint violation requires an inner SAVEPOINT around the topic INSERT -- a "
-    "prod change, out of scope for this TEST-ONLY quarantine burn-down. The "
-    "non-concurrent resilience tests in this file are fixed and run."
-)
 async def test_pool_not_starved_under_concurrency(
     clean_rls_db: asyncpg.Pool,
     app_pool: asyncpg.Pool,
@@ -360,13 +350,6 @@ async def test_pool_not_starved_under_concurrency(
     assert len(completed) == 10, "All 10 jobs should succeed (none skipped)"
 
 
-@pytest.mark.skip(
-    reason="QUARANTINE (prod-code concurrency gap, not test-only): same root cause as "
-    "test_pool_not_starved_under_concurrency -- two workers racing to create the same "
-    "topic abort each other's SAVEPOINT on the unique-constraint violation, raising "
-    "InFailedSQLTransactionError. Needs an inner SAVEPOINT around the topic INSERT in "
-    "_persist_extraction (prod change)."
-)
 async def test_multi_worker_race_idempotent(
     clean_rls_db: asyncpg.Pool,
     app_pool: asyncpg.Pool,
