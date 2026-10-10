@@ -15,12 +15,13 @@ exhausted when max_jobs concurrent workers are all mid-LLM.
 
 from __future__ import annotations
 
+import asyncio
 import functools
 import json
 import time
 from dataclasses import dataclass
 from datetime import date
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID, uuid4
 
 import structlog
@@ -103,6 +104,17 @@ def _get_extraction_refund_skipped_counter() -> Counter:
     )
 
 
+# Arq enforces its job timeout by cancelling the task, so a cancelled job is
+# recorded as having run out of time.
+_CANCELLED_ERROR_CODE: Final = "deadline_exceeded"
+# Arq waits for a cancelled job to finish, so the cancellation cleanup is kept
+# short and bounded.
+_CANCEL_CLEANUP_TIMEOUT_SECS: Final = 10.0
+# A cleanup still running when its job is cancelled a second time is held here
+# so the event loop does not garbage-collect it before it finishes.
+_DETACHED_CLEANUPS: set[asyncio.Task[None]] = set()
+
+
 # ---------------------------------------------------------------------------
 # Value types
 # ---------------------------------------------------------------------------
@@ -123,10 +135,15 @@ class _Job:
 
 @dataclass(frozen=True)
 class _Bucket:
-    """Budget period the pre-charge was debited to; ``known`` gates every refund."""
+    """Budget period the pre-charge was debited to; ``known`` gates every refund.
+
+    ``pre_charged_cents`` is what is still pre-charged for this job: zero
+    once an earlier run of it settled, so a revived run charges its full cost.
+    """
 
     period_start: date
     known: bool
+    pre_charged_cents: int = PRE_CHARGE_CENTS
 
 
 @dataclass(frozen=True)
@@ -224,19 +241,34 @@ async def _check_idempotent(
     return False
 
 
-async def _start_job(conn: asyncpg.Connection, job: _Job, fallback: _Bucket) -> _Bucket:
-    """Transition the job row to running and return the bucket its pre-charge used.
+async def _start_job(conn: asyncpg.Connection, job: _Job, fallback: _Bucket) -> _Bucket | None:
+    """Claim the job row and return the bucket its pre-charge used; None when not claimed.
 
-    A job row whose period cannot be read leaves the bucket unknown, so a
-    later refund is skipped rather than landing in the wrong period.
+    An unclaimed row is owned or already finished by another execution of
+    the same job, and that execution (or the orphan sweep) settles the
+    pre-charge, so this one neither calls the model nor touches the budget.
+    A revived failed row was settled when it failed, so nothing is still
+    pre-charged for it. A job row whose period cannot be read leaves the
+    bucket unknown, so a later refund is skipped rather than landing in the
+    wrong period.
     """
     if job.job_uuid is None:
         return fallback
-    await extraction_jobs.mark_running(conn, job.job_uuid)
+    claimed_from = await extraction_jobs.mark_running(conn, job.job_uuid)
+    if claimed_from is None:
+        await job.log.info(
+            "extraction_job_not_claimed",
+            conversation_id=job.conversation_id,
+            job_id=str(job.job_uuid),
+        )
+        return None
+    pre_charged = 0 if claimed_from == "failed" else PRE_CHARGE_CENTS
     period_start = await extraction_jobs.get_period_start(conn, job.job_uuid)
     if period_start is None:
-        return _Bucket(period_start=fallback.period_start, known=False)
-    return _Bucket(period_start=period_start, known=True)
+        return _Bucket(
+            period_start=fallback.period_start, known=False, pre_charged_cents=pre_charged
+        )
+    return _Bucket(period_start=period_start, known=True, pre_charged_cents=pre_charged)
 
 
 async def _load_conversation(conn: asyncpg.Connection, job: _Job) -> _Loaded:
@@ -427,10 +459,50 @@ async def _settle_budget(
             user_id=job.user_uuid,
             period_start=bucket.period_start,
             actual_cents=actual_cents,
-            estimated_cents=PRE_CHARGE_CENTS,
+            estimated_cents=bucket.pre_charged_cents,
         )
     except Exception:  # broad: redis errors come in many shapes
         await job.log.warning(event, exc_info=True)
+
+
+async def _settle_and_mark_failed(
+    ctx: ExtractionContext, job: _Job, bucket: _Bucket, spend: _Spend, error_code: str
+) -> None:
+    """Settle the pre-charge against ``spend``, then write the failed job state."""
+    await _settle_budget(ctx, job, bucket, spend.cents, "budget_refund_failed")
+    if job.job_uuid is not None:
+        await _mark_job_failed(
+            job.pool,
+            job.user_uuid,
+            str(job.job_uuid),
+            job.conversation_id,
+            error_code,
+            spend,
+        )
+
+
+async def _fail_cancelled(
+    ctx: ExtractionContext, job: _Job, bucket: _Bucket, spend: _Spend
+) -> None:
+    """Settle and fail a cancelled job, bounded so the cancellation is not held up.
+
+    The cleanup is shielded: a second cancellation stops the wait, not the
+    cleanup. One that outlasts the bound is cancelled and left to the orphan
+    sweep.
+    """
+    cleanup = asyncio.create_task(
+        _settle_and_mark_failed(ctx, job, bucket, spend, _CANCELLED_ERROR_CODE)
+    )
+    try:
+        await asyncio.wait_for(asyncio.shield(cleanup), _CANCEL_CLEANUP_TIMEOUT_SECS)
+    except TimeoutError:
+        cleanup.cancel()
+        await job.log.warning(
+            "extraction_cancel_cleanup_timed_out", conversation_id=job.conversation_id
+        )
+    except asyncio.CancelledError:
+        _DETACHED_CLEANUPS.add(cleanup)
+        cleanup.add_done_callback(_DETACHED_CLEANUPS.discard)
 
 
 async def _publish_progress(
@@ -474,7 +546,11 @@ async def _persist(
     topic_path: str,
     embeddings: Sequence[Sequence[float]],
 ) -> int | None:
-    """Write the run under a SAVEPOINT; None when a concurrent worker already did."""
+    """Write the run under a SAVEPOINT; None when a concurrent worker already did.
+
+    The conversation row is locked before its processed_at is read, so of two
+    workers racing here exactly one sees it unprocessed and writes.
+    """
     run = ExtractionToPersist(
         user_id=job.user_uuid,
         conversation_id=job.conversation_id,
@@ -493,8 +569,12 @@ async def _persist(
     )
     async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn2:  # noqa: SIM117
         async with conn2.transaction():
-            # Last-write-wins guard: another worker may have committed during Phase 2.
-            if await _check_idempotent(conn2, job.conversation_id, str(job.user_uuid), job.log):
+            if await conv_repo.lock_processed_at(conn2, job.conversation_id) is not None:
+                await job.log.info(
+                    "Conversation processed by a concurrent worker, skipping",
+                    user_id=str(job.user_uuid),
+                    conversation_id=job.conversation_id,
+                )
                 return None
             persisted = await persist_extraction(conn2, job.cipher, ctx["embedding_service"], run)
     return len(persisted.entry_ids)
@@ -530,11 +610,17 @@ async def extract_conversation(
     recording completes with ``entries_created=0`` and creates no topic.
 
     Lifecycle UPDATEs:
-      mark_running   -- Phase 1, after the idempotency check passes.
+      mark_running   -- Phase 1, after the idempotency check passes. A row it
+                        cannot claim belongs to another execution of the job,
+                        so this one returns without a model call.
       mark_completed -- inside the Phase 3 SAVEPOINT, or on a short dedicated
                         connection when nothing is recorded.
       mark_failed    -- on a FRESH connection in the outer except block, with
-                        the usage of every model call made before the failure.
+                        the usage of every model call made before the failure;
+                        on cancellation (Arq's timeout) with ``deadline_exceeded``.
+
+    Budget: the ingest pre-charge is settled against the estimated cost of
+    every model call the job made, whatever the outcome.
 
     Args:
         ctx: Arq worker context (pool, cipher, extraction_service,
@@ -589,6 +675,10 @@ async def extract_conversation(
         )
         try:
             return await _run_job(ctx, job, str(user_id), str(job_id))
+        except asyncio.CancelledError:
+            success = False
+            failure_reason = _CANCELLED_ERROR_CODE
+            raise
         except Exception as exc:
             success = False
             failure_reason = _classify_error(exc)
@@ -621,7 +711,10 @@ async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str)
         async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn1:
             if await _check_idempotent(conn1, job.conversation_id, user_id, job.log):
                 return _result(None, 0, _NO_SPEND, skipped=True)
-            bucket = await _start_job(conn1, job, bucket)
+            claimed = await _start_job(conn1, job, bucket)
+            if claimed is None:
+                return _result(None, 0, _NO_SPEND, skipped=True)
+            bucket = claimed
             loaded = await _load_conversation(conn1, job)
         # conn1 released here -- pool slot returned before any LLM call.
         if await _skip_by_rule(ctx, job, loaded, bucket):
@@ -629,20 +722,16 @@ async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str)
         extracted = await _extract(ctx, loaded, started)
         spent = extracted.spend
         result = await _record(ctx, job, loaded, extracted, bucket)
+    except asyncio.CancelledError:
+        await _fail_cancelled(ctx, job, bucket, spent)
+        raise
     except Exception as exc:
-        # The SAVEPOINT (if any) is already rolled back. Refund first, then
+        # The SAVEPOINT (if any) is already rolled back. Settle first, then
         # write the failed state on a FRESH connection; the two side effects
         # are independent so neither blocks the other.
-        await _settle_budget(ctx, job, bucket, 0, "budget_refund_failed")
-        if job.job_uuid is not None:
-            await _mark_job_failed(
-                job.pool,
-                job.user_uuid,
-                job_id,
-                job.conversation_id,
-                _classify_error(exc),
-                _failure_spend(ctx, exc, spent),
-            )
+        await _settle_and_mark_failed(
+            ctx, job, bucket, _failure_spend(ctx, exc, spent), _classify_error(exc)
+        )
         raise
     if not result["skipped"]:
         await _publish_progress(
@@ -696,13 +785,14 @@ async def _record(
             topic_usable=extracted.topic_path is not None,
         )
         await _complete_without_entries(job, content_hash(loaded.messages), spent)
-        await _settle_budget(ctx, job, bucket, 0, "budget_refund_failed")
+        await _settle_budget(ctx, job, bucket, spent.cents, "budget_refund_failed")
         return _result(None, 0, spent, skipped=True)
     embeddings = await embed_texts(
         ctx["embedding_service"], [candidate.content for candidate in extracted.outcome.candidates]
     )
     entries_created = await _persist(ctx, job, loaded, extracted, extracted.topic_path, embeddings)
     if entries_created is None:
+        await _settle_budget(ctx, job, bucket, spent.cents, "budget_delta_failed")
         return _result(None, 0, spent, skipped=True)
     # Best-effort and after commit: a Redis failure never rolls back the run.
     await _settle_budget(ctx, job, bucket, spent.cents, "budget_delta_failed")

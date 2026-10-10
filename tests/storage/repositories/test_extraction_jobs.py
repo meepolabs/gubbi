@@ -9,6 +9,7 @@ Run:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import date
 from uuid import UUID
 
@@ -187,21 +188,22 @@ async def test_create_pending_after_terminal_succeeds(
 # ---------------------------------------------------------------------------
 
 
-async def test_mark_running_noop_when_already_running(
+async def test_mark_running_claims_a_pending_job_once(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],
     conversation_id: int,
 ) -> None:
-    """mark_running is idempotent when the job is already in 'running' status."""
+    """The first claim reports the pending status; a second claim reports nothing."""
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
         job_id = await create_pending(
             conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
         )
-        await mark_running(conn, job_id)
-        # Second call must not raise.
-        await mark_running(conn, job_id)
+        first = await mark_running(conn, job_id)
+        second = await mark_running(conn, job_id)
+
+    assert (first, second) == ("pending", None)
 
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -225,7 +227,9 @@ async def test_mark_running_retries_failed_job_and_clears_error_code(
             conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
         )
         await mark_failed(conn, job_id, error_code="llm_provider_error")
-        await mark_running(conn, job_id)
+        claimed_from = await mark_running(conn, job_id)
+
+    assert claimed_from == "failed"
 
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -236,6 +240,60 @@ async def test_mark_running_retries_failed_job_and_clears_error_code(
     assert row["status"] == "running"
     assert row["error_code"] is None
     assert row["started_at"] is not None
+
+
+async def test_mark_running_does_not_claim_a_completed_job(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(
+            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
+        )
+        await mark_completed(conn, job_id, topics_created=0, entries_created=0, cents_spent=0)
+        claimed_from = await mark_running(conn, job_id)
+
+    async with admin_pool.acquire() as conn:
+        status = await conn.fetchval("SELECT status FROM extraction_jobs WHERE id = $1", job_id)
+    assert claimed_from is None
+    assert status == "completed"
+
+
+async def test_a_claim_waiting_on_an_uncommitted_claim_does_not_also_claim(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    """The second claim blocks on the first's row lock, then sees 'running' and backs off."""
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(
+            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
+        )
+
+    async def _second_claim() -> str | None:
+        async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+            return await mark_running(conn, job_id)
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as first:
+        first_claim = await mark_running(first, job_id)
+        second = asyncio.create_task(_second_claim())
+        await _wait_until_blocked_on_a_lock(admin_pool)
+    second_claim = await second
+
+    assert (first_claim, second_claim) == ("pending", None)
+
+
+async def _wait_until_blocked_on_a_lock(admin_pool: asyncpg.Pool) -> None:
+    for _ in range(500):
+        if await admin_pool.fetchval("SELECT count(*) FROM pg_locks WHERE NOT granted"):
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("the second claim never waited on the first's lock")
 
 
 # ---------------------------------------------------------------------------

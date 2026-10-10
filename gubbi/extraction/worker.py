@@ -83,8 +83,8 @@ def _reset_worker_telemetry_guard() -> None:
 # not change.
 #
 # Default key is ``"openai_compatible"`` so an unset env var in prod yields
-# the real provider. Testbench D-tier compose sets ``JOURNAL_LLM_PROVIDER:
-# fake`` to opt into the in-process stub.
+# the real provider. A test deployment sets ``JOURNAL_LLM_PROVIDER=fake``
+# to opt into the in-process stub.
 def _build_openai_compatible_provider(settings: Settings) -> LLMProvider:
     """Build the OpenAI-compatible provider, refusing to start without an endpoint."""
     llm = settings.llm
@@ -341,7 +341,7 @@ async def startup(ctx: ExtractionContext) -> None:
         cipher = _build_content_cipher()
         ctx["cipher"] = cipher
 
-        # Extraction service. Testbench D-tier compose sets
+        # Extraction service. A test deployment sets
         # ``JOURNAL_LLM_PROVIDER=fake`` so the worker boots against the
         # in-process FakeLLMProvider and never calls a real endpoint.
         extraction_service = ExtractionService(llm_provider)

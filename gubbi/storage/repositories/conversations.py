@@ -50,6 +50,7 @@ __all__: list[str] = [
     "get_title_summary",
     "get_titles_summaries",
     "list_conversations",
+    "lock_processed_at",
     "mark_processed",
     "read_conversation",
     "read_conversation_by_id",
@@ -863,6 +864,22 @@ async def get_processed_at(
     """Return the conversations.processed_at timestamp, or None if NULL."""
     return await conn.fetchval(  # type: ignore[no-any-return]
         "SELECT processed_at FROM conversations WHERE id = $1",
+        conversation_id,
+    )
+
+
+async def lock_processed_at(
+    conn: asyncpg.Connection,
+    conversation_id: int,
+) -> datetime_cls | None:
+    """Lock the conversation row until the transaction ends; return its processed_at.
+
+    Must run inside a transaction. A concurrent caller blocks here until the
+    holder commits, then reads the committed processed_at, so at most one
+    transaction sees it NULL and goes on to write.
+    """
+    return await conn.fetchval(  # type: ignore[no-any-return]
+        "SELECT processed_at FROM conversations WHERE id = $1 FOR UPDATE",
         conversation_id,
     )
 

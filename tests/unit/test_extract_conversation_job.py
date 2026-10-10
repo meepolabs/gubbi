@@ -95,16 +95,21 @@ async def test_no_connection_is_held_during_any_llm_call() -> None:
     assert len(tracker.conns) == 2, "one load connection, one persist connection"
 
 
-async def test_persist_runs_inside_a_transaction_after_a_second_idempotency_check() -> None:
+async def test_persist_rechecks_processed_at_under_a_row_lock_in_its_transaction() -> None:
     tracker = ConnectionTracker()
+    order: list[str] = []
 
     with patched_job(tracker) as mocks:
+        persisted = mocks.persist.return_value
+        mocks.lock_processed_at.side_effect = lambda *_a: order.append("lock")
+        mocks.persist.side_effect = lambda *_a: order.append("persist") or persisted
         await _run(make_ctx(ScriptedProvider([chunk_output()])))
 
     conn1, conn2 = tracker.conns
-    assert [c.args[0] for c in mocks.get_processed_at.await_args_list] == [conn1, conn2]
+    assert [c.args[0] for c in mocks.get_processed_at.await_args_list] == [conn1]
+    mocks.lock_processed_at.assert_awaited_once_with(conn2, CONVERSATION_ID)
     conn2.transaction.assert_called_once()
-    assert mocks.persist.await_args.args[0] is conn2
+    assert order == ["lock", "persist"]
 
 
 async def test_system_turns_never_reach_the_provider() -> None:
@@ -214,12 +219,33 @@ async def test_mark_running_follows_the_idempotency_check() -> None:
 async def test_a_concurrent_worker_that_committed_first_wins() -> None:
     tracker = ConnectionTracker()
 
+    ctx = make_ctx(ScriptedProvider([chunk_output()]))
+
     with patched_job(tracker) as mocks:
-        mocks.get_processed_at.side_effect = [None, "2026-05-01T00:00:00Z"]
-        result = await _run(make_ctx(ScriptedProvider([chunk_output()])))
+        mocks.lock_processed_at.return_value = "2026-05-01T00:00:00Z"
+        result = await _run(ctx)
 
     assert result["skipped"] is True
     mocks.persist.assert_not_awaited()
+    mocks.record_audit.assert_not_awaited()
+    ctx["redis"].publish.assert_not_awaited()
+
+
+async def test_a_job_row_another_execution_owns_is_left_alone() -> None:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([chunk_output()])
+
+    with patched_job(tracker) as mocks:
+        mocks.mark_running.return_value = None
+        result = await _run(make_ctx(provider))
+
+    assert result["skipped"] is True
+    assert provider.user_contents == []
+    mocks.read_conversation.assert_not_awaited()
+    mocks.persist.assert_not_awaited()
+    mocks.mark_completed.assert_not_awaited()
+    mocks.mark_failed.assert_not_awaited()
+    mocks.record_audit.assert_not_awaited()
 
 
 async def test_without_a_job_row_no_lifecycle_update_runs() -> None:

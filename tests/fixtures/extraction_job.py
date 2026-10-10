@@ -154,6 +154,7 @@ class JobMocks:
 
     tracker: ConnectionTracker
     get_processed_at: AsyncMock
+    lock_processed_at: AsyncMock
     read_conversation: AsyncMock
     get_extraction_state: AsyncMock
     list_topics: AsyncMock
@@ -225,6 +226,7 @@ def patched_job(
         mocks = JobMocks(
             tracker=tracker,
             get_processed_at=enter(f"{conv}.get_processed_at", return_value=None),
+            lock_processed_at=enter(f"{conv}.lock_processed_at", return_value=None),
             read_conversation=enter(
                 f"{conv}.read_conversation_by_id",
                 return_value=(MagicMock(), loaded, len(loaded)),
@@ -236,7 +238,7 @@ def patched_job(
             list_topics=enter("gubbi.storage.repositories.topics.list_all", return_value=([], 0)),
             mark_processed=enter(f"{conv}.mark_processed"),
             set_extraction_state=enter(f"{conv}.set_extraction_state", return_value=True),
-            mark_running=enter(f"{jobs}.mark_running", return_value=True),
+            mark_running=enter(f"{jobs}.mark_running", return_value="pending"),
             get_period_start=enter(f"{jobs}.get_period_start", return_value=period_start),
             mark_completed=enter(f"{jobs}.mark_completed", return_value=True),
             mark_failed=enter(f"{jobs}.mark_failed", return_value=True),

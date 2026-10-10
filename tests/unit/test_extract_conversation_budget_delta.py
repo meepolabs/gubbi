@@ -1,8 +1,9 @@
 """Unit tests for the budget pre-charge reconciliation in extract_conversation.
 
 Ingest pre-charges ``PRE_CHARGE_CENTS`` into the user's budget bucket. The
-job reconciles that estimate against what it actually spent: the real cost
-on success, zero on a skip, on nothing to record, and on failure. Every
+job reconciles that estimate against the estimated cost of every model call
+it made, whatever the outcome: success, nothing to record, failure, or
+cancellation. A rule skip makes no call and refunds in full. Every
 reconciliation lands in the bucket read from the job row; when that bucket
 is unknown the refund is skipped and counted instead.
 """
@@ -22,11 +23,12 @@ from gubbi.extraction.jobs.extract_conversation import (
     _get_extraction_refund_skipped_counter,
     extract_conversation,
 )
-from gubbi.extraction.llm.provider import LLMPermanentError
+from gubbi.extraction.llm.provider import LLMPermanentError, LLMRefusalError
 from gubbi.extraction.pipeline import PipelineFailure
 from gubbi.models.conversation import Message
 from tests.fixtures.extraction_job import (
     CALL_CENTS,
+    CALL_USAGE,
     CONVERSATION_ID,
     JOB_ID,
     PERIOD,
@@ -101,13 +103,13 @@ async def test_without_a_budget_helper_the_job_runs_unchanged() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Failure: refund before the job is marked failed
+# Failure: settle before the job is marked failed
 # ---------------------------------------------------------------------------
 
 
-async def test_failure_refunds_the_pre_charge_before_marking_the_job_failed() -> None:
+async def test_failure_settles_the_pre_charge_before_marking_the_job_failed() -> None:
     call_log: list[str] = []
-    helper = _helper(side_effect=lambda **_kw: call_log.append("refund"))
+    helper = _helper(side_effect=lambda **_kw: call_log.append("settle"))
     tracker = ConnectionTracker()
 
     with patched_job(tracker) as mocks:
@@ -116,10 +118,70 @@ async def test_failure_refunds_the_pre_charge_before_marking_the_job_failed() ->
             await _run(make_ctx(ScriptedProvider([LLMPermanentError("x")]), helper))
 
     settled = _settled(helper)
-    assert settled["actual_cents"] == 0
+    assert settled["actual_cents"] == 0, "the failed call reported no usage"
     assert settled["estimated_cents"] == PRE_CHARGE_CENTS
     assert settled["period_start"] == PERIOD, "the job row's bucket, not the runtime period"
-    assert call_log == ["refund", "mark_failed"]
+    assert call_log == ["settle", "mark_failed"]
+
+
+async def test_a_failure_after_billed_calls_charges_what_they_cost() -> None:
+    helper = _helper()
+    tracker = ConnectionTracker()
+    refused = LLMRefusalError("no", usage=CALL_USAGE)
+
+    with patched_job(tracker) as mocks, pytest.raises(PipelineFailure):
+        await _run(make_ctx(ScriptedProvider([refused]), helper))
+
+    assert _settled(helper)["actual_cents"] == CALL_CENTS
+    assert mocks.mark_failed.await_args.kwargs["cents_spent"] == CALL_CENTS
+
+
+async def test_a_persistence_failure_charges_the_completed_pipelines_cost() -> None:
+    helper = _helper()
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        mocks.persist.side_effect = RuntimeError("disk full")
+        with pytest.raises(RuntimeError, match="disk full"):
+            await _run(make_ctx(ScriptedProvider([chunk_output()]), helper))
+
+    assert _settled(helper)["actual_cents"] == CALL_CENTS
+
+
+async def test_a_revived_failed_job_charges_its_full_cost() -> None:
+    """The earlier failed run already settled its pre-charge, so none is left to offset."""
+    helper = _helper()
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        mocks.mark_running.return_value = "failed"
+        await _run(make_ctx(ScriptedProvider([chunk_output()]), helper))
+
+    settled = _settled(helper)
+    assert (settled["actual_cents"], settled["estimated_cents"]) == (CALL_CENTS, 0)
+
+
+async def test_a_job_another_execution_owns_leaves_the_budget_alone() -> None:
+    helper = _helper()
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        mocks.mark_running.return_value = None
+        await _run(make_ctx(ScriptedProvider([chunk_output()]), helper))
+
+    helper.record_actual_cost.assert_not_awaited()
+
+
+async def test_losing_the_persist_race_still_charges_the_calls_made() -> None:
+    helper = _helper()
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        mocks.lock_processed_at.return_value = "2026-05-01T00:00:00Z"
+        result = await _run(make_ctx(ScriptedProvider([chunk_output()]), helper))
+
+    assert result["skipped"] is True
+    assert _settled(helper)["actual_cents"] == CALL_CENTS
 
 
 async def test_refund_failure_does_not_block_marking_the_job_failed() -> None:
@@ -189,7 +251,7 @@ async def test_refund_is_skipped_and_counted_when_the_job_row_has_no_period() ->
 
 
 # ---------------------------------------------------------------------------
-# Nothing spent on the user's behalf: full refund
+# Nothing recorded: charged for the calls made, refunded when none were
 # ---------------------------------------------------------------------------
 
 
@@ -197,16 +259,22 @@ _TRIVIAL = [Message(role="user", content="ok")]
 
 
 @pytest.mark.parametrize(
-    ("steps", "messages"),
+    ("steps", "messages", "triage", "cents"),
     [
-        pytest.param([chunk_output(entries=[])], None, id="no-entries"),
-        pytest.param([chunk_output(topic="../x")], None, id="unusable-topic"),
-        pytest.param([], _TRIVIAL, id="rule-skip"),
+        pytest.param([chunk_output(entries=[])], None, False, CALL_CENTS, id="no-entries"),
+        pytest.param([chunk_output(topic="../x")], None, False, CALL_CENTS, id="unusable-topic"),
+        pytest.param([{"worth_recording": False}], None, True, CALL_CENTS, id="triaged-out"),
+        pytest.param([], _TRIVIAL, False, 0, id="rule-skip"),
     ],
 )
-async def test_a_run_that_records_nothing_refunds_the_pre_charge(
-    steps: list[Any], messages: list[Message] | None
+async def test_a_run_that_records_nothing_settles_the_cost_of_its_calls(
+    monkeypatch: pytest.MonkeyPatch,
+    steps: list[Any],
+    messages: list[Message] | None,
+    triage: bool,
+    cents: int,
 ) -> None:
+    monkeypatch.setenv("JOURNAL_EXTRACTION_TRIAGE", "true" if triage else "false")
     helper = _helper()
     tracker = ConnectionTracker()
 
@@ -215,7 +283,7 @@ async def test_a_run_that_records_nothing_refunds_the_pre_charge(
 
     assert result["skipped"] is True
     settled = _settled(helper)
-    assert settled["actual_cents"] == 0
+    assert settled["actual_cents"] == cents
     assert settled["estimated_cents"] == PRE_CHARGE_CENTS
     assert settled["period_start"] == PERIOD
 

@@ -4,7 +4,8 @@ Tests cover:
 - Idempotent re-entry after an LLM failure (retrying from scratch produces exactly N entries).
 - Persistence rollback leaves no partial state.
 - Pool not starved under concurrency (10 concurrent jobs against pool max=12).
-- Multi-worker race: both workers for same conversation_id, bounded READ COMMITTED outcome.
+- Multi-worker race: both workers for same conversation_id, exactly one writes.
+- Duplicate execution of one job row: only the execution that claims it calls the model.
 - Lifecycle UPDATEs: mark_running -> mark_completed / mark_failed.
 - Audit rows at terminals: extraction_job.completed / extraction_job.failed.
 - Retry idempotency: lifecycle UPDATEs are no-ops on second invocation.
@@ -203,33 +204,65 @@ async def test_multi_worker_race_idempotent(
     clean_rls_db: asyncpg.Pool,
     app_pool: asyncpg.Pool,
 ) -> None:
-    """Two concurrent workers for one conversation: a bounded READ COMMITTED outcome.
+    """Two workers for one conversation both reach persistence: exactly one writes.
 
-    Both may pass the conn2 idempotency check before either commits
-    mark_processed, so the test asserts only the stable bound: at least one
-    write lands and each worker writes at most once.
+    Both pass the Phase 1 check before either commits; the row lock taken
+    in the persistence transaction serializes the recheck, so the second
+    sees the first's processed_at and writes nothing.
     """
     conv_id = await _seed_conversation(clean_rls_db)
-
-    async def _run_worker() -> dict[str, Any]:
-        provider = ScriptedProvider(
+    providers = [
+        ScriptedProvider(
             [chunk_output("test/race", [entry("Race entry")])], delay=_LLM_LATENCY_SECS
         )
-        return await extract_conversation(_ctx(app_pool, provider), conv_id, _USER_ID_STR)
+        for _ in range(2)
+    ]
 
-    results = await asyncio.gather(_run_worker(), _run_worker())
+    results = await asyncio.gather(
+        *(extract_conversation(_ctx(app_pool, p), conv_id, _USER_ID_STR) for p in providers)
+    )
 
-    writers = [r for r in results if not r["skipped"]]
-    assert 1 <= len(writers) <= 2, f"Expected 1-2 writers, got {results}"
+    assert [len(p.user_contents) for p in providers] == [1, 1], "both reached the model"
+    assert sorted(r["skipped"] for r in results) == [False, True]
     async with clean_rls_db.acquire() as conn:
         audit_count: int = await conn.fetchval(
             "SELECT COUNT(*) FROM audit_log WHERE action = 'conversation.extracted'"
             " AND target_id = $1",
             str(conv_id),
         )
-    assert 1 <= audit_count <= 2, f"Expected 1-2 audit rows, got {audit_count}"
-    assert 1 <= await _count_topic_entries(clean_rls_db, "test/race") <= 2
+    assert audit_count == 1
+    assert await _count_topic_entries(clean_rls_db, "test/race") == 1
     assert await _processed_at(clean_rls_db, conv_id) is not None
+
+
+async def test_a_second_execution_of_a_running_job_makes_no_model_call(
+    clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
+) -> None:
+    """Two executions of one job row: the one that does not claim it returns untouched."""
+    conv_id = await _seed_conversation(clean_rls_db)
+    job_id = await seed_job(app_pool, _USER_UUID, conv_id)
+    providers = [
+        ScriptedProvider([_two_entries()], delay=_LLM_LATENCY_SECS),
+        ScriptedProvider([_two_entries()], delay=_LLM_LATENCY_SECS),
+    ]
+
+    results = await asyncio.gather(
+        *(
+            extract_conversation(_ctx(app_pool, p), conv_id, _USER_ID_STR, str(job_id))
+            for p in providers
+        )
+    )
+
+    assert sorted(len(p.user_contents) for p in providers) == [0, 1]
+    assert sorted(r["skipped"] for r in results) == [False, True]
+    assert await _count_topic_entries(clean_rls_db, _TOPIC) == 2
+    async with clean_rls_db.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, llm_calls FROM extraction_jobs WHERE id = $1", job_id
+        )
+    assert row is not None
+    assert (row["status"], row["llm_calls"]) == ("completed", 1)
 
 
 # ---------------------------------------------------------------------------
