@@ -124,7 +124,12 @@ class OpenAICompatibleProvider(LLMProvider):
 
     A ``time_budget`` passed to ``complete()`` caps each attempt at the time
     left and ends the call with :class:`LLMDeadlineError` when no time is
-    left for another attempt, including after the wait a retry needs.
+    left for another attempt, including after the wait a retry needs and
+    after that wait has actually elapsed.
+
+    Timed-out attempts report no usage although the upstream may have billed
+    them; they are counted in ``unmetered_attempts`` on the response or the
+    raised error.
 
     An empty ``api_key`` sends a placeholder bearer, for endpoints that need
     no key.
@@ -173,11 +178,14 @@ class OpenAICompatibleProvider(LLMProvider):
         remaining = self._remaining(ends_at)
         if remaining is not None and remaining <= 0:
             raise LLMDeadlineError("time budget spent before the first attempt", attempts=0)
+        unmetered = 0
         for attempt in range(1, LLM_MAX_ATTEMPTS + 1):
             try:
                 response = await self._attempt(model_messages, parameters, output_schema, remaining)
             except LLMProviderError as exc:
+                unmetered += isinstance(exc, LLMTimeoutError)
                 exc.attempts = attempt
+                exc.unmetered_attempts = unmetered
                 if not isinstance(exc, LLMTransientError):
                     raise
                 delay = _retry_delay(attempt, exc.retry_after)
@@ -185,7 +193,9 @@ class OpenAICompatibleProvider(LLMProvider):
                 if _budget_ends_retries(delay, remaining):
                     await self._record_retry(attempt, exc, "deadline", None)
                     raise LLMDeadlineError(
-                        "time budget too short for another attempt", attempts=attempt
+                        "time budget too short for another attempt",
+                        attempts=attempt,
+                        unmetered_attempts=unmetered,
                     ) from None
                 await self._record_retry(
                     attempt, exc, "exhausted" if delay is None else "retried", delay
@@ -194,8 +204,14 @@ class OpenAICompatibleProvider(LLMProvider):
                     raise
                 await self._sleep(delay)
                 remaining = self._remaining(ends_at)
+                if remaining is not None and remaining <= 0:
+                    raise LLMDeadlineError(
+                        "time budget spent while waiting to retry",
+                        attempts=attempt,
+                        unmetered_attempts=unmetered,
+                    ) from None
                 continue
-            return dataclasses.replace(response, attempts=attempt)
+            return dataclasses.replace(response, attempts=attempt, unmetered_attempts=unmetered)
         raise AssertionError("retry loop exited without returning or raising")
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
@@ -384,7 +400,15 @@ def _extract_content(
     try:
         parsed = json.loads(text)
     except json.JSONDecodeError:
-        raise LLMSchemaError("model output is not valid JSON", usage=usage) from None
+        pass
+    else:
+        return _json_object(parsed, usage)
+    # Raised outside the except block: the decode error's ``doc`` holds the
+    # model output, so it must not ride along as context.
+    raise LLMSchemaError("model output is not valid JSON", usage=usage)
+
+
+def _json_object(parsed: object, usage: LLMUsage) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise LLMSchemaError("model output is not a JSON object", usage=usage)
     return parsed

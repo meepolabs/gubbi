@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 if TYPE_CHECKING:
+    import asyncio
     import threading
 
     import asyncpg
@@ -25,3 +26,4 @@ class ExtractionContext(TypedDict):
     health_thread: NotRequired[threading.Thread]
     job_id: NotRequired[str]
     budget_helper: NotRequired[BudgetHelper]
+    cancel_cleanups: NotRequired[set[asyncio.Task[None]]]

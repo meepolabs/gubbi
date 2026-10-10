@@ -14,11 +14,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from gubbi_common.budget import PRE_CHARGE_CENTS
 
+from gubbi.extraction.chunking import chunk_messages
 from gubbi.extraction.jobs import extract_conversation as job_module
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.provider import LLMMessage, LLMResponse
+from gubbi.models.conversation import Message
 from tests.fixtures.extraction_job import (
     CALL_CENTS,
+    CALL_USAGE,
     CONVERSATION_ID,
     JOB_ID,
     PERIOD,
@@ -34,10 +37,11 @@ pytestmark = pytest.mark.unit
 
 
 class _BlockingProvider(ScriptedProvider):
-    """A provider whose call never returns; ``called`` is set once it is in flight."""
+    """Answers its scripted steps, then blocks; ``called`` is set once it blocks."""
 
-    def __init__(self) -> None:
-        super().__init__([])
+    def __init__(self, steps: list[Any] | None = None) -> None:
+        super().__init__(list(steps or []))
+        self._answers_left = len(steps or [])
         self.called = asyncio.Event()
 
     async def complete(
@@ -48,9 +52,38 @@ class _BlockingProvider(ScriptedProvider):
         *,
         time_budget: float | None = None,
     ) -> LLMResponse:
+        if self._answers_left:
+            self._answers_left -= 1
+            return await super().complete(
+                messages, system_prompt, output_schema, time_budget=time_budget
+            )
         self.called.set()
         await asyncio.Event().wait()
         raise AssertionError("unreachable")
+
+
+class _RecordingRegistry(set[asyncio.Task[None]]):
+    """A cleanup registry that remembers every task ever added to it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.added: list[asyncio.Task[None]] = []
+
+    def add(self, task: asyncio.Task[None]) -> None:
+        self.added.append(task)
+        super().add(task)
+
+
+def _multi_chunk_transcript() -> list[Message]:
+    # 40 x 10k chars: several chunks at the default chunk target.
+    return [
+        Message(
+            role="user" if i % 2 == 0 else "assistant",
+            content=f"m{i} " + "x" * 10_000,
+            timestamp="2026-03-10T09:00:00",
+        )
+        for i in range(40)
+    ]
 
 
 def _helper() -> MagicMock:
@@ -104,9 +137,52 @@ async def test_cancellation_after_the_pipeline_charges_its_cost() -> None:
     assert helper.record_actual_cost.await_args.kwargs["actual_cents"] == CALL_CENTS
 
 
+async def test_cancellation_mid_pipeline_settles_and_records_the_calls_already_made() -> None:
+    helper = _helper()
+    messages = _multi_chunk_transcript()
+    assert len(chunk_messages(messages)) >= 2
+    provider = _BlockingProvider([chunk_output()])
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker, messages=messages) as mocks:
+        task = await _cancel_when(make_ctx(provider, helper), provider.called)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert helper.record_actual_cost.await_args.kwargs["actual_cents"] == CALL_CENTS
+    kwargs = mocks.mark_failed.await_args.kwargs
+    assert kwargs["cents_spent"] == CALL_CENTS
+    assert (kwargs["input_tokens"], kwargs["output_tokens"]) == (
+        CALL_USAGE.input,
+        CALL_USAGE.output,
+    )
+    assert kwargs["llm_calls"] == 1
+
+
+async def test_a_cancellation_inside_a_settle_does_not_settle_again() -> None:
+    settling = asyncio.Event()
+
+    async def _write_then_hang(**_kwargs: Any) -> None:
+        settling.set()
+        await asyncio.Event().wait()
+
+    helper = MagicMock()
+    helper.record_actual_cost = AsyncMock(side_effect=_write_then_hang)
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        task = await _cancel_when(make_ctx(ScriptedProvider([chunk_output()]), helper), settling)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    helper.record_actual_cost.assert_awaited_once()
+    assert mocks.mark_failed.await_args.kwargs["error_code"] == "deadline_exceeded"
+
+
 async def test_a_stuck_cancellation_cleanup_is_abandoned_after_its_bound() -> None:
     provider = _BlockingProvider()
     tracker = ConnectionTracker()
+    registry = _RecordingRegistry()
 
     async def _stuck(*_args: Any, **_kwargs: Any) -> bool:
         await asyncio.Event().wait()
@@ -117,11 +193,17 @@ async def test_a_stuck_cancellation_cleanup_is_abandoned_after_its_bound() -> No
         patch.object(job_module, "_CANCEL_CLEANUP_TIMEOUT_SECS", 0.05),
     ):
         mocks.mark_failed.side_effect = _stuck
-        task = await _cancel_when(make_ctx(provider), provider.called)
+        ctx = make_ctx(provider)
+        ctx["cancel_cleanups"] = registry
+        task = await _cancel_when(ctx, provider.called)
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
+        (cleanup,) = registry.added
+        await asyncio.wait({cleanup}, timeout=1)
 
     mocks.mark_failed.assert_awaited_once()
+    assert cleanup.cancelled()
+    assert not registry
 
 
 async def test_a_second_cancellation_does_not_abandon_the_cleanup() -> None:

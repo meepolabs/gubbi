@@ -116,6 +116,7 @@ class ChunkExtraction:
     usage: LLMUsage
     finish_reason: str = "stop"
     attempts: int = 1
+    unmetered_attempts: int = 0
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ class TriageVerdict:
     usage: LLMUsage
     finish_reason: str = "stop"
     attempts: int = 1
+    unmetered_attempts: int = 0
 
 
 class _EntryOutput(BaseModel):
@@ -180,13 +182,16 @@ def parse_chunk_extraction(
     *,
     finish_reason: str = "stop",
     attempts: int = 1,
+    unmetered_attempts: int = 0,
 ) -> ChunkExtraction:
     """Validate model output against the chunk schema and return a ChunkExtraction.
 
     Raises:
         LLMSchemaError: the output is not a JSON object matching the schema.
     """
-    output = _validate(_ChunkOutput, "chunk extraction", content, usage, attempts)
+    output = _validate(
+        _ChunkOutput, "chunk extraction", content, usage, attempts, unmetered_attempts
+    )
     return ChunkExtraction(
         topic_path=output.topic_path,
         topic_title=output.topic_title,
@@ -195,6 +200,7 @@ def parse_chunk_extraction(
         usage=usage,
         finish_reason=finish_reason,
         attempts=attempts,
+        unmetered_attempts=unmetered_attempts,
     )
 
 
@@ -204,13 +210,16 @@ def parse_chunk_categorization(
     *,
     finish_reason: str = "stop",
     attempts: int = 1,
+    unmetered_attempts: int = 0,
 ) -> ChunkExtraction:
     """Validate categorize output; the result carries no entries.
 
     Raises:
         LLMSchemaError: the output is not a JSON object matching the schema.
     """
-    output = _validate(_CategoryOutput, "chunk categorization", content, usage, attempts)
+    output = _validate(
+        _CategoryOutput, "chunk categorization", content, usage, attempts, unmetered_attempts
+    )
     return ChunkExtraction(
         topic_path=output.topic_path,
         topic_title=output.topic_title,
@@ -219,6 +228,7 @@ def parse_chunk_categorization(
         usage=usage,
         finish_reason=finish_reason,
         attempts=attempts,
+        unmetered_attempts=unmetered_attempts,
     )
 
 
@@ -229,13 +239,16 @@ def parse_chunk_entries(
     topic_path: str,
     finish_reason: str = "stop",
     attempts: int = 1,
+    unmetered_attempts: int = 0,
 ) -> ChunkExtraction:
     """Validate entries output; the result carries ``topic_path`` and an empty title and summary.
 
     Raises:
         LLMSchemaError: the output is not a JSON object matching the schema.
     """
-    output = _validate(_EntriesOutput, "chunk entries", content, usage, attempts)
+    output = _validate(
+        _EntriesOutput, "chunk entries", content, usage, attempts, unmetered_attempts
+    )
     return ChunkExtraction(
         topic_path=topic_path,
         topic_title="",
@@ -244,6 +257,7 @@ def parse_chunk_entries(
         usage=usage,
         finish_reason=finish_reason,
         attempts=attempts,
+        unmetered_attempts=unmetered_attempts,
     )
 
 
@@ -253,18 +267,20 @@ def parse_triage(
     *,
     finish_reason: str = "stop",
     attempts: int = 1,
+    unmetered_attempts: int = 0,
 ) -> TriageVerdict:
     """Validate triage output and return a TriageVerdict.
 
     Raises:
         LLMSchemaError: the output is not a JSON object matching the schema.
     """
-    output = _validate(_TriageOutput, "triage", content, usage, attempts)
+    output = _validate(_TriageOutput, "triage", content, usage, attempts, unmetered_attempts)
     return TriageVerdict(
         worth_recording=output.worth_recording,
         usage=usage,
         finish_reason=finish_reason,
         attempts=attempts,
+        unmetered_attempts=unmetered_attempts,
     )
 
 
@@ -274,8 +290,9 @@ def _validate[M: BaseModel](
     content: str | Mapping[str, Any],
     usage: LLMUsage,
     attempts: int,
+    unmetered_attempts: int,
 ) -> M:
-    decoded = _decode(label, content, usage, attempts)
+    decoded = _decode(label, content, usage, attempts, unmetered_attempts)
     errors: list[ErrorDetails] = []
     try:
         return model.model_validate(decoded)
@@ -283,11 +300,20 @@ def _validate[M: BaseModel](
         errors = exc.errors(include_url=False, include_input=False, include_context=False)
     # Raised outside the except block so no exception context (which
     # embeds the offending values) is chained onto the schema error.
-    raise LLMSchemaError(_describe(label, errors), usage=usage, attempts=attempts)
+    raise LLMSchemaError(
+        _describe(label, errors),
+        usage=usage,
+        attempts=attempts,
+        unmetered_attempts=unmetered_attempts,
+    )
 
 
 def _decode(
-    label: str, content: str | Mapping[str, Any], usage: LLMUsage, attempts: int
+    label: str,
+    content: str | Mapping[str, Any],
+    usage: LLMUsage,
+    attempts: int,
+    unmetered_attempts: int,
 ) -> Mapping[str, Any]:
     if isinstance(content, Mapping):
         return content
@@ -296,7 +322,12 @@ def _decode(
     except json.JSONDecodeError:
         decoded = None
     if not isinstance(decoded, dict):
-        raise LLMSchemaError(f"{label} output is not a JSON object", usage=usage, attempts=attempts)
+        raise LLMSchemaError(
+            f"{label} output is not a JSON object",
+            usage=usage,
+            attempts=attempts,
+            unmetered_attempts=unmetered_attempts,
+        )
     return decoded
 
 

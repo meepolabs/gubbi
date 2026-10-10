@@ -14,8 +14,8 @@ Public surface
 create_pending      -- INSERT a new pending job; raises ExtractionJobAlreadyInFlight on conflict
 mark_running        -- claim a job for a run; returns the status it was claimed from
 update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
-mark_completed      -- terminal UPDATE to 'completed'
-mark_failed         -- terminal UPDATE to 'failed'
+mark_completed      -- terminal UPDATE to 'completed'; adds this run's usage to the row
+mark_failed         -- terminal UPDATE to 'failed'; adds this run's usage to the row
 get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint)
 ExtractionJobAlreadyInFlight -- raised by create_pending on partial-unique conflict
 StatusCounts        -- dataclass returned by get_status_counts
@@ -272,8 +272,9 @@ async def mark_completed(
 ) -> bool:
     """Transition job to 'completed' and record final counters + timestamp.
 
-    The usage counters are the job's totals over every model call, failed
-    attempts included.
+    ``cents_spent`` and the usage counters are this run's totals over every
+    model call, failed attempts included; they are ADDED to the row's
+    counters, so a job revived after a failed run keeps that run's usage.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'. This makes the function safe
@@ -285,13 +286,13 @@ async def mark_completed(
         SET status = 'completed',
             topics_created = $2,
             entries_created = $3,
-            cents_spent = $4,
-            input_tokens = $5,
-            output_tokens = $6,
-            cached_input_tokens = $7,
-            reasoning_tokens = $8,
-            llm_calls = $9,
-            chunks = $10,
+            cents_spent = cents_spent + $4,
+            input_tokens = input_tokens + $5,
+            output_tokens = output_tokens + $6,
+            cached_input_tokens = cached_input_tokens + $7,
+            reasoning_tokens = reasoning_tokens + $8,
+            llm_calls = llm_calls + $9,
+            chunks = chunks + $10,
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')
@@ -330,8 +331,9 @@ async def mark_failed(
 ) -> bool:
     """Transition job to 'failed' and record the error_code.
 
-    ``cents_spent`` and the usage counters are the job's totals over every model
-    call made before the failure, failed attempts included.
+    ``cents_spent`` and the usage counters are this run's totals over every
+    model call made before the failure, failed attempts included; they are
+    ADDED to the row's counters, as in :func:`mark_completed`.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'.
@@ -341,13 +343,13 @@ async def mark_failed(
         UPDATE extraction_jobs
         SET status = 'failed',
             error_code = $2,
-            cents_spent = $3,
-            input_tokens = $4,
-            output_tokens = $5,
-            cached_input_tokens = $6,
-            reasoning_tokens = $7,
-            llm_calls = $8,
-            chunks = $9,
+            cents_spent = cents_spent + $3,
+            input_tokens = input_tokens + $4,
+            output_tokens = output_tokens + $5,
+            cached_input_tokens = cached_input_tokens + $6,
+            reasoning_tokens = reasoning_tokens + $7,
+            llm_calls = llm_calls + $8,
+            chunks = chunks + $9,
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')

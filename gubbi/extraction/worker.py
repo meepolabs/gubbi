@@ -11,7 +11,7 @@ import logging
 import os
 import threading
 from contextlib import suppress
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 import redis.asyncio as aioredis
 import structlog
@@ -63,6 +63,10 @@ _sync_log = logging.getLogger(__name__)
 # most once per process; tests reset it via the ``_reset_worker_telemetry_guard``
 # helper (or by monkeypatching this name directly).
 _WORKER_TELEMETRY_CONFIGURED: bool = False
+
+# How long shutdown waits for cancelled jobs' budget and job-state cleanups
+# before cancelling them; they need the Redis client and the PG pool open.
+_CANCEL_CLEANUP_DRAIN_SECS: Final = 5.0
 
 
 def _reset_worker_telemetry_guard() -> None:
@@ -279,6 +283,7 @@ async def startup(ctx: ExtractionContext) -> None:
     pool: asyncpg.Pool | None = None
     redis_pool: aioredis.ConnectionPool | None = None
     redis_client: aioredis.Redis | None = None
+    ctx["cancel_cleanups"] = set()
 
     try:
         # Health server thread (existing behaviour).
@@ -387,14 +392,31 @@ async def startup(ctx: ExtractionContext) -> None:
         raise
 
 
-async def shutdown(ctx: ExtractionContext) -> None:
-    """Arq worker shutdown hook: close PG pool and Redis client/connection pool.
+async def _drain_cancel_cleanups(ctx: ExtractionContext) -> None:
+    """Wait a bounded time for cancelled jobs' cleanups, then cancel and await the rest."""
+    cleanups = set(ctx.get("cancel_cleanups", ()))
+    if not cleanups:
+        return
+    _done, pending = await asyncio.wait(cleanups, timeout=_CANCEL_CLEANUP_DRAIN_SECS)
+    if not pending:
+        return
+    await logger.warning("extraction_cancel_cleanups_abandoned", count=len(pending))
+    for task in pending:
+        task.cancel()
+    await asyncio.gather(*pending, return_exceptions=True)
 
+
+async def shutdown(ctx: ExtractionContext) -> None:
+    """Arq worker shutdown hook: drain cancellation cleanups, then close PG and Redis.
+
+    Cleanups of cancelled jobs still settle budgets through Redis and write
+    job state through the PG pool, so they are waited for (bounded) first.
     Reverse-lifecycle order matches the startup-fail teardown above
     (redis_client.aclose -> redis_pool.aclose -> pool.close): close
     last-opened first so a Redis hiccup during shutdown cannot leak
     the redis pool while the PG pool drains.
     """
+    await _drain_cancel_cleanups(ctx)
     redis_client = ctx.get("redis")
     if redis_client is not None:
         await redis_client.aclose()

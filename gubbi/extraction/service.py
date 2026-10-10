@@ -52,6 +52,7 @@ class ExtractionService:
             _usage_of(response),
             finish_reason=response.finish_reason,
             attempts=response.attempts,
+            unmetered_attempts=response.unmetered_attempts,
         )
 
     async def categorize_chunk(
@@ -77,6 +78,7 @@ class ExtractionService:
             _usage_of(response),
             finish_reason=response.finish_reason,
             attempts=response.attempts,
+            unmetered_attempts=response.unmetered_attempts,
         )
 
     async def extract_chunk_entries(
@@ -110,6 +112,7 @@ class ExtractionService:
             topic_path=topic_path,
             finish_reason=response.finish_reason,
             attempts=response.attempts,
+            unmetered_attempts=response.unmetered_attempts,
         )
 
     async def triage(self, chunk_text: str, *, time_budget: float | None = None) -> TriageVerdict:
@@ -128,6 +131,7 @@ class ExtractionService:
             _usage_of(response),
             finish_reason=response.finish_reason,
             attempts=response.attempts,
+            unmetered_attempts=response.unmetered_attempts,
         )
 
     @property

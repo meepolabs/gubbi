@@ -29,6 +29,9 @@ class LLMResponse:
     cached_input_tokens: int = 0
     reasoning_tokens: int = 0
     attempts: int = 1
+    unmetered_attempts: int = 0
+    """Attempts that ended without the upstream reporting usage (timed out), so
+    their cost is unknown; counted in ``attempts``, not in the token counts."""
 
 
 # ---------------------------------------------------------------------------
@@ -50,8 +53,9 @@ class LLMProviderError(Exception):
     ``usage`` carries the token counts of the call that produced the error
     when the upstream reported any: a refused or truncated call still bills.
     ``attempts`` is the number of upstream requests the call made before
-    failing, when the provider tracks it. Messages never carry model output
-    or refusal text.
+    failing, when the provider tracks it. ``unmetered_attempts`` counts the
+    requests among them that ended without reported usage (timed out), whose
+    cost is unknown. Messages never carry model output or refusal text.
     """
 
     def __init__(
@@ -60,10 +64,12 @@ class LLMProviderError(Exception):
         *,
         usage: LLMUsage | None = None,
         attempts: int | None = None,
+        unmetered_attempts: int = 0,
     ) -> None:
         super().__init__(message)
         self.usage = usage
         self.attempts = attempts
+        self.unmetered_attempts = unmetered_attempts
 
 
 class LLMTransientError(LLMProviderError):
@@ -81,9 +87,12 @@ class LLMTransientError(LLMProviderError):
         *,
         usage: LLMUsage | None = None,
         attempts: int | None = None,
+        unmetered_attempts: int = 0,
         retry_after: float | None = None,
     ) -> None:
-        super().__init__(message, usage=usage, attempts=attempts)
+        super().__init__(
+            message, usage=usage, attempts=attempts, unmetered_attempts=unmetered_attempts
+        )
         self.retry_after = retry_after
 
 

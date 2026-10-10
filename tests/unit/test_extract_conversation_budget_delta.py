@@ -23,7 +23,13 @@ from gubbi.extraction.jobs.extract_conversation import (
     _get_extraction_refund_skipped_counter,
     extract_conversation,
 )
-from gubbi.extraction.llm.provider import LLMPermanentError, LLMRefusalError
+from gubbi.extraction.llm.provider import (
+    LLMDeadlineError,
+    LLMPermanentError,
+    LLMRefusalError,
+    LLMTimeoutError,
+    LLMUsage,
+)
 from gubbi.extraction.pipeline import PipelineFailure
 from gubbi.models.conversation import Message
 from tests.fixtures.extraction_job import (
@@ -43,6 +49,9 @@ from tests.fixtures.extraction_job import (
 pytestmark = pytest.mark.unit
 
 _RUNTIME_PERIOD = date(2026, 6, 1)
+_LARGE_USAGE = LLMUsage(input=4_000, output=3_000)
+# ScriptedProvider prices one token at a hundredth of a cent.
+_LARGE_CENTS = (_LARGE_USAGE.input + _LARGE_USAGE.output) // 100
 
 
 def _helper(side_effect: Any = None) -> MagicMock:
@@ -134,6 +143,50 @@ async def test_a_failure_after_billed_calls_charges_what_they_cost() -> None:
 
     assert _settled(helper)["actual_cents"] == CALL_CENTS
     assert mocks.mark_failed.await_args.kwargs["cents_spent"] == CALL_CENTS
+
+
+@pytest.mark.parametrize(
+    ("failure", "pre_charged_from", "charged"),
+    [
+        pytest.param(
+            LLMDeadlineError("budget spent", attempts=2, unmetered_attempts=1),
+            "pending",
+            PRE_CHARGE_CENTS,
+            id="timed-out-attempt-keeps-the-pre-charge",
+        ),
+        pytest.param(
+            LLMTimeoutError("late", usage=_LARGE_USAGE, attempts=3, unmetered_attempts=2),
+            "pending",
+            _LARGE_CENTS,
+            id="timed-out-attempt-with-spend-above-the-pre-charge",
+        ),
+        pytest.param(
+            LLMDeadlineError("budget spent", attempts=1, unmetered_attempts=1),
+            "failed",
+            0,
+            id="timed-out-attempt-on-a-revived-job-has-no-pre-charge-floor",
+        ),
+        pytest.param(
+            LLMRefusalError("no", usage=CALL_USAGE, attempts=2),
+            "pending",
+            CALL_CENTS,
+            id="all-attempts-metered-charge-the-real-spend",
+        ),
+    ],
+)
+async def test_unmetered_attempts_are_never_refunded_below_the_pre_charge(
+    failure: Exception, pre_charged_from: str, charged: int
+) -> None:
+    helper = _helper()
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        mocks.mark_running.return_value = pre_charged_from
+        with pytest.raises(PipelineFailure):
+            await _run(make_ctx(ScriptedProvider([failure]), helper))
+
+    assert _settled(helper)["actual_cents"] == charged
+    assert mocks.mark_failed.await_args.kwargs["llm_calls"] == failure.attempts
 
 
 async def test_a_persistence_failure_charges_the_completed_pipelines_cost() -> None:

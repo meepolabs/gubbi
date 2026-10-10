@@ -89,6 +89,18 @@ class _SleepLog:
         return self.now
 
 
+class _OverrunningSleep(_SleepLog):
+    """Advances the fake clock past each requested wait, as a busy scheduler can."""
+
+    def __init__(self, overrun: float) -> None:
+        super().__init__()
+        self._overrun = overrun
+
+    async def __call__(self, seconds: float) -> None:
+        await super().__call__(seconds)
+        self.now += self._overrun
+
+
 def _sequence(*responders: Callable[[httpx2.Request], httpx2.Response]) -> _Recorder:
     """Answer the n-th request with the n-th responder; the last one repeats."""
     queue: Iterator[Callable[[httpx2.Request], httpx2.Response]] = iter(responders)
@@ -308,6 +320,9 @@ async def test_non_json_output_raises_schema_error_with_usage() -> None:
 
     assert excinfo.value.usage == _wire_usage(body)
     assert _OUTPUT_SENTINEL not in str(excinfo.value)
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
 
 
 async def test_text_mode_returns_text_without_response_format() -> None:
@@ -465,6 +480,41 @@ async def test_transport_timeout_retries_then_maps_to_timeout_error() -> None:
     assert len(recorder.requests) == LLM_MAX_ATTEMPTS
 
 
+def _read_timeout(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.ReadTimeout("timed out", request=request)
+
+
+def _connect_error(request: httpx2.Request) -> httpx2.Response:
+    raise httpx2.ConnectError("refused", request=request)
+
+
+@pytest.mark.parametrize(
+    ("responders", "expected_unmetered"),
+    [
+        pytest.param((_read_timeout, _json_response(_stop_body())), 1, id="timeout-then-success"),
+        pytest.param((_connect_error, _json_response(_stop_body())), 0, id="connect-then-success"),
+        pytest.param((_json_response(_stop_body()),), 0, id="first-attempt-success"),
+    ],
+)
+async def test_response_counts_the_attempts_that_timed_out_without_usage(
+    responders: tuple[Callable[[httpx2.Request], httpx2.Response], ...],
+    expected_unmetered: int,
+) -> None:
+    response = await _provider(_sequence(*responders)).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert response.unmetered_attempts == expected_unmetered
+
+
+async def test_raised_error_counts_the_attempts_that_timed_out_without_usage() -> None:
+    recorder = _sequence(_read_timeout, _connect_error, _read_timeout)
+
+    with pytest.raises(LLMTimeoutError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert excinfo.value.attempts == LLM_MAX_ATTEMPTS == 3
+    assert excinfo.value.unmetered_attempts == 2
+
+
 async def test_connection_error_maps_to_transient_not_timeout() -> None:
     def respond(request: httpx2.Request) -> httpx2.Response:
         raise httpx2.ConnectError("refused", request=request)
@@ -579,6 +629,20 @@ async def test_retry_wait_inside_the_time_budget_still_retries() -> None:
     assert 7.0 <= sleep.delays[0] < 30.0
 
 
+async def test_retry_wait_that_overruns_the_time_budget_starts_no_further_request() -> None:
+    recorder = _Recorder(_status(503))
+    sleep = _OverrunningSleep(overrun=30.0)
+
+    with pytest.raises(LLMDeadlineError) as excinfo:
+        await _provider(recorder, sleep).complete(
+            _MESSAGES, "system prompt", _SCHEMA, time_budget=20.0
+        )
+
+    assert len(sleep.delays) == 1
+    assert len(recorder.requests) == 1
+    assert excinfo.value.attempts == 1
+
+
 async def test_spent_time_budget_makes_no_request() -> None:
     recorder = _Recorder(_json_response(_stop_body()))
 
@@ -604,6 +668,7 @@ async def test_attempt_is_cut_off_at_the_time_budget() -> None:
 
     assert time.monotonic() - started < 2.0
     assert excinfo.value.attempts == 1
+    assert excinfo.value.unmetered_attempts == 1
 
 
 async def test_unusable_finish_inside_the_time_budget_keeps_its_usage() -> None:

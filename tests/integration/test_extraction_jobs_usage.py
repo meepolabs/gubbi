@@ -130,3 +130,29 @@ async def test_terminal_job_keeps_its_status_and_usage(
 
     assert transitioned is False
     assert after == before
+
+
+@pytest.mark.parametrize(("write_terminal", "expected_status"), _TERMINAL_WRITERS)
+async def test_a_retried_job_totals_the_usage_of_every_run(
+    app_pool: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    write_terminal: Any,
+    expected_status: str,
+) -> None:
+    second_run = {column: value * 10 for column, value in _USAGE.items()}
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        job_id = await _create_job(conn, seeded_a)
+        fresh = await conn.fetchrow(_USAGE_SQL, job_id)
+        await jobs_repo.mark_running(conn, job_id)
+        await _fail(conn, job_id, _USAGE, _CENTS)
+        assert await jobs_repo.mark_running(conn, job_id) == "failed"
+        await write_terminal(conn, job_id, second_run, _CENTS * 10)
+        row = await conn.fetchrow(_USAGE_SQL, job_id)
+
+    assert fresh is not None
+    assert fresh["cents_spent"] == 0
+    assert _usage_of(fresh) == _ZERO_USAGE
+    assert row is not None
+    assert row["status"] == expected_status
+    assert row["cents_spent"] == _CENTS * 11
+    assert _usage_of(row) == {column: value * 11 for column, value in _USAGE.items()}

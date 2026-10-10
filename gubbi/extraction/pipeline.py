@@ -13,6 +13,8 @@ each call gets the time left before it as its budget, retries included.
 
 Every failure surfaces as :class:`PipelineFailure` carrying the token usage
 of every call made, the failed call included, so the job can account for it.
+The running spend is also reported after every call through ``on_spend``, so a
+run cancelled mid-call still knows what its earlier calls cost.
 """
 
 from __future__ import annotations
@@ -53,6 +55,7 @@ __all__: list[str] = [
     "PipelineDeadlineError",
     "PipelineFailure",
     "PipelineOutcome",
+    "PipelineSpend",
     "run_pipeline",
 ]
 
@@ -79,6 +82,23 @@ class ExtractedCandidate:
 
 
 @dataclass(frozen=True)
+class PipelineSpend:
+    """Running totals of every call the pipeline has made so far."""
+
+    usage: LLMUsage
+    llm_calls: int
+    """Upstream requests made, provider retries included."""
+    chunks: int
+    unmetered_calls: int
+    """Requests among ``llm_calls`` whose usage the upstream never reported
+    (timed out), so ``usage`` undercounts what they cost."""
+
+
+def _ignore_spend(_spend: PipelineSpend) -> None:
+    return None
+
+
+@dataclass(frozen=True)
 class PipelineOutcome:
     """Topic, summary and dated candidates for a conversation, plus call accounting.
 
@@ -95,6 +115,8 @@ class PipelineOutcome:
     """Upstream requests made, provider retries included."""
     chunks: int
     """Chunks the transcript was cut into, a truncation split counting as two."""
+    unmetered_calls: int = 0
+    """Requests whose usage the upstream never reported; see :class:`PipelineSpend`."""
 
 
 class PipelineDeadlineError(Exception):
@@ -111,12 +133,14 @@ class PipelineFailure(Exception):
         *,
         llm_calls: int,
         chunks: int,
+        unmetered_calls: int = 0,
     ) -> None:
         super().__init__(f"extraction pipeline failed: {type(error).__name__}")
         self.error = error
         self.usage_so_far = usage_so_far
         self.llm_calls = llm_calls
         self.chunks = chunks
+        self.unmetered_calls = unmetered_calls
 
 
 @dataclass(frozen=True)
@@ -130,6 +154,7 @@ class _Run:
     clock: Callable[[], float]
     mode: ExtractionMode
     triage_enabled: bool
+    on_spend: Callable[[PipelineSpend], None]
 
 
 @dataclass(frozen=True)
@@ -137,6 +162,7 @@ class _Progress:
     usage: LLMUsage = field(default_factory=LLMUsage)
     llm_calls: int = 0
     chunks: int = 0
+    unmetered_calls: int = 0
     extractions: tuple[ChunkExtraction, ...] = ()
     """Call results in order; in two-call mode the categorization comes first."""
     candidates: tuple[ExtractedCandidate, ...] = ()
@@ -151,6 +177,9 @@ class _CallResult(Protocol):
 
     @property
     def attempts(self) -> int: ...
+
+    @property
+    def unmetered_attempts(self) -> int: ...
 
 
 class _Request[R](Protocol):
@@ -175,6 +204,7 @@ async def run_pipeline(
     clock: Callable[[], float] = time.monotonic,
     mode: ExtractionMode = "single",
     triage_enabled: bool = False,
+    on_spend: Callable[[PipelineSpend], None] = _ignore_spend,
 ) -> PipelineOutcome:
     """Extract topic, summary and dated entry candidates from a role-filtered transcript.
 
@@ -185,6 +215,8 @@ async def run_pipeline(
     chunk (``single``) or a categorize call followed by an entries call per
     chunk (``two_call``); ``triage_enabled`` screens each chunk first. Triage
     calls count toward ``usage`` and ``llm_calls`` like any other call.
+    ``on_spend`` receives the running totals once the transcript is chunked
+    and again after every call, failed calls included.
 
     Raises:
         PipelineFailure: any call failed, a chunk stayed truncated after one
@@ -200,9 +232,11 @@ async def run_pipeline(
         clock=clock,
         mode=mode,
         triage_enabled=triage_enabled,
+        on_spend=on_spend,
     )
     chunks = chunk_messages(messages)
     progress = _Progress(chunks=len(chunks))
+    on_spend(_spend_of(progress))
     try:
         if not chunks:
             raise _CallFailedError(ValueError("transcript produced no chunks"), progress)
@@ -214,6 +248,7 @@ async def run_pipeline(
             failed.progress.usage,
             llm_calls=failed.progress.llm_calls,
             chunks=failed.progress.chunks,
+            unmetered_calls=failed.progress.unmetered_calls,
         ) from failed.error
     return _outcome(progress)
 
@@ -246,6 +281,7 @@ async def _extract_chunk_step(
         if not isinstance(failed.error, LLMTruncatedError):
             raise
         progress = replace(failed.progress, chunks=failed.progress.chunks + 1)
+        run.on_spend(_spend_of(progress))
     for half in split_in_two(chunk):
         progress = await _extract(run, progress, half, chunk_index)
     return progress
@@ -290,7 +326,13 @@ async def _call[R: _CallResult](
             result = await request(time_budget=time_budget)
         except Exception as exc:
             usage = exc.usage if isinstance(exc, LLMProviderError) else None
-            failed = _account(progress, LLMUsage() if usage is None else usage, _attempts_of(exc))
+            failed = _account(
+                progress,
+                LLMUsage() if usage is None else usage,
+                _attempts_of(exc),
+                exc.unmetered_attempts if isinstance(exc, LLMProviderError) else 0,
+            )
+            run.on_spend(_spend_of(failed))
             await _report_failure(span, exc, usage, chunk_index, stage, _latency_ms(start_ns))
             raise _CallFailedError(_pipeline_error(exc), failed) from exc
         attrs = {
@@ -303,7 +345,9 @@ async def _call[R: _CallResult](
         }
         safe_set_attributes(span_name, span, attrs)
         await logger.info("extraction_llm_call", outcome="ok", **attrs)
-    return result, _account(progress, result.usage, result.attempts)
+    progress = _account(progress, result.usage, result.attempts, result.unmetered_attempts)
+    run.on_spend(_spend_of(progress))
+    return result, progress
 
 
 async def _report_failure(
@@ -361,7 +405,7 @@ def _attempts_of(exc: Exception) -> int:
     return 1
 
 
-def _account(progress: _Progress, usage: LLMUsage, requests: int) -> _Progress:
+def _account(progress: _Progress, usage: LLMUsage, requests: int, unmetered: int) -> _Progress:
     return replace(
         progress,
         usage=LLMUsage(
@@ -371,6 +415,16 @@ def _account(progress: _Progress, usage: LLMUsage, requests: int) -> _Progress:
             reasoning=progress.usage.reasoning + usage.reasoning,
         ),
         llm_calls=progress.llm_calls + requests,
+        unmetered_calls=progress.unmetered_calls + unmetered,
+    )
+
+
+def _spend_of(progress: _Progress) -> PipelineSpend:
+    return PipelineSpend(
+        usage=progress.usage,
+        llm_calls=progress.llm_calls,
+        chunks=progress.chunks,
+        unmetered_calls=progress.unmetered_calls,
     )
 
 
@@ -404,4 +458,5 @@ def _outcome(progress: _Progress) -> PipelineOutcome:
         usage=progress.usage,
         llm_calls=progress.llm_calls,
         chunks=progress.chunks,
+        unmetered_calls=progress.unmetered_calls,
     )

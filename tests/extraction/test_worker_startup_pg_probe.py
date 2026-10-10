@@ -554,6 +554,28 @@ async def test_worker_startup_puts_embedding_service_on_ctx(
     get_settings.cache_clear()
 
 
+@pytest.mark.unit
+async def test_worker_startup_gives_jobs_a_shared_cancel_cleanup_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shutdown drains the registry startup puts on ctx, which every job shares."""
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", "fake")
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    assert ctx["cancel_cleanups"] == set()
+
+    get_settings.cache_clear()
+
+
 # ---------------------------------------------------------------------------
 # Replica-count over-provisioning WARN + alertable counter (#138 worker variant).
 # ---------------------------------------------------------------------------

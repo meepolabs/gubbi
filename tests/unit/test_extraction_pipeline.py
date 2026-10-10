@@ -31,6 +31,7 @@ from gubbi.extraction.pipeline import (
     ExtractedCandidate,
     PipelineDeadlineError,
     PipelineFailure,
+    PipelineSpend,
     run_pipeline,
 )
 from gubbi.extraction.service import ExtractionService
@@ -66,9 +67,12 @@ Step = Mapping[str, Any] | Exception
 class _ScriptedProvider:
     """Replays one scripted step per call; records every user message it receives."""
 
-    def __init__(self, steps: list[Step], *, attempts: int = 1) -> None:
+    def __init__(
+        self, steps: list[Step], *, attempts: int = 1, unmetered_attempts: int = 0
+    ) -> None:
         self._steps = list(steps)
         self._attempts = attempts
+        self._unmetered_attempts = unmetered_attempts
         self.user_contents: list[str] = []
         self.schemas: list[Mapping[str, Any] | None] = []
         self.time_budgets: list[float | None] = []
@@ -95,6 +99,7 @@ class _ScriptedProvider:
             cached_input_tokens=CALL_USAGE.cached_input,
             reasoning_tokens=CALL_USAGE.reasoning,
             attempts=self._attempts,
+            unmetered_attempts=self._unmetered_attempts,
         )
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
@@ -393,6 +398,65 @@ async def test_schema_failure_counts_the_responses_requests() -> None:
 
     assert isinstance(failure.error, LLMSchemaError)
     assert failure.llm_calls == 2
+
+
+async def test_running_spend_is_reported_after_every_call_failed_ones_included() -> None:
+    messages = _large_conversation()
+    chunk_count = len(chunk_messages(messages))
+    timed_out = LLMTransientError("down", usage=FAILED_USAGE, attempts=3, unmetered_attempts=2)
+    provider = _ScriptedProvider([_output(), timed_out])
+    reports: list[PipelineSpend] = []
+
+    await _failure(provider, messages, on_spend=reports.append)
+
+    assert reports == [
+        PipelineSpend(usage=LLMUsage(), llm_calls=0, chunks=chunk_count, unmetered_calls=0),
+        PipelineSpend(usage=CALL_USAGE, llm_calls=1, chunks=chunk_count, unmetered_calls=0),
+        PipelineSpend(
+            usage=_plus(CALL_USAGE, FAILED_USAGE),
+            llm_calls=4,
+            chunks=chunk_count,
+            unmetered_calls=2,
+        ),
+    ]
+
+
+async def test_a_truncation_split_reports_the_extra_chunk_before_the_next_call() -> None:
+    messages = _small_conversation()
+    truncated = LLMTruncatedError("cap", usage=FAILED_USAGE)
+    provider = _ScriptedProvider([truncated, _output(), _output()])
+    reports: list[PipelineSpend] = []
+    clock_readings = iter([0.0, 200.0])
+
+    await _failure(provider, messages, on_spend=reports.append, clock=lambda: next(clock_readings))
+
+    assert reports[-1] == PipelineSpend(
+        usage=FAILED_USAGE, llm_calls=1, chunks=2, unmetered_calls=0
+    )
+
+
+@pytest.mark.parametrize(
+    ("step", "expected_unmetered"),
+    [
+        pytest.param(_output(), 1, id="success-after-a-timed-out-attempt"),
+        pytest.param(
+            LLMDeadlineError("budget spent", attempts=2, unmetered_attempts=2),
+            2,
+            id="deadline-after-timed-out-attempts",
+        ),
+    ],
+)
+async def test_unmetered_attempts_are_counted_on_the_outcome_and_the_failure(
+    step: Step, expected_unmetered: int
+) -> None:
+    provider = _ScriptedProvider([step], unmetered_attempts=1)
+
+    try:
+        result: Any = await _run(provider, _small_conversation())
+    except PipelineFailure as failure:
+        result = failure
+
+    assert result.unmetered_calls == expected_unmetered
 
 
 async def test_empty_transcript_fails_without_calling_the_model() -> None:
