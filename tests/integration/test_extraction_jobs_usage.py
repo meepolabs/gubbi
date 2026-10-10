@@ -30,8 +30,9 @@ _USAGE: dict[str, int] = {
     "chunks": 6,
 }
 _ZERO_USAGE: dict[str, int] = dict.fromkeys(_USAGE, 0)
+_CENTS = 17
 _USAGE_SQL = (
-    "SELECT status, input_tokens, output_tokens, cached_input_tokens,"
+    "SELECT status, cents_spent, input_tokens, output_tokens, cached_input_tokens,"
     " reasoning_tokens, llm_calls, chunks FROM extraction_jobs WHERE id = $1"
 )
 
@@ -48,14 +49,22 @@ def _usage_of(row: asyncpg.Record | None) -> dict[str, int]:
     return {column: row[column] for column in _USAGE}
 
 
-async def _complete(conn: asyncpg.Connection, job_id: UUID, usage: dict[str, int]) -> bool:
+async def _complete(
+    conn: asyncpg.Connection, job_id: UUID, usage: dict[str, int], cents: int = 0
+) -> bool:
     return await jobs_repo.mark_completed(
-        conn, job_id, topics_created=1, entries_created=2, cents_spent=3, **usage
+        conn, job_id, topics_created=1, entries_created=2, cents_spent=cents, **usage
     )
 
 
-async def _fail(conn: asyncpg.Connection, job_id: UUID, usage: dict[str, int]) -> bool:
-    return await jobs_repo.mark_failed(conn, job_id, error_code="llm_refused", **usage)
+async def _fail(
+    conn: asyncpg.Connection, job_id: UUID, usage: dict[str, int], cents: int | None = None
+) -> bool:
+    if cents is None:
+        return await jobs_repo.mark_failed(conn, job_id, error_code="llm_refused", **usage)
+    return await jobs_repo.mark_failed(
+        conn, job_id, error_code="llm_refused", cents_spent=cents, **usage
+    )
 
 
 _TERMINAL_WRITERS: list[Any] = [
@@ -73,12 +82,13 @@ async def test_terminal_transition_persists_all_usage_counters(
 ) -> None:
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         job_id = await _create_job(conn, seeded_a)
-        transitioned = await write_terminal(conn, job_id, _USAGE)
+        transitioned = await write_terminal(conn, job_id, _USAGE, _CENTS)
         row = await conn.fetchrow(_USAGE_SQL, job_id)
 
     assert transitioned is True
     assert row is not None
     assert row["status"] == expected_status
+    assert row["cents_spent"] == _CENTS
     assert _usage_of(row) == _USAGE
 
 
@@ -97,6 +107,7 @@ async def test_terminal_transition_without_usage_records_zero(
     assert transitioned is True
     assert row is not None
     assert row["status"] == expected_status
+    assert row["cents_spent"] == 0
     assert _usage_of(row) == _ZERO_USAGE
 
 
@@ -112,9 +123,9 @@ async def test_terminal_job_keeps_its_status_and_usage(
     del expected_status
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         job_id = await _create_job(conn, seeded_a)
-        await first_terminal(conn, job_id, _ZERO_USAGE)
+        await first_terminal(conn, job_id, _ZERO_USAGE, 0)
         before = await conn.fetchrow(_USAGE_SQL, job_id)
-        transitioned = await write_terminal(conn, job_id, _USAGE)
+        transitioned = await write_terminal(conn, job_id, _USAGE, _CENTS)
         after = await conn.fetchrow(_USAGE_SQL, job_id)
 
     assert transitioned is False

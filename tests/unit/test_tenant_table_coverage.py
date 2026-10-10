@@ -75,6 +75,7 @@ _SKIP_KEYWORDS = frozenset(
         "new_entry",
         "updated",
         "counts",
+        "ref_check",
         # Singular noun forms that appear in string literals (e.g. title="Update Entry")
         "entry",
         # Common English word that appears as false positive after FROM in prose

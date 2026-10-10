@@ -312,6 +312,7 @@ async def mark_failed(
     job_id: UUID,
     *,
     error_code: str,
+    cents_spent: int = 0,
     input_tokens: int = 0,
     output_tokens: int = 0,
     cached_input_tokens: int = 0,
@@ -321,8 +322,8 @@ async def mark_failed(
 ) -> bool:
     """Transition job to 'failed' and record the error_code.
 
-    The usage counters are the job's totals over every model call made before
-    the failure, failed attempts included.
+    ``cents_spent`` and the usage counters are the job's totals over every model
+    call made before the failure, failed attempts included.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'.
@@ -332,18 +333,20 @@ async def mark_failed(
         UPDATE extraction_jobs
         SET status = 'failed',
             error_code = $2,
-            input_tokens = $3,
-            output_tokens = $4,
-            cached_input_tokens = $5,
-            reasoning_tokens = $6,
-            llm_calls = $7,
-            chunks = $8,
+            cents_spent = $3,
+            input_tokens = $4,
+            output_tokens = $5,
+            cached_input_tokens = $6,
+            reasoning_tokens = $7,
+            llm_calls = $8,
+            chunks = $9,
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')
         """,
         job_id,
         error_code,
+        cents_spent,
         input_tokens,
         output_tokens,
         cached_input_tokens,

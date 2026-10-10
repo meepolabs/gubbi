@@ -23,7 +23,11 @@ from gubbi.crypto.cipher import (
 )
 from gubbi.models.journal import Entry, TopicMeta
 from gubbi.storage.constants import SNIPPET_PREVIEW_LEN
-from gubbi.storage.exceptions import EntryNotFoundError, TopicNotFoundError
+from gubbi.storage.exceptions import (
+    ConversationNotFoundError,
+    EntryNotFoundError,
+    TopicNotFoundError,
+)
 from gubbi.storage.repositories.base import _add_param, _escape_like
 from gubbi.storage.repositories.topics import get as get_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
@@ -105,7 +109,14 @@ async def append(
     flags a near-duplicate of that entry; ``source_conversation_id`` links an
     entry extracted from a conversation. Each stays NULL when omitted.
 
-    Raises TopicNotFoundError if the topic does not exist.
+    The foreign keys behind the two reference ids ignore ownership, so the
+    INSERT itself requires each referenced row to belong to the inserting user;
+    nothing is written otherwise.
+
+    Raises TopicNotFoundError if the topic does not exist, EntryNotFoundError if
+    ``duplicate_of_entry_id`` names no entry of this user, and
+    ConversationNotFoundError if ``source_conversation_id`` names no
+    conversation of this user.
     """
     topic_id = await get_topic_id(conn, topic)
     d: date_cls = date_cls.fromisoformat(date) if date else date_cls.today()
@@ -120,25 +131,41 @@ async def append(
 
     row = await conn.fetchrow(
         """
-        WITH new_entry AS (
+        WITH ref_check AS (
+            SELECT
+                owner.user_id,
+                ($11::integer IS NULL OR EXISTS (
+                    SELECT 1 FROM entries d
+                    WHERE d.id = $11 AND d.user_id = owner.user_id
+                )) AS duplicate_ok,
+                ($12::integer IS NULL OR EXISTS (
+                    SELECT 1 FROM conversations c
+                    WHERE c.id = $12 AND c.user_id = owner.user_id
+                )) AS conversation_ok
+            FROM (
+                SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid AS user_id
+            ) AS owner
+        ),
+        new_entry AS (
             INSERT INTO entries
                 (topic_id, date, content_encrypted, content_nonce,
                  reasoning_encrypted, reasoning_nonce,
                  tags, user_id, created_at, updated_at, search_vector,
                  client, duplicate_of_entry_id, source_conversation_id)
-            VALUES (
-                $1, $2, $3, $4, $5, $6, $7,
-                (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
+            SELECT
+                $1, $2, $3, $4, $5, $6, $7, ref_check.user_id,
                 $8, $8, to_tsvector('english', $9),
                 $10, $11, $12
-            )
+            FROM ref_check
+            WHERE ref_check.duplicate_ok AND ref_check.conversation_ok
             RETURNING id
         ),
         _upd AS (
             UPDATE topics SET updated_at = $8
-            WHERE id = $1
+            WHERE id = $1 AND EXISTS (SELECT 1 FROM new_entry)
         )
-        SELECT id FROM new_entry
+        SELECT ref_check.duplicate_ok, ref_check.conversation_ok, (SELECT id FROM new_entry) AS id
+        FROM ref_check
         """,
         topic_id,
         d,
@@ -155,6 +182,12 @@ async def append(
     )
     if row is None:
         raise RuntimeError("INSERT entries failed: no row returned")
+    if not row["duplicate_ok"]:
+        raise EntryNotFoundError(f"Entry not found: {duplicate_of_entry_id}")
+    if not row["conversation_ok"]:
+        raise ConversationNotFoundError(f"Conversation not found: {source_conversation_id}")
+    if row["id"] is None:
+        raise RuntimeError("INSERT entries failed: no row returned")
     return int(row["id"])
 
 
@@ -167,11 +200,15 @@ async def link_to_conversation(
 
     Sets ``source_conversation_id`` only while it is NULL, so an existing link is
     never overwritten. Returns True iff this call set the link; False when the
-    entry is already linked, deleted, missing, or another user's (RLS).
+    entry is already linked, deleted, missing, or another user's (RLS), or when
+    the conversation is missing or not owned by the entry's user (the foreign
+    key alone ignores ownership).
     """
     result = await conn.execute(
-        "UPDATE entries SET source_conversation_id = $2"
-        " WHERE id = $1 AND source_conversation_id IS NULL AND deleted_at IS NULL",
+        "UPDATE entries e SET source_conversation_id = c.id"
+        " FROM conversations c"
+        " WHERE e.id = $1 AND c.id = $2 AND c.user_id = e.user_id"
+        " AND e.source_conversation_id IS NULL AND e.deleted_at IS NULL",
         entry_id,
         conversation_id,
     )
