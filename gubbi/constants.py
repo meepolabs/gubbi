@@ -52,3 +52,12 @@ ANTHROPIC_REQUEST_TIMEOUT_SECS: Final = 120  # Anthropic SDK per-request timeout
 # -- Pagination -----------------------------------------------------------------
 
 DEFAULT_PAGE_SIZE: Final = 10  # Default repository pagination size
+
+# -- Extraction chunking --------------------------------------------------------
+
+# Characters per estimated token. Deliberately low (real tokenizers average
+# closer to 4 for English) so the estimate overshoots rather than undershoots.
+CHARS_PER_TOKEN: Final = 3.5
+CHUNK_TARGET_TOKENS: Final = 50_000  # Max estimated tokens of transcript per LLM call
+CHUNK_OVERLAP_TOKENS: Final = 2_000  # Whole messages repeated from the previous chunk
+PRIOR_ENTRIES_MAX_TOKENS: Final = 4_000  # Budget for earlier chunks' entries sent forward
