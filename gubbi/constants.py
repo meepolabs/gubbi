@@ -88,3 +88,7 @@ DEDUPE_EXACT_COSINE: Final = 0.97
 # At or above this (and below the exact threshold) the entry is inserted but
 # flagged as a near-duplicate of the entry it resembles.
 DEDUPE_NEAR_COSINE: Final = 0.90
+# Above this many distinct event days an extraction run takes one per-user
+# dedupe lock instead of a lock per day, so the advisory locks one transaction
+# holds in the shared lock table stay bounded whatever dates the model chose.
+DEDUPE_PER_DAY_LOCK_MAX_DAYS: Final = 32

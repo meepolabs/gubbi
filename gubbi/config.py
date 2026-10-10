@@ -371,7 +371,8 @@ class LLMConfig(BaseSettings):
         Skipped when unset (the worker reports the missing value) and for the
         ``fake`` provider, which never calls an endpoint.
         """
-        if not v.strip() or info.data.get("provider") == "fake":
+        provider = str(info.data.get("provider", "")).strip().lower()
+        if not v.strip() or provider == "fake":
             return v
         problem = _llm_base_url_problem(v.strip())
         if problem is not None:

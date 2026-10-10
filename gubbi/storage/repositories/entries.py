@@ -15,6 +15,7 @@ from gubbi_common.audit.actions import Action
 from gubbi_common.audit.sql import record_audit_async as record_audit
 from gubbi_common.audit.targets import TargetKind
 
+from gubbi.constants import DEDUPE_PER_DAY_LOCK_MAX_DAYS
 from gubbi.crypto.cipher import (
     ContentCipher,
     DecryptionError,
@@ -1284,11 +1285,6 @@ class DedupeNeighbour:
 # fixed integer constant, so a key in this namespace can coincide with one only
 # by a 2**-64 accident, and a coincidence costs a wait, never a wrong result.
 _DEDUPE_LOCK_NAMESPACE = "gubbi:entries:dedupe"
-
-# Above this many distinct days a run takes one per-user lock instead of a lock
-# per day, so the advisory locks one transaction holds in the shared lock table
-# stay bounded whatever dates the model chose.
-DEDUPE_PER_DAY_LOCK_MAX_DAYS = 32
 
 
 def _dedupe_lock_key(user_id: UUID, day: date_cls, client: str | None) -> int:

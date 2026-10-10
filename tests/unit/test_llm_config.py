@@ -147,8 +147,11 @@ def test_base_url_rejected_without_echoing_it(clean_llm_env: pytest.MonkeyPatch,
 
 
 @pytest.mark.unit
-def test_base_url_unchecked_for_fake_provider(clean_llm_env: pytest.MonkeyPatch) -> None:
-    clean_llm_env.setenv("JOURNAL_LLM_PROVIDER", "fake")
+@pytest.mark.parametrize("provider", ["fake", "FAKE"], ids=["lower", "upper"])
+def test_base_url_unchecked_for_fake_provider(
+    clean_llm_env: pytest.MonkeyPatch, provider: str
+) -> None:
+    clean_llm_env.setenv("JOURNAL_LLM_PROVIDER", provider)
     clean_llm_env.setenv("JOURNAL_LLM_BASE_URL", "http://llm.example.test/v1")
 
     assert LLMConfig().base_url == "http://llm.example.test/v1"
