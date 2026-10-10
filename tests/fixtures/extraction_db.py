@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     import asyncpg
 
     from gubbi.crypto.cipher import ContentCipher
-    from tests.fixtures.extraction_job import ScriptedProvider
+    from gubbi.extraction.llm.provider import LLMProvider
 
 
 @dataclass(frozen=True)
@@ -117,7 +117,7 @@ async def seed_job(
         )
 
 
-def job_ctx(app_pool: asyncpg.Pool, cipher: ContentCipher, provider: ScriptedProvider) -> Any:
+def job_ctx(app_pool: asyncpg.Pool, cipher: ContentCipher, provider: LLMProvider) -> Any:
     """Arq context for a real-database job run against ``provider``."""
     return {
         "pool": app_pool,
