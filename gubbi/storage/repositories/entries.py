@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC
 from datetime import date as date_cls
 from datetime import datetime as datetime_cls
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 
 __all__: list[str] = [
     "MAX_MOVE_IDS",
+    "DedupeNeighbour",
     "EntriesMoveNotFound",
     "append",
     "delete",
@@ -48,6 +50,7 @@ __all__: list[str] = [
     "get_timeline_counts",
     "get_unindexed",
     "link_to_conversation",
+    "list_dedupe_neighbours",
     "list_entries",
     "mark_indexed",
     "mark_indexed_batch",
@@ -1223,3 +1226,76 @@ async def get_max_indexed_at(conn: asyncpg.Connection) -> datetime_cls | None:
     return await conn.fetchval(  # type: ignore[no-any-return]
         "SELECT MAX(indexed_at) FROM entries WHERE deleted_at IS NULL AND indexed_at IS NOT NULL"
     )
+
+
+@dataclass(frozen=True)
+class DedupeNeighbour:
+    """A stored entry an extracted entry may repeat; ``embedding`` is None if unindexed."""
+
+    id: int
+    content: str
+    date: date_cls
+    client: str | None
+    embedding: tuple[float, ...] | None
+
+
+async def list_dedupe_neighbours(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    dates: Sequence[date_cls],
+    client: str | None,
+    exclude_conversation_id: int,
+) -> list[DedupeNeighbour]:
+    """Return live entries on any of ``dates`` that extraction dedupe compares against.
+
+    An entry qualifies when its client equals ``client`` or is NULL (entries
+    written before clients were recorded); with ``client=None`` only NULL-client
+    entries qualify. The summary entry of conversation
+    ``exclude_conversation_id`` is left out. Entries without an embedding are
+    returned with ``embedding=None`` so they can still match on text. Rows that
+    fail to decrypt are logged and skipped. Ordered by id.
+    """
+    if not dates:
+        return []
+    rows = await conn.fetch(
+        """
+        SELECT e.id, e.date, e.client, e.content_encrypted, e.content_nonce,
+               ee.embedding
+        FROM entries e
+        LEFT JOIN entry_embeddings ee ON ee.entry_id = e.id
+        WHERE e.deleted_at IS NULL
+          AND e.date = ANY($1::date[])
+          AND (e.client IS NULL OR e.client = $2::text)
+          AND e.conversation_id IS DISTINCT FROM $3::int
+        ORDER BY e.id
+        """,
+        sorted(set(dates)),
+        client,
+        exclude_conversation_id,
+    )
+    neighbours: list[DedupeNeighbour] = []
+    for r in rows:
+        try:
+            content = _decrypt_content_field(cipher, r, "content_encrypted", "content_nonce")
+        except DecryptionError as exc:
+            await logger.warning(
+                "dedupe_neighbour_decrypt_failed",
+                entry_id=r["id"],
+                error_type=type(exc).__name__,
+            )
+            continue
+        if content is None:
+            raise RuntimeError(
+                f"Entry {r['id']}: content decrypted to None; schema invariant violated"
+            )
+        embedding = r["embedding"]
+        neighbours.append(
+            DedupeNeighbour(
+                id=int(r["id"]),
+                content=content,
+                date=r["date"],
+                client=r["client"],
+                embedding=None if embedding is None else tuple(float(x) for x in embedding),
+            )
+        )
+    return neighbours

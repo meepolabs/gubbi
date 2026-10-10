@@ -79,3 +79,12 @@ EXTRACTION_MIN_USER_CHARS: Final = 8
 # Conversation sources produced by automated or sub-agent sessions, which are
 # never extracted. Empty: no ingest source is automated today.
 AUTOMATED_EXTRACTION_SOURCES: Final[frozenset[str]] = frozenset()
+
+# -- Extraction dedupe ----------------------------------------------------------
+
+# Cosine similarity (all-MiniLM-L6-v2 embeddings) at or above which an extracted
+# entry repeats a same-day entry and is not inserted.
+DEDUPE_EXACT_COSINE: Final = 0.97
+# At or above this (and below the exact threshold) the entry is inserted but
+# flagged as a near-duplicate of the entry it resembles.
+DEDUPE_NEAR_COSINE: Final = 0.90
