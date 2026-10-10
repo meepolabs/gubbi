@@ -18,7 +18,9 @@ Every column is nullable or carries a constant default, so each ADD COLUMN is a
 catalog-only change on PostgreSQL 11+ and no existing row is rewritten. The two
 foreign keys are ON DELETE SET NULL: removing the referenced entry or
 conversation unlinks rather than blocks or cascades. Their indexes keep that
-SET NULL from scanning ``entries`` on every referenced delete.
+SET NULL from scanning ``entries`` on every referenced delete. A partial index
+on ``(user_id, date, client)`` over live rows serves extraction dedupe, which
+reads a user's live entries of given event days and clients.
 
 All three tables already carry FORCE ROW LEVEL SECURITY and table-level grants
 to journal_app and journal_admin, so the new columns inherit both; no policy or
@@ -73,9 +75,12 @@ _CREATE_INDEXES = (
     "ON public.entries USING btree (duplicate_of_entry_id)",
     "CREATE INDEX idx_entries_source_conversation_id "
     "ON public.entries USING btree (source_conversation_id)",
+    "CREATE INDEX idx_entries_user_date_client "
+    "ON public.entries USING btree (user_id, date, client) WHERE (deleted_at IS NULL)",
 )
 
 _DROP_INDEXES = (
+    "DROP INDEX public.idx_entries_user_date_client",
     "DROP INDEX public.idx_entries_source_conversation_id",
     "DROP INDEX public.idx_entries_duplicate_of_entry_id",
 )
@@ -101,7 +106,7 @@ def _extraction_jobs_alter(clause: str) -> str:
 
 
 def upgrade() -> None:
-    """Add the entries, extraction_jobs and conversations columns plus the FK indexes."""
+    """Add the entries, extraction_jobs and conversations columns plus their indexes."""
     op.execute(_UPGRADE_ENTRIES)
     op.execute(_extraction_jobs_alter("ADD COLUMN {column} integer DEFAULT 0 NOT NULL"))
     op.execute(_UPGRADE_CONVERSATIONS)

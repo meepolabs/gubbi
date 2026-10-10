@@ -21,6 +21,7 @@ from gubbi.extraction.persist import (
 )
 from gubbi.extraction.pipeline import ExtractedCandidate
 from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import extraction_jobs as jobs_repo
 from gubbi.storage.repositories import topics as topic_repo
 from tests.fixtures.tenants import seed_for
@@ -67,9 +68,11 @@ def _near(axis: int, spill_axis: int) -> list[float]:
     return vector
 
 
-def _candidate(content: str, day: date) -> ExtractedCandidate:
+def _candidate(
+    content: str, day: date, *, why: str = "because", tags: tuple[str, ...] = ("t",)
+) -> ExtractedCandidate:
     return ExtractedCandidate(
-        content=content, why="because", tags=("t",), entry_date=day, source_message_index=None
+        content=content, why=why, tags=tags, entry_date=day, source_message_index=None
     )
 
 
@@ -78,6 +81,8 @@ def _run(
     job_id: UUID | None,
     candidates: Sequence[ExtractedCandidate],
     embeddings: Sequence[Sequence[float]],
+    *,
+    topic_path: str = _TOPIC,
 ) -> ExtractionToPersist:
     assert seed.conversation_id is not None
     return ExtractionToPersist(
@@ -86,7 +91,7 @@ def _run(
         job_id=job_id,
         extraction_attempt_id=str(uuid4()),
         client=_CLIENT,
-        topic_path=_TOPIC,
+        topic_path=topic_path,
         topic_title="Extracted",
         candidates=candidates,
         embeddings=embeddings,
@@ -297,3 +302,210 @@ async def test_persist_extraction_records_state_usage_and_audit(
 async def test_extraction_to_persist_rejects_unpaired_embeddings(seeded_a: TenantSeed) -> None:
     with pytest.raises(ValueError, match="one embedding per candidate"):
         _run(seeded_a, None, [_candidate("Bought a bike", date.today())], [])
+
+
+@pytest.mark.parametrize(
+    ("title", "stored"),
+    [
+        pytest.param("Bike\x00 log <3!", "Bike log 3", id="control-and-symbols-stripped"),
+        pytest.param("x" * 150, "x" * 100, id="capped-at-100"),
+        pytest.param("<<!!>>", "Extracted", id="empty-falls-back-to-path"),
+    ],
+)
+async def test_ensure_topic_stores_a_sanitized_title(
+    app_pool: asyncpg.Pool, admin_pool: asyncpg.Pool, tenant_a: UUID, title: str, stored: str
+) -> None:
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+        topic_id, _ = await ensure_topic(conn, _TOPIC, title)
+
+    async with admin_pool.acquire() as conn:
+        saved = await conn.fetchval("SELECT title FROM topics WHERE id = $1", topic_id)
+    assert saved == stored
+
+
+async def test_concurrent_runs_of_different_conversations_insert_a_shared_entry_once(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    seeded_a: TenantSeed,
+) -> None:
+    other = await seed_for(admin_pool, seeded_a.user_id, topic_path="tenant-a/other", n_entries=0)
+    shared = [_candidate("Bought a bike", date.today())]
+    first_run = _run(seeded_a, None, shared, [_basis(1)], topic_path=seeded_a.topic_path)
+    second_run = _run(other, None, shared, [_basis(1)], topic_path=seeded_a.topic_path)
+
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as first:
+        first_result = await persist_extraction(first, cipher, EmbeddingService(), first_run)
+        # The second run starts while the first is still uncommitted and may
+        # only decide once the first commits on leaving this block.
+        second_task = asyncio.create_task(_persist(app_pool, cipher, second_run))
+        await asyncio.sleep(0.3)
+        assert not second_task.done()
+    second_result = await asyncio.wait_for(second_task, timeout=10)
+
+    async with admin_pool.acquire() as conn:
+        bike_rows = await conn.fetchval(
+            "SELECT count(*) FROM entries WHERE user_id = $1 AND source_conversation_id IS NOT NULL",
+            seeded_a.user_id,
+        )
+    assert len(first_result.entry_ids) == 1
+    assert second_result.entry_ids == ()
+    assert second_result.suppressed == 1
+    assert bike_rows == 1
+
+
+async def _lock_and_release(
+    app_pool: asyncpg.Pool, user_id: UUID, day: date, client: str | None
+) -> None:
+    async with user_scoped_connection(app_pool, user_id=user_id) as conn:
+        await entry_repo.lock_dedupe_days(conn, user_id, [day], client)
+
+
+_LOCK_DAY = date(2026, 6, 1)
+
+
+@pytest.mark.parametrize(
+    ("held_client", "user", "day", "client", "waits"),
+    [
+        pytest.param(_CLIENT, "a", _LOCK_DAY, _CLIENT, True, id="same-user-day-client-waits"),
+        pytest.param(_CLIENT, "a", _LOCK_DAY, None, True, id="unknown-client-waits-for-named"),
+        pytest.param(None, "a", _LOCK_DAY, _CLIENT, True, id="named-client-waits-for-unknown"),
+        pytest.param(None, "a", _LOCK_DAY, None, True, id="unknown-waits-for-unknown"),
+        pytest.param(_CLIENT, "b", _LOCK_DAY, _CLIENT, False, id="other-user-proceeds"),
+        pytest.param(
+            _CLIENT, "a", _LOCK_DAY + timedelta(days=1), _CLIENT, False, id="other-day-proceeds"
+        ),
+        pytest.param(_CLIENT, "a", _LOCK_DAY, "claude", False, id="other-named-client-proceeds"),
+    ],
+)
+async def test_lock_dedupe_days_blocks_exactly_the_runs_that_share_neighbours(
+    app_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    tenant_b: UUID,
+    held_client: str | None,
+    user: str,
+    day: date,
+    client: str | None,
+    waits: bool,
+) -> None:
+    contender = tenant_a if user == "a" else tenant_b
+
+    async with user_scoped_connection(app_pool, user_id=tenant_a) as holder:
+        await entry_repo.lock_dedupe_days(holder, tenant_a, [_LOCK_DAY], held_client)
+        task = asyncio.create_task(_lock_and_release(app_pool, contender, day, client))
+        await asyncio.sleep(0.3)
+        done_while_held = task.done()
+    await asyncio.wait_for(task, timeout=10)
+
+    assert done_while_held is not waits
+
+
+_HOSTILE_TOPIC = "tenant-a/hostile"
+
+
+@pytest.mark.parametrize(
+    ("candidate", "content", "why", "tags"),
+    [
+        pytest.param(
+            _candidate("Bought a bike", date.today(), tags=("a" * 200,)),
+            "Bought a bike",
+            "because",
+            ("a" * 50,),
+            id="tag-over-128-chars",
+        ),
+        pytest.param(
+            _candidate("Bought\x00 a bike", date.today(), tags=("bi\x00ke",)),
+            "Bought a bike",
+            "because",
+            ("bike",),
+            id="nul-in-content-and-tag",
+        ),
+        pytest.param(
+            _candidate("Bought a bike", date.today(), tags=("bike", "<>", "bike", "  ")),
+            "Bought a bike",
+            "because",
+            ("bike",),
+            id="empty-and-duplicate-tags-dropped",
+        ),
+        pytest.param(
+            _candidate("x" * 1500, date.today(), why="y" * 6000),
+            "x" * 1000,
+            "y" * 5000,
+            ("t",),
+            id="oversize-content-and-why-capped",
+        ),
+    ],
+)
+async def test_persist_extraction_stores_candidates_as_the_mcp_write_path_would(
+    app_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    seeded_a: TenantSeed,
+    candidate: ExtractedCandidate,
+    content: str,
+    why: str,
+    tags: tuple[str, ...],
+) -> None:
+    run = _run(seeded_a, None, [candidate], [_basis(1)], topic_path=_HOSTILE_TOPIC)
+
+    result = await _persist(app_pool, cipher, run)
+
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        _, entries, total = await entry_repo.read(conn, cipher, _HOSTILE_TOPIC)
+    assert len(result.entry_ids) == 1
+    assert total == 1
+    (entry,) = entries
+    assert (entry.id, entry.content, entry.reasoning, tuple(entry.tags)) == (
+        result.entry_ids[0],
+        content,
+        why,
+        tags,
+    )
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        pytest.param(
+            _candidate('<parameter name="content">Bought a bike', date.today()),
+            id="tool-call-syntax-in-content",
+        ),
+        pytest.param(
+            _candidate("Bought a bike", date.today(), why="</parameter>"),
+            id="tool-call-syntax-in-why",
+        ),
+        pytest.param(_candidate("\x00\x01 \x7f", date.today()), id="empty-after-sanitizing"),
+    ],
+)
+async def test_persist_extraction_drops_an_unstorable_candidate_and_keeps_the_rest(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    seeded_a: TenantSeed,
+    candidate: ExtractedCandidate,
+) -> None:
+    kept = _candidate("Moved desks", date.today())
+    run = _run(seeded_a, None, [candidate, kept], [_basis(1), _basis(2)])
+
+    result = await _persist(app_pool, cipher, run)
+
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        _, entries, _ = await entry_repo.read(conn, cipher, _TOPIC)
+    assert [entry.content for entry in entries] == ["Moved desks"]
+    assert len(result.entry_ids) == 1
+    assert result.suppressed == 0
+
+
+async def test_persist_extraction_dedupes_on_the_sanitized_text(
+    app_pool: asyncpg.Pool, cipher: ContentCipher, seeded_a: TenantSeed
+) -> None:
+    candidates = [
+        _candidate("Bought a bike", date.today()),
+        _candidate("Bought a\x00 bike", date.today()),
+    ]
+    # Orthogonal embeddings: only the text can make the second a repeat.
+    run = _run(seeded_a, None, candidates, [_basis(1), _basis(2)])
+
+    result = await _persist(app_pool, cipher, run)
+
+    assert len(result.entry_ids) == 1
+    assert result.suppressed == 1

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import UTC
@@ -36,6 +37,7 @@ from gubbi.validation import validate_topic as _validate_topic
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
 
     import asyncpg
 
@@ -56,6 +58,7 @@ __all__: list[str] = [
     "link_to_conversation",
     "list_dedupe_neighbours",
     "list_entries",
+    "lock_dedupe_days",
     "mark_indexed",
     "mark_indexed_batch",
     "move_entries_to_topic",
@@ -1274,6 +1277,51 @@ class DedupeNeighbour:
     date: date_cls
     client: str | None
     embedding: tuple[float, ...] | None
+
+
+# Advisory-lock keys for extraction dedupe are 64-bit BLAKE2b digests of
+# strings under this prefix. Every other advisory key in the application is a
+# fixed integer constant, so a key in this namespace can coincide with one only
+# by a 2**-64 accident, and a coincidence costs a wait, never a wrong result.
+_DEDUPE_LOCK_NAMESPACE = "gubbi:entries:dedupe"
+
+
+def _dedupe_lock_key(user_id: UUID, day: date_cls, client: str | None) -> int:
+    # ``-`` cannot be confused with a client because a present client is
+    # always written with a leading ``=``.
+    client_part = "-" if client is None else f"={client}"
+    name = f"{_DEDUPE_LOCK_NAMESPACE}:{user_id}:{day.isoformat()}:{client_part}"
+    digest = hashlib.blake2b(name.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+async def lock_dedupe_days(
+    conn: asyncpg.Connection,
+    user_id: UUID,
+    dates: Sequence[date_cls],
+    client: str | None,
+) -> None:
+    """Serialize extraction dedupe for ``user_id`` on ``dates`` until the transaction ends.
+
+    A run inserts entries of its own client and reads as neighbours the
+    entries of its own client and of the unknown client (see
+    ``list_dedupe_neighbours``). Two runs conflict when one can insert an
+    entry the other reads: same client, or one of them has no client. So each
+    (user, day) gets an exclusive transaction-scoped advisory lock on the run's
+    own client and, for a named client, a shared lock on the unknown client.
+    Runs of two different named clients share only the shared lock and do not
+    wait for each other. Locks are taken one at a time in ascending key order
+    so concurrent callers cannot deadlock on each other.
+    """
+    if not dates:
+        return
+    days = set(dates)
+    locks = {(_dedupe_lock_key(user_id, day, client), False) for day in days}
+    if client is not None:
+        locks |= {(_dedupe_lock_key(user_id, day, None), True) for day in days}
+    for key, is_shared in sorted(locks):
+        lock = "pg_advisory_xact_lock_shared" if is_shared else "pg_advisory_xact_lock"
+        await conn.execute(f"SELECT {lock}($1::bigint)", key)
 
 
 async def list_dedupe_neighbours(

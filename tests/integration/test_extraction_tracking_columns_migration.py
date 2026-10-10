@@ -66,8 +66,18 @@ EXPECTED_FOREIGN_KEYS: dict[str, tuple[str, str, str]] = {
 }
 
 EXPECTED_INDEXES: dict[str, str] = {
-    "idx_entries_duplicate_of_entry_id": "duplicate_of_entry_id",
-    "idx_entries_source_conversation_id": "source_conversation_id",
+    "idx_entries_duplicate_of_entry_id": (
+        "CREATE INDEX idx_entries_duplicate_of_entry_id"
+        " ON public.entries USING btree (duplicate_of_entry_id)"
+    ),
+    "idx_entries_source_conversation_id": (
+        "CREATE INDEX idx_entries_source_conversation_id"
+        " ON public.entries USING btree (source_conversation_id)"
+    ),
+    "idx_entries_user_date_client": (
+        "CREATE INDEX idx_entries_user_date_client"
+        " ON public.entries USING btree (user_id, date, client) WHERE (deleted_at IS NULL)"
+    ),
 }
 
 
@@ -155,11 +165,9 @@ async def _snapshot(dsn: str) -> SchemaSnapshot:
         )
         index_rows = await conn.fetch(
             """
-            SELECT i.relname AS index_name, a.attname AS column_name
-            FROM pg_index x
-            JOIN pg_class i ON i.oid = x.indexrelid
-            JOIN pg_attribute a ON a.attrelid = x.indrelid AND a.attnum = ANY(x.indkey)
-            WHERE x.indrelid = 'public.entries'::regclass AND i.relname = ANY($1::text[])
+            SELECT indexname, indexdef FROM pg_indexes
+            WHERE schemaname = 'public' AND tablename = 'entries'
+              AND indexname = ANY($1::text[])
             """,
             list(EXPECTED_INDEXES),
         )
@@ -175,7 +183,7 @@ async def _snapshot(dsn: str) -> SchemaSnapshot:
         foreign_keys={
             r["column_name"]: (r["ref_table"], r["ref_column"], r["delete_rule"]) for r in fk_rows
         },
-        indexes={r["index_name"]: r["column_name"] for r in index_rows},
+        indexes={r["indexname"]: r["indexdef"] for r in index_rows},
     )
 
 

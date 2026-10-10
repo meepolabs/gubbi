@@ -8,7 +8,7 @@ CPU-bound work or calls a model.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Protocol
 
 import structlog
@@ -23,6 +23,8 @@ from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
 from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import topics as topic_repo
+from gubbi.tools.constants import MAX_ENTRY_CONTENT_CHARS, MAX_ENTRY_REASONING_CHARS
+from gubbi.validation import reject_tool_call_syntax, sanitize_freetext, sanitize_label
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,6 +45,8 @@ __all__: list[str] = [
 ]
 
 logger = structlog.get_logger(__name__)
+
+_MAX_TOPIC_TITLE_CHARS = 100
 
 
 class EmbeddingStore(Protocol):
@@ -102,6 +106,9 @@ class PersistResult:
 async def ensure_topic(conn: asyncpg.Connection, path: str, title: str) -> tuple[int, bool]:
     """Return ``(topic_id, created)`` for ``path``, creating the topic if it is missing.
 
+    ``title`` is sanitized as a label before it is stored; when nothing
+    survives, the title is derived from the last segment of ``path``.
+
     The INSERT runs in its own savepoint: when a concurrent transaction creates
     the same path first, the unique violation rolls back only that savepoint,
     and the winner's id is read back on a transaction that is still usable.
@@ -110,12 +117,18 @@ async def ensure_topic(conn: asyncpg.Connection, path: str, title: str) -> tuple
         return await topic_repo.get_id(conn, path), False
     except TopicNotFoundError:
         pass
+    safe_title = sanitize_label(title, max_len=_MAX_TOPIC_TITLE_CHARS) or _title_from_path(path)
     try:
         async with conn.transaction():
-            topic_id = await topic_repo.create(conn, path, title=title)
+            topic_id = await topic_repo.create(conn, path, title=safe_title)
     except topic_repo.TopicAlreadyExists:
         return await topic_repo.get_id(conn, path), False
     return topic_id, True
+
+
+def _title_from_path(path: str) -> str:
+    """``"cars/toyota-corolla"`` -> ``"Toyota corolla"``."""
+    return path.rsplit("/", 1)[-1].replace("-", " ").capitalize()[:_MAX_TOPIC_TITLE_CHARS]
 
 
 async def persist_extraction(
@@ -132,8 +145,24 @@ async def persist_extraction(
     repeating an earlier candidate inserts nothing. A near match is inserted with
     ``duplicate_of_entry_id`` naming the entry it resembles. Inserted entries carry
     the run's client and conversation and get their embedding stored.
+
+    Candidate text is sanitized and capped as the MCP write path stores it
+    before dedupe compares it; a candidate left empty or carrying tool-call
+    syntax is dropped. Concurrent runs for the same user and event day are
+    serialized from the neighbour read to commit, so two runs cannot both
+    miss each other's entry and insert it twice.
     """
+    run, dropped = _sanitized(run)
+    if dropped:
+        await logger.warning(
+            "extraction_candidates_dropped",
+            conversation_id=run.conversation_id,
+            candidates_dropped=dropped,
+        )
     topic_id, topic_created = await ensure_topic(conn, run.topic_path, run.topic_title)
+    await entry_repo.lock_dedupe_days(
+        conn, run.user_id, [candidate.entry_date for candidate in run.candidates], run.client
+    )
     decisions = await _classify(conn, cipher, run)
     entry_ids, linked = await _write_candidates(conn, cipher, embedding_service, run, decisions)
     await conv_repo.mark_processed(conn, run.conversation_id)
@@ -157,6 +186,36 @@ async def persist_extraction(
         topic_created=topic_created,
     )
     return result
+
+
+def _sanitized_candidate(candidate: ExtractedCandidate) -> ExtractedCandidate | None:
+    """The candidate as it will be stored, or None when it must not be stored."""
+    content = sanitize_freetext(candidate.content, max_len=MAX_ENTRY_CONTENT_CHARS)
+    why = sanitize_freetext(candidate.why, max_len=MAX_ENTRY_REASONING_CHARS)
+    if not content.strip():
+        return None
+    try:
+        reject_tool_call_syntax(content)
+        reject_tool_call_syntax(why)
+    except ValueError:
+        return None
+    tags = tuple(dict.fromkeys(label for tag in candidate.tags if (label := sanitize_label(tag))))
+    return replace(candidate, content=content, why=why, tags=tags)
+
+
+def _sanitized(run: ExtractionToPersist) -> tuple[ExtractionToPersist, int]:
+    """``run`` with every candidate sanitized, and how many were dropped as unstorable."""
+    kept = [
+        (safe, embedding)
+        for candidate, embedding in zip(run.candidates, run.embeddings, strict=True)
+        if (safe := _sanitized_candidate(candidate)) is not None
+    ]
+    sanitized = replace(
+        run,
+        candidates=tuple(candidate for candidate, _ in kept),
+        embeddings=tuple(embedding for _, embedding in kept),
+    )
+    return sanitized, len(run.candidates) - len(kept)
 
 
 async def _classify(
