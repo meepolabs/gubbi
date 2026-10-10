@@ -26,7 +26,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0003_audit_log_app_dedup_read"
+_EXPECTED_HEAD = "0004_extraction_tracking_columns"
 
 
 def _alembic_config() -> Config:
