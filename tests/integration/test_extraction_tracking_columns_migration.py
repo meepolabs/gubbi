@@ -15,6 +15,7 @@ import subprocess
 import sys
 import uuid
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
@@ -100,8 +101,8 @@ def _with_database(dsn: str, name: str) -> str:
     return urlunparse(urlparse(dsn)._replace(path=f"/{name}"))
 
 
-def _alembic(dsn: str, *args: str) -> None:
-    result = subprocess.run(  # noqa: S603 -- argv entries are literals
+def _run_alembic(dsn: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 -- argv entries are literals
         [sys.executable, "-m", "alembic", *args],
         cwd=_PROJECT_ROOT,
         env={**os.environ, "JOURNAL_DB_MIGRATION_URL": dsn},
@@ -109,6 +110,10 @@ def _alembic(dsn: str, *args: str) -> None:
         text=True,
         check=False,
     )
+
+
+def _alembic(dsn: str, *args: str) -> None:
+    result = _run_alembic(dsn, *args)
     if result.returncode != 0:
         pytest.fail(
             f"alembic {' '.join(args)} failed:\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
@@ -253,13 +258,9 @@ async def _read_legacy_rows(
     return entry, conversation, job
 
 
-@pytest_asyncio.fixture(scope="module", loop_scope="session")
-async def round_trip() -> AsyncIterator[RoundTrip]:
-    """Upgrade a fresh database to head, step back one revision, and upgrade again.
-
-    Rows planted at the previous revision show the re-applied revision leaves
-    pre-existing data readable with the new columns at their defaults.
-    """
+@asynccontextmanager
+async def _scratch_database() -> AsyncIterator[str]:
+    """Yield the DSN of a fresh database with pgvector, dropped on exit."""
     name = f"{_DATABASE_PREFIX}{uuid.uuid4().hex[:12]}"
     dsn = _with_database(TEST_DATABASE_URL, name)
     try:
@@ -275,26 +276,37 @@ async def round_trip() -> AsyncIterator[RoundTrip]:
                 await setup.execute("CREATE EXTENSION IF NOT EXISTS vector")
             finally:
                 await setup.close()
-            await _alembic_off_the_loop(dsn, "upgrade", "head")
-            after_first_upgrade = await _snapshot(dsn)
-            await _alembic_off_the_loop(dsn, "downgrade", _PREVIOUS_REVISION)
-            after_downgrade = await _snapshot(dsn)
-            legacy = await _plant_legacy_rows(dsn)
-            await _alembic_off_the_loop(dsn, "upgrade", "head")
-            after_second_upgrade = await _snapshot(dsn)
-            entry, conversation, job = await _read_legacy_rows(dsn, legacy)
-            yield RoundTrip(
-                after_first_upgrade=after_first_upgrade,
-                after_downgrade=after_downgrade,
-                after_second_upgrade=after_second_upgrade,
-                legacy_entry=entry,
-                legacy_conversation=conversation,
-                legacy_job=job,
-            )
+            yield dsn
         finally:
             await admin.execute(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)')
     finally:
         await admin.close()
+
+
+@pytest_asyncio.fixture(scope="module", loop_scope="session")
+async def round_trip() -> AsyncIterator[RoundTrip]:
+    """Upgrade a fresh database to head, step back one revision, and upgrade again.
+
+    Rows planted at the previous revision show the re-applied revision leaves
+    pre-existing data readable with the new columns at their defaults.
+    """
+    async with _scratch_database() as dsn:
+        await _alembic_off_the_loop(dsn, "upgrade", "head")
+        after_first_upgrade = await _snapshot(dsn)
+        await _alembic_off_the_loop(dsn, "downgrade", _PREVIOUS_REVISION)
+        after_downgrade = await _snapshot(dsn)
+        legacy = await _plant_legacy_rows(dsn)
+        await _alembic_off_the_loop(dsn, "upgrade", "head")
+        after_second_upgrade = await _snapshot(dsn)
+        entry, conversation, job = await _read_legacy_rows(dsn, legacy)
+        yield RoundTrip(
+            after_first_upgrade=after_first_upgrade,
+            after_downgrade=after_downgrade,
+            after_second_upgrade=after_second_upgrade,
+            legacy_entry=entry,
+            legacy_conversation=conversation,
+            legacy_job=job,
+        )
 
 
 @pytest.mark.parametrize("stage", ["after_first_upgrade", "after_second_upgrade"])
@@ -334,6 +346,44 @@ def test_rows_from_before_the_upgrade_read_the_new_column_defaults(
         "llm_calls": 0,
         "chunks": 0,
     }
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [
+        pytest.param("ALTER TABLE entries ADD COLUMN client integer", id="column-of-another-type"),
+        pytest.param(
+            "CREATE INDEX idx_entries_source_conversation_id ON entries (created_at)",
+            id="index-on-another-column",
+        ),
+    ],
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_upgrade_fails_and_records_nothing_over_a_drifted_object(drift: str) -> None:
+    async with _scratch_database() as dsn:
+        await _alembic_off_the_loop(dsn, "upgrade", _PREVIOUS_REVISION)
+        conn = await asyncpg.connect(dsn, timeout=5)
+        try:
+            await conn.execute(drift)
+        finally:
+            await conn.close()
+
+        result = await asyncio.to_thread(_run_alembic, dsn, "upgrade", "head")
+
+        conn = await asyncpg.connect(dsn, timeout=5)
+        try:
+            version = await conn.fetchval("SELECT version_num FROM alembic_version")
+            added = await conn.fetchval(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'conversations' "
+                "AND column_name = 'extraction_version'"
+            )
+        finally:
+            await conn.close()
+
+    assert result.returncode != 0, "upgrade must refuse a pre-existing object it owns"
+    assert version == _PREVIOUS_REVISION
+    assert added == 0, "a failed upgrade must roll back every column it added"
 
 
 @pytest.mark.asyncio(loop_scope="session")

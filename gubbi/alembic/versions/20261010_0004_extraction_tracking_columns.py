@@ -27,6 +27,11 @@ grant changes here.
 The indexes are built with plain ``CREATE INDEX``: the columns are NULL on
 every existing row and ``entries`` is per-user journal data, so the build is a
 short scan rather than a long write block.
+
+No statement uses IF [NOT] EXISTS. A column or index of the same name already
+present means the schema drifted from this chain, so the upgrade fails and
+rolls back rather than recording the revision over an incompatible object; the
+downgrade likewise drops only what it expects to find.
 """
 
 from alembic import op
@@ -48,44 +53,44 @@ _EXTRACTION_JOB_COUNTERS = (
 
 _UPGRADE_ENTRIES = """
 ALTER TABLE public.entries
-    ADD COLUMN IF NOT EXISTS duplicate_of_entry_id integer
+    ADD COLUMN duplicate_of_entry_id integer
         CONSTRAINT entries_duplicate_of_entry_id_fkey
         REFERENCES public.entries(id) ON DELETE SET NULL,
-    ADD COLUMN IF NOT EXISTS client text,
-    ADD COLUMN IF NOT EXISTS source_conversation_id integer
+    ADD COLUMN client text,
+    ADD COLUMN source_conversation_id integer
         CONSTRAINT entries_source_conversation_id_fkey
         REFERENCES public.conversations(id) ON DELETE SET NULL
 """
 
 _UPGRADE_CONVERSATIONS = """
 ALTER TABLE public.conversations
-    ADD COLUMN IF NOT EXISTS extracted_content_hash text,
-    ADD COLUMN IF NOT EXISTS extraction_version integer
+    ADD COLUMN extracted_content_hash text,
+    ADD COLUMN extraction_version integer
 """
 
 _CREATE_INDEXES = (
-    "CREATE INDEX IF NOT EXISTS idx_entries_duplicate_of_entry_id "
+    "CREATE INDEX idx_entries_duplicate_of_entry_id "
     "ON public.entries USING btree (duplicate_of_entry_id)",
-    "CREATE INDEX IF NOT EXISTS idx_entries_source_conversation_id "
+    "CREATE INDEX idx_entries_source_conversation_id "
     "ON public.entries USING btree (source_conversation_id)",
 )
 
 _DROP_INDEXES = (
-    "DROP INDEX IF EXISTS public.idx_entries_source_conversation_id",
-    "DROP INDEX IF EXISTS public.idx_entries_duplicate_of_entry_id",
+    "DROP INDEX public.idx_entries_source_conversation_id",
+    "DROP INDEX public.idx_entries_duplicate_of_entry_id",
 )
 
 _DOWNGRADE_ENTRIES = """
 ALTER TABLE public.entries
-    DROP COLUMN IF EXISTS source_conversation_id,
-    DROP COLUMN IF EXISTS client,
-    DROP COLUMN IF EXISTS duplicate_of_entry_id
+    DROP COLUMN source_conversation_id,
+    DROP COLUMN client,
+    DROP COLUMN duplicate_of_entry_id
 """
 
 _DOWNGRADE_CONVERSATIONS = """
 ALTER TABLE public.conversations
-    DROP COLUMN IF EXISTS extraction_version,
-    DROP COLUMN IF EXISTS extracted_content_hash
+    DROP COLUMN extraction_version,
+    DROP COLUMN extracted_content_hash
 """
 
 
@@ -98,9 +103,7 @@ def _extraction_jobs_alter(clause: str) -> str:
 def upgrade() -> None:
     """Add the entries, extraction_jobs and conversations columns plus the FK indexes."""
     op.execute(_UPGRADE_ENTRIES)
-    op.execute(
-        _extraction_jobs_alter("ADD COLUMN IF NOT EXISTS {column} integer DEFAULT 0 NOT NULL")
-    )
+    op.execute(_extraction_jobs_alter("ADD COLUMN {column} integer DEFAULT 0 NOT NULL"))
     op.execute(_UPGRADE_CONVERSATIONS)
     for statement in _CREATE_INDEXES:
         op.execute(statement)
@@ -111,5 +114,5 @@ def downgrade() -> None:
     for statement in _DROP_INDEXES:
         op.execute(statement)
     op.execute(_DOWNGRADE_CONVERSATIONS)
-    op.execute(_extraction_jobs_alter("DROP COLUMN IF EXISTS {column}"))
+    op.execute(_extraction_jobs_alter("DROP COLUMN {column}"))
     op.execute(_DOWNGRADE_ENTRIES)
