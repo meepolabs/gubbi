@@ -1,0 +1,101 @@
+{
+  "length": {
+    "choices": [
+      {
+        "finish_reason": "length",
+        "index": 0,
+        "message": {
+          "content": "{\"summary\":",
+          "role": "assistant"
+        }
+      }
+    ],
+    "container": null,
+    "context_management": {
+      "applied_edits": []
+    },
+    "created": 1767225600,
+    "diagnostics": null,
+    "id": "chatcmpl-fixture",
+    "model": "fixture-model",
+    "object": "chat.completion",
+    "role": "assistant",
+    "stop_details": null,
+    "system_fingerprint": null,
+    "type": "message",
+    "usage": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 0,
+      "completion_tokens": 5,
+      "inference_geo": "global",
+      "output_tokens_details": {
+        "thinking_tokens": 0
+      },
+      "prompt_tokens": 283,
+      "reasoning_tokens": 0,
+      "service_tier": "standard",
+      "speed": "standard",
+      "total_tokens": 288
+    }
+  },
+  "stop_cached": {
+    "choices": [
+      {
+        "finish_reason": "stop",
+        "index": 0,
+        "message": {
+          "content": "{\"summary\":\"The user has decided to buy a Toyota Corolla today.\",\"topic\":\"Purchasing a Toyota Corolla\"}",
+          "reasoning_details": [
+            {
+              "format": "anthropic-claude-v1",
+              "id": "reasoning-fixture",
+              "index": 0,
+              "signature": "signature-fixture",
+              "text": "",
+              "type": "reasoning.text"
+            }
+          ],
+          "role": "assistant"
+        }
+      }
+    ],
+    "container": null,
+    "context_management": {
+      "applied_edits": []
+    },
+    "created": 1767225600,
+    "diagnostics": null,
+    "id": "chatcmpl-fixture",
+    "model": "fixture-model",
+    "object": "chat.completion",
+    "role": "assistant",
+    "stop_details": null,
+    "system_fingerprint": null,
+    "type": "message",
+    "usage": {
+      "cache_creation": {
+        "ephemeral_1h_input_tokens": 0,
+        "ephemeral_5m_input_tokens": 0
+      },
+      "cache_creation_input_tokens": 0,
+      "cache_read_input_tokens": 17379,
+      "completion_tokens": 188,
+      "inference_geo": "global",
+      "output_tokens_details": {
+        "thinking_tokens": 140
+      },
+      "prompt_tokens": 17383,
+      "prompt_tokens_details": {
+        "cached_tokens": 17379
+      },
+      "reasoning_tokens": 140,
+      "service_tier": "standard",
+      "speed": "standard",
+      "total_tokens": 17571
+    }
+  }
+}
