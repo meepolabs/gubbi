@@ -31,7 +31,35 @@ MESSAGES = (
     ("model_date", "source_index", "messages", "expected"),
     [
         pytest.param("2026-02-14", 0, MESSAGES, date(2026, 2, 14), id="valid-model-date-wins"),
-        pytest.param(" 2026-05-20 ", 0, MESSAGES, TODAY, id="model-date-equal-to-today-kept"),
+        pytest.param(
+            " 2026-05-20 ", 0, MESSAGES, date(2026, 3, 1), id="backfill-sync-day-falls-to-source"
+        ),
+        pytest.param(
+            "2026-04-16", None, MESSAGES, date(2026, 4, 15), id="after-latest-message-uses-latest"
+        ),
+        pytest.param(
+            "2026-04-15", 0, MESSAGES, date(2026, 4, 15), id="equal-to-latest-message-kept"
+        ),
+        pytest.param(
+            "2026-05-20",
+            0,
+            (*MESSAGES, _Msg("2026-05-20T07:00:00")),
+            TODAY,
+            id="latest-message-today-allows-today",
+        ),
+        pytest.param(
+            "2026-03-01", 0, (_Msg(None),), CREATED, id="undated-after-created-uses-created"
+        ),
+        pytest.param(
+            "2026-05-25",
+            0,
+            (_Msg("2026-03-01T09:00:00"), _Msg("2026-06-01T09:00:00")),
+            date(2026, 3, 1),
+            id="model-date-after-today-rejected-despite-later-message",
+        ),
+        pytest.param(
+            "2025-12-24", 0, (_Msg(None),), date(2025, 12, 24), id="undated-before-created-kept"
+        ),
         pytest.param(
             "2026-05-21", 0, MESSAGES, date(2026, 3, 1), id="future-model-date-falls-to-source"
         ),

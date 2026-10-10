@@ -19,7 +19,7 @@ import asyncio
 import functools
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 from typing import TYPE_CHECKING, Any, Final, cast
 from uuid import UUID, uuid4
@@ -43,7 +43,11 @@ from gubbi.extraction.llm.provider import (
     LLMTruncatedError,
     LLMUsage,
 )
-from gubbi.extraction.persist import ExtractionToPersist, persist_extraction
+from gubbi.extraction.persist import (
+    ExtractionToPersist,
+    persist_extraction,
+    sanitize_candidates,
+)
 from gubbi.extraction.pipeline import (
     PipelineDeadlineError,
     PipelineFailure,
@@ -778,22 +782,31 @@ async def _record(
 ) -> dict[str, Any]:
     """Persist what the pipeline found, or complete the job with nothing to record."""
     spent = extracted.spend
-    if extracted.topic_path is None or not extracted.outcome.candidates:
+    candidates = sanitize_candidates(extracted.outcome.candidates)
+    if dropped := len(extracted.outcome.candidates) - len(candidates):
+        await job.log.warning(
+            "extraction_candidates_dropped",
+            conversation_id=job.conversation_id,
+            candidates_dropped=dropped,
+        )
+    topic_path = extracted.topic_path
+    if topic_path is None or not candidates:
         await job.log.info(
             "extraction_nothing_to_record",
             conversation_id=job.conversation_id,
-            topic_usable=extracted.topic_path is not None,
+            topic_usable=topic_path is not None,
         )
         await _complete_without_entries(job, content_hash(loaded.messages), spent)
         await _settle_budget(ctx, job, bucket, spent.cents, "budget_refund_failed")
         return _result(None, 0, spent, skipped=True)
+    extracted = replace(extracted, outcome=replace(extracted.outcome, candidates=candidates))
     embeddings = await embed_texts(
-        ctx["embedding_service"], [candidate.content for candidate in extracted.outcome.candidates]
+        ctx["embedding_service"], [candidate.content for candidate in candidates]
     )
-    entries_created = await _persist(ctx, job, loaded, extracted, extracted.topic_path, embeddings)
+    entries_created = await _persist(ctx, job, loaded, extracted, topic_path, embeddings)
     if entries_created is None:
         await _settle_budget(ctx, job, bucket, spent.cents, "budget_delta_failed")
         return _result(None, 0, spent, skipped=True)
     # Best-effort and after commit: a Redis failure never rolls back the run.
     await _settle_budget(ctx, job, bucket, spent.cents, "budget_delta_failed")
-    return _result(extracted.topic_path, entries_created, spent, skipped=False)
+    return _result(topic_path, entries_created, spent, skipped=False)

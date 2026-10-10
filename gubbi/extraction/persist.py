@@ -42,6 +42,7 @@ __all__: list[str] = [
     "PersistResult",
     "ensure_topic",
     "persist_extraction",
+    "sanitize_candidates",
 ]
 
 logger = structlog.get_logger(__name__)
@@ -63,8 +64,9 @@ class EmbeddingStore(Protocol):
 class ExtractionToPersist:
     """Everything one extraction run writes, gathered before the connection is taken.
 
-    ``embeddings[i]`` is the embedding of ``candidates[i].content``. ``job_id`` is
-    None when the run has no job row to complete.
+    ``candidates`` are the output of :func:`sanitize_candidates`, and
+    ``embeddings[i]`` is the embedding of ``candidates[i].content`` as stored.
+    ``job_id`` is None when the run has no job row to complete.
     """
 
     user_id: UUID
@@ -146,19 +148,16 @@ async def persist_extraction(
     ``duplicate_of_entry_id`` naming the entry it resembles. Inserted entries carry
     the run's client and conversation and get their embedding stored.
 
-    Candidate text is sanitized and capped as the MCP write path stores it
-    before dedupe compares it; a candidate left empty or carrying tool-call
-    syntax is dropped. Concurrent runs for the same user and event day are
-    serialized from the neighbour read to commit, so two runs cannot both
-    miss each other's entry and insert it twice.
+    Candidates must already be sanitized by :func:`sanitize_candidates`, so the
+    embeddings the caller computed encode exactly the stored text; a candidate
+    that is not raises ``ValueError`` before anything is written. Concurrent
+    runs for the same user and event day are serialized from the neighbour
+    read to commit, so two runs cannot both miss each other's entry and
+    insert it twice.
     """
-    run, dropped = _sanitized(run)
-    if dropped:
-        await logger.warning(
-            "extraction_candidates_dropped",
-            conversation_id=run.conversation_id,
-            candidates_dropped=dropped,
-        )
+    if not all(_is_sanitized(candidate) for candidate in run.candidates):
+        msg = "persist_extraction requires candidates from sanitize_candidates"
+        raise ValueError(msg)
     topic_id, topic_created = await ensure_topic(conn, run.topic_path, run.topic_title)
     await entry_repo.lock_dedupe_days(
         conn, run.user_id, [candidate.entry_date for candidate in run.candidates], run.client
@@ -203,19 +202,27 @@ def _sanitized_candidate(candidate: ExtractedCandidate) -> ExtractedCandidate | 
     return replace(candidate, content=content, why=why, tags=tags)
 
 
-def _sanitized(run: ExtractionToPersist) -> tuple[ExtractionToPersist, int]:
-    """``run`` with every candidate sanitized, and how many were dropped as unstorable."""
-    kept = [
-        (safe, embedding)
-        for candidate, embedding in zip(run.candidates, run.embeddings, strict=True)
-        if (safe := _sanitized_candidate(candidate)) is not None
-    ]
-    sanitized = replace(
-        run,
-        candidates=tuple(candidate for candidate, _ in kept),
-        embeddings=tuple(embedding for _, embedding in kept),
+def sanitize_candidates(candidates: Sequence[ExtractedCandidate]) -> tuple[ExtractedCandidate, ...]:
+    """The candidates as they will be stored, in order, minus any that must not be stored.
+
+    Text is sanitized and capped as the MCP write path stores it; a candidate
+    left empty or carrying tool-call syntax is dropped. Embed and dedupe the
+    result, never the raw model output.
+    """
+    return tuple(
+        safe for candidate in candidates if (safe := _sanitized_candidate(candidate)) is not None
     )
-    return sanitized, len(run.candidates) - len(kept)
+
+
+def _is_sanitized(candidate: ExtractedCandidate) -> bool:
+    # sanitize_label is not idempotent: a label whose stripped characters left a
+    # trailing space loses that space when sanitized again.
+    safe = _sanitized_candidate(candidate)
+    return (
+        safe is not None
+        and (safe.content, safe.why) == (candidate.content, candidate.why)
+        and all(tag.strip() and sanitize_label(tag) == tag.strip() for tag in candidate.tags)
+    )
 
 
 async def _classify(

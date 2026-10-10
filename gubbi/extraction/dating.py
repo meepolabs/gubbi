@@ -1,11 +1,13 @@
 """Event-date resolution for extracted entries.
 
 An extracted entry's date is when the event happened, not when the worker ran.
-Resolution order: the model-supplied date (if it is a valid ISO date and not
-in the future), then the date of the message the entry was drawn from, then
-the conversation's latest message, then the conversation's created date.
-The worker's own clock is never a fallback; ``today`` only bounds the model
-date.
+Resolution order: the model-supplied date (if it is a valid ISO date no later
+than the conversation's latest known date), then the date of the message the
+entry was drawn from, then the conversation's latest message, then the
+conversation's created date. The latest known date is the latest dated
+message, or the created date when no message is dated, and never later than
+``today``: a conversation synced long after it happened cannot take the sync
+day. The worker's own clock is never a fallback.
 """
 
 from __future__ import annotations
@@ -34,19 +36,18 @@ def resolve_event_date(
     today: date,
 ) -> date:
     """Return the event date for an extracted entry."""
+    message_dates = [d for d in (_timestamp_date(m.timestamp) for m in messages) if d is not None]
+    latest_known = max(message_dates) if message_dates else conversation_created
+
     from_model = _parse_model_date(model_date)
-    if from_model is not None and from_model <= today:
+    if from_model is not None and from_model <= min(latest_known, today):
         return from_model
 
     from_source = _source_message_date(source_message_index, messages)
     if from_source is not None:
         return from_source
 
-    message_dates = [d for d in (_timestamp_date(m.timestamp) for m in messages) if d is not None]
-    if message_dates:
-        return max(message_dates)
-
-    return conversation_created
+    return latest_known
 
 
 def _parse_model_date(value: str | None) -> date | None:

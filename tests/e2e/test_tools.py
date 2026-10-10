@@ -221,6 +221,31 @@ class TestConversationFlow:
         listed = await tools["journal_list_conversations"](topic_prefix="work")
         assert listed["total"] == 1
 
+    async def test_save_keeps_only_user_and_assistant_turns(self, tools: dict) -> None:
+        await tools["journal_create_topic"](topic="test/roles", title="Role Filter")
+        result = await tools["journal_save_conversation"](
+            topic="test/roles",
+            title="Mixed Roles",
+            messages=[
+                {"role": "system", "content": "SYSTEM-PROMPT-MARKER"},
+                {"role": "user", "content": "USER-TURN-MARKER"},
+                {"role": "tool", "content": "TOOL-OUTPUT-MARKER"},
+                {"role": "assistant", "content": "   "},
+                {"role": "assistant", "content": "ASSISTANT-TURN-MARKER"},
+                {"role": "user", "content": ""},
+            ],
+            summary="Mixed roles.",
+        )
+
+        read = await tools["journal_read_conversation"](conversation_id=result["conversation_id"])
+
+        content = read["content"]
+        assert read["metadata"]["message_count"] == 2
+        assert read["messages_total"] == 2
+        assert content.index("USER-TURN-MARKER") < content.index("ASSISTANT-TURN-MARKER")
+        assert "SYSTEM-PROMPT-MARKER" not in content
+        assert "TOOL-OUTPUT-MARKER" not in content
+
     async def test_save_returns_conversation_id(self, tools: dict) -> None:
         await tools["journal_create_topic"](topic="hobbies/running", title="Running")
         result = await tools["journal_save_conversation"](

@@ -1285,12 +1285,24 @@ class DedupeNeighbour:
 # by a 2**-64 accident, and a coincidence costs a wait, never a wrong result.
 _DEDUPE_LOCK_NAMESPACE = "gubbi:entries:dedupe"
 
+# Above this many distinct days a run takes one per-user lock instead of a lock
+# per day, so the advisory locks one transaction holds in the shared lock table
+# stay bounded whatever dates the model chose.
+DEDUPE_PER_DAY_LOCK_MAX_DAYS = 32
+
 
 def _dedupe_lock_key(user_id: UUID, day: date_cls, client: str | None) -> int:
     # ``-`` cannot be confused with a client because a present client is
     # always written with a leading ``=``.
     client_part = "-" if client is None else f"={client}"
     name = f"{_DEDUPE_LOCK_NAMESPACE}:{user_id}:{day.isoformat()}:{client_part}"
+    digest = hashlib.blake2b(name.encode(), digest_size=8).digest()
+    return int.from_bytes(digest, "big", signed=True)
+
+
+def _dedupe_user_lock_key(user_id: UUID) -> int:
+    # ``*`` never appears in an ISO date, so this name cannot equal a per-day name.
+    name = f"{_DEDUPE_LOCK_NAMESPACE}:{user_id}:*"
     digest = hashlib.blake2b(name.encode(), digest_size=8).digest()
     return int.from_bytes(digest, "big", signed=True)
 
@@ -1310,12 +1322,22 @@ async def lock_dedupe_days(
     (user, day) gets an exclusive transaction-scoped advisory lock on the run's
     own client and, for a named client, a shared lock on the unknown client.
     Runs of two different named clients share only the shared lock and do not
-    wait for each other. Locks are taken one at a time in ascending key order
-    so concurrent callers cannot deadlock on each other.
+    wait for each other.
+
+    A run spanning more than ``DEDUPE_PER_DAY_LOCK_MAX_DAYS`` distinct days
+    takes one exclusive per-user lock instead, which every per-day run also
+    holds in shared mode: it waits for and blocks every other run of the user.
+    The per-user lock is taken first and the per-day locks then one at a time
+    in ascending key order, so concurrent callers cannot deadlock on each other.
     """
     if not dates:
         return
     days = set(dates)
+    user_key = _dedupe_user_lock_key(user_id)
+    if len(days) > DEDUPE_PER_DAY_LOCK_MAX_DAYS:
+        await conn.execute("SELECT pg_advisory_xact_lock($1::bigint)", user_key)
+        return
+    await conn.execute("SELECT pg_advisory_xact_lock_shared($1::bigint)", user_key)
     locks = {(_dedupe_lock_key(user_id, day, client), False) for day in days}
     if client is not None:
         locks |= {(_dedupe_lock_key(user_id, day, None), True) for day in days}
