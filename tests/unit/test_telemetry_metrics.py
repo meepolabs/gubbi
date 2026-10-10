@@ -66,7 +66,7 @@ def _restore_otel_globals() -> Iterator[None]:
         otel_metrics_internal._METER_PROVIDER = saved_provider  # type: ignore[attr-defined]
         otel_metrics_internal._METER_PROVIDER_SET_ONCE = saved_once  # type: ignore[attr-defined]
         gubbi_metrics.initialize_metrics.cache_clear()
-        # clear the three orphan-counter factory caches so each test
+        # clear the orphan-counter factory caches so each test
         # observes a fresh meter resolution rather than the last test's
         # cached counter object.
         #
@@ -80,11 +80,13 @@ def _restore_otel_globals() -> Iterator[None]:
             _get_extraction_refund_skipped_counter,
         )
         from gubbi.extraction.llm.anthropic_provider import _get_anthropic_retry_counter
+        from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
         from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
 
         _get_orphan_cleanup_swept_counter.cache_clear()
         _get_extraction_refund_skipped_counter.cache_clear()
         _get_anthropic_retry_counter.cache_clear()
+        _get_llm_retry_counter.cache_clear()
 
 
 def _set_provider(provider: object) -> None:
@@ -683,6 +685,38 @@ def test_anthropic_retry_counter_rebinds_to_real_provider() -> None:
     assert isinstance(rebound, Counter)
     assert not type(rebound).__name__.startswith("NoOp")
     # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
+
+
+def test_llm_retry_counter_rebinds_to_real_provider() -> None:
+    """``llm.retry_count_total`` lands in a real reader after rebind."""
+    from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
+    from gubbi.telemetry import rebind_metrics_after_configure
+
+    _set_provider(NoOpMeterProvider())
+    _get_llm_retry_counter.cache_clear()
+    _get_llm_retry_counter().add(
+        1, attributes={"result": "retried", "error_class": "LLMTransientError"}
+    )
+    sealed = _get_llm_retry_counter()
+    assert type(sealed).__name__.startswith("NoOp"), (
+        "precondition: factory must be sealed against NoOp"
+    )
+
+    reader = InMemoryMetricReader()
+    _set_provider(MeterProvider(metric_readers=[reader]))
+
+    rebind_metrics_after_configure()
+
+    _get_llm_retry_counter().add(
+        1, attributes={"result": "exhausted", "error_class": "LLMRateLimitError"}
+    )
+    found, total = _walk_counter_total(reader, "llm.retry_count_total")
+
+    assert found, (
+        "llm.retry_count_total not found in exported metrics -- "
+        "factory still bound to NoOp; rebind hook is not wiring this counter"
+    )
+    assert total == 1, f"expected counter sum == 1 after rebind+add, got {total}"
 
 
 def test_orphan_counter_modules_have_no_module_scope_counter_names() -> None:

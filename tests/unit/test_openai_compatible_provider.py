@@ -9,14 +9,18 @@ reasoning tokens as top-level usage fields, which is the shape under test.
 from __future__ import annotations
 
 import copy
+import email.utils
 import json
 import pathlib
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx2
 import pytest
 
+from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
+from gubbi.extraction.llm import openai_compatible
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.llm.provider import (
     LLMMessage,
@@ -64,7 +68,36 @@ def _json_response(body: dict[str, Any], status: int = 200) -> Callable[..., htt
     return respond
 
 
-def _provider(recorder: _Recorder) -> OpenAICompatibleProvider:
+class _SleepLog:
+    def __init__(self) -> None:
+        self.delays: list[float] = []
+
+    async def __call__(self, seconds: float) -> None:
+        self.delays.append(seconds)
+
+
+def _sequence(*responders: Callable[[httpx2.Request], httpx2.Response]) -> _Recorder:
+    """Answer the n-th request with the n-th responder; the last one repeats."""
+    queue: Iterator[Callable[[httpx2.Request], httpx2.Response]] = iter(responders)
+    current = responders[-1]
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        nonlocal current
+        current = next(queue, current)
+        return current(request)
+
+    return _Recorder(respond)
+
+
+def _status(status: int, headers: dict[str, str] | None = None) -> Callable[..., httpx2.Response]:
+    def respond(_request: httpx2.Request) -> httpx2.Response:
+        body = {"error": {"message": _OUTPUT_SENTINEL, "type": "error"}}
+        return httpx2.Response(status, json=body, headers=headers)
+
+    return respond
+
+
+def _provider(recorder: _Recorder, sleep: _SleepLog | None = None) -> OpenAICompatibleProvider:
     return OpenAICompatibleProvider(
         base_url="https://llm.example.test/v1",
         api_key="test-key",
@@ -74,6 +107,7 @@ def _provider(recorder: _Recorder) -> OpenAICompatibleProvider:
         max_output_tokens=512,
         timeout=5.0,
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(recorder)),
+        sleep=sleep or _SleepLog(),
     )
 
 
@@ -267,31 +301,139 @@ async def test_text_mode_returns_text_without_response_format() -> None:
     assert "response_format" not in recorder.requests[0]
 
 
+@pytest.mark.parametrize("status", [400, 401, 404, 422])
+async def test_permanent_http_status_raises_after_one_request(status: int) -> None:
+    recorder = _Recorder(_status(status))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMPermanentError
+    assert _OUTPUT_SENTINEL not in str(excinfo.value)
+    assert len(recorder.requests) == 1
+    assert sleep.delays == []
+
+
 @pytest.mark.parametrize(
     ("status", "error_class"),
     [
-        pytest.param(400, LLMPermanentError, id="400"),
-        pytest.param(401, LLMPermanentError, id="401"),
         pytest.param(408, LLMTransientError, id="408"),
         pytest.param(429, LLMRateLimitError, id="429"),
+        pytest.param(500, LLMTransientError, id="500"),
         pytest.param(503, LLMTransientError, id="503"),
     ],
 )
-async def test_http_status_maps_to_error_class_after_one_request(
+async def test_retryable_http_status_exhausts_attempts_then_maps_to_error_class(
     status: int, error_class: type[LLMProviderError]
 ) -> None:
-    error_body = {"error": {"message": _OUTPUT_SENTINEL, "type": "error"}}
-    recorder = _Recorder(_json_response(error_body, status=status))
+    recorder = _Recorder(_status(status))
+    sleep = _SleepLog()
 
     with pytest.raises(LLMProviderError) as excinfo:
-        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
 
     assert type(excinfo.value) is error_class
     assert _OUTPUT_SENTINEL not in str(excinfo.value)
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    assert len(sleep.delays) == LLM_MAX_ATTEMPTS - 1
+
+
+async def test_transient_failures_then_success_reports_attempt_count() -> None:
+    recorder = _sequence(_status(503), _status(503), _json_response(_stop_body()))
+    sleep = _SleepLog()
+
+    response = await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert response.attempts == 3
+    assert response.content == json.loads(_stop_body()["choices"][0]["message"]["content"])
+    assert len(recorder.requests) == 3
+    assert len(sleep.delays) == 2
+
+
+async def test_backoff_grows_between_attempts() -> None:
+    recorder = _Recorder(_status(503))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMTransientError):
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    first, second = sleep.delays
+    assert 0 < first <= second <= LLM_BACKOFF_CAP_SECS
+
+
+def _http_date_in_30s() -> str:
+    return email.utils.format_datetime(datetime.now(UTC) + timedelta(seconds=30), usegmt=True)
+
+
+@pytest.mark.parametrize(
+    ("retry_after", "minimum"),
+    [
+        pytest.param(lambda: "7", 7.0, id="delta-seconds"),
+        pytest.param(lambda: "2.5", 2.5, id="fractional-seconds"),
+        pytest.param(_http_date_in_30s, 28.0, id="http-date"),
+    ],
+)
+async def test_rate_limit_waits_at_least_retry_after(
+    retry_after: Callable[[], str], minimum: float
+) -> None:
+    recorder = _sequence(_status(429, {"Retry-After": retry_after()}), _json_response(_stop_body()))
+    sleep = _SleepLog()
+
+    response = await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert response.attempts == 2
+    assert len(sleep.delays) == 1
+    assert minimum <= sleep.delays[0] <= LLM_BACKOFF_CAP_SECS
+
+
+async def test_retry_after_beyond_cap_stops_retrying() -> None:
+    too_long = str(int(LLM_BACKOFF_CAP_SECS) + 1)
+    recorder = _Recorder(_status(429, {"Retry-After": too_long}))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMRateLimitError):
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
     assert len(recorder.requests) == 1
+    assert sleep.delays == []
 
 
-async def test_transport_timeout_maps_to_timeout_error() -> None:
+@pytest.mark.parametrize("retry_after", ["soon", ""], ids=["unparseable", "empty"])
+async def test_unusable_retry_after_falls_back_to_backoff(retry_after: str) -> None:
+    recorder = _sequence(_status(429, {"Retry-After": retry_after}), _json_response(_stop_body()))
+    sleep = _SleepLog()
+
+    response = await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert response.attempts == 2
+    assert 0 < sleep.delays[0] <= LLM_BACKOFF_CAP_SECS
+
+
+class _CounterLog:
+    def __init__(self) -> None:
+        self.points: list[dict[str, str]] = []
+
+    def add(self, amount: int, attributes: dict[str, str]) -> None:
+        self.points.extend([attributes] * amount)
+
+
+async def test_retry_counter_records_each_retry_and_the_exhaustion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    counter = _CounterLog()
+    monkeypatch.setattr(openai_compatible, "_get_llm_retry_counter", lambda: counter)
+    recorder = _Recorder(_status(429))
+
+    with pytest.raises(LLMRateLimitError):
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    retried = {"result": "retried", "error_class": "LLMRateLimitError"}
+    exhausted = {"result": "exhausted", "error_class": "LLMRateLimitError"}
+    assert counter.points == [retried] * (LLM_MAX_ATTEMPTS - 1) + [exhausted]
+
+
+async def test_transport_timeout_retries_then_maps_to_timeout_error() -> None:
     def respond(request: httpx2.Request) -> httpx2.Response:
         raise httpx2.ReadTimeout("timed out", request=request)
 
@@ -300,7 +442,7 @@ async def test_transport_timeout_maps_to_timeout_error() -> None:
     with pytest.raises(LLMTimeoutError):
         await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
 
-    assert len(recorder.requests) == 1
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
 
 
 async def test_connection_error_maps_to_transient_not_timeout() -> None:
@@ -313,6 +455,20 @@ async def test_connection_error_maps_to_transient_not_timeout() -> None:
         await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
 
     assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+
+
+async def test_non_json_output_is_not_retried() -> None:
+    body = _stop_body()
+    body["choices"][0]["message"]["content"] = _OUTPUT_SENTINEL
+    recorder = _Recorder(_json_response(body))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMSchemaError):
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert len(recorder.requests) == 1
+    assert sleep.delays == []
 
 
 def test_estimate_cost_uses_configured_prices() -> None:

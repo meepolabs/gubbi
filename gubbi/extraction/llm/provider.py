@@ -19,7 +19,7 @@ class LLMUsage:
     reasoning: int = 0
 
 
-@dataclass
+@dataclass(frozen=True)
 class LLMResponse:
     content: str | dict[str, Any]
     input_tokens: int
