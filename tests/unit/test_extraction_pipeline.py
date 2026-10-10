@@ -9,6 +9,12 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 
+from gubbi.extraction.chunk_extraction import (
+    CHUNK_CATEGORIZE_SCHEMA,
+    CHUNK_ENTRIES_SCHEMA,
+    CHUNK_EXTRACTION_SCHEMA,
+    TRIAGE_SCHEMA,
+)
 from gubbi.extraction.chunking import chunk_messages, split_in_two
 from gubbi.extraction.llm.provider import (
     LLMMessage,
@@ -63,6 +69,7 @@ class _ScriptedProvider:
         self._steps = list(steps)
         self._attempts = attempts
         self.user_contents: list[str] = []
+        self.schemas: list[Mapping[str, Any] | None] = []
 
     async def complete(
         self,
@@ -71,6 +78,7 @@ class _ScriptedProvider:
         output_schema: Mapping[str, Any] | None = None,
     ) -> LLMResponse:
         self.user_contents.append(messages[0]["content"])
+        self.schemas.append(output_schema)
         step = self._steps.pop(0)
         if isinstance(step, Exception):
             raise step
@@ -160,6 +168,7 @@ async def _run(
     *,
     deadline: float = 100.0,
     clock: Callable[[], float] = lambda: 0.0,
+    **modes: Any,
 ) -> Any:
     return await run_pipeline(
         ExtractionService(provider),
@@ -169,6 +178,7 @@ async def _run(
         deadline=deadline,
         today=TODAY,
         clock=clock,
+        **modes,
     )
 
 
@@ -425,6 +435,7 @@ EXPECTED_SPAN_KEYS = {
     "finish_reason",
     "attempts",
     "chunk_index",
+    "stage",
     "latency_ms",
 }
 
@@ -483,3 +494,192 @@ async def test_call_log_lines_carry_sizes_but_no_transcript_text(log_capture: Lo
     assert log_capture.text.count("extraction_llm_call") == 2
     assert '"prompt_size": 900' in log_capture.text
     assert SECRET not in log_capture.text
+
+
+# -- Default mode ----------------------------------------------------------------
+
+
+async def test_default_arguments_make_only_single_call_extractions() -> None:
+    messages = _large_conversation()
+    chunk_count = len(chunk_messages(messages))
+    provider = _ScriptedProvider([_output() for _ in range(chunk_count)])
+
+    await _run(provider, messages)
+
+    assert provider.schemas == [CHUNK_EXTRACTION_SCHEMA] * chunk_count
+
+
+# -- Two-call mode ---------------------------------------------------------------
+
+TOPIC_HEADING = "## Topic\n"
+
+
+def _category(topic: str = "work/launch", summary: str = "Planned the launch.") -> dict[str, Any]:
+    return {"topic_path": topic, "topic_title": topic.title(), "summary": summary}
+
+
+def _entries(*entries: dict[str, Any]) -> dict[str, Any]:
+    return {"entries": list(entries)}
+
+
+async def test_two_call_categorizes_once_then_extracts_every_chunk_under_that_topic() -> None:
+    messages = _large_conversation()
+    chunks = chunk_messages(messages)
+    steps: list[Step] = [_category()] + [
+        _entries(_entry(f"decision-{i}")) for i in range(len(chunks))
+    ]
+    provider = _ScriptedProvider(steps)
+
+    outcome = await _run(provider, messages, mode="two_call")
+
+    assert provider.schemas == [CHUNK_CATEGORIZE_SCHEMA] + [CHUNK_ENTRIES_SCHEMA] * len(chunks)
+    assert provider.transcript_of(0) == chunks[0].text
+    assert [provider.transcript_of(i + 1) for i in range(len(chunks))] == [c.text for c in chunks]
+    for call in range(1, len(chunks) + 1):
+        assert f"{TOPIC_HEADING}work/launch\n" in provider.user_contents[call]
+    assert "decision-0" in provider.prior_section_of(len(chunks))
+    assert outcome.llm_calls == len(chunks) + 1
+    assert outcome.chunks == len(chunks)
+    assert outcome.usage == _times(CALL_USAGE, len(chunks) + 1)
+
+
+async def test_two_call_yields_the_same_outcome_as_single_for_the_same_model_answers() -> None:
+    entries = [
+        _entry("picked vendor", "2026-01-20", 0),
+        _entry("launch in spring", None, 2),
+        _entry("future claim", "2099-01-01", 1),
+    ]
+    single = await _run(
+        _ScriptedProvider([_output(entries=entries)]), _small_conversation(), mode="single"
+    )
+
+    two_call = await _run(
+        _ScriptedProvider([_category(), _entries(*entries)]),
+        _small_conversation(),
+        mode="two_call",
+    )
+
+    assert type(two_call) is type(single)
+    assert two_call.candidates == single.candidates
+    assert (two_call.topic_path, two_call.topic_title, two_call.summary) == (
+        single.topic_path,
+        single.topic_title,
+        single.summary,
+    )
+
+
+async def test_two_call_truncated_entries_call_splits_without_recategorizing() -> None:
+    messages = _small_conversation()
+    (chunk,) = chunk_messages(messages)
+    first_half, second_half = split_in_two(chunk)
+    provider = _ScriptedProvider(
+        [_category(), _truncated(), _entries(_entry("a")), _entries(_entry("b"))]
+    )
+
+    outcome = await _run(provider, messages, mode="two_call")
+
+    assert provider.schemas == [CHUNK_CATEGORIZE_SCHEMA] + [CHUNK_ENTRIES_SCHEMA] * 3
+    assert provider.transcript_of(2) == first_half.text
+    assert provider.transcript_of(3) == second_half.text
+    assert [c.content for c in outcome.candidates] == ["a", "b"]
+    assert outcome.chunks == 2
+    assert outcome.usage == _plus(_times(CALL_USAGE, 3), FAILED_USAGE)
+
+
+async def test_two_call_categorize_failure_makes_no_entries_call_and_counts_its_usage() -> None:
+    provider = _ScriptedProvider([LLMRefusalError("refused", usage=FAILED_USAGE, attempts=2)])
+
+    failure = await _failure(provider, _small_conversation(), mode="two_call")
+
+    assert isinstance(failure.error, LLMRefusalError)
+    assert provider.schemas == [CHUNK_CATEGORIZE_SCHEMA]
+    assert failure.llm_calls == 2
+    assert failure.usage_so_far == FAILED_USAGE
+
+
+# -- Triage ----------------------------------------------------------------------
+
+
+def _verdict(worth_recording: bool) -> dict[str, Any]:
+    return {"worth_recording": worth_recording}
+
+
+@pytest.mark.parametrize("mode", ["single", "two_call"])
+async def test_triage_negative_chunk_makes_no_extraction_call_and_counts_triage_usage(
+    mode: str,
+) -> None:
+    provider = _ScriptedProvider([_verdict(False)], attempts=2)
+
+    outcome = await _run(provider, _small_conversation(), mode=mode, triage_enabled=True)
+
+    assert provider.schemas == [TRIAGE_SCHEMA]
+    assert provider.transcript_of(0) == chunk_messages(_small_conversation())[0].text
+    assert outcome.candidates == ()
+    assert (outcome.topic_path, outcome.topic_title, outcome.summary) == ("", "", "")
+    assert outcome.usage == CALL_USAGE
+    assert outcome.llm_calls == 2
+
+
+async def test_triage_positive_chunk_is_extracted_and_both_calls_are_counted() -> None:
+    provider = _ScriptedProvider([_verdict(True), _output(entries=[_entry("picked vendor")])])
+
+    outcome = await _run(provider, _small_conversation(), triage_enabled=True)
+
+    assert provider.schemas == [TRIAGE_SCHEMA, CHUNK_EXTRACTION_SCHEMA]
+    assert [c.content for c in outcome.candidates] == ["picked vendor"]
+    assert outcome.llm_calls == 2
+    assert outcome.usage == _times(CALL_USAGE, 2)
+
+
+async def test_two_call_with_triage_categorizes_on_the_first_chunk_worth_recording() -> None:
+    messages = _large_conversation()
+    chunks = chunk_messages(messages)
+    rest: list[Step] = []
+    for _ in chunks[2:]:
+        rest += [_verdict(True), _entries()]
+    steps: list[Step] = [
+        _verdict(False),
+        _verdict(True),
+        _category(topic="work/second"),
+        _entries(),
+        *rest,
+    ]
+    provider = _ScriptedProvider(steps)
+
+    outcome = await _run(provider, messages, mode="two_call", triage_enabled=True)
+
+    assert provider.schemas[:4] == [
+        TRIAGE_SCHEMA,
+        TRIAGE_SCHEMA,
+        CHUNK_CATEGORIZE_SCHEMA,
+        CHUNK_ENTRIES_SCHEMA,
+    ]
+    assert provider.schemas.count(CHUNK_CATEGORIZE_SCHEMA) == 1
+    assert provider.transcript_of(2) == chunks[1].text
+    assert outcome.topic_path == "work/second"
+    assert outcome.llm_calls == len(steps)
+
+
+async def test_triage_failure_fails_the_run_and_counts_its_requests() -> None:
+    provider = _ScriptedProvider([LLMTransientError("down", attempts=3)])
+
+    failure = await _failure(provider, _small_conversation(), triage_enabled=True)
+
+    assert isinstance(failure.error, LLMTransientError)
+    assert provider.schemas == [TRIAGE_SCHEMA]
+    assert failure.llm_calls == 3
+
+
+async def test_spans_name_the_stage_of_each_call(
+    in_memory_tracer: tuple[Any, InMemoryExporter],
+) -> None:
+    _, exporter = in_memory_tracer
+    provider = _ScriptedProvider([_verdict(True), _category(), _entries()])
+
+    await _run(provider, _small_conversation(), mode="two_call", triage_enabled=True)
+
+    assert [attrs["stage"] for attrs in _llm_spans(exporter)] == [
+        "triage",
+        "categorize",
+        "extract",
+    ]

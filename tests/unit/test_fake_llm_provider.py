@@ -39,6 +39,26 @@ async def test_chunk_schema_yields_one_entry_under_testbench_topic() -> None:
     assert result.usage == _CANNED_USAGE
 
 
+async def test_two_call_schemas_yield_testbench_topic_and_one_entry() -> None:
+    service = ExtractionService(FakeLLMProvider())
+
+    categorized = await service.categorize_chunk("[0] [undated] user: hello", [])
+    extracted = await service.extract_chunk_entries(
+        "[0] [undated] user: hello", categorized.topic_path, ""
+    )
+
+    assert categorized.topic_path == "testbench/fake"
+    assert len(extracted.entries) == 1
+    assert extracted.usage == _CANNED_USAGE
+
+
+async def test_triage_schema_says_worth_recording() -> None:
+    verdict = await ExtractionService(FakeLLMProvider()).triage("[0] [undated] user: hello")
+
+    assert verdict.worth_recording is True
+    assert verdict.usage == _CANNED_USAGE
+
+
 async def test_categorize_schema_returns_unchanged_canned_topic() -> None:
     response = await FakeLLMProvider().complete(_msg("hi"), "sys", _CATEGORIZE_SCHEMA)
 

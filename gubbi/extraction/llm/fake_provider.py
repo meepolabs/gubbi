@@ -146,18 +146,39 @@ class FakeLLMProvider(LLMProvider):
         return round(cents, 6)
 
 
+_CANNED_TOPIC_PATH = "testbench/fake"
+_CANNED_TOPIC_TITLE = "Testbench Fake Topic"
+
+
+def _canned_chunk_entry() -> dict[str, Any]:
+    return {
+        "content": "fake decision marker from FakeLLMProvider",
+        "why": "canned reasoning from FakeLLMProvider",
+        "tags": ["fake", "testbench"],
+        "event_date": None,
+        "source_message_index": 0,
+    }
+
+
+def _entry_properties(properties: Mapping[str, Any]) -> Mapping[str, Any]:
+    entry_schema: Mapping[str, Any] = properties["entries"].get("items", {})
+    entry_properties: Mapping[str, Any] = entry_schema.get("properties", {})
+    return entry_properties
+
+
 def _canned_content_for_schema(
     output_schema: Mapping[str, Any] | None,
 ) -> str | dict[str, Any]:
     """Return the dict that ExtractionService expects for this schema.
 
-    Three schema shapes are exercised: the single-call chunk schema
-    (topic_path ... plus entries), the categorize schema (topic_path /
-    topic_title / summary / confidence) and the extract-entries schema
-    (entries: [{content, reasoning, tags, ...}]). Distinguished by the property set so a
-    future third schema with a fresh property name surfaces as
-    "FakeLLMProvider canned response shape drift" rather than silently
-    returning the wrong dict.
+    Schema shapes exercised: the single-call chunk schema (topic_path ...
+    plus entries), the chunk categorize schema (topic_path / topic_title /
+    summary), the chunk entries schema (entries: [{content, why, ...}]), the
+    triage schema (worth_recording, always true), and the legacy categorize
+    (adds confidence) and extract-entries (entries: [{content, reasoning,
+    ...}]) schemas. Distinguished by the property set so a future schema with
+    a fresh property name surfaces as "FakeLLMProvider canned response shape
+    drift" rather than silently returning the wrong dict.
 
     A ``None`` schema (free-form completion) returns a string so the
     contract matches the real provider's text-mode return shape.
@@ -166,27 +187,29 @@ def _canned_content_for_schema(
         return "fake free-form response from FakeLLMProvider"
 
     properties = output_schema.get("properties", {})
+    if "worth_recording" in properties:
+        return {"worth_recording": True}
     # The chunk schema carries both topic_path and entries, so it must be
     # matched before the categorize and extract-entries branches.
     if "topic_path" in properties and "entries" in properties:
         return {
-            "topic_path": "testbench/fake",
-            "topic_title": "Testbench Fake Topic",
+            "topic_path": _CANNED_TOPIC_PATH,
+            "topic_title": _CANNED_TOPIC_TITLE,
             "summary": "Canned chunk summary from FakeLLMProvider.",
-            "entries": [
-                {
-                    "content": "fake decision marker from FakeLLMProvider",
-                    "why": "canned reasoning from FakeLLMProvider",
-                    "tags": ["fake", "testbench"],
-                    "event_date": None,
-                    "source_message_index": 0,
-                }
-            ],
+            "entries": [_canned_chunk_entry()],
         }
+    if "topic_path" in properties and "confidence" not in properties:
+        return {
+            "topic_path": _CANNED_TOPIC_PATH,
+            "topic_title": _CANNED_TOPIC_TITLE,
+            "summary": "Canned chunk summary from FakeLLMProvider.",
+        }
+    if "entries" in properties and "why" in _entry_properties(properties):
+        return {"entries": [_canned_chunk_entry()]}
     if "topic_path" in properties:
         return {
-            "topic_path": "testbench/fake",
-            "topic_title": "Testbench Fake Topic",
+            "topic_path": _CANNED_TOPIC_PATH,
+            "topic_title": _CANNED_TOPIC_TITLE,
             "summary": "Canned categorization summary from FakeLLMProvider.",
             "confidence": 0.9,
         }

@@ -1,4 +1,10 @@
-"""Structured output of one single-call extraction over a transcript chunk.
+"""Structured outputs of the per-chunk extraction calls.
+
+The single-call schema returns topic, summary and entries in one object. The
+two-call variant splits it into a categorize schema (topic and summary) and an
+entries schema; both parse to :class:`ChunkExtraction` so the pipeline treats
+the modes alike. The triage schema answers whether a chunk holds anything
+worth recording.
 
 The JSON schema is written in strict form (every property required,
 ``additionalProperties: false``, nullables as type unions with ``null``)
@@ -22,10 +28,17 @@ if TYPE_CHECKING:
     from pydantic_core import ErrorDetails
 
 __all__: list[str] = [
+    "CHUNK_CATEGORIZE_SCHEMA",
+    "CHUNK_ENTRIES_SCHEMA",
     "CHUNK_EXTRACTION_SCHEMA",
+    "TRIAGE_SCHEMA",
     "ChunkEntry",
     "ChunkExtraction",
+    "TriageVerdict",
+    "parse_chunk_categorization",
+    "parse_chunk_entries",
     "parse_chunk_extraction",
+    "parse_triage",
 ]
 
 _ENTRY_SCHEMA: Final[Mapping[str, Any]] = {
@@ -50,6 +63,31 @@ CHUNK_EXTRACTION_SCHEMA: Final[Mapping[str, Any]] = {
         "entries": {"type": "array", "items": _ENTRY_SCHEMA},
     },
     "required": ["topic_path", "topic_title", "summary", "entries"],
+    "additionalProperties": False,
+}
+
+CHUNK_CATEGORIZE_SCHEMA: Final[Mapping[str, Any]] = {
+    "type": "object",
+    "properties": {
+        "topic_path": {"type": "string"},
+        "topic_title": {"type": "string"},
+        "summary": {"type": "string"},
+    },
+    "required": ["topic_path", "topic_title", "summary"],
+    "additionalProperties": False,
+}
+
+CHUNK_ENTRIES_SCHEMA: Final[Mapping[str, Any]] = {
+    "type": "object",
+    "properties": {"entries": {"type": "array", "items": _ENTRY_SCHEMA}},
+    "required": ["entries"],
+    "additionalProperties": False,
+}
+
+TRIAGE_SCHEMA: Final[Mapping[str, Any]] = {
+    "type": "object",
+    "properties": {"worth_recording": {"type": "boolean"}},
+    "required": ["worth_recording"],
     "additionalProperties": False,
 }
 
@@ -80,6 +118,16 @@ class ChunkExtraction:
     attempts: int = 1
 
 
+@dataclass(frozen=True)
+class TriageVerdict:
+    """Whether a chunk holds anything worth recording, plus the call's usage and outcome."""
+
+    worth_recording: bool
+    usage: LLMUsage
+    finish_reason: str = "stop"
+    attempts: int = 1
+
+
 class _EntryOutput(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
 
@@ -99,8 +147,30 @@ class _ChunkOutput(BaseModel):
     entries: list[_EntryOutput]
 
 
-_KNOWN_FIELDS: Final[frozenset[str]] = frozenset(_ChunkOutput.model_fields) | frozenset(
-    _EntryOutput.model_fields
+class _CategoryOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    topic_path: str
+    topic_title: str
+    summary: str
+
+
+class _EntriesOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    entries: list[_EntryOutput]
+
+
+class _TriageOutput(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, frozen=True)
+
+    worth_recording: bool
+
+
+_KNOWN_FIELDS: Final[frozenset[str]] = (
+    frozenset(_ChunkOutput.model_fields)
+    | frozenset(_EntryOutput.model_fields)
+    | frozenset(_TriageOutput.model_fields)
 )
 
 
@@ -116,16 +186,7 @@ def parse_chunk_extraction(
     Raises:
         LLMSchemaError: the output is not a JSON object matching the schema.
     """
-    decoded = _decode(content, usage, attempts)
-    errors: list[ErrorDetails] = []
-    try:
-        output = _ChunkOutput.model_validate(decoded)
-    except ValidationError as exc:
-        errors = exc.errors(include_url=False, include_input=False, include_context=False)
-    if errors:
-        # Raised outside the except block so no exception context (which
-        # embeds the offending values) is chained onto the schema error.
-        raise LLMSchemaError(_describe(errors), usage=usage, attempts=attempts)
+    output = _validate(_ChunkOutput, "chunk extraction", content, usage, attempts)
     return ChunkExtraction(
         topic_path=output.topic_path,
         topic_title=output.topic_title,
@@ -137,7 +198,97 @@ def parse_chunk_extraction(
     )
 
 
-def _decode(content: str | Mapping[str, Any], usage: LLMUsage, attempts: int) -> Mapping[str, Any]:
+def parse_chunk_categorization(
+    content: str | Mapping[str, Any],
+    usage: LLMUsage,
+    *,
+    finish_reason: str = "stop",
+    attempts: int = 1,
+) -> ChunkExtraction:
+    """Validate categorize output; the result carries no entries.
+
+    Raises:
+        LLMSchemaError: the output is not a JSON object matching the schema.
+    """
+    output = _validate(_CategoryOutput, "chunk categorization", content, usage, attempts)
+    return ChunkExtraction(
+        topic_path=output.topic_path,
+        topic_title=output.topic_title,
+        summary=output.summary,
+        entries=(),
+        usage=usage,
+        finish_reason=finish_reason,
+        attempts=attempts,
+    )
+
+
+def parse_chunk_entries(
+    content: str | Mapping[str, Any],
+    usage: LLMUsage,
+    *,
+    topic_path: str,
+    finish_reason: str = "stop",
+    attempts: int = 1,
+) -> ChunkExtraction:
+    """Validate entries output; the result carries ``topic_path`` and an empty title and summary.
+
+    Raises:
+        LLMSchemaError: the output is not a JSON object matching the schema.
+    """
+    output = _validate(_EntriesOutput, "chunk entries", content, usage, attempts)
+    return ChunkExtraction(
+        topic_path=topic_path,
+        topic_title="",
+        summary="",
+        entries=tuple(_to_entry(entry) for entry in output.entries),
+        usage=usage,
+        finish_reason=finish_reason,
+        attempts=attempts,
+    )
+
+
+def parse_triage(
+    content: str | Mapping[str, Any],
+    usage: LLMUsage,
+    *,
+    finish_reason: str = "stop",
+    attempts: int = 1,
+) -> TriageVerdict:
+    """Validate triage output and return a TriageVerdict.
+
+    Raises:
+        LLMSchemaError: the output is not a JSON object matching the schema.
+    """
+    output = _validate(_TriageOutput, "triage", content, usage, attempts)
+    return TriageVerdict(
+        worth_recording=output.worth_recording,
+        usage=usage,
+        finish_reason=finish_reason,
+        attempts=attempts,
+    )
+
+
+def _validate[M: BaseModel](
+    model: type[M],
+    label: str,
+    content: str | Mapping[str, Any],
+    usage: LLMUsage,
+    attempts: int,
+) -> M:
+    decoded = _decode(label, content, usage, attempts)
+    errors: list[ErrorDetails] = []
+    try:
+        return model.model_validate(decoded)
+    except ValidationError as exc:
+        errors = exc.errors(include_url=False, include_input=False, include_context=False)
+    # Raised outside the except block so no exception context (which
+    # embeds the offending values) is chained onto the schema error.
+    raise LLMSchemaError(_describe(label, errors), usage=usage, attempts=attempts)
+
+
+def _decode(
+    label: str, content: str | Mapping[str, Any], usage: LLMUsage, attempts: int
+) -> Mapping[str, Any]:
     if isinstance(content, Mapping):
         return content
     try:
@@ -145,9 +296,7 @@ def _decode(content: str | Mapping[str, Any], usage: LLMUsage, attempts: int) ->
     except json.JSONDecodeError:
         decoded = None
     if not isinstance(decoded, dict):
-        raise LLMSchemaError(
-            "chunk extraction output is not a JSON object", usage=usage, attempts=attempts
-        )
+        raise LLMSchemaError(f"{label} output is not a JSON object", usage=usage, attempts=attempts)
     return decoded
 
 
@@ -161,9 +310,9 @@ def _to_entry(entry: _EntryOutput) -> ChunkEntry:
     )
 
 
-def _describe(errors: list[ErrorDetails]) -> str:
+def _describe(label: str, errors: list[ErrorDetails]) -> str:
     problems = sorted({f"{_location(error['loc'])}: {error['type']}" for error in errors})
-    return "chunk extraction output failed schema validation: " + "; ".join(problems)
+    return f"{label} output failed schema validation: " + "; ".join(problems)
 
 
 def _location(loc: tuple[int | str, ...]) -> str:

@@ -174,6 +174,7 @@ GUBBI_SPAN_ALLOWLIST: Mapping[str, frozenset[str]] = {
             "finish_reason",
             "attempts",
             "chunk_index",
+            "stage",
             "latency_ms",
             "correlation_id",
         }
