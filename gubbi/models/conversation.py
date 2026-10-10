@@ -1,9 +1,11 @@
-"""Conversation data models: ConversationMeta and Message."""
+"""Conversation data models: ConversationMeta, Message, and the shared role filter."""
 
+from collections.abc import Iterable
 from typing import Annotated
 
 from pydantic import BaseModel, StringConstraints, field_validator
 
+from gubbi.tools.constants import KEEP_ROLES
 from gubbi.validation import validate_topic
 
 Tag128 = Annotated[str, StringConstraints(max_length=128)]
@@ -43,3 +45,13 @@ class Message(BaseModel):
     # True when the message content could not be decrypted and ``content`` holds
     # the soft-fail sentinel. Always False on the loud MCP path.
     decryption_failed: bool = False
+
+
+def keep_conversation_roles(messages: Iterable[Message]) -> list[Message]:
+    """Return the user/assistant turns with non-blank content, in input order.
+
+    System prompts, tool calls, and tool results are infrastructure, not part of
+    the conversation record, so every ingest path stores and hashes only what
+    this returns.
+    """
+    return [m for m in messages if m.role in KEEP_ROLES and m.content.strip()]

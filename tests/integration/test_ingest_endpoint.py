@@ -237,3 +237,78 @@ class TestIngestEndpoint:
             headers={"X-Auth-User-Id": str(TEST_USER_ID)},
         )
         assert resp.status_code == 422
+
+
+class TestIngestRoleFilter:
+    """Non-conversation turns are dropped server-side, never rejected."""
+
+    async def test_system_turns_accepted_and_not_stored(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        conv = _build_conv_payload("conv-role-mixed-001", platform="claude")
+        conv["messages"] = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Hello"},
+            {"role": "system", "content": "Tool context injected mid-thread."},
+            {"role": "assistant", "content": "Hi there"},
+        ]
+        payload = {"source": "extension_claude", "conversations": [conv]}
+
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = IngestConversationResponse.model_validate(resp.json())
+        assert data.conversations_saved == 1
+        async with pool.acquire() as conn:
+            roles = await conn.fetch(
+                "SELECT m.role FROM messages m"
+                " JOIN conversations c ON c.id = m.conversation_id"
+                " WHERE c.platform = $1 AND c.platform_id = $2"
+                " ORDER BY m.position",
+                "claude",
+                "conv-role-mixed-001",
+            )
+        assert [r["role"] for r in roles] == ["user", "assistant"]
+
+    async def test_system_only_conversation_not_saved_or_enqueued(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        empty_conv = _build_conv_payload("conv-role-system-only-001")
+        empty_conv["messages"] = [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "   "},
+        ]
+        control_conv = _build_conv_payload("conv-role-control-001")
+        payload = {"source": "extension_chatgpt", "conversations": [empty_conv, control_conv]}
+
+        resp = await client.post(
+            ENDPOINT,
+            json=payload,
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = IngestConversationResponse.model_validate(resp.json())
+        assert data.conversations_saved == 1
+        assert data.conversations_skipped_dedupe == 0
+        async with pool.acquire() as conn:
+            saved_ids = await conn.fetch(
+                "SELECT platform_id FROM conversations WHERE platform = $1",
+                "chatgpt",
+            )
+            job_conv_ids = await conn.fetch(
+                "SELECT c.platform_id FROM extraction_jobs j"
+                " JOIN conversations c ON c.id = j.conversation_id"
+                " WHERE j.user_id = $1",
+                TEST_USER_ID,
+            )
+        assert [r["platform_id"] for r in saved_ids] == ["conv-role-control-001"]
+        assert [r["platform_id"] for r in job_conv_ids] == ["conv-role-control-001"]

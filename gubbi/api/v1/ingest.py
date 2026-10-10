@@ -31,7 +31,7 @@ from gubbi.api.v1.auth import require_scope
 from gubbi.app_state import get_optional_arq_pool, require_app_ctx
 from gubbi.audit.sql import record_audit
 from gubbi.crypto.guard import require_cipher
-from gubbi.models.conversation import Message
+from gubbi.models.conversation import Message, keep_conversation_roles
 from gubbi.storage.connection import safe_acquire
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
@@ -211,6 +211,23 @@ async def ingest_conversations(
                     await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
 
         for conv in body.conversations:
+            messages = keep_conversation_roles(
+                Message(
+                    role=msg.role,
+                    content=msg.content,
+                    timestamp=msg.timestamp.isoformat() if msg.timestamp else None,
+                )
+                for msg in conv.messages
+            )
+            if not messages:
+                await log.info(
+                    "ingest_conversation_empty_after_role_filter",
+                    platform=conv.platform,
+                    platform_id=conv.platform_id,
+                    message_count=len(conv.messages),
+                )
+                continue
+
             # Dedupe pre-check in its own transaction so the SET LOCAL
             # GUC is properly transaction-scoped (and unwinds before the
             # connection is reused). The pre-check requires RLS to be
@@ -237,15 +254,6 @@ async def ingest_conversations(
                 title = validate_title(conv.title)
             except ValueError:
                 title = validate_title(f"Conversation {conv.created_at.isoformat()}")
-
-            messages = [
-                Message(
-                    role=msg.role,
-                    content=msg.content,
-                    timestamp=msg.timestamp.isoformat() if msg.timestamp else None,
-                )
-                for msg in conv.messages
-            ]
 
             # ============================================================
             # TRANSACTION 1: save conversation + set platform metadata.

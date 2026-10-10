@@ -14,7 +14,7 @@ from gubbi.audit import ACTION_CONVERSATION_SAVED, audited
 from gubbi.auth.scope import require_scope
 from gubbi.auth_context import current_user_id
 from gubbi.crypto.guard import require_cipher
-from gubbi.models.conversation import Message
+from gubbi.models.conversation import Message, keep_conversation_roles
 from gubbi.storage.exceptions import ConversationNotFoundError, TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
@@ -112,24 +112,22 @@ async def _journal_save_conversation(
             f"Too many messages: max {MAX_MESSAGES_PER_CONVERSATION}, got {len(messages)}"
         )
 
-    # Only keep human-readable turns. Tool calls, tool results, and system
-    # messages are infrastructure noise -- not part of the conversation record.
-    keepable = [m for m in messages if m.get("role") in KEEP_ROLES]
     try:
-        parsed_messages = [
+        candidates = [
             Message(
-                role=m.get("role", "user"),
+                role=m.get("role", ""),
                 content=sanitize_freetext(m.get("content", ""))[:MAX_MSG_CHARS],
                 timestamp=m.get("timestamp"),
             )
-            for m in keepable
-            if m.get("content", "").strip()
+            for m in messages
         ]
     except (TypeError, AttributeError) as e:
         return validation_error(
             "Invalid message format \u2014 each message"
             f" must be a dict with 'role' and 'content': {e}"
         )
+
+    parsed_messages = keep_conversation_roles(candidates)
 
     for msg in parsed_messages:
         try:
@@ -140,7 +138,7 @@ async def _journal_save_conversation(
     if not parsed_messages:
         return validation_error("No user/assistant messages found after filtering.")
 
-    empty_dropped = len(keepable) - len(parsed_messages)
+    empty_dropped = sum(1 for m in candidates if m.role in KEEP_ROLES) - len(parsed_messages)
 
     user_id = current_user_id.get()
     if user_id is None:
