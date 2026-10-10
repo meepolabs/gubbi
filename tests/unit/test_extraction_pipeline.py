@@ -428,6 +428,8 @@ async def test_deadline_already_passed_makes_no_call() -> None:
 # -- Telemetry -------------------------------------------------------------------
 
 EXPECTED_SPAN_KEYS = {
+    "provider_name",
+    "model_name",
     "prompt_size",
     "completion_size",
     "cached_prompt_size",
@@ -466,6 +468,8 @@ async def test_successful_call_span_keeps_every_attribute_through_the_allowlist(
     assert attrs["finish_reason"] == "stop"
     assert attrs["attempts"] == 2
     assert attrs["chunk_index"] == 0
+    assert attrs["provider_name"] == "_ScriptedProvider"
+    assert attrs["model_name"] == "unknown"
 
 
 async def test_truncated_call_span_records_length_and_the_failed_call_usage(

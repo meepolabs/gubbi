@@ -5,7 +5,7 @@ Verifies that after a successful extraction run, a
 actor_type, actor_id, target_kind, target_id, and metadata.
 
 Requires a running PostgreSQL instance with migrations applied through
-0020.  Uses mock LLM service so no API key is needed.
+head. Uses a scripted LLM provider so no endpoint is needed.
 
 Run with:
     pytest tests/integration/test_extraction_summary_audit.py -v
@@ -14,7 +14,6 @@ Run with:
 from __future__ import annotations
 
 import json
-from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
 
 import asyncpg
@@ -22,7 +21,8 @@ import pytest
 
 from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
-from gubbi.extraction.service import CategorizationResult, ExtractedEntry, ExtractionEntriesResult
+from tests.fixtures.extraction_db import job_ctx
+from tests.fixtures.extraction_job import ScriptedProvider, chunk_output, entry
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
@@ -78,6 +78,18 @@ async def _seed_user_and_conversation(conn: asyncpg.Connection) -> int:
         summary_ct,
         summary_nonce,
     )
+    message_ct, message_nonce = _CIPHER.encrypt("I finally decided to learn the cello.")
+    await conn.execute(
+        """
+        INSERT INTO messages
+            (conversation_id, user_id, role, position, content_encrypted, content_nonce)
+        VALUES ($1, $2, 'user', 0, $3, $4)
+        """,
+        conv_id,
+        _USER_UUID,
+        message_ct,
+        message_nonce,
+    )
     return conv_id
 
 
@@ -98,37 +110,10 @@ async def test_extraction_summary_audit_row_written(
         conv_id = await _seed_user_and_conversation(conn)
 
     # --- Build context: worker runs under journal_app for the user-actor audit ---
-    mock_extraction_service = AsyncMock()
-
-    # Stub out the LLM calls
-    mock_extraction_service.categorize_conversation.return_value = CategorizationResult(
-        topic_path="test/extraction-audit",
-        topic_title="Extraction Audit Test",
-        summary="Test summary",
-        confidence=0.95,
+    provider = ScriptedProvider(
+        [chunk_output("test/extraction-audit", [entry("Decided to learn the cello")])]
     )
-    mock_extraction_service.extract_entries.return_value = ExtractionEntriesResult(
-        entries=[
-            ExtractedEntry(
-                content="Test entry",
-                reasoning="Test reasoning",
-                tags=[],
-                entry_date="2026-05-02",
-            ),
-        ],
-        input_tokens=100,
-        output_tokens=50,
-    )
-
-    mock_redis = AsyncMock()
-    mock_redis.publish = AsyncMock()
-
-    ctx: dict = {
-        "pool": app_pool,
-        "cipher": _CIPHER,
-        "extraction_service": mock_extraction_service,
-        "redis": mock_redis,
-    }
+    ctx = job_ctx(app_pool, _CIPHER, provider)
 
     # --- Run worker ---
     result = await extract_conversation(ctx, conv_id, _USER_ID_STR)
@@ -173,20 +158,12 @@ async def test_extraction_summary_audit_not_written_on_skip(
             conv_id,
         )
 
-    mock_cipher = MagicMock()
-    mock_extraction_service = AsyncMock()
-    mock_redis = AsyncMock()
-    mock_redis.publish = AsyncMock()
-
-    ctx: dict = {
-        "pool": app_pool,
-        "cipher": mock_cipher,
-        "extraction_service": mock_extraction_service,
-        "redis": mock_redis,
-    }
+    provider = ScriptedProvider([])
+    ctx = job_ctx(app_pool, _CIPHER, provider)
 
     result = await extract_conversation(ctx, conv_id, _USER_ID_STR)
     assert result["skipped"] is True
+    assert provider.user_contents == []
 
     # Verify no audit row was written for this conversation.
     async with clean_rls_db.acquire() as conn:

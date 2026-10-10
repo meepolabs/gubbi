@@ -273,6 +273,11 @@ async def _call[R: _CallResult](
     span_name = SpanNames.EXTRACTION_LLM_CALL
     start_ns = time.monotonic_ns()
     with trace.get_tracer(_TRACER_NAME).start_as_current_span(span_name) as span:
+        safe_set_attributes(
+            span_name,
+            span,
+            {"provider_name": run.service.provider_name, "model_name": run.service.model_name},
+        )
         try:
             result = await request()
         except Exception as exc:

@@ -94,8 +94,8 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_LLM_MODEL` | yes (worker) | Model name sent with every request. | `your-model-name` |
 | `JOURNAL_LLM_API_KEY` | depends on endpoint | Bearer key sent to the endpoint. Leave unset for endpoints that need no key; the worker then sends the placeholder bearer `unused`. | (random) |
 | `JOURNAL_LLM_INPUT_PRICE_PER_MTOK` / `JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK` | no | USD per million input / output tokens, used for cost accounting. Defaults `1.00` / `5.00`. | `0.40` |
-| `JOURNAL_EXTRACTION_MODE` | no | Accepted values `single` (default: one structured call per chunk) and `two_call`. `two_call` is experimental and not yet used by the worker; leave the default. | `single` |
-| `JOURNAL_EXTRACTION_TRIAGE` | no | Accepted setting, default `false`. Triage is experimental and not yet used by the worker. | `false` |
+| `JOURNAL_EXTRACTION_MODE` | no | `single` (default: one structured call per transcript chunk returns topic, summary and entries) or `two_call` (one call picks the topic, then one entries call per chunk). `two_call` is experimental and may be removed; leave the default unless comparing the two. | `single` |
+| `JOURNAL_EXTRACTION_TRIAGE` | no | When `true`, each transcript chunk is first screened by one small "anything worth recording?" call and skipped if the answer is no. Adds one call per chunk; useful with a cheap local model. Default `false`. | `false` |
 
 ### Operator provisioning
 

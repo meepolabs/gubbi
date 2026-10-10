@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from gubbi.extraction.chunk_extraction import CHUNK_ENTRIES_SCHEMA
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
 from gubbi.extraction.llm.provider import (
     LLMMessage,
@@ -14,11 +15,7 @@ from gubbi.extraction.llm.provider import (
     LLMTruncatedError,
     LLMUsage,
 )
-from gubbi.extraction.service import (
-    _CATEGORIZE_SCHEMA,
-    _EXTRACT_SCHEMA,
-    ExtractionService,
-)
+from gubbi.extraction.service import ExtractionService
 
 pytestmark = pytest.mark.unit
 
@@ -59,31 +56,6 @@ async def test_triage_schema_says_worth_recording() -> None:
     assert verdict.usage == _CANNED_USAGE
 
 
-async def test_categorize_schema_returns_unchanged_canned_topic() -> None:
-    response = await FakeLLMProvider().complete(_msg("hi"), "sys", _CATEGORIZE_SCHEMA)
-
-    assert response.content == {
-        "topic_path": "testbench/fake",
-        "topic_title": "Testbench Fake Topic",
-        "summary": "Canned categorization summary from FakeLLMProvider.",
-        "confidence": 0.9,
-    }
-
-
-async def test_extract_entries_schema_returns_unchanged_canned_entry() -> None:
-    response = await FakeLLMProvider().complete(_msg("hi"), "sys", _EXTRACT_SCHEMA)
-
-    assert response.content == {
-        "entries": [
-            {
-                "content": "fake decision marker from FakeLLMProvider",
-                "reasoning": "canned reasoning from FakeLLMProvider",
-                "tags": ["fake", "testbench"],
-            }
-        ]
-    }
-
-
 @pytest.mark.parametrize(
     ("marker", "error_class", "expected_usage"),
     [
@@ -99,7 +71,9 @@ async def test_marker_raises_matching_error(
     expected_usage: LLMUsage | None,
 ) -> None:
     with pytest.raises(LLMProviderError) as caught:
-        await FakeLLMProvider().complete(_msg(f"before {marker} after"), "sys", _EXTRACT_SCHEMA)
+        await FakeLLMProvider().complete(
+            _msg(f"before {marker} after"), "sys", CHUNK_ENTRIES_SCHEMA
+        )
 
     assert type(caught.value) is error_class
     assert caught.value.usage == expected_usage

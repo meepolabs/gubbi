@@ -160,12 +160,6 @@ def _canned_chunk_entry() -> dict[str, Any]:
     }
 
 
-def _entry_properties(properties: Mapping[str, Any]) -> Mapping[str, Any]:
-    entry_schema: Mapping[str, Any] = properties["entries"].get("items", {})
-    entry_properties: Mapping[str, Any] = entry_schema.get("properties", {})
-    return entry_properties
-
-
 def _canned_content_for_schema(
     output_schema: Mapping[str, Any] | None,
 ) -> str | dict[str, Any]:
@@ -173,12 +167,11 @@ def _canned_content_for_schema(
 
     Schema shapes exercised: the single-call chunk schema (topic_path ...
     plus entries), the chunk categorize schema (topic_path / topic_title /
-    summary), the chunk entries schema (entries: [{content, why, ...}]), the
-    triage schema (worth_recording, always true), and the legacy categorize
-    (adds confidence) and extract-entries (entries: [{content, reasoning,
-    ...}]) schemas. Distinguished by the property set so a future schema with
-    a fresh property name surfaces as "FakeLLMProvider canned response shape
-    drift" rather than silently returning the wrong dict.
+    summary), the chunk entries schema (entries only), and the triage schema
+    (worth_recording, always true). Distinguished by the property set so a
+    future schema with a fresh property name surfaces as "FakeLLMProvider
+    canned response shape drift" rather than silently returning the wrong
+    dict.
 
     A ``None`` schema (free-form completion) returns a string so the
     contract matches the real provider's text-mode return shape.
@@ -198,31 +191,14 @@ def _canned_content_for_schema(
             "summary": "Canned chunk summary from FakeLLMProvider.",
             "entries": [_canned_chunk_entry()],
         }
-    if "topic_path" in properties and "confidence" not in properties:
+    if "topic_path" in properties:
         return {
             "topic_path": _CANNED_TOPIC_PATH,
             "topic_title": _CANNED_TOPIC_TITLE,
             "summary": "Canned chunk summary from FakeLLMProvider.",
         }
-    if "entries" in properties and "why" in _entry_properties(properties):
-        return {"entries": [_canned_chunk_entry()]}
-    if "topic_path" in properties:
-        return {
-            "topic_path": _CANNED_TOPIC_PATH,
-            "topic_title": _CANNED_TOPIC_TITLE,
-            "summary": "Canned categorization summary from FakeLLMProvider.",
-            "confidence": 0.9,
-        }
     if "entries" in properties:
-        return {
-            "entries": [
-                {
-                    "content": "fake decision marker from FakeLLMProvider",
-                    "reasoning": "canned reasoning from FakeLLMProvider",
-                    "tags": ["fake", "testbench"],
-                }
-            ]
-        }
+        return {"entries": [_canned_chunk_entry()]}
     raise ValueError(
         f"FakeLLMProvider has no canned response for output_schema with "
         f"properties {sorted(properties.keys())}; add a branch in "

@@ -122,71 +122,44 @@ def _make_app_ctx() -> AppContext:
     return ctx
 
 
+_EXTRACTION_USER = "00000000-0000-0000-0000-0000000000b6"
+_EXTRACTION_JOB = "00000000-0000-0000-0000-0000000000b7"
+
+
 def _extraction_success_ctx() -> tuple[dict[str, Any], list[Any]]:
     """Build an extraction job context whose only failure point is the audit write.
 
-    Returns the Arq context plus the patches that carry the job through
-    both LLM calls and persistence, so the audit write is actually
-    reached. Injecting at ``record_audit`` is what makes the assertion
-    about an audit failure rather than a vendor failure.
+    Returns the Arq context plus the patches that carry the job through the
+    LLM pipeline and into its completion write, so the audit write is
+    actually reached. The pipeline finds nothing worth recording, so the
+    job's own completion audit row is the write that fails. Injecting at
+    ``record_audit`` is what makes the assertion about an audit failure
+    rather than a vendor failure.
     """
-    from gubbi.extraction.service import (
-        CategorizationResult,
-        ExtractedEntry,
-        ExtractionEntriesResult,
+    from tests.fixtures.extraction_job import (
+        ConnectionTracker,
+        ScriptedProvider,
+        chunk_output,
+        make_ctx,
+        patched_job,
     )
 
-    conn = AsyncMock()
-    conn.fetchval.return_value = None
-    transaction = MagicMock()
-    transaction.__aenter__ = AsyncMock(return_value=None)
-    transaction.__aexit__ = AsyncMock(return_value=False)
-    conn.transaction = MagicMock(return_value=transaction)
+    tracker = ConnectionTracker()
+    ctx = make_ctx(ScriptedProvider([chunk_output(entries=[])]))
+    return ctx, [patched_job(tracker)]
 
-    connection_cm = MagicMock()
-    connection_cm.__aenter__ = AsyncMock(return_value=conn)
-    connection_cm.__aexit__ = AsyncMock(return_value=False)
 
-    extraction_service = AsyncMock()
-    extraction_service._llm = MagicMock(_model="fake-model")
-    extraction_service.categorize_conversation.return_value = CategorizationResult(
-        topic_path="probe/topic",
-        topic_title="Probe",
-        summary="s",
-        confidence=0.9,
-        input_tokens=10,
-        output_tokens=5,
-    )
-    extraction_service.extract_entries.return_value = ExtractionEntriesResult(
-        entries=(ExtractedEntry(content="c", reasoning="r", tags=["t"], entry_date="2026-05-22"),),
-        input_tokens=8,
-        output_tokens=4,
+def _extraction_failing_llm_ctx(error: Exception) -> tuple[dict[str, Any], list[Any]]:
+    """Build an extraction job context whose only LLM call raises ``error``."""
+    from tests.fixtures.extraction_job import (
+        ConnectionTracker,
+        ScriptedProvider,
+        make_ctx,
+        patched_job,
     )
 
-    ctx: dict[str, Any] = {
-        "pool": MagicMock(),
-        "cipher": MagicMock(),
-        "extraction_service": extraction_service,
-        "redis": AsyncMock(),
-        "redis_pool": MagicMock(),
-    }
-
-    patches = [
-        patch(
-            "gubbi.extraction.jobs.extract_conversation.user_scoped_connection",
-            return_value=connection_cm,
-        ),
-        patch(
-            "gubbi.storage.repositories.conversations.read_conversation_by_id",
-            return_value=(MagicMock(), [MagicMock(role="user", content="hi")], 1),
-        ),
-        patch("gubbi.storage.repositories.conversations.get_processed_at", return_value=None),
-        patch("gubbi.storage.repositories.conversations.mark_processed"),
-        patch("gubbi.storage.repositories.topics.list_all", return_value=([], 0)),
-        patch("gubbi.storage.repositories.topics.get_id", return_value=1),
-        patch("gubbi.storage.repositories.entries.append"),
-    ]
-    return ctx, patches
+    tracker = ConnectionTracker()
+    return make_ctx(ScriptedProvider([error])), [patched_job(tracker)]
 
 
 # ---------------------------------------------------------------------------
@@ -738,10 +711,10 @@ class TestMcpToolCallSpan:
 class TestExtractionJobSpan:
     """The outer ``extraction.job`` span wraps the worker's own audit writes.
 
-    Injection is at the audit write itself, not at the LLM calls: the two
-    inner ``extraction.llm_call`` spans wrap only a vendor call and can
-    never see an audit-write failure, so they keep the SDK's default
-    recording and are not this module's concern.
+    Injection is at the audit write itself, not at the LLM calls: the inner
+    ``extraction.llm_call`` spans wrap only a vendor call and can never see
+    an audit-write failure, so they keep the SDK's default recording and
+    are not this module's concern.
     """
 
     async def test_audit_write_failure_leaves_no_marker_on_the_job_span(
@@ -766,7 +739,7 @@ class TestExtractionJobSpan:
                 )
             )
             stack.enter_context(pytest.raises(asyncpg.exceptions.InsufficientPrivilegeError))
-            await job_module.extract_conversation(ctx, 4242, "00000000-0000-0000-0000-0000000000b6")
+            await job_module.extract_conversation(ctx, 4242, _EXTRACTION_USER, _EXTRACTION_JOB)
 
         # Assert
         job_spans = [span for span in exporter.spans if span.name == "extraction.job"]
@@ -803,7 +776,7 @@ class TestExtractionJobSpan:
                 )
             )
             stack.enter_context(pytest.raises(RuntimeError, match="our own message"))
-            await job_module.extract_conversation(ctx, 4242, "00000000-0000-0000-0000-0000000000b6")
+            await job_module.extract_conversation(ctx, 4242, _EXTRACTION_USER, _EXTRACTION_JOB)
 
         # Assert
         job_spans = [span for span in exporter.spans if span.name == "extraction.job"]
@@ -826,18 +799,16 @@ class TestExtractionJobSpan:
         # Arrange
         from gubbi.extraction.jobs import extract_conversation as job_module
         from gubbi.extraction.llm.provider import LLMRateLimitError
+        from gubbi.extraction.pipeline import PipelineFailure
 
         _tracer, exporter = in_memory_tracer
-        ctx, patches = _extraction_success_ctx()
-        ctx["extraction_service"].categorize_conversation.side_effect = LLMRateLimitError(
-            "vendor said slow down"
-        )
+        ctx, patches = _extraction_failing_llm_ctx(LLMRateLimitError("vendor said slow down"))
 
         # Act
         with ExitStack() as stack:
             for cm in patches:
                 stack.enter_context(cm)
-            stack.enter_context(pytest.raises(LLMRateLimitError, match="vendor said slow down"))
+            stack.enter_context(pytest.raises(PipelineFailure))
             await job_module.extract_conversation(ctx, 4242, "00000000-0000-0000-0000-0000000000b6")
 
         # Assert
