@@ -1,7 +1,7 @@
 """Conversation data models: ConversationMeta, Message, and the shared role filter."""
 
 from collections.abc import Iterable
-from typing import Annotated
+from typing import Annotated, Protocol
 
 from pydantic import BaseModel, StringConstraints, field_validator
 
@@ -47,7 +47,21 @@ class Message(BaseModel):
     decryption_failed: bool = False
 
 
-def keep_conversation_roles(messages: Iterable[Message]) -> list[Message]:
+class ConversationTurn(Protocol):
+    """Any message exposing a speaker role and text content."""
+
+    @property
+    def role(self) -> str:
+        """Speaker role, e.g. ``user`` or ``assistant``."""
+        ...
+
+    @property
+    def content(self) -> str:
+        """Message text."""
+        ...
+
+
+def keep_conversation_roles[M: ConversationTurn](messages: Iterable[M]) -> list[M]:
     """Return the user/assistant turns with non-blank content, in input order.
 
     System prompts, tool calls, and tool results are infrastructure, not part of

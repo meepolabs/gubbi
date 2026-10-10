@@ -61,3 +61,16 @@ CHARS_PER_TOKEN: Final = 3.5
 CHUNK_TARGET_TOKENS: Final = 50_000  # Max estimated tokens of transcript per LLM call
 CHUNK_OVERLAP_TOKENS: Final = 2_000  # Whole messages repeated from the previous chunk
 PRIOR_ENTRIES_MAX_TOKENS: Final = 4_000  # Budget for earlier chunks' entries sent forward
+
+# -- Extraction skip rules ------------------------------------------------------
+
+# Bump to re-extract conversations whose content is unchanged since their last
+# extraction (stored hash matches but the stored version is older).
+EXTRACTION_VERSION: Final = 2
+# Conversations whose user turns total fewer stripped characters than this are
+# skipped. Kept low enough that a short meaningful line ("I got married", 13
+# chars) is still extracted; only greetings / acknowledgements fall below it.
+EXTRACTION_MIN_USER_CHARS: Final = 8
+# Conversation sources produced by automated or sub-agent sessions, which are
+# never extracted. Empty: no ingest source is automated today.
+AUTOMATED_EXTRACTION_SOURCES: Final[frozenset[str]] = frozenset()
