@@ -32,7 +32,7 @@ from opentelemetry import trace
 from gubbi.audit import record_audit
 from gubbi.config import get_settings
 from gubbi.constants import EXTRACTION_JOB_DEADLINE_SECS, EXTRACTION_VERSION
-from gubbi.extraction.charging import record_charge, settle_attempt
+from gubbi.extraction.charging import record_charge, record_unmetered, settle_attempt
 from gubbi.extraction.dedupe import embed_texts
 from gubbi.extraction.failure_metrics import record_job_failures
 from gubbi.extraction.llm.provider import (
@@ -104,12 +104,17 @@ _DETACHED_CLEANUPS: set[asyncio.Task[None]] = set()
 
 @dataclass(frozen=True)
 class _Spend:
-    """Token usage and estimated cost of every model call the job made."""
+    """Token usage and estimated cost of every model call the job made.
+
+    ``unmetered_calls`` counts the calls whose usage the upstream never
+    reported, so ``usage`` and the charge undercount them.
+    """
 
     usage: LLMUsage
     llm_calls: int
     chunks: int
     cents: int
+    unmetered_calls: int = 0
 
 
 _NO_SPEND = _Spend(usage=LLMUsage(), llm_calls=0, chunks=0, cents=0)
@@ -276,6 +281,7 @@ def _spend_of(ctx: ExtractionContext, spend: PipelineSpend | PipelineOutcome) ->
         llm_calls=spend.llm_calls,
         chunks=spend.chunks,
         cents=ctx["extraction_service"].estimate_cost_cents(spend.usage),
+        unmetered_calls=spend.unmetered_calls,
     )
 
 
@@ -340,6 +346,7 @@ async def _complete_without_entries(job: _Job, transcript_hash: str, spend: _Spe
             await _audit_completed_without_entries(conn, job)
             settled = await settle_attempt(conn, job.job_uuid, spend.usage, completed=True)
     record_charge(settled)
+    record_unmetered(settled, spend.unmetered_calls)
 
 
 async def _complete_processed_job(conn: asyncpg.Connection, job: _Job) -> None:
@@ -420,7 +427,16 @@ async def _mark_job_failed(
                 settled = await settle_attempt(conn, UUID(job_id), spend.usage, completed=False)
         if outcome is not None:
             record_job_failures(error_code, outcome)
+            await logger.warning(
+                "extraction_job_failed",
+                job_id=job_id,
+                conversation_id=conversation_id,
+                error_code=str(error_code),
+                outcome=str(outcome),
+                unmetered_calls=spend.unmetered_calls,
+            )
         record_charge(settled)
+        record_unmetered(settled, spend.unmetered_calls)
     except Exception as exc:
         # Swallow secondary failure -- the original exception is what Arq needs.
         # The job row may remain in 'running' until the orphan sweep fails it.
@@ -547,6 +563,7 @@ async def _persist(
                 return None
             persisted = await persist_extraction(conn2, job.cipher, ctx["embedding_service"], run)
     record_charge(persisted.settled)
+    record_unmetered(persisted.settled, extracted.spend.unmetered_calls)
     return len(persisted.entry_ids)
 
 
@@ -717,6 +734,7 @@ async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str)
             conversation_id=job.conversation_id,
             topic_path=result["topic_path"],
             entries_created=result["entries_created"],
+            unmetered_calls=job.ledger.spend.unmetered_calls,
         )
     return result
 
@@ -756,6 +774,7 @@ async def _record(
             "extraction_nothing_to_record",
             conversation_id=job.conversation_id,
             topic_usable=topic_path is not None,
+            unmetered_calls=spent.unmetered_calls,
         )
         await _complete_without_entries(job, content_hash(loaded.messages), spent)
         return _result(None, 0, spent, skipped=True)

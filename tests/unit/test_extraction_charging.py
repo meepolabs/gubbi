@@ -1,4 +1,4 @@
-"""Unit tests for the charge counter recorded after a settled attempt commits."""
+"""Unit tests for the counters recorded after a settled attempt commits."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from unittest.mock import call, patch
 
 import pytest
 
-from gubbi.extraction.charging import SettledAttempt, record_charge
+from gubbi.extraction.charging import SettledAttempt, record_charge, record_unmetered
 from gubbi.extraction.wallet import ChargeSplit
 from gubbi.storage.repositories.wallet import Charge
 from gubbi.telemetry.attrs import MetricNames
@@ -56,5 +56,36 @@ def test_record_charge_counts_each_nonzero_part_by_lane(
 ) -> None:
     with patch("gubbi.extraction.charging.record_counter") as record_counter:
         record_charge(settled)
+
+    assert record_counter.call_args_list == expected
+
+
+_UNMETERED = MetricNames.EXTRACTION_LLM_UNMETERED_CALLS
+
+
+@pytest.mark.parametrize(
+    ("settled", "unmetered", "expected"),
+    [
+        pytest.param(
+            _settled(0, 0, lane="backfill"),
+            3,
+            [call(_UNMETERED, {"lane": "backfill"}, amount=3)],
+            id="unmetered",
+        ),
+        pytest.param(
+            SettledAttempt(lane="live", charge=None, follow_up_job_id=None),
+            1,
+            [call(_UNMETERED, {"lane": "live"}, amount=1)],
+            id="unmetered-without-a-charge",
+        ),
+        pytest.param(_settled(700, 0), 0, [], id="all-metered"),
+        pytest.param(None, 2, [], id="no-settlement"),
+    ],
+)
+def test_record_unmetered_counts_a_settled_attempts_unmetered_calls_by_lane(
+    settled: SettledAttempt | None, unmetered: int, expected: list[object]
+) -> None:
+    with patch("gubbi.extraction.charging.record_counter") as record_counter:
+        record_unmetered(settled, unmetered)
 
     assert record_counter.call_args_list == expected

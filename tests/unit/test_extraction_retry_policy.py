@@ -170,4 +170,4 @@ def test_code_sets_partition_the_error_codes() -> None:
 
     assert sum(len(codes) for codes in sets) == len(ErrorCode)
     assert set().union(*sets) == {code.value for code in ErrorCode}
-    assert {"llm_refused", "superseded", "conversation_unreadable"} == retry_policy.TERMINAL_CODES
+    assert {"llm_refused", "superseded"} == retry_policy.TERMINAL_CODES

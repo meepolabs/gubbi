@@ -183,6 +183,10 @@ _COUNTERS: tuple[tuple[str, str], ...] = (
         MetricNames.EXTRACTION_CHARGES_WEIGHTED,
         "Weighted tokens charged to user wallets, by lane and paying balance",
     ),
+    (
+        MetricNames.EXTRACTION_LLM_UNMETERED_CALLS,
+        "LLM calls of finished extraction attempts with no reported usage, by lane",
+    ),
 )
 
 

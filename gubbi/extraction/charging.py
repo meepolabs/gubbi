@@ -12,7 +12,9 @@ older content, so a follow-up job is queued for the conversation in the same
 transaction, in the same lane, scheduled by the lane's spend rule.
 
 The ``extraction.charges.weighted_total`` counter is recorded by the caller
-after the transaction commits, through :func:`record_charge`.
+after the transaction commits, through :func:`record_charge`, and so is
+``extraction.llm.unmetered_calls_total``, through :func:`record_unmetered`:
+calls whose usage the upstream never reported are not in the charge.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ if TYPE_CHECKING:
 
     from gubbi.extraction.llm.provider import LLMUsage
 
-__all__: list[str] = ["SettledAttempt", "record_charge", "settle_attempt"]
+__all__: list[str] = ["SettledAttempt", "record_charge", "record_unmetered", "settle_attempt"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,3 +97,12 @@ def record_charge(settled: SettledAttempt | None) -> None:
                 {"lane": settled.lane, "part": part},
                 amount=amount,
             )
+
+
+def record_unmetered(settled: SettledAttempt | None, unmetered_calls: int) -> None:
+    """Count a committed attempt's calls that went uncharged for want of reported usage."""
+    if settled is None or unmetered_calls <= 0:
+        return
+    record_counter(
+        MetricNames.EXTRACTION_LLM_UNMETERED_CALLS, {"lane": settled.lane}, amount=unmetered_calls
+    )

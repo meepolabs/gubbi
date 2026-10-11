@@ -102,10 +102,12 @@ class ScriptedProvider:
         tracker: ConnectionTracker | None = None,
         *,
         delay: float = 0.0,
+        unmetered_attempts: int = 0,
     ) -> None:
         self._steps = list(steps)
         self._tracker = tracker
         self._delay = delay
+        self._unmetered_attempts = unmetered_attempts
         self._model = "scripted-model"
         self.user_contents: list[str] = []
         self.schemas: list[Mapping[str, Any] | None] = []
@@ -135,6 +137,8 @@ class ScriptedProvider:
             model=self._model,
             cached_input_tokens=CALL_USAGE.cached_input,
             reasoning_tokens=CALL_USAGE.reasoning,
+            attempts=1 + self._unmetered_attempts,
+            unmetered_attempts=self._unmetered_attempts,
         )
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:

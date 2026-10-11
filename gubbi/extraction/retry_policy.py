@@ -25,7 +25,6 @@ class ErrorCode(StrEnum):
     INTERNAL_ERROR = "internal_error"
     LLM_REFUSED = "llm_refused"
     SUPERSEDED = "superseded"
-    CONVERSATION_UNREADABLE = "conversation_unreadable"
 
 
 class RetryClass(StrEnum):
@@ -48,7 +47,6 @@ RETRY_CLASSES: Final[Mapping[ErrorCode, RetryClass]] = MappingProxyType(
         ErrorCode.INTERNAL_ERROR: RetryClass.DETERMINISTIC,
         ErrorCode.LLM_REFUSED: RetryClass.TERMINAL,
         ErrorCode.SUPERSEDED: RetryClass.TERMINAL,
-        ErrorCode.CONVERSATION_UNREADABLE: RetryClass.TERMINAL,
     }
 )
 

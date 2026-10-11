@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+from dataclasses import replace
 from typing import Any
+from unittest.mock import call, patch
 from uuid import UUID
 
 import pytest
+import structlog
 
 from gubbi.constants import EXTRACTION_VERSION
+from gubbi.extraction.charging import SettledAttempt
 from gubbi.extraction.jobs.extract_conversation import _classify_error, extract_conversation
 from gubbi.extraction.llm.provider import (
     LLMPermanentError,
@@ -24,6 +29,7 @@ from gubbi.extraction.llm.provider import (
 from gubbi.extraction.pipeline import PipelineDeadlineError, PipelineFailure
 from gubbi.extraction.skips import content_hash
 from gubbi.models.conversation import Message, keep_conversation_roles
+from gubbi.telemetry.attrs import MetricNames
 from tests.fixtures.extraction_job import (
     CALL_CENTS,
     CALL_USAGE,
@@ -569,3 +575,72 @@ async def test_load_failure_is_logged_and_re_raised() -> None:
             await _run(make_ctx(ScriptedProvider([])))
 
     assert len(tracker.conns) == 2, "load connection, then the failure connection"
+
+
+# ---------------------------------------------------------------------------
+# Unmetered calls
+# ---------------------------------------------------------------------------
+
+
+_SETTLED = SettledAttempt(lane="live", charge=None, follow_up_job_id=None)
+
+
+def _completed_run(mocks: Any) -> None:
+    mocks.persist.return_value = replace(mocks.persist.return_value, settled=_SETTLED)
+
+
+def _empty_run(mocks: Any) -> None:
+    mocks.settle_attempt.return_value = _SETTLED
+
+
+_TERMINAL_RUNS = [
+    pytest.param(lambda n: [chunk_output()], _completed_run, "Extraction complete", id="completed"),
+    pytest.param(
+        lambda n: [chunk_output(entries=[])],
+        _empty_run,
+        "extraction_nothing_to_record",
+        id="nothing-to-record",
+    ),
+    pytest.param(
+        lambda n: [LLMTimeoutError("late", attempts=n + 1, unmetered_attempts=n)],
+        _empty_run,
+        "extraction_job_failed",
+        id="failed",
+    ),
+]
+
+
+async def _run_terminal(steps: list[Any], unmetered: int, arrange: Any) -> tuple[Any, list[Any]]:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider(steps, unmetered_attempts=unmetered)
+    with (
+        patched_job(tracker) as mocks,
+        patch("gubbi.extraction.charging.record_counter") as record_counter,
+        structlog.testing.capture_logs() as logs,
+    ):
+        arrange(mocks)
+        with contextlib.suppress(PipelineFailure):
+            await _run(make_ctx(provider))
+    return record_counter, logs
+
+
+@pytest.mark.parametrize(("steps", "arrange", "event"), _TERMINAL_RUNS)
+async def test_a_finished_attempt_counts_and_logs_its_unmetered_calls(
+    steps: Any, arrange: Any, event: str
+) -> None:
+    record_counter, logs = await _run_terminal(steps(2), 2, arrange)
+
+    assert record_counter.call_args_list == [
+        call(MetricNames.EXTRACTION_LLM_UNMETERED_CALLS, {"lane": "live"}, amount=2)
+    ]
+    assert [log["unmetered_calls"] for log in logs if log["event"] == event] == [2]
+
+
+@pytest.mark.parametrize(("steps", "arrange", "event"), _TERMINAL_RUNS)
+async def test_a_fully_metered_attempt_records_no_unmetered_count(
+    steps: Any, arrange: Any, event: str
+) -> None:
+    record_counter, logs = await _run_terminal(steps(0), 0, arrange)
+
+    assert record_counter.call_args_list == []
+    assert [log["unmetered_calls"] for log in logs if log["event"] == event] == [0]

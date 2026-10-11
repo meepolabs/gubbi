@@ -109,11 +109,10 @@ def _patch_worker_dependencies(
     redis_pool_stub.aclose = AsyncMock()
     redis_client_stub = MagicMock()
     redis_client_stub.aclose = AsyncMock()
-    # T2 follow-up: the worker now PINGs Redis at startup via
-    # ``RedisPingProbe`` BEFORE the BudgetHelper wiring runs. Default to
-    # a successful PONG so the smoke fixture's happy path works; tests
-    # that exercise the probe failure path override ``ping`` on the
-    # returned handle.
+    # The worker PINGs Redis at startup via ``RedisPingProbe`` before it
+    # starts the heartbeat. Default to a successful PONG so the smoke
+    # fixture's happy path works; tests that exercise the probe failure
+    # path override ``ping`` on the returned handle.
     redis_client_stub.ping = AsyncMock(return_value=b"PONG")
     redis_client_stub.register_script = MagicMock(return_value=MagicMock())
 
