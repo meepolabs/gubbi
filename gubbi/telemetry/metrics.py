@@ -132,8 +132,9 @@ def initialize_metrics() -> dict[str, object]:
         name=MetricNames.BACKGROUND_TASK_DIED,
         description=(
             "Incremented when a background loop's tick raises (stage=tick), "
-            "the loop itself stops (stage=loop) or it cannot be started "
-            "(stage=not_started)"
+            "the loop itself stops (stage=loop), it cannot be started "
+            "(stage=not_started) or it outlives its shutdown deadline "
+            "(stage=stop_timeout)"
         ),
         unit="1",
     )

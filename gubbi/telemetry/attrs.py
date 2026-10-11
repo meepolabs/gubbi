@@ -82,7 +82,7 @@ class MetricNames:
     # {ok|warn|fail} * {dev|ci|staging|production}.
     STARTUP_PROBE_OUTCOME: Final[str] = "startup.probe.outcome_total"
     # A background loop lost a tick or stopped; ``task`` names the loop,
-    # ``stage`` is tick, loop or not_started.
+    # ``stage`` is tick, loop, not_started or stop_timeout.
     BACKGROUND_TASK_DIED: Final[str] = "background_task.died_total"
     # Extraction queue and budget gauges, recorded once per scheduler tick.
     EXTRACTION_QUEUE_OLDEST_RUNNABLE_AGE: Final[str] = (

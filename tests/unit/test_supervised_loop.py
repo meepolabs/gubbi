@@ -13,6 +13,7 @@ from gubbi.extraction.supervised_loop import (
     run_every,
     start_supervised,
     stop_supervised,
+    stop_supervised_before_teardown,
 )
 
 pytestmark = pytest.mark.unit
@@ -72,21 +73,86 @@ async def test_cancelling_a_supervised_loop_is_not_counted() -> None:
     died.assert_not_called()
 
 
-async def test_stop_returns_by_its_deadline_when_a_loop_ignores_cancellation() -> None:
-    release = asyncio.Event()
-
+def _ignores_cancellation(release: asyncio.Event) -> asyncio.Task[None]:
     async def _stubborn() -> None:
         while not release.is_set():
             with suppress(asyncio.CancelledError):
                 await asyncio.sleep(10)
 
-    task = asyncio.create_task(_stubborn())
-    await asyncio.sleep(0)
-    with patch.object(supervised_loop.logger, "warning", AsyncMock()) as warning:
-        await asyncio.wait_for(stop_supervised([task], timeout_secs=0.05), 2)
+    return asyncio.create_task(_stubborn(), name="stubborn")
 
-    assert not task.done()
-    warning.assert_awaited_once()
-    release.set()
-    task.cancel()
-    await asyncio.wait([task], timeout=1)
+
+async def test_stop_reports_logs_and_counts_a_loop_that_ignores_cancellation() -> None:
+    release = asyncio.Event()
+    task = _ignores_cancellation(release)
+    await asyncio.sleep(0)
+
+    try:
+        with (
+            patch.object(supervised_loop.logger, "error", AsyncMock()) as error,
+            patch.object(supervised_loop, "record_background_task_died") as died,
+        ):
+            stuck = await asyncio.wait_for(stop_supervised([task], timeout_secs=0.05), 2)
+
+        assert stuck == {task}
+        assert not task.done()
+        error.assert_awaited_once_with("background_task_stop_timeout", task="stubborn")
+        died.assert_called_once_with(task="stubborn", stage="stop_timeout")
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.wait([task], timeout=1)
+
+
+async def test_stop_reports_nothing_when_every_loop_unwinds() -> None:
+    task = start_supervised("demo", _park())
+    await asyncio.sleep(0)
+
+    with patch.object(supervised_loop, "record_background_task_died") as died:
+        stuck = await stop_supervised([task], timeout_secs=1)
+
+    assert stuck == set()
+    died.assert_not_called()
+
+
+async def test_teardown_stop_waits_out_its_grace_for_a_slow_unwinding_loop() -> None:
+    events: list[str] = []
+
+    async def _slow_unwind() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.sleep(0.1)
+            events.append("unwound")
+
+    task = asyncio.create_task(_slow_unwind(), name="slow")
+    await asyncio.sleep(0)
+
+    with patch.object(supervised_loop.logger, "error", AsyncMock()) as error:
+        await stop_supervised_before_teardown([task], timeout_secs=0.02, grace_secs=2)
+    events.append("returned")
+
+    assert events == ["unwound", "returned"]
+    error.assert_awaited_once_with("background_task_stop_timeout", task="slow")
+
+
+async def test_teardown_stop_logs_a_loop_alive_after_its_grace_and_returns() -> None:
+    release = asyncio.Event()
+    task = _ignores_cancellation(release)
+    await asyncio.sleep(0)
+
+    try:
+        with patch.object(supervised_loop.logger, "error", AsyncMock()) as error:
+            await asyncio.wait_for(
+                stop_supervised_before_teardown([task], timeout_secs=0.02, grace_secs=0.02), 2
+            )
+
+        assert not task.done()
+        assert [c.args[0] for c in error.await_args_list] == [
+            "background_task_stop_timeout",
+            "background_task_alive_at_teardown",
+        ]
+    finally:
+        release.set()
+        task.cancel()
+        await asyncio.wait([task], timeout=1)

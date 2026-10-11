@@ -34,7 +34,7 @@ from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.service import ExtractionService
-from gubbi.extraction.supervised_loop import start_supervised, stop_supervised
+from gubbi.extraction.supervised_loop import start_supervised, stop_supervised_before_teardown
 from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import rebind_metrics_after_configure
@@ -421,7 +421,7 @@ async def shutdown(ctx: ExtractionContext) -> None:
     """
     heartbeat = ctx.get("heartbeat_task")
     if heartbeat is not None:
-        await stop_supervised([heartbeat])
+        await stop_supervised_before_teardown([heartbeat])
     await _drain_cancel_cleanups(ctx)
     redis_client = ctx.get("redis")
     if redis_client is not None:

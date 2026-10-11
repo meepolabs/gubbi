@@ -68,7 +68,7 @@ from gubbi.extraction.scheduler import (
 from gubbi.extraction.supervised_loop import (
     report_not_started,
     start_supervised,
-    stop_supervised,
+    stop_supervised_before_teardown,
 )
 from gubbi.mcp_validation import JournalFastMCP
 from gubbi.middleware import (
@@ -505,7 +505,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await logger.info("Server shutting down")
-        await stop_supervised(background_tasks)
+        await stop_supervised_before_teardown(background_tasks)
         if arq_pool is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await arq_pool.close()
