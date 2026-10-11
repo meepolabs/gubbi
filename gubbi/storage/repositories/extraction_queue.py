@@ -16,6 +16,7 @@ Public surface
 user_period_usage       -- per-user period, period-backfill and lifetime-backfill usage
 global_period_tokens    -- filtered tokens admitted in a period, all users
 first_upload_at         -- earliest live/backfill job of a user, optionally per platform
+supersede_failed        -- end failed rows that a newer job of their conversation replaces
 select_runnable         -- lock queued or revivable failed rows whose run_after has passed
 terminal_failure_sql    -- SQL predicate: a failed row the retry policy never runs again
 terminal_failure_args   -- the parameters terminal_failure_sql binds
@@ -62,6 +63,7 @@ __all__: list[str] = [
     "revive_failed",
     "select_runnable",
     "stale_admitted_pending",
+    "supersede_failed",
     "terminal_failure_args",
     "terminal_failure_sql",
     "user_period_usage",
@@ -236,6 +238,49 @@ def terminal_failure_args() -> tuple[list[str], list[str], int]:
     return sorted(TERMINAL_CODES), sorted(DETERMINISTIC_CODES), DETERMINISTIC_MAX_ATTEMPTS
 
 
+_NEWER_JOB_EXISTS = """
+EXISTS (
+    SELECT 1
+    FROM extraction_jobs AS newer
+    WHERE newer.user_id = j.user_id
+      AND newer.conversation_id = j.conversation_id
+      AND newer.source = j.source
+      AND (newer.created_at, newer.id) > (j.created_at, j.id)
+)
+"""
+
+
+async def supersede_failed(conn: asyncpg.Connection) -> int:
+    """End every non-terminal ``failed`` row that has a newer job; return rows changed.
+
+    A newer job of the same conversation reads its current content, so it
+    covers whatever the older row would extract. The row stays ``failed``
+    with the terminal code ``superseded`` and ``run_after = 'infinity'``,
+    whatever the newer job's status. A held row is left until it is
+    released, so the scan stays on the runnable index range; a row another
+    transaction holds is skipped and ended on a later call.
+    """
+    result = await conn.execute(
+        f"""
+        UPDATE extraction_jobs
+        SET error_code = $4,
+            run_after = 'infinity'
+        WHERE id IN (
+            SELECT j.id
+            FROM extraction_jobs AS j
+            WHERE j.status = 'failed'
+              AND j.run_after < 'infinity'
+              AND NOT {terminal_failure_sql(1)}
+              AND {_NEWER_JOB_EXISTS}
+            FOR UPDATE OF j SKIP LOCKED
+        )
+        """,  # noqa: S608 - the interpolated predicates are fixed SQL; values are bound
+        *terminal_failure_args(),
+        ErrorCode.SUPERSEDED.value,
+    )
+    return int(str(result).rsplit(" ", 1)[-1])
+
+
 async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[RunnableJob]:
     """Lock and return up to ``limit`` rows the scheduler may admit or dispatch now.
 
@@ -253,11 +298,11 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
     for lost dispatches.
 
     Only one job per conversation may be active (pending or running), so a
-    failed row whose conversation has an active job is excluded, and of
-    several failed rows of one conversation only the newest may be returned.
-    Both exclusions apply before ``limit``, so blocked failed rows never fill
-    the batch. A job made active after this read is caught by
-    :func:`revive_failed`.
+    failed row whose conversation has an active job is excluded, and so is a
+    failed row with any newer job of its conversation (normally already ended
+    by :func:`supersede_failed`). Both exclusions apply before ``limit``, so
+    blocked failed rows never fill the batch. A job made active after this
+    read is caught by :func:`revive_failed`.
 
     Order: lane ``paste``, ``live``, ``backfill``; newest ``activity_at`` first
     within a lane (unknown last); then ``created_at`` and ``id`` so equal rows
@@ -282,16 +327,7 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
                           AND active.source = j.source
                           AND active.status NOT IN ('completed', 'failed')
                  )
-                 AND NOT EXISTS (
-                        SELECT 1
-                        FROM extraction_jobs AS newer
-                        WHERE newer.conversation_id = j.conversation_id
-                          AND newer.user_id = j.user_id
-                          AND newer.source = j.source
-                          AND newer.status = 'failed'
-                          AND (newer.created_at > j.created_at
-                               OR (newer.created_at = j.created_at AND newer.id < j.id))
-                 ))
+                 AND NOT {_NEWER_JOB_EXISTS})
           )
         ORDER BY CASE j.lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
                  j.activity_at DESC NULLS LAST,

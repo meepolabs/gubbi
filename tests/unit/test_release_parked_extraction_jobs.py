@@ -74,7 +74,13 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
 
     log_dry_run(
         build_logger(stream),
-        DryRunResult(groups, would_hydrate=3, held_unhydrated=2, held_unhydrated_parked=1),
+        DryRunResult(
+            groups,
+            would_hydrate=3,
+            would_mark_unreadable=2,
+            would_mark_unreadable_parked=1,
+            unreadable_running=4,
+        ),
     )
 
     lines = _lines(stream)
@@ -89,8 +95,9 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
         summary["releasable"],
         summary["terminal"],
         summary["would_hydrate"],
-        summary["held_unhydrated"],
-    ) == (7, 4, 2, 3, 2)
+        summary["would_mark_unreadable"],
+        summary["unreadable_running"],
+    ) == (7, 4, 2, 3, 2, 4)
 
 
 def test_release_log_reports_released_total_and_held_terminal() -> None:
@@ -99,7 +106,8 @@ def test_release_log_reports_released_total_and_held_terminal() -> None:
         released=(GroupCount("failed", "transient", 3), GroupCount("pending", "none", 1)),
         held_terminal=2,
         hydrated=3,
-        held_unhydrated=1,
+        marked_unreadable=1,
+        unreadable_running=5,
     )
 
     log_release(build_logger(stream), result)
@@ -110,8 +118,9 @@ def test_release_log_reports_released_total_and_held_terminal() -> None:
         summary["released"],
         summary["held_terminal"],
         summary["hydrated"],
-        summary["held_unhydrated"],
-    ) == ("release_summary", 4, 2, 3, 1)
+        summary["marked_unreadable"],
+        summary["unreadable_running"],
+    ) == ("release_summary", 4, 2, 3, 1, 5)
 
 
 @pytest.mark.parametrize(

@@ -134,7 +134,7 @@ async def test_dry_run_counts_held_rows_by_status_and_error_class_without_writin
         GroupCount("failed", "unclassified", 2),
         GroupCount("pending", "none", 1),
     }
-    assert (result.would_hydrate, result.held_unhydrated) == (len(_HYDRATABLE), 0)
+    assert (result.would_hydrate, result.would_mark_unreadable) == (len(_HYDRATABLE), 0)
     assert await _snapshot(admin_pool, job_ids) == before
 
 
@@ -200,7 +200,7 @@ async def test_a_running_row_counted_by_release_is_retried_once_swept_as_worker_
         job_id,
     )
     await admin_pool.execute(
-        "UPDATE extraction_jobs SET started_at = now() - interval '1 day' WHERE id = $1", job_id
+        "UPDATE extraction_jobs SET created_at = now() - interval '1 day' WHERE id = $1", job_id
     )
     await orphan_cleanup._sweep_running(admin_pool)
     await admin_pool.execute(
@@ -300,7 +300,7 @@ async def test_released_legacy_work_is_charged_its_stored_token_count(
         )
 
     assert expected > 0
-    assert (result.hydrated, result.held_unhydrated) == (1, 0)
+    assert (result.hydrated, result.marked_unreadable) == (1, 0)
     assert (hydrated["filtered_tokens"], hydrated["token_count_version"]) == (
         expected,
         TOKEN_COUNT_VERSION,
@@ -308,52 +308,89 @@ async def test_released_legacy_work_is_charged_its_stored_token_count(
     assert (usage[tenant_a].period_conversations, usage[tenant_a].period_tokens) == (1, expected)
 
 
-async def test_a_row_whose_conversation_does_not_decrypt_stays_held(
+async def _ended(admin_pool: asyncpg.Pool, job_id: UUID) -> tuple[str, str | None, bool]:
+    row = await admin_pool.fetchrow(
+        "SELECT status, error_code, run_after = 'infinity' AS held FROM extraction_jobs"
+        " WHERE id = $1",
+        job_id,
+    )
+    assert row is not None
+    return row["status"], row["error_code"], row["held"]
+
+
+async def _make_unreadable(admin_pool: asyncpg.Pool, job_id: UUID) -> None:
+    await admin_pool.execute(
+        "UPDATE messages SET content_encrypted = 'not ciphertext'::bytea"
+        " WHERE conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
+        job_id,
+    )
+
+
+async def _plant_lone(admin_pool: asyncpg.Pool, user_id: UUID, topic_path: str, label: str) -> UUID:
+    """One planted row alone on its conversation, as the queue-columns migration leaves it."""
+    job_ids = await _plant_jobs(admin_pool, user_id, topic_path)
+    await admin_pool.execute(
+        "DELETE FROM extraction_jobs WHERE id <> $1 AND conversation_id ="
+        " (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
+        job_ids[label],
+    )
+    return job_ids[label]
+
+
+@pytest.mark.parametrize(
+    "label", ["pending_held", "failed_transient_held", "pending_scheduled"], ids=str
+)
+async def test_release_ends_a_row_whose_conversation_does_not_decrypt(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
     cipher: ContentCipher,
+    label: str,
 ) -> None:
     readable = await _plant_legacy_pending(admin_pool, tenant_a, "release-readable")
-    unreadable = await _plant_legacy_pending(admin_pool, tenant_a, "release-unreadable")
-    async with admin_pool.acquire() as conn:
-        await conn.execute(
-            "UPDATE messages SET content_encrypted = 'not ciphertext'::bytea"
-            " WHERE conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
-            unreadable,
-        )
+    unreadable = await _plant_lone(
+        admin_pool, tenant_a, f"release-unreadable-{label.replace('_', '-')}", label
+    )
+    await _make_unreadable(admin_pool, unreadable)
 
     dry_run = await count_parked(admin_pool, cipher)
     result = await release_parked(admin_pool, cipher)
+    after_first = await _snapshot(admin_pool, {"unreadable": unreadable})
+    second = await release_parked(admin_pool, cipher)
 
-    assert (dry_run.would_hydrate, dry_run.held_unhydrated) == (1, 1)
-    assert (result.hydrated, result.held_unhydrated) == (1, 1)
+    assert (dry_run.would_hydrate, dry_run.would_mark_unreadable) == (1, 1)
+    assert (result.hydrated, result.marked_unreadable) == (1, 1)
     assert sum(group.count for group in result.released) == 1
     assert (await _job(admin_pool, readable))["held"] is False
-    held = await _job(admin_pool, unreadable)
-    assert (held["held"], held["token_count_version"], held["filtered_tokens"]) == (True, None, 0)
+    assert await _ended(admin_pool, unreadable) == ("failed", "conversation_unreadable", True)
+    async with admin_pool.acquire() as conn, conn.transaction():
+        runnable = {job.job_id for job in await queue_repo.select_runnable(conn, limit=1000)}
+    assert unreadable not in runnable
+    assert (second.released, second.hydrated, second.marked_unreadable) == ((), 0, 0)
+    assert await _snapshot(admin_pool, {"unreadable": unreadable}) == after_first
 
 
-async def test_an_unreadable_running_row_is_not_reported_as_held(
+async def test_an_unreadable_running_row_is_left_to_the_sweep_then_ended_on_a_later_release(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
     cipher: ContentCipher,
 ) -> None:
-    job_ids = await _plant_jobs(admin_pool, tenant_a, "release-running-unreadable")
-    async with admin_pool.acquire() as conn:
-        await conn.execute(
-            "DELETE FROM extraction_jobs WHERE id <> $1 AND conversation_id ="
-            " (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
-            job_ids["running_held"],
-        )
-        await conn.execute(
-            "UPDATE messages SET content_encrypted = 'not ciphertext'::bytea"
-            " WHERE conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
-            job_ids["running_held"],
-        )
+    job_id = await _plant_lone(admin_pool, tenant_a, "release-running-unreadable", "running_held")
+    await _make_unreadable(admin_pool, job_id)
 
     dry_run = await count_parked(admin_pool, cipher)
+    first = await release_parked(admin_pool, cipher)
+    left_running = await _ended(admin_pool, job_id)
+    await admin_pool.execute(
+        "UPDATE extraction_jobs SET created_at = now() - interval '1 day' WHERE id = $1", job_id
+    )
+    await orphan_cleanup._sweep_running(admin_pool)
+    second = await release_parked(admin_pool, cipher)
 
-    assert (dry_run.held_unhydrated, dry_run.held_unhydrated_parked) == (1, 0)
+    assert (dry_run.would_mark_unreadable, dry_run.unreadable_running) == (0, 1)
+    assert (first.marked_unreadable, first.unreadable_running) == (0, 1)
+    assert left_running == ("running", None, True)
+    assert (second.marked_unreadable, second.unreadable_running) == (1, 0)
+    assert await _ended(admin_pool, job_id) == ("failed", "conversation_unreadable", True)
 
 
 async def _plant_uncounted_pending(
@@ -390,7 +427,7 @@ async def test_release_counts_a_scheduled_row_left_without_a_token_count(
         runnable = await queue_repo.select_runnable(conn, limit=10)
 
     assert expected > 0
-    assert (dry_run.would_hydrate, dry_run.held_unhydrated) == (1, 0)
+    assert (dry_run.would_hydrate, dry_run.would_mark_unreadable) == (1, 0)
     assert (result.hydrated, result.released) == (1, ())
     assert [(job.job_id, job.filtered_tokens) for job in runnable] == [(job_id, expected)]
 
@@ -418,10 +455,9 @@ async def test_a_row_whose_conversation_has_another_owner_is_never_decrypted(
     result = await release_parked(admin_pool, cipher)
 
     assert decrypted == []
-    assert (dry_run.would_hydrate, dry_run.held_unhydrated) == (0, 1)
-    assert (result.hydrated, result.held_unhydrated, result.released) == (0, 1, ())
-    held = await _job(admin_pool, job_id)
-    assert (held["held"], held["token_count_version"]) == (True, None)
+    assert (dry_run.would_hydrate, dry_run.would_mark_unreadable) == (0, 1)
+    assert (result.hydrated, result.marked_unreadable, result.released) == (0, 1, ())
+    assert await _ended(admin_pool, job_id) == ("failed", "conversation_unreadable", True)
 
 
 @pytest.mark.parametrize(

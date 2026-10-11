@@ -475,8 +475,8 @@ async def test_blocked_failed_rows_filling_a_batch_do_not_hide_later_runnable_wo
     )
     async with clean_rls_db.acquire() as conn:
         await conn.execute(
-            "INSERT INTO extraction_jobs (user_id, conversation_id, source, status)"
-            " SELECT user_id, conversation_id, source, 'running'"
+            "INSERT INTO extraction_jobs (user_id, conversation_id, source, status, created_at)"
+            " SELECT user_id, conversation_id, source, 'running', created_at - interval '1 hour'"
             " FROM extraction_jobs WHERE id = ANY($1::uuid[])",
             blocked,
         )

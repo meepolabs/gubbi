@@ -10,6 +10,8 @@ The threshold is EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
 (40 minutes): past the extraction function's own Arq timeout, at which
 Arq cancels the job, so a live long-running job is never swept.
 
+A running row with no ``started_at`` is measured from its ``created_at``.
+
 Pending rows are never swept: a pending row is queued work the scheduler
 owns, however long it waits for its lane or budget.
 """
@@ -80,7 +82,7 @@ async def _sweep_running(admin_pool: asyncpg.Pool) -> int:
             SELECT id, attempts, clock_timestamp() AS db_now
             FROM extraction_jobs
             WHERE status = 'running'
-              AND started_at < now() - ($1 * interval '1 second')
+              AND coalesce(started_at, created_at) < now() - ($1 * interval '1 second')
             FOR UPDATE SKIP LOCKED
             """,
             _RUNNING_THRESHOLD_SECS,

@@ -19,10 +19,14 @@ admits or retries such a row. ``--release`` first counts the tokens of every
 pending, failed or running row that has no count and is not a terminal
 failure, from the stored conversation with the estimator ingest uses, and only
 then releases held rows. A running row keeps its status and ``run_after``; the
-count lets the scheduler retry it once the orphan sweep fails it. A row whose
-conversation is missing, belongs to another user, or cannot be decrypted keeps
-no count (a held one stays held) and is counted as ``held_unhydrated``.
-``--dry-run`` reports how many rows would be counted and how many would not.
+count lets the scheduler retry it once the orphan sweep fails it. A pending or
+failed row whose conversation is missing, belongs to another user, or cannot
+be decrypted can never be counted or extracted: ``--release`` fails it with
+the terminal code ``conversation_unreadable`` and reports it as
+``marked_unreadable``. Such a running row may still have a live worker, so it
+is left alone and reported as ``unreadable_running``; once the orphan sweep
+fails it, a later ``--release`` marks it. ``--dry-run`` reports how many rows
+would be counted and how many would be marked.
 
 Output is one JSON log line per count group on stderr, counts only.
 
@@ -60,7 +64,7 @@ from gubbi.storage.repositories.extraction_queue import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Collection, Iterable, Mapping, Sequence
     from uuid import UUID
 
     import asyncpg
@@ -84,7 +88,7 @@ _RELEASABLE: Final = (
 _UNCOUNTED: Final = "status IN ('pending', 'failed', 'running') AND token_count_version IS NULL"
 
 _UNCOUNTED_SQL: Final = f"""
-SELECT j.id, j.conversation_id,
+SELECT j.id, j.conversation_id, j.status = 'running' AS running,
        j.run_after = 'infinity' AND j.status IN ('pending', 'failed') AS parked,
        c.id IS NOT NULL AS owned
 FROM extraction_jobs AS j
@@ -103,6 +107,18 @@ SET filtered_tokens = $2,
 WHERE id = $1
   AND {_UNCOUNTED}
 RETURNING id
+"""  # noqa: S608 - fixed SQL fragments; values are bound
+
+_MARK_UNREADABLE_SQL: Final = f"""
+UPDATE extraction_jobs
+SET status = 'failed',
+    error_code = $5,
+    run_after = 'infinity',
+    completed_at = now()
+WHERE id = ANY($4::uuid[])
+  AND status IN ('pending', 'failed')
+  AND token_count_version IS NULL
+  AND NOT {_TERMINAL_FAILURE}
 """  # noqa: S608 - fixed SQL fragments; values are bound
 
 _RELEASE_SQL: Final = f"""
@@ -154,33 +170,37 @@ class GroupCount:
 
 @dataclass(frozen=True)
 class DryRunResult:
-    """Held rows by group, and how many uncounted rows would be counted or not.
+    """Held rows by group, and what release would do with the uncounted rows.
 
-    ``held_unhydrated_parked`` is the part of ``held_unhydrated`` that is held,
-    so release would leave it held.
+    ``would_mark_unreadable_parked`` is the part of ``would_mark_unreadable``
+    that is held, so release would end it rather than release it.
+    ``unreadable_running`` rows cannot be counted and are left running.
     """
 
     groups: tuple[GroupCount, ...]
     would_hydrate: int = 0
-    held_unhydrated: int = 0
-    held_unhydrated_parked: int = 0
+    would_mark_unreadable: int = 0
+    would_mark_unreadable_parked: int = 0
+    unreadable_running: int = 0
 
 
 @dataclass(frozen=True)
 class ReleaseResult:
-    """Rows released, by group; rows whose token count was filled in; rows left held."""
+    """Rows released, by group; rows counted; rows ended as unreadable; rows left held."""
 
     released: tuple[GroupCount, ...]
     held_terminal: int
     hydrated: int = 0
-    held_unhydrated: int = 0
+    marked_unreadable: int = 0
+    unreadable_running: int = 0
 
 
 @dataclass(frozen=True)
 class _TokenCounts:
     counted: dict[UUID, int]
-    unloadable: frozenset[UUID]
-    unloadable_parked: int
+    unreadable: frozenset[UUID]
+    unreadable_parked: int
+    unreadable_running: int
 
 
 def error_class_of(status: str, error_code: str | None) -> str:
@@ -221,11 +241,13 @@ async def _count_uncounted_tokens(conn: asyncpg.Connection, cipher: ContentCiphe
 
     Tokens come from the stored conversation, counted as ingest counts them.
     A row whose conversation is missing, is owned by another user, or does not
-    decrypt is unloadable; another user's conversation is never decrypted.
+    decrypt is unreadable; another user's conversation is never decrypted.
+    Unreadable running rows are only counted, never collected.
     """
     counted: dict[UUID, int] = {}
-    unloadable: set[UUID] = set()
-    unloadable_parked = 0
+    unreadable: set[UUID] = set()
+    unreadable_parked = 0
+    unreadable_running = 0
     by_conversation: dict[int, int | None] = {}
     for row in await conn.fetch(_UNCOUNTED_SQL, *terminal_failure_args()):
         conversation_id = int(row["conversation_id"])
@@ -236,13 +258,18 @@ async def _count_uncounted_tokens(conn: asyncpg.Connection, cipher: ContentCiphe
                     conn, cipher, conversation_id
                 )
             tokens = by_conversation[conversation_id]
-        if tokens is None:
-            unloadable.add(row["id"])
-            unloadable_parked += int(row["parked"])
-        else:
+        if tokens is not None:
             counted[row["id"]] = tokens
+        elif row["running"]:
+            unreadable_running += 1
+        else:
+            unreadable.add(row["id"])
+            unreadable_parked += int(row["parked"])
     return _TokenCounts(
-        counted=counted, unloadable=frozenset(unloadable), unloadable_parked=unloadable_parked
+        counted=counted,
+        unreadable=frozenset(unreadable),
+        unreadable_parked=unreadable_parked,
+        unreadable_running=unreadable_running,
     )
 
 
@@ -264,25 +291,44 @@ async def count_parked(pool: asyncpg.Pool, cipher: ContentCipher) -> DryRunResul
     return DryRunResult(
         groups=group_counts(rows),
         would_hydrate=len(tokens.counted),
-        held_unhydrated=len(tokens.unloadable),
-        held_unhydrated_parked=tokens.unloadable_parked,
+        would_mark_unreadable=len(tokens.unreadable),
+        would_mark_unreadable_parked=tokens.unreadable_parked,
+        unreadable_running=tokens.unreadable_running,
     )
 
 
 async def release_parked(pool: asyncpg.Pool, cipher: ContentCipher) -> ReleaseResult:
-    """Count tokens where missing, then make every non-terminal, counted held row runnable now."""
+    """Count tokens where missing, end unreadable rows, then free every remaining held row.
+
+    Only non-terminal held rows with a token count are freed.
+    """
     args = terminal_failure_args()
     async with pool.acquire() as conn, conn.transaction():
         tokens = await _count_uncounted_tokens(conn, cipher)
         hydrated = await _store_token_counts(conn, tokens.counted)
+        marked = await _mark_unreadable(conn, tokens.unreadable)
         rows = await conn.fetch(_RELEASE_SQL, *args)
         held_terminal = await conn.fetchval(_COUNT_HELD_TERMINAL_SQL, *args)
     return ReleaseResult(
         released=group_counts(rows),
         held_terminal=int(held_terminal or 0),
         hydrated=hydrated,
-        held_unhydrated=len(tokens.unloadable),
+        marked_unreadable=marked,
+        unreadable_running=tokens.unreadable_running,
     )
+
+
+async def _mark_unreadable(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> int:
+    """Fail each still-uncounted row as ``conversation_unreadable``; return rows written."""
+    if not job_ids:
+        return 0
+    result = await conn.execute(
+        _MARK_UNREADABLE_SQL,
+        *terminal_failure_args(),
+        list(job_ids),
+        ErrorCode.CONVERSATION_UNREADABLE.value,
+    )
+    return int(str(result).rsplit(" ", 1)[-1])
 
 
 async def _store_token_counts(conn: asyncpg.Connection, counted: Mapping[UUID, int]) -> int:
@@ -324,10 +370,11 @@ def log_dry_run(log: EventLogger, result: DryRunResult) -> None:
     log.info(
         "dry_run_summary",
         parked=parked,
-        releasable=parked - terminal - result.held_unhydrated_parked,
+        releasable=parked - terminal - result.would_mark_unreadable_parked,
         terminal=terminal,
         would_hydrate=result.would_hydrate,
-        held_unhydrated=result.held_unhydrated,
+        would_mark_unreadable=result.would_mark_unreadable,
+        unreadable_running=result.unreadable_running,
     )
 
 
@@ -342,7 +389,8 @@ def log_release(log: EventLogger, result: ReleaseResult) -> None:
         released=sum(group.count for group in result.released),
         held_terminal=result.held_terminal,
         hydrated=result.hydrated,
-        held_unhydrated=result.held_unhydrated,
+        marked_unreadable=result.marked_unreadable,
+        unreadable_running=result.unreadable_running,
     )
 
 
@@ -387,7 +435,7 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--release",
         action="store_true",
-        help="Make held rows runnable now, except terminal failures and rows "
+        help="Make held rows runnable now, except terminal failures; fail rows "
         "whose conversation cannot be read.",
     )
     return parser

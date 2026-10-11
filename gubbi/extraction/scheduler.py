@@ -2,10 +2,11 @@
 
 One tick, serialized across API replicas by a session advisory lock:
 
-1. Lock runnable rows: queued ``pending`` rows and retryable ``failed`` rows
-   whose ``run_after`` has passed, in lane order. A failed row whose
-   conversation already has an active job is left for a later tick, and so
-   is a row with no recorded token count.
+1. End every retryable ``failed`` row that a newer job of its conversation
+   replaces, as ``superseded``. Then lock runnable rows: queued ``pending``
+   rows and retryable ``failed`` rows whose ``run_after`` has passed, in lane
+   order. A failed row whose conversation already has an active job is left
+   for a later tick, and so is a row with no recorded token count.
 2. Decide admission for the rows not yet charged, against per-user and global
    limits (everything is admitted while budgets are disabled). A failed row
    that was charged before runs again without a second decision or charge.
@@ -124,6 +125,7 @@ class TickResult:
     """What one tick did; every field is a row count."""
 
     admitted: int = 0
+    superseded: int = 0
     deferred: int = 0
     enqueued: int = 0
     enqueue_failed: int = 0
@@ -181,6 +183,7 @@ class ExtractionScheduler:
     async def _locked_tick(self, conn: asyncpg.Connection) -> TickResult:
         period = budget_period(datetime.now(UTC))
         async with conn.transaction():
+            superseded = await queue_repo.supersede_failed(conn)
             plan = await self._plan(conn, period)
             dispatch = await _claim(conn, plan.dispatch, period)
             await self._record_deferrals(conn, plan.deferrals, period)
@@ -198,6 +201,7 @@ class ExtractionScheduler:
             lost += await queue_repo.fail_enqueue_lost(conn, job_id)
         return TickResult(
             admitted=sum(1 for job in dispatch if job.admitted_at is None),
+            superseded=superseded,
             deferred=len(plan.deferrals),
             enqueued=len(dispatched.enqueued_ids),
             enqueue_failed=len(failed),
