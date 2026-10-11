@@ -26,7 +26,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0004_extraction_tracking_columns"
+_EXPECTED_HEAD = "0005_extraction_queue_columns"
 
 
 def _alembic_config() -> Config:
