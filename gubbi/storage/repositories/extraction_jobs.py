@@ -118,7 +118,8 @@ async def create_pending(
     (migration 0023) enforces this at the database level; we catch the
     UniqueViolationError and surface it as the typed exception. The INSERT
     runs in a savepoint so the lookup of the existing job still works when
-    the caller holds an open transaction. When the conflicting job finished
+    the caller holds an open transaction. The lookup locks the active row
+    until the caller's transaction ends. When the conflicting job finished
     before the lookup found it, the INSERT is retried in a fresh savepoint,
     up to ``_CREATE_PENDING_ATTEMPTS`` times in total, then RuntimeError.
     """
@@ -165,10 +166,12 @@ async def _find_in_flight_job(
     conversation_id: int,
     source: str,
 ) -> UUID | None:
-    """Return the id of the active job that made create_pending's INSERT conflict.
+    """Lock and return the id of the active job that made create_pending's INSERT conflict.
 
-    None when no active row exists any more: the conflicting job finished
-    between the violation and this lookup.
+    The row lock holds until the caller's transaction ends, so the job cannot
+    finish while the caller still refreshes and commits work for it. None when
+    no active row exists any more: the conflicting job finished between the
+    violation and this lookup.
     """
     existing_row = await conn.fetchrow(
         """
@@ -179,6 +182,7 @@ async def _find_in_flight_job(
           AND source = $3
           AND status NOT IN ('completed', 'failed')
         LIMIT 1
+        FOR UPDATE
         """,
         user_id,
         conversation_id,

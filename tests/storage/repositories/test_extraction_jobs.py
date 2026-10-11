@@ -316,6 +316,37 @@ async def test_create_pending_gives_up_when_no_active_row_is_ever_found(
     assert hooked.inserts == 3
 
 
+async def test_reused_job_cannot_finish_until_the_reusing_transaction_ends(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    """The in-flight lookup locks the reused row, so a completion waits for the commit."""
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+
+    async def _complete() -> str:
+        return str(
+            await admin_pool.execute(
+                "UPDATE extraction_jobs SET status = 'completed' WHERE id = $1", job_id
+            )
+        )
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        with pytest.raises(ExtractionJobAlreadyInFlight) as reused:
+            await create_pending(conn, user_a, conversation_id, "chatgpt")
+        completion = asyncio.create_task(_complete())
+        await _wait_until_blocked_on_a_lock(admin_pool)
+        refreshed = await _refresh(conn, reused.value.existing_job_id)
+        completed_before_commit = completion.done()
+
+    assert (reused.value.existing_job_id, refreshed) == (job_id, True)
+    assert completed_before_commit is False
+    assert await completion == "UPDATE 1"
+
+
 # ---------------------------------------------------------------------------
 # Tests: refresh_queued
 # ---------------------------------------------------------------------------

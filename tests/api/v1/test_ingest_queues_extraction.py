@@ -8,7 +8,8 @@ Verifies that POST /api/v1/ingest/conversations:
   - Reports budget_exhausted when the user's monthly allowance is used up
   - Skipped-by-dedup conversations produce no row
   - An audit row is written for each created job, none for a reused one
-  - A conversation and its job are stored together or not at all
+  - A conversation and its job are stored together or not at all, each
+    conversation independently of the others in its request
   - A re-upload refreshes the queue inputs of a job not yet admitted
   - Replay (re-POST same payload) does NOT duplicate in-flight rows (idempotency)
 
@@ -41,6 +42,7 @@ from gubbi.crypto.cipher import ContentCipher
 from gubbi.extraction.intake import TOKEN_COUNT_VERSION, count_filtered_tokens, next_nightly_window
 from gubbi.models.conversation import Message
 from gubbi.storage.embedding_service import EmbeddingService
+from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
 from gubbi.storage.repositories.search import fts_search
 
@@ -456,6 +458,31 @@ class TestIngestQueuesExtraction:
         lanes = [(await _job_for(pool, pid))["lane"] for pid in ("plat-001", "plat-002")]
         assert lanes == ["backfill", "backfill"]
 
+    async def test_platforms_are_judged_on_their_own_history_across_requests(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        """After onboarding, a known platform's fresh work is live; a new platform's is backfill."""
+        await _post(client, "extension_chatgpt", _build_conv("mix-seed", title="Seed"))
+        await _backdate_jobs(pool, _PAST_ONBOARDING)
+        fresh = [datetime.now(UTC) + timedelta(hours=1)]
+
+        await _post(
+            client,
+            "extension_chatgpt",
+            _build_conv("mix-001", title="ChatGPT fresh", message_times=fresh),
+        )
+        await _post(
+            client,
+            "extension_claude",
+            _build_conv("mix-002", platform="claude", title="Claude fresh", message_times=fresh),
+        )
+
+        lanes = [(await _job_for(pool, pid))["lane"] for pid in ("mix-001", "mix-002")]
+        assert lanes == ["live", "backfill"]
+        assert (await _job_for(pool, "mix-002"))["run_after"] <= datetime.now(UTC)
+
     async def test_over_limit_user_is_saved_searchable_queued_and_flagged(
         self,
         client: AsyncClient,
@@ -595,6 +622,38 @@ class TestIngestQueuesExtraction:
         assert data["extractions_skipped_error"] == 1
         assert await _counts_for(pool, "atomic-001") == (0, 0)
 
+    async def test_failed_job_insert_rolls_back_only_its_own_conversation(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A failure on the second conversation leaves the first stored with its job."""
+        create_pending = extraction_jobs.create_pending
+        calls = 0
+
+        async def _fail_second(*args: Any, **kwargs: Any) -> UUID:
+            nonlocal calls
+            calls += 1
+            if calls == 2:
+                raise asyncpg.PostgresError("simulated insert failure")
+            return await create_pending(*args, **kwargs)
+
+        monkeypatch.setattr("gubbi.api.v1.ingest.extraction_jobs.create_pending", _fail_second)
+
+        data = await _post(
+            client,
+            "extension_chatgpt",
+            _build_conv("pair-001", title="Pair first"),
+            _build_conv("pair-002", title="Pair second"),
+        )
+
+        assert (data["conversations_saved"], data["extractions_enqueued"]) == (1, 1)
+        assert data["extractions_skipped_error"] == 1
+        assert await _counts_for(pool, "pair-001") == (1, 1)
+        assert await _counts_for(pool, "pair-002") == (0, 1)
+        assert (await _job_for(pool, "pair-001"))["status"] == "pending"
+
     async def test_resend_after_failed_save_stores_conversation_and_job(
         self,
         client: AsyncClient,
@@ -645,6 +704,31 @@ class TestIngestQueuesExtraction:
         assert after["run_after"] > before["run_after"]
         assert after["activity_at"] == fresh
         assert after["filtered_tokens"] > before["filtered_tokens"]
+
+    async def test_resave_replaces_token_count_when_thread_shrinks(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        """The refreshed token count is the new upload's, even when it is smaller."""
+        await _post(
+            client, "extension_chatgpt", _build_conv("shrink-001", title="Shrink", msg_count=6)
+        )
+        before = await _job_for(pool, "shrink-001")
+
+        await _post(
+            client, "extension_chatgpt", _build_conv("shrink-002", title="Shrink", msg_count=2)
+        )
+
+        after = await _job_by_id(pool, before["id"])
+        expected = count_filtered_tokens(
+            [
+                Message(role="user", content="Message 0"),
+                Message(role="assistant", content="Message 1"),
+            ]
+        )
+        assert after["filtered_tokens"] == expected
+        assert after["filtered_tokens"] < before["filtered_tokens"]
 
     async def test_resave_leaves_admitted_job_unchanged(
         self,
