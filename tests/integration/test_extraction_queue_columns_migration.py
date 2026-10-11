@@ -75,6 +75,11 @@ EXPECTED_INDEXES: dict[str, str] = {
         "CREATE INDEX idx_extraction_jobs_user_period_admitted ON public.extraction_jobs"
         " USING btree (user_id, budget_period_start) WHERE (admitted_at IS NOT NULL)"
     ),
+    "idx_extraction_jobs_period_admitted": (
+        "CREATE INDEX idx_extraction_jobs_period_admitted ON public.extraction_jobs"
+        " USING btree (budget_period_start) INCLUDE (filtered_tokens)"
+        " WHERE (admitted_at IS NOT NULL)"
+    ),
 }
 
 
@@ -245,7 +250,9 @@ async def _read_legacy_jobs(dsn: str, job_ids: dict[str, UUID]) -> dict[str, asy
     conn = await asyncpg.connect(dsn, timeout=5)
     try:
         rows = await conn.fetch(
-            f"SELECT id, {', '.join(EXPECTED_COLUMNS)}, isfinite(run_after) AS run_after_finite "  # noqa: S608 -- column names are module literals
+            f"SELECT id, {', '.join(EXPECTED_COLUMNS)}, "  # noqa: S608 -- column names are module literals
+            "isfinite(run_after) AS run_after_finite, "
+            "run_after = 'infinity'::timestamptz AS run_after_infinity "
             "FROM extraction_jobs WHERE id = ANY($1::uuid[])",
             list(job_ids.values()),
         )
@@ -327,7 +334,7 @@ def test_downgrade_removes_every_added_object(round_trip: RoundTrip) -> None:
 
 @pytest.mark.parametrize("status", ["pending", "failed"])
 def test_upgrade_holds_unfinished_jobs_until_released(round_trip: RoundTrip, status: str) -> None:
-    assert round_trip.legacy_jobs[status]["run_after_finite"] is False
+    assert round_trip.legacy_jobs[status]["run_after_infinity"] is True
 
 
 @pytest.mark.parametrize("status", ["running", "completed"])
@@ -349,7 +356,7 @@ def test_pre_existing_jobs_read_the_backfill_lane_and_no_charge(
     assert {
         key: value
         for key, value in job.items()
-        if key not in {"id", "run_after", "run_after_finite"}
+        if key not in {"id", "run_after", "run_after_finite", "run_after_infinity"}
     } == {
         "lane": "backfill",
         "defer_reason": None,

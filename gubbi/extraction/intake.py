@@ -28,6 +28,7 @@ class Lane(StrEnum):
 
 def assign_lane(
     request_source: str,
+    *,
     activity_at: datetime,
     now: datetime,
     first_upload_at_platform: datetime | None,

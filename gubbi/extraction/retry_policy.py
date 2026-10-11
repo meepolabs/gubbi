@@ -55,10 +55,6 @@ DETERMINISTIC_MAX_ATTEMPTS: Final = 3
 # Each delay is shortened by up to this fraction, so jitter never pushes a
 # delay past its cap and simultaneous failures do not retry in lockstep.
 JITTER_RATIO: Final = 0.2
-# asyncpg encodes exactly this naive value as PostgreSQL 'infinity' for
-# timestamptz and decodes 'infinity' back to it.
-RUN_AFTER_NEVER: Final = datetime.max
-
 _MAX_BACKOFF_EXPONENT: Final = 30
 
 
@@ -73,12 +69,14 @@ def next_run_after(
     now: datetime,
     *,
     rng: Callable[[], float] = random.random,
-) -> datetime:
+) -> datetime | None:
     """Return when a job that failed with ``code`` may run again.
 
     ``attempts`` counts runs started so far, including the one that failed.
     ``rng`` returns a float in ``[0, 1)`` and drives the jitter. Returns
-    :data:`RUN_AFTER_NEVER` when the job must not be retried.
+    ``None`` when the job must not be retried; callers persist ``None`` as
+    PostgreSQL ``'infinity'`` at the repository boundary, so no naive sentinel
+    is ever compared with an aware ``now``.
     """
     if attempts < 1:
         raise ValueError(f"attempts must be >= 1, got {attempts}")
@@ -86,10 +84,10 @@ def next_run_after(
         raise ValueError("now must be timezone-aware")
     cls = retry_class(code)
     if cls is RetryClass.TERMINAL:
-        return RUN_AFTER_NEVER
+        return None
     if cls is RetryClass.DETERMINISTIC:
         if attempts >= DETERMINISTIC_MAX_ATTEMPTS:
-            return RUN_AFTER_NEVER
+            return None
         return now + _jittered(DETERMINISTIC_DELAY, rng)
     return now + _jittered(_transient_delay(attempts), rng)
 

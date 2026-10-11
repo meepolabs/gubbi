@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
 from itertools import pairwise
 
 import pytest
@@ -13,7 +14,6 @@ from gubbi.extraction.retry_policy import (
     DETERMINISTIC_DELAY,
     DETERMINISTIC_MAX_ATTEMPTS,
     JITTER_RATIO,
-    RUN_AFTER_NEVER,
     TRANSIENT_BASE_DELAY,
     TRANSIENT_MAX_DELAY,
     ErrorCode,
@@ -54,6 +54,12 @@ def _max_jitter() -> float:
     return 0.999999
 
 
+def _delay(code: ErrorCode, attempts: int, rng: Callable[[], float]) -> timedelta:
+    run_after = next_run_after(code, attempts, NOW, rng=rng)
+    assert run_after is not None
+    return run_after - NOW
+
+
 @pytest.mark.parametrize("code", list(ErrorCode), ids=str)
 def test_every_error_code_has_a_retry_class(code: ErrorCode) -> None:
     assert code in retry_policy.RETRY_CLASSES
@@ -82,12 +88,12 @@ def test_classes_match_the_settled_partition() -> None:
 
 @pytest.mark.parametrize("attempts", [1, 2, 5, 100])
 def test_llm_refused_never_runs_again(attempts: int) -> None:
-    assert next_run_after(ErrorCode.LLM_REFUSED, attempts, NOW) == RUN_AFTER_NEVER
+    assert next_run_after(ErrorCode.LLM_REFUSED, attempts, NOW) is None
 
 
 @pytest.mark.parametrize("code", _TRANSIENT_CODES, ids=str)
 def test_transient_backoff_doubles_from_base_until_cap(code: ErrorCode) -> None:
-    delays = [next_run_after(code, n, NOW, rng=_no_jitter) - NOW for n in range(1, 40)]
+    delays = [_delay(code, n, _no_jitter) for n in range(1, 40)]
 
     assert delays[0] == TRANSIENT_BASE_DELAY
     assert delays[1] == TRANSIENT_BASE_DELAY * 2
@@ -99,9 +105,9 @@ def test_transient_backoff_doubles_from_base_until_cap(code: ErrorCode) -> None:
 @pytest.mark.parametrize("attempts", [1, 4, 39])
 def test_jitter_shortens_delay_within_ratio(attempts: int) -> None:
     code = ErrorCode.LLM_RATE_LIMITED
-    unjittered = next_run_after(code, attempts, NOW, rng=_no_jitter) - NOW
+    unjittered = _delay(code, attempts, _no_jitter)
 
-    jittered = next_run_after(code, attempts, NOW, rng=_max_jitter) - NOW
+    jittered = _delay(code, attempts, _max_jitter)
 
     assert unjittered * (1 - JITTER_RATIO) <= jittered < unjittered
 
@@ -115,7 +121,7 @@ def test_deterministic_waits_long_delay_before_max_attempts(code: ErrorCode) -> 
 @pytest.mark.parametrize("code", _DETERMINISTIC_CODES, ids=str)
 def test_deterministic_is_terminal_at_max_attempts(code: ErrorCode) -> None:
     for attempts in (DETERMINISTIC_MAX_ATTEMPTS, DETERMINISTIC_MAX_ATTEMPTS + 5):
-        assert next_run_after(code, attempts, NOW) == RUN_AFTER_NEVER
+        assert next_run_after(code, attempts, NOW) is None
 
 
 def test_rejects_attempts_below_one() -> None:

@@ -99,6 +99,26 @@ class _Msg:
         pytest.param(
             "zip_upload", _day(39), _day(40), _day(0), _day(0), WINDOW, Lane.LIVE, id="zip-live"
         ),
+        pytest.param(
+            "extension_claude",
+            _day(10),
+            _day(40),
+            _day(10),
+            _day(0),
+            WINDOW,
+            Lane.LIVE,
+            id="activity-equal-to-platform-first-upload-is-live",
+        ),
+        pytest.param(
+            "extension_chatgpt",
+            _day(7),
+            _day(7),
+            _day(0),
+            _day(0),
+            WINDOW,
+            Lane.LIVE,
+            id="now-at-onboarding-window-end-is-live",
+        ),
     ],
 )
 def test_assign_lane_classifies_by_source_platform_and_onboarding(
@@ -110,14 +130,28 @@ def test_assign_lane_classifies_by_source_platform_and_onboarding(
     window: timedelta,
     expected: Lane,
 ) -> None:
-    lane = assign_lane(source, activity_at, now, first_platform, first_any, window)
+    lane = assign_lane(
+        source,
+        activity_at=activity_at,
+        now=now,
+        first_upload_at_platform=first_platform,
+        first_upload_at_any=first_any,
+        onboarding_window=window,
+    )
 
     assert lane is expected
 
 
 def test_assign_lane_rejects_unknown_source() -> None:
     with pytest.raises(ValueError, match="unknown ingest source"):
-        assign_lane("agent", _day(0), _day(0), None, None, WINDOW)
+        assign_lane(
+            "agent",
+            activity_at=_day(0),
+            now=_day(0),
+            first_upload_at_platform=None,
+            first_upload_at_any=None,
+            onboarding_window=WINDOW,
+        )
 
 
 @pytest.mark.parametrize(
