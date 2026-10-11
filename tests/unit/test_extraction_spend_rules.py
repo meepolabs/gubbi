@@ -97,6 +97,11 @@ def test_run_after_follows_the_lane_schedule(lane: Lane, expected: datetime) -> 
         ("JOURNAL_LLM_WEIGHT_INPUT", "-0.1"),
         ("JOURNAL_LLM_WEIGHT_CACHED_INPUT", "-0.1"),
         ("JOURNAL_LLM_WEIGHT_OUTPUT", "-0.1"),
+        *(
+            (f"JOURNAL_LLM_WEIGHT_{weight}", raw)
+            for weight in ("INPUT", "CACHED_INPUT", "OUTPUT")
+            for raw in ("inf", "-inf", "nan")
+        ),
     ],
 )
 def test_out_of_range_setting_is_rejected(

@@ -378,11 +378,15 @@ class LLMConfig(BaseSettings):
     running_job_cap: int = Field(
         default=3, ge=1, validation_alias="JOURNAL_EXTRACTION_RUNNING_JOB_CAP"
     )
-    weight_input: float = Field(default=1.0, ge=0, validation_alias="JOURNAL_LLM_WEIGHT_INPUT")
-    weight_cached_input: float = Field(
-        default=0.1, ge=0, validation_alias="JOURNAL_LLM_WEIGHT_CACHED_INPUT"
+    weight_input: float = Field(
+        default=1.0, ge=0, allow_inf_nan=False, validation_alias="JOURNAL_LLM_WEIGHT_INPUT"
     )
-    weight_output: float = Field(default=4.0, ge=0, validation_alias="JOURNAL_LLM_WEIGHT_OUTPUT")
+    weight_cached_input: float = Field(
+        default=0.1, ge=0, allow_inf_nan=False, validation_alias="JOURNAL_LLM_WEIGHT_CACHED_INPUT"
+    )
+    weight_output: float = Field(
+        default=4.0, ge=0, allow_inf_nan=False, validation_alias="JOURNAL_LLM_WEIGHT_OUTPUT"
+    )
     # Deployment-wide monthly ceiling across all users, in weighted tokens.
     global_monthly_token_ceiling: int | None = Field(
         default=None, gt=0, validation_alias="JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING"

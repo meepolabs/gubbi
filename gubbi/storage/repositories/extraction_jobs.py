@@ -487,7 +487,6 @@ class FinishedAttempt:
     source: str
     lane: str
     attempt: int
-    activity_at: datetime | None
     resaved_during_run: bool
 
 
@@ -495,7 +494,7 @@ async def finished_attempt(conn: asyncpg.Connection, job_id: UUID) -> FinishedAt
     """Return the latest attempt of ``job_id``; None when the row is not visible."""
     row = await conn.fetchrow(
         """
-        SELECT j.user_id, j.conversation_id, j.source, j.lane, j.attempts, j.activity_at,
+        SELECT j.user_id, j.conversation_id, j.source, j.lane, j.attempts,
                coalesce(c.updated_at > j.started_at, false) AS resaved_during_run
         FROM extraction_jobs AS j
         LEFT JOIN conversations AS c ON c.id = j.conversation_id
@@ -512,7 +511,6 @@ async def finished_attempt(conn: asyncpg.Connection, job_id: UUID) -> FinishedAt
         source=str(row["source"]),
         lane=str(row["lane"]),
         attempt=int(row["attempts"]),
-        activity_at=row["activity_at"],
         resaved_during_run=bool(row["resaved_during_run"]),
     )
 
@@ -525,11 +523,24 @@ async def create_follow_up(
     Must run inside the caller's transaction, after the finished job left the
     active statuses. The conversation's ``processed_at`` is cleared so the new
     job extracts it again; content unchanged since the last extraction is
-    then skipped by its content hash. Returns the new job id, or None when
+    then skipped by its content hash. The new job's ``activity_at`` is the
+    conversation's latest message timestamp as saved now, else its
+    ``updated_at``, never later than now. Returns the new job id, or None when
     another job of the conversation is already active.
     """
-    await conn.execute(
-        "UPDATE conversations SET processed_at = NULL WHERE id = $1",
+    activity_at = await conn.fetchval(
+        """
+        UPDATE conversations AS c
+        SET processed_at = NULL
+        WHERE c.id = $1
+        RETURNING least(
+            coalesce(
+                (SELECT max(m.timestamp) FROM messages AS m WHERE m.conversation_id = c.id),
+                c.updated_at
+            ),
+            now()
+        )
+        """,
         attempt.conversation_id,
     )
     try:
@@ -540,7 +551,7 @@ async def create_follow_up(
             attempt.source,
             lane=attempt.lane,
             run_after=run_after,
-            activity_at=attempt.activity_at,
+            activity_at=activity_at,
         )
     except ExtractionJobAlreadyInFlight:
         return None

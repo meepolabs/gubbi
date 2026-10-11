@@ -101,35 +101,39 @@ async def available(
     no charges and no grants has the whole allowance available.
     """
     ids = list(monthly_amounts)
-    charges = await conn.fetch(
+    rows = await conn.fetch(
         f"""
-        SELECT user_id,
-               coalesce(sum(monthly_part) FILTER (WHERE month = {CURRENT_MONTH_SQL}), 0)
-                   AS monthly_used,
-               coalesce(sum(credit_part), 0) AS credit_spent
-        FROM llm_charges
-        WHERE user_id = ANY($1::uuid[])
-        GROUP BY user_id
+        WITH charges AS (
+            SELECT user_id,
+                   sum(monthly_part) FILTER (WHERE month = {CURRENT_MONTH_SQL}) AS monthly_used,
+                   sum(credit_part) AS credit_spent
+            FROM llm_charges
+            WHERE user_id = ANY($1::uuid[])
+            GROUP BY user_id
+        ), grants AS (
+            SELECT user_id, sum(amount) AS granted
+            FROM credit_grants
+            WHERE user_id = ANY($1::uuid[])
+            GROUP BY user_id
+        )
+        SELECT u.user_id,
+               coalesce(c.monthly_used, 0) AS monthly_used,
+               coalesce(c.credit_spent, 0) AS credit_spent,
+               coalesce(g.granted, 0) AS granted
+        FROM (SELECT unnest($1::uuid[]) AS user_id) AS u
+        LEFT JOIN charges AS c ON c.user_id = u.user_id
+        LEFT JOIN grants AS g ON g.user_id = u.user_id
         """,  # noqa: S608 - the interpolated expression is fixed SQL; values are bound
         ids,
     )
-    grants = await conn.fetch(
-        """
-        SELECT user_id, coalesce(sum(amount), 0) AS granted
-        FROM credit_grants
-        WHERE user_id = ANY($1::uuid[])
-        GROUP BY user_id
-        """,
-        ids,
-    )
-    monthly_used = {UUID(str(r["user_id"])): int(r["monthly_used"]) for r in charges}
-    credit_spent = {UUID(str(r["user_id"])): int(r["credit_spent"]) for r in charges}
-    granted = {UUID(str(r["user_id"])): int(r["granted"]) for r in grants}
+    # Overspend is recorded in credit_part, so monthly use past a (lowered) allowance is no debt.
     return {
-        user_id: max(monthly_amounts[user_id] - monthly_used.get(user_id, 0), 0)
-        + granted.get(user_id, 0)
-        - credit_spent.get(user_id, 0)
-        for user_id in ids
+        UUID(str(r["user_id"])): max(
+            monthly_amounts[UUID(str(r["user_id"]))] - int(r["monthly_used"]), 0
+        )
+        + int(r["granted"])
+        - int(r["credit_spent"])
+        for r in rows
     }
 
 

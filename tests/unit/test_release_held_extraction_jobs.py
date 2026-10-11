@@ -18,6 +18,8 @@ from gubbi.scripts.release_held_extraction_jobs import (
     log_release,
 )
 
+pytestmark = pytest.mark.unit
+
 
 @pytest.mark.parametrize(
     ("status", "error_code", "expected"),

@@ -189,6 +189,38 @@ async def test_available_reads_every_requested_user_in_one_call(
     assert balances == {tenant_a: 900 + 250, tenant_b: -300, untouched: 2_000}
 
 
+async def test_available_reads_charges_and_grants_in_one_statement(
+    clean_rls_db: asyncpg.Pool, tenant_a: UUID, tenant_b: UUID
+) -> None:
+    await _grant(clean_rls_db, tenant_a, 250)
+    await _charge(clean_rls_db, _attempt(tenant_b, 100))
+    statements: list[str] = []
+    original_fetch = asyncpg.connection.Connection.fetch
+
+    async def _counting_fetch(self: asyncpg.Connection, query: str, *args: object) -> object:
+        statements.append(query)
+        return await original_fetch(self, query, *args)
+
+    async with clean_rls_db.acquire() as conn:
+        with patch.object(asyncpg.connection.Connection, "fetch", _counting_fetch):
+            balances = await wallet_repo.available(conn, {tenant_a: _MONTHLY, tenant_b: _MONTHLY})
+
+    assert len(statements) == 1
+    assert balances == {tenant_a: _MONTHLY + 250, tenant_b: _MONTHLY - 100}
+
+
+async def test_monthly_use_past_a_lowered_allowance_leaves_credit_untouched(
+    clean_rls_db: asyncpg.Pool, tenant_a: UUID
+) -> None:
+    await _grant(clean_rls_db, tenant_a, 300)
+    await _charge(clean_rls_db, _attempt(tenant_a, 800))
+
+    async with clean_rls_db.acquire() as conn:
+        balances = await wallet_repo.available(conn, {tenant_a: 500})
+
+    assert balances == {tenant_a: 300}
+
+
 async def test_available_under_rls_sees_only_the_users_own_rows(
     clean_rls_db: asyncpg.Pool, app_pool: asyncpg.Pool, tenant_a: UUID, tenant_b: UUID
 ) -> None:
@@ -213,6 +245,32 @@ async def test_global_used_sums_this_months_weighted_charges_of_every_user(
         total = await wallet_repo.global_used(conn)
 
     assert total == 1_530
+
+
+async def test_deleting_a_user_keeps_their_charges_in_global_used_as_anonymous_rows(
+    clean_rls_db: asyncpg.Pool, tenant_a: UUID, tenant_b: UUID
+) -> None:
+    await _grant(clean_rls_db, tenant_a, 500)
+    await _charge(clean_rls_db, _attempt(tenant_a, 400))
+    await _charge(clean_rls_db, _attempt(tenant_b, 30))
+    async with clean_rls_db.acquire() as conn:
+        before = await wallet_repo.global_used(conn)
+
+    await clean_rls_db.execute("DELETE FROM users WHERE id = $1", tenant_a)
+
+    async with clean_rls_db.acquire() as conn:
+        after = await wallet_repo.global_used(conn)
+        balances = await wallet_repo.available(conn, {tenant_a: _MONTHLY, tenant_b: _MONTHLY})
+    charge_owners = await clean_rls_db.fetch(
+        "SELECT user_id, weighted FROM llm_charges ORDER BY weighted"
+    )
+    grants_left = await clean_rls_db.fetchval(
+        "SELECT count(*) FROM credit_grants WHERE user_id = $1", tenant_a
+    )
+    assert (before, after) == (430, 430)
+    assert [(r["user_id"], r["weighted"]) for r in charge_owners] == [(tenant_b, 30), (None, 400)]
+    assert grants_left == 0
+    assert balances == {tenant_a: _MONTHLY, tenant_b: _MONTHLY - 30}
 
 
 # ---------------------------------------------------------------------------

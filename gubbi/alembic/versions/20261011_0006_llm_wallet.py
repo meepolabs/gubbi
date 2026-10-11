@@ -13,6 +13,9 @@ keeps both parts non-negative and summing to ``weighted``; ``(job_id,
 attempt)`` is unique, so an attempt is charged at most once. ``job_id`` has no
 foreign key: a charge may belong to a job kind with no ``extraction_jobs`` row.
 ``job_kind`` has no CHECK; the application's spend-rule table names the kinds.
+``user_id`` is nullable with ON DELETE SET NULL: deleting a user keeps their
+charges as anonymous rows, so a purge never lowers the deployment-wide monthly
+total. A grant has no use without its user, so ``credit_grants`` cascades.
 
 A user's balance is a sum over these rows, never stored. Two indexes answer
 the sums from the index alone: ``(user_id, month) INCLUDE (monthly_part,
@@ -21,7 +24,8 @@ credit_part)`` for a user's monthly use and credit spent, ``(month) INCLUDE
 (amount)`` does the same for grants.
 
 Both tables carry FORCE ROW LEVEL SECURITY with a user-isolation policy for
-journal_app matching ``extraction_jobs``. journal_app may only SELECT and
+journal_app matching ``extraction_jobs``; an anonymous charge matches no user,
+so journal_app neither sees nor writes one. journal_app may only SELECT and
 INSERT: the tables are append-only. journal_admin holds ALL, as on every
 other table.
 
@@ -62,9 +66,9 @@ _CREATE_LLM_CHARGES = """
 CREATE TABLE public.llm_charges (
     id uuid DEFAULT gen_random_uuid() NOT NULL
         CONSTRAINT llm_charges_pkey PRIMARY KEY,
-    user_id uuid NOT NULL
+    user_id uuid
         CONSTRAINT llm_charges_user_id_fkey
-        REFERENCES public.users(id) ON DELETE CASCADE,
+        REFERENCES public.users(id) ON DELETE SET NULL,
     job_kind text NOT NULL,
     job_id uuid NOT NULL,
     attempt integer NOT NULL,

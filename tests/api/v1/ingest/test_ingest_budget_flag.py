@@ -85,6 +85,30 @@ class TestIngestBudgetFlag:
 
         assert data["budget_exhausted"] is exhausted
 
+    async def test_a_first_upload_grants_no_credit(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        budget_env: pytest.MonkeyPatch,
+    ) -> None:
+        """Credit comes only from grant sources outside ingest, never from an upload."""
+        count_sql = "SELECT count(*) FROM credit_grants WHERE user_id = $1"
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO credit_grants (user_id, amount, reason, idempotency_key)"
+                " VALUES ($1, 5, 'test', 'planted-grant')",
+                TEST_USER_ID,
+            )
+            planted = await conn.fetchval(count_sql, TEST_USER_ID)
+
+        data = await post(client, "paste_memories", build_conv("first-001", title="First"))
+
+        async with pool.acquire() as conn:
+            after = await conn.fetchval(count_sql, TEST_USER_ID)
+        assert data["conversations_saved"] == 1
+        assert planted == 1
+        assert after == planted
+
     async def test_budgets_disabled_never_flags_exhaustion(
         self,
         client: AsyncClient,

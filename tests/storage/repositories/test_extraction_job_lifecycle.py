@@ -336,6 +336,95 @@ async def test_create_follow_up_queues_a_new_job_and_reopens_the_conversation(
     }
 
 
+_OLD_ACTIVITY = datetime(2026, 1, 1, tzinfo=UTC)
+_RESAVED_MESSAGE_AT = datetime(2026, 3, 4, 5, 6, tzinfo=UTC)
+_CONVERSATION_UPDATED_AT = datetime(2026, 2, 1, tzinfo=UTC)
+
+
+async def _add_message(
+    admin_pool: asyncpg.Pool, user_id: UUID, conversation_id: int, stamp: datetime | None
+) -> None:
+    await admin_pool.execute(
+        "INSERT INTO messages (conversation_id, user_id, role, timestamp, position,"
+        " content_encrypted, content_nonce)"
+        " VALUES ($1, $2, 'user', $3, 0, 'x'::bytea, 'nonce_msg_12'::bytea)",
+        conversation_id,
+        user_id,
+        stamp,
+    )
+
+
+async def _follow_up_activity_at(
+    app_pool: asyncpg.Pool, admin_pool: asyncpg.Pool, user_id: UUID, conversation_id: int
+) -> datetime:
+    async with user_scoped_connection(app_pool, user_id=user_id) as conn:
+        job_id = await create_pending(
+            conn, user_id, conversation_id, "chatgpt", activity_at=_OLD_ACTIVITY
+        )
+        await admit(conn, [job_id])
+        assert await mark_running(conn, job_id)
+        assert await mark_completed(
+            conn, job_id, topics_created=0, entries_created=0, cents_spent=0
+        )
+        attempt = await finished_attempt(conn, job_id)
+        assert attempt is not None
+        follow_up = await create_follow_up(conn, attempt, datetime(2026, 7, 2, tzinfo=UTC))
+    activity_at: datetime = await admin_pool.fetchval(
+        "SELECT activity_at FROM extraction_jobs WHERE id = $1", follow_up
+    )
+    return activity_at
+
+
+@pytest.mark.parametrize(
+    ("stamps", "expected"),
+    [
+        pytest.param(
+            [_RESAVED_MESSAGE_AT - timedelta(days=1), _RESAVED_MESSAGE_AT, None],
+            _RESAVED_MESSAGE_AT,
+            id="latest-message",
+        ),
+        pytest.param([None], _CONVERSATION_UPDATED_AT, id="undated-messages-use-updated-at"),
+        pytest.param([], _CONVERSATION_UPDATED_AT, id="no-messages-use-updated-at"),
+    ],
+)
+async def test_create_follow_up_takes_activity_at_from_the_conversation_as_saved_now(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+    stamps: list[datetime | None],
+    expected: datetime,
+) -> None:
+    user_a, _ = rls_users
+    await admin_pool.execute(
+        "UPDATE conversations SET updated_at = $2 WHERE id = $1",
+        conversation_id,
+        _CONVERSATION_UPDATED_AT,
+    )
+    for stamp in stamps:
+        await _add_message(admin_pool, user_a, conversation_id, stamp)
+
+    activity_at = await _follow_up_activity_at(app_pool, admin_pool, user_a, conversation_id)
+
+    assert activity_at == expected
+
+
+async def test_create_follow_up_never_takes_an_activity_at_later_than_now(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    await _add_message(admin_pool, user_a, conversation_id, datetime(2999, 1, 1, tzinfo=UTC))
+    before: datetime = await admin_pool.fetchval("SELECT now()")
+
+    activity_at = await _follow_up_activity_at(app_pool, admin_pool, user_a, conversation_id)
+
+    after: datetime = await admin_pool.fetchval("SELECT now()")
+    assert before <= activity_at <= after
+
+
 async def test_create_follow_up_returns_none_when_the_conversation_already_has_an_active_job(
     app_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],

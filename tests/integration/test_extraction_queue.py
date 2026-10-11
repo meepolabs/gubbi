@@ -185,6 +185,56 @@ async def test_select_runnable_excludes_rows_that_may_not_run(
     assert set(await _runnable_ids(clean_rls_db)) == {pending, retryable}
 
 
+class _FetchThroughCursor:
+    """Run ``fetch`` through a cursor and call ``between`` after the first row.
+
+    The ranking finishes under the statement's snapshot before the first row
+    is locked, so a row ``between`` changes and commits is locked in its new
+    version, which only the quals on the locked row recheck.
+    """
+
+    def __init__(self, conn: asyncpg.Connection, between: Any) -> None:
+        self._conn = conn
+        self._between = between
+
+    async def fetch(self, query: str, *args: object) -> list[asyncpg.Record]:
+        async with self._conn.transaction():
+            cursor = await self._conn.cursor(query, *args)
+            first = await cursor.fetchrow()
+            await self._between()
+            rest = await cursor.fetch(100)
+        return [first, *rest] if first is not None else rest
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        pytest.param("run_after = now() + interval '1 day'", id="deferred"),
+        pytest.param("admitted_at = now()", id="dispatched"),
+    ],
+)
+async def test_select_runnable_drops_a_row_changed_after_its_snapshot_before_its_lock(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, change: str
+) -> None:
+    first = await _insert(clean_rls_db, seeded_a, Job(lane="paste"))
+    changed = await _insert(clean_rls_db, seeded_a, Job(lane="live"))
+
+    async def _change_and_commit() -> None:
+        await clean_rls_db.execute(
+            f"UPDATE extraction_jobs SET {change} WHERE id = $1",  # noqa: S608 - fixed SQL
+            changed,
+        )
+
+    async with clean_rls_db.acquire() as conn:
+        jobs = await queue_repo.select_runnable(
+            _FetchThroughCursor(conn, _change_and_commit),  # type: ignore[arg-type]
+            10,
+            10,
+        )
+
+    assert [job.job_id for job in jobs] == [first]
+
+
 async def test_select_runnable_retries_a_deterministic_failure_below_its_limit(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:

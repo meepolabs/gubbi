@@ -263,6 +263,10 @@ async def select_runnable(conn: asyncpg.Connection, limit: int, per_user: int) -
     within a lane (unknown last); then ``created_at`` and ``id`` so equal rows
     come back in a stable order and ``limit`` never starves a higher lane.
     """
+    # A row changed after the statement's snapshot is locked in its new
+    # version, and FOR UPDATE rechecks only the quals on ``j``; the CTE's
+    # result is not re-evaluated. Repeating the runnable predicate on ``j``
+    # drops a row another transaction deferred or dispatched in that window.
     rows = await conn.fetch(
         f"""
         WITH ranked AS (
@@ -275,6 +279,7 @@ async def select_runnable(conn: asyncpg.Connection, limit: int, per_user: int) -
         FROM extraction_jobs AS j
         JOIN ranked AS r ON r.id = j.id
         WHERE r.rank <= $2
+          AND {_runnable_sql(3)}
         ORDER BY {_QUEUE_ORDER}
         LIMIT $1
         FOR UPDATE OF j SKIP LOCKED

@@ -15,9 +15,10 @@ import pytest
 
 from gubbi.config import get_settings
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
-from gubbi.extraction.llm.provider import LLMRefusalError
+from gubbi.extraction.llm.provider import LLMRateLimitError, LLMRefusalError
 from gubbi.extraction.pipeline import PipelineFailure
 from gubbi.extraction.wallet import usage_weights, weighted
+from gubbi.storage.repositories.extraction_queue import revive_failed
 from tests.fixtures.extraction_db import (
     SeedMessage,
     charges_of,
@@ -51,8 +52,22 @@ def _fresh_settings() -> Iterator[None]:
     get_settings.cache_clear()
 
 
+_CURRENT_UTC_MONTH = "SELECT date_trunc('month', now() AT TIME ZONE 'UTC')::date"
+
+
 def _call_weighted() -> int:
     return weighted(CALL_USAGE, usage_weights())
+
+
+async def _revive(admin_pool: asyncpg.Pool, job_id: UUID) -> None:
+    """Move a failed job back to pending, due and dispatched, as the scheduler does."""
+    async with admin_pool.acquire() as conn:
+        assert await revive_failed(conn, [job_id]) == {job_id}
+        await conn.execute(
+            "UPDATE extraction_jobs SET run_after = now() - interval '1 minute',"
+            " admitted_at = now() WHERE id = $1",
+            job_id,
+        )
 
 
 async def _seed(
@@ -73,7 +88,7 @@ async def test_a_completed_attempt_is_charged_its_reported_usage(
     )
 
     [charge] = await charges_of(admin_pool, job_id)
-    assert dict(charge) | {"month": None} == {
+    assert dict(charge) == {
         "attempt": 1,
         "job_kind": "backfill",
         "input_tokens": CALL_USAGE.input,
@@ -82,7 +97,7 @@ async def test_a_completed_attempt_is_charged_its_reported_usage(
         "weighted": _call_weighted(),
         "monthly_part": _call_weighted(),
         "credit_part": 0,
-        "month": None,
+        "month": await admin_pool.fetchval(_CURRENT_UTC_MONTH),
     }
 
 
@@ -99,6 +114,63 @@ async def test_a_failed_attempt_is_charged_the_usage_of_its_calls(
 
     charges = await charges_of(admin_pool, job_id)
     assert [(c["attempt"], c["weighted"]) for c in charges] == [(1, _call_weighted())]
+
+
+async def test_a_failed_then_revived_job_charges_each_attempt_once(
+    app_pool: asyncpg.Pool, admin_pool: asyncpg.Pool, cipher: ContentCipher, tenant_a: UUID
+) -> None:
+    conv_id, job_id = await _seed(admin_pool, app_pool, cipher, tenant_a)
+    failing = ScriptedProvider([LLMRateLimitError("slow", usage=CALL_USAGE)])
+    with pytest.raises(PipelineFailure):
+        await extract_conversation(
+            job_ctx(app_pool, cipher, failing), conv_id, str(tenant_a), str(job_id)
+        )
+    await _revive(admin_pool, job_id)
+    succeeding = ScriptedProvider([chunk_output("health/running", [entry("Signed up")])])
+
+    await extract_conversation(
+        job_ctx(app_pool, cipher, succeeding), conv_id, str(tenant_a), str(job_id)
+    )
+
+    charges = await charges_of(admin_pool, job_id)
+    status = await admin_pool.fetchval("SELECT status FROM extraction_jobs WHERE id = $1", job_id)
+    assert status == "completed"
+    assert [(c["attempt"], c["weighted"]) for c in charges] == [
+        (1, _call_weighted()),
+        (2, _call_weighted()),
+    ]
+
+
+async def test_an_attempt_started_last_month_is_charged_to_the_month_it_ended_in(
+    app_pool: asyncpg.Pool, admin_pool: asyncpg.Pool, cipher: ContentCipher, tenant_a: UUID
+) -> None:
+    conv_id, job_id = await _seed(admin_pool, app_pool, cipher, tenant_a)
+
+    class _StartedLastMonth(ScriptedProvider):
+        async def complete(self, *args: object, **kwargs: object) -> object:
+            await admin_pool.execute(
+                "UPDATE extraction_jobs SET started_at ="
+                " date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+                " - interval '1 hour' WHERE id = $1",
+                job_id,
+            )
+            return await super().complete(*args, **kwargs)  # type: ignore[arg-type]
+
+    provider = _StartedLastMonth([chunk_output("health/running", [entry("Signed up")])])
+
+    await extract_conversation(
+        job_ctx(app_pool, cipher, provider), conv_id, str(tenant_a), str(job_id)
+    )
+
+    started_month, current_month = await admin_pool.fetchrow(
+        "SELECT date_trunc('month', started_at AT TIME ZONE 'UTC')::date,"
+        " date_trunc('month', now() AT TIME ZONE 'UTC')::date"
+        " FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    [charge] = await charges_of(admin_pool, job_id)
+    assert started_month < current_month
+    assert charge["month"] == current_month
 
 
 async def test_a_cancelled_attempt_is_charged_the_calls_that_finished_before_it(
