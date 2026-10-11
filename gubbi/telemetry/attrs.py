@@ -84,6 +84,25 @@ class MetricNames:
     # A background loop lost a tick or stopped; ``task`` names the loop,
     # ``stage`` is tick, loop or not_started.
     BACKGROUND_TASK_DIED: Final[str] = "background_task.died_total"
+    # Extraction queue and budget gauges, recorded once per scheduler tick.
+    EXTRACTION_QUEUE_OLDEST_RUNNABLE_AGE: Final[str] = (
+        "extraction.queue.oldest_runnable_age_seconds"
+    )
+    EXTRACTION_QUEUE_DEPTH: Final[str] = "extraction.queue.depth"
+    EXTRACTION_QUEUE_DEFERRED: Final[str] = "extraction.queue.deferred"
+    EXTRACTION_BUDGET_GLOBAL_USED_RATIO: Final[str] = "extraction.budget.global_used_ratio"
+    EXTRACTION_PROVIDER_TOKENS_MONTH: Final[str] = "extraction.provider.tokens_month"
+
+
+# Attribute keys each allowlisted metric may carry; any other key is dropped.
+# Values must come from small fixed sets: never a user, job or conversation id.
+GUBBI_METRIC_ALLOWLIST: Mapping[str, frozenset[str]] = {
+    MetricNames.EXTRACTION_QUEUE_OLDEST_RUNNABLE_AGE: frozenset(),
+    MetricNames.EXTRACTION_QUEUE_DEPTH: frozenset({"lane"}),
+    MetricNames.EXTRACTION_QUEUE_DEFERRED: frozenset({"defer_reason"}),
+    MetricNames.EXTRACTION_BUDGET_GLOBAL_USED_RATIO: frozenset(),
+    MetricNames.EXTRACTION_PROVIDER_TOKENS_MONTH: frozenset({"kind"}),
+}
 
 
 # ---------------------------------------------------------------------------
@@ -229,6 +248,7 @@ def get_allowlisted_attrs(span_name: str) -> frozenset[str]:
 
 __all__ = [
     "BANNED_KEYS",
+    "GUBBI_METRIC_ALLOWLIST",
     "GUBBI_SPAN_ALLOWLIST",
     "MCP_TOOL_CALL_ATTRS",
     "MetricNames",

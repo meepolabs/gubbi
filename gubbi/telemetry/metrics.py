@@ -5,6 +5,7 @@ Defines and initializes the gubbi-side metric instruments:
     - mcp.tool_call_count (counter)
     - mcp.tool_response_size_chars (histogram)
     - audit.persistence_failure (counter)
+    - extraction queue and budget gauges (see ``GUBBI_METRIC_ALLOWLIST``)
 
 The instruments are built lazily through ``initialize_metrics()`` so that
 they bind to the meter provider configured by ``configure_otel()`` during
@@ -38,17 +39,23 @@ from __future__ import annotations
 
 import functools
 import logging
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from gubbi_common.telemetry.allowlist import is_banned_key
 from opentelemetry.metrics import Counter, Histogram, get_meter
 
-from gubbi.telemetry.attrs import MetricNames
+from gubbi.telemetry.attrs import GUBBI_METRIC_ALLOWLIST, MetricNames
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from opentelemetry.metrics import _Gauge
 
 __all__: list[str] = [
     "initialize_metrics",
     "record_audit_persistence_failure",
     "record_background_task_died",
+    "record_gauge",
     "record_replica_count_warning",
     "record_startup_probe_outcome",
     "record_tool_call",
@@ -128,7 +135,34 @@ def initialize_metrics() -> dict[str, object]:
         ),
         unit="1",
     )
+    for name, description, unit in _GAUGES:
+        inst[name] = meter.create_gauge(name=name, description=description, unit=unit)
     return inst
+
+
+_GAUGES: tuple[tuple[str, str, str], ...] = (
+    (
+        MetricNames.EXTRACTION_QUEUE_OLDEST_RUNNABLE_AGE,
+        "Seconds since the longest-waiting runnable extraction job became runnable",
+        "s",
+    ),
+    (MetricNames.EXTRACTION_QUEUE_DEPTH, "Runnable extraction jobs by lane", "1"),
+    (
+        MetricNames.EXTRACTION_QUEUE_DEFERRED,
+        "Extraction jobs held back by admission, by defer reason",
+        "1",
+    ),
+    (
+        MetricNames.EXTRACTION_BUDGET_GLOBAL_USED_RATIO,
+        "Filtered tokens admitted this budget period over the global ceiling",
+        "1",
+    ),
+    (
+        MetricNames.EXTRACTION_PROVIDER_TOKENS_MONTH,
+        "Provider-reported tokens of the extraction jobs charged to this budget period",
+        "1",
+    ),
+)
 
 
 def _validate_metric_attrs(attrs: dict[str, str]) -> dict[str, str]:
@@ -261,3 +295,25 @@ def record_background_task_died(*, task: str, stage: str) -> None:
     """Increment the background_task.died_total counter for loop ``task`` at ``stage``."""
     attrs = _validate_metric_attrs({"task": task, "stage": stage})
     cast("Counter", initialize_metrics()[MetricNames.BACKGROUND_TASK_DIED]).add(1, attributes=attrs)
+
+
+def _allowlisted_metric_attrs(name: str, attrs: Mapping[str, str]) -> dict[str, str]:
+    """Keep only the attribute keys ``GUBBI_METRIC_ALLOWLIST`` allows for ``name``."""
+    allowed = GUBBI_METRIC_ALLOWLIST[name]
+    kept: dict[str, str] = {}
+    for key, value in attrs.items():
+        if key not in allowed:
+            logger.warning("Dropping metric attribute %r not allowlisted for %s", key, name)
+            continue
+        kept[key] = value
+    return _validate_metric_attrs(kept)
+
+
+def record_gauge(name: str, value: float, attrs: Mapping[str, str] | None = None) -> None:
+    """Set gauge ``name`` to ``value`` for the allowlisted subset of ``attrs``.
+
+    Raises:
+        KeyError: ``name`` is not a gauge in ``GUBBI_METRIC_ALLOWLIST``.
+    """
+    filtered = _allowlisted_metric_attrs(name, attrs or {})
+    cast("_Gauge", initialize_metrics()[name]).set(value, attributes=filtered)

@@ -11,7 +11,7 @@ from uuid import UUID
 
 from gubbi.config import get_settings
 
-__all__: list[str] = ["ExtractionLimits", "limits_for"]
+__all__: list[str] = ["ExtractionLimits", "global_monthly_token_ceiling", "limits_for"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,8 +37,13 @@ def limits_for(user_id: UUID) -> ExtractionLimits:
         monthly_tokens=llm.monthly_token_limit,
         first_sync_conversations=llm.first_sync_conversation_limit,
         first_sync_tokens=llm.first_sync_token_limit,
-        global_monthly_token_ceiling=llm.global_monthly_token_ceiling,
+        global_monthly_token_ceiling=global_monthly_token_ceiling(),
         backfill_stop_ratio=llm.backfill_stop_ratio,
         nightly_window_hour=llm.nightly_window_hour,
         onboarding_window=timedelta(days=llm.onboarding_window_days),
     )
+
+
+def global_monthly_token_ceiling() -> int | None:
+    """Return the deployment-wide monthly filtered-token ceiling; None when unset."""
+    return get_settings().llm.global_monthly_token_ceiling

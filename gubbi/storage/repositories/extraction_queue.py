@@ -26,8 +26,10 @@ fail_enqueue_lost       -- fail a pending row whose enqueue raised, with growing
 defer                   -- hold rows back with a reason until a recheck time
 stale_admitted_pending  -- admitted rows still pending after a given age
 inflight_admitted_count -- admitted rows that are pending or running
+queue_snapshot          -- runnable depth and age, deferrals and period usage, for metrics
 UserPeriodUsage         -- dataclass returned by user_period_usage
 RunnableJob             -- dataclass returned by select_runnable / stale_admitted_pending
+QueueSnapshot           -- dataclass returned by queue_snapshot
 """
 
 from __future__ import annotations
@@ -48,10 +50,11 @@ from gubbi.extraction.retry_policy import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Collection
+    from collections.abc import Collection, Mapping
     from datetime import date, datetime, timedelta
 
 __all__: list[str] = [
+    "QueueSnapshot",
     "RunnableJob",
     "UserPeriodUsage",
     "admit",
@@ -60,6 +63,7 @@ __all__: list[str] = [
     "first_upload_at",
     "global_period_tokens",
     "inflight_admitted_count",
+    "queue_snapshot",
     "revive_failed",
     "select_runnable",
     "stale_admitted_pending",
@@ -249,6 +253,31 @@ EXISTS (
 """
 
 
+def _runnable_sql(first_param: int) -> str:
+    """Return the predicate over ``extraction_jobs AS j`` for a row runnable now.
+
+    Binds :func:`terminal_failure_args` at ``$first_param`` onward. See
+    :func:`select_runnable` for what makes a row runnable.
+    """
+    return f"""
+        j.run_after <= now()
+        AND j.token_count_version IS NOT NULL
+        AND (
+              (j.status = 'pending' AND j.admitted_at IS NULL)
+           OR (j.status = 'failed'
+               AND NOT {terminal_failure_sql(first_param)}
+               AND NOT EXISTS (
+                      SELECT 1
+                      FROM extraction_jobs AS active
+                      WHERE active.user_id = j.user_id
+                        AND active.conversation_id = j.conversation_id
+                        AND active.status NOT IN ('completed', 'failed')
+               )
+               AND NOT {_NEWER_JOB_EXISTS})
+        )
+    """  # noqa: S608 - the interpolated predicates are fixed SQL; values are bound
+
+
 async def supersede_failed(conn: asyncpg.Connection) -> int:
     """End every non-terminal ``failed`` row that has a newer job; return rows changed.
 
@@ -312,21 +341,7 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
         SELECT j.id, j.user_id, j.conversation_id, j.source, j.lane, j.activity_at,
                j.filtered_tokens, j.attempts, j.admitted_at, j.status
         FROM extraction_jobs AS j
-        WHERE j.run_after <= now()
-          AND j.token_count_version IS NOT NULL
-          AND (
-                (j.status = 'pending' AND j.admitted_at IS NULL)
-             OR (j.status = 'failed'
-                 AND NOT {terminal_failure_sql(2)}
-                 AND NOT EXISTS (
-                        SELECT 1
-                        FROM extraction_jobs AS active
-                        WHERE active.user_id = j.user_id
-                          AND active.conversation_id = j.conversation_id
-                          AND active.status NOT IN ('completed', 'failed')
-                 )
-                 AND NOT {_NEWER_JOB_EXISTS})
-          )
+        WHERE {_runnable_sql(2)}
         ORDER BY CASE j.lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
                  j.activity_at DESC NULLS LAST,
                  j.created_at,
@@ -503,3 +518,82 @@ async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> bool:
             failures,
         )
     return True
+
+
+# ---------------------------------------------------------------------------
+# Metrics
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class QueueSnapshot:
+    """Queue and budget figures read at one moment.
+
+    oldest_runnable_age_seconds : ``now() - run_after`` of the runnable row
+        whose ``run_after`` is earliest; 0 when nothing is runnable. A row
+        counts from when it became runnable, so a deferral or retry backoff
+        that has not yet passed never ages the queue.
+    depth_by_lane : runnable rows per lane; a lane with none is absent
+    deferred_by_reason : rows held by admission and not yet due again
+        (``defer_reason`` set, not admitted, ``run_after`` in the future and
+        not held at ``'infinity'``); a reason with none is absent. Disjoint
+        from the runnable rows.
+    period_filtered_tokens : filtered tokens admitted in the period, all users
+    period_provider_tokens : provider-reported usage of the rows charged to the
+        period, keyed ``input``, ``output`` and ``cached``
+    """
+
+    oldest_runnable_age_seconds: float
+    depth_by_lane: Mapping[Lane, int]
+    deferred_by_reason: Mapping[str, int]
+    period_filtered_tokens: int
+    period_provider_tokens: Mapping[str, int]
+
+
+_PERIOD_USAGE_SQL = """
+SELECT coalesce(sum(filtered_tokens), 0) AS filtered,
+       coalesce(sum(input_tokens), 0) AS input,
+       coalesce(sum(output_tokens), 0) AS output,
+       coalesce(sum(cached_input_tokens), 0) AS cached
+FROM extraction_jobs
+WHERE admitted_at IS NOT NULL
+  AND budget_period_start = $1
+"""
+
+
+async def queue_snapshot(conn: asyncpg.Connection, period: date) -> QueueSnapshot:
+    """Read the queue and budget figures the scheduler reports each tick.
+
+    Takes no row locks. Runnable means exactly what :func:`select_runnable`
+    selects, without its batch limit.
+    """
+    queue_rows = await conn.fetch(
+        f"""
+        SELECT 'lane' AS kind, j.lane AS key, count(*) AS rows,
+               date_part('epoch', now() - min(j.run_after))::float8 AS oldest_age
+        FROM extraction_jobs AS j
+        WHERE {_runnable_sql(1)}
+        GROUP BY j.lane
+        UNION ALL
+        SELECT 'deferred', defer_reason, count(*), NULL
+        FROM extraction_jobs
+        WHERE defer_reason IS NOT NULL
+          AND admitted_at IS NULL
+          AND status IN ('pending', 'failed')
+          AND run_after > now()
+          AND run_after < 'infinity'
+        GROUP BY defer_reason
+        """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
+        *terminal_failure_args(),
+    )
+    usage = cast("asyncpg.Record", await conn.fetchrow(_PERIOD_USAGE_SQL, period))
+    lanes = [row for row in queue_rows if row["kind"] == "lane"]
+    return QueueSnapshot(
+        oldest_runnable_age_seconds=max((float(row["oldest_age"]) for row in lanes), default=0.0),
+        depth_by_lane={Lane(row["key"]): int(row["rows"]) for row in lanes},
+        deferred_by_reason={
+            str(row["key"]): int(row["rows"]) for row in queue_rows if row["kind"] == "deferred"
+        },
+        period_filtered_tokens=int(usage["filtered"]),
+        period_provider_tokens={kind: int(usage[kind]) for kind in ("input", "output", "cached")},
+    )

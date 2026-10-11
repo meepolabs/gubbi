@@ -22,6 +22,8 @@ One tick, serialized across API replicas by a session advisory lock:
    Arq job is restored. A row whose enqueue raises is failed as
    ``enqueue_lost`` and revived after the retry policy's backoff, which
    grows with each consecutive lost enqueue.
+5. Record the queue and budget gauges from aggregate reads taken after the
+   claim transaction, so they reflect this tick's admissions and deferrals.
 
 A row that does not fit a limit is deferred with a reason and never refused.
 """
@@ -32,6 +34,7 @@ from dataclasses import asdict, dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
+import asyncpg
 import structlog
 from redis.exceptions import RedisError
 
@@ -45,6 +48,7 @@ from gubbi.extraction.admission import (
     user_usage_from_totals,
 )
 from gubbi.extraction.limits import ExtractionLimits, limits_for
+from gubbi.extraction.queue_metrics import record_queue_metrics
 from gubbi.extraction.supervised_loop import run_every
 from gubbi.storage.pg_setup import advisory_unlock, try_advisory_lock
 from gubbi.storage.repositories import extraction_queue as queue_repo
@@ -52,8 +56,6 @@ from gubbi.storage.repositories import extraction_queue as queue_repo
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Iterable, Sequence
     from uuid import UUID
-
-    import asyncpg
 
     from gubbi.config import Settings
     from gubbi.storage.repositories.extraction_queue import RunnableJob
@@ -199,6 +201,7 @@ class ExtractionScheduler:
         lost = 0
         for job_id in failed:
             lost += await queue_repo.fail_enqueue_lost(conn, job_id)
+        await self._record_metrics(conn, period)
         return TickResult(
             admitted=sum(1 for job in dispatch if job.admitted_at is None),
             superseded=superseded,
@@ -208,6 +211,13 @@ class ExtractionScheduler:
             reenqueued=len(redispatched.enqueued_ids),
             enqueue_lost=lost,
         )
+
+    async def _record_metrics(self, conn: asyncpg.Connection, period: date) -> None:
+        """Record the queue gauges; a failed read loses this tick's gauges, not its work."""
+        try:
+            await record_queue_metrics(conn, period, budget_enabled=self._config.budget_enabled)
+        except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as exc:
+            await logger.warning("extraction_queue_metrics_failed", error_class=type(exc).__name__)
 
     async def _plan(self, conn: asyncpg.Connection, period: date) -> _Plan:
         jobs = await queue_repo.select_runnable(conn, self._config.batch_size)
