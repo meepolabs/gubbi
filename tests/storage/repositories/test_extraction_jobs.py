@@ -133,22 +133,38 @@ async def test_create_pending_returns_uuid(
     # Verify the row exists via admin pool (bypasses RLS for inspection).
 
 
-async def test_create_pending_duplicate_raises(
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param("chatgpt", id="test_create_pending_duplicate_raises"),
+        pytest.param(
+            "extension_chatgpt",
+            id="test_create_pending_raises_already_in_flight_for_existing_pending_row",
+        ),
+    ],
+)
+async def test_create_pending_raises_already_in_flight_for_an_active_job(
     app_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],
     conversation_id: int,
+    source: str,
 ) -> None:
-    """Second create_pending for same active job raises ExtractionJobAlreadyInFlight."""
+    """A second create_pending for an active (user, conversation, source) raises.
+
+    The partial unique index fires on the second INSERT; the repository surfaces
+    it as ExtractionJobAlreadyInFlight and attaches the existing job_id so callers
+    can reuse it for idempotent enqueue semantics.
+    """
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
         first_id = await create_pending(
-            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
+            conn, user_a, conversation_id, source, period_start=date(2026, 5, 1)
         )
 
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
         with pytest.raises(ExtractionJobAlreadyInFlight) as exc_info:
             await create_pending(
-                conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
+                conn, user_a, conversation_id, source, period_start=date(2026, 5, 1)
             )
 
     assert exc_info.value.existing_job_id == first_id
@@ -719,48 +735,6 @@ async def test_get_status_counts_buckets(
     assert counts.in_flight_count == 2
     assert counts.synced_count == 1
     assert counts.last_sync_at is not None
-
-
-# ---------------------------------------------------------------------------
-# Tests: ExtractionJobAlreadyInFlight -- repository unit level
-# ---------------------------------------------------------------------------
-
-
-async def test_create_pending_raises_already_in_flight_for_existing_pending_row(
-    app_pool: asyncpg.Pool,
-    rls_users: tuple[UUID, UUID],
-    conversation_id: int,
-) -> None:
-    """When a pending row already exists for (user, conv, source), create_pending raises.
-
-    The partial unique index fires on the second INSERT; the repository surfaces
-    it as ExtractionJobAlreadyInFlight and attaches the existing job_id so callers
-    can reuse it for idempotent enqueue semantics.
-    """
-    # Arrange
-    user_a, _ = rls_users
-
-    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        first_id = await create_pending(
-            conn,
-            user_a,
-            conversation_id,
-            "extension_chatgpt",
-            period_start=date(2026, 5, 1),
-        )
-
-    # Act + Assert
-    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        with pytest.raises(ExtractionJobAlreadyInFlight) as exc_info:
-            await create_pending(
-                conn,
-                user_a,
-                conversation_id,
-                "extension_chatgpt",
-                period_start=date(2026, 5, 1),
-            )
-
-    assert exc_info.value.existing_job_id == first_id
 
 
 # ---------------------------------------------------------------------------
