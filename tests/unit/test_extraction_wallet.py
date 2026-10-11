@@ -1,11 +1,21 @@
-"""Unit tests for wallet arithmetic: weighting usage and splitting a charge."""
+"""Unit tests for wallet arithmetic: weighting usage, splitting a charge, folding a balance."""
 
 from __future__ import annotations
+
+from datetime import date
 
 import pytest
 
 from gubbi.extraction.llm.provider import LLMUsage
-from gubbi.extraction.wallet import ChargeSplit, UsageWeights, split_charge, weighted
+from gubbi.extraction.wallet import (
+    Balance,
+    ChargeSplit,
+    MonthTotals,
+    UsageWeights,
+    balance,
+    split_charge,
+    weighted,
+)
 
 pytestmark = pytest.mark.unit
 
@@ -58,3 +68,107 @@ def test_split_charge(monthly_left: int, amount: int, expected: ChargeSplit) -> 
 
     assert split == expected
     assert split.monthly_part + split.credit_part == amount
+
+
+_ALLOWANCE = 1_000
+_JAN, _FEB, _MAR = date(2026, 1, 1), date(2026, 2, 1), date(2026, 3, 1)
+
+
+def _month(
+    month: date, *, monthly_part: int = 0, credit_part: int = 0, granted: int = 0
+) -> MonthTotals:
+    return MonthTotals(
+        month=month, monthly_part=monthly_part, credit_part=credit_part, granted=granted
+    )
+
+
+@pytest.mark.parametrize(
+    ("monthly_amount", "months", "current", "expected"),
+    [
+        pytest.param(_ALLOWANCE, [], _JAN, Balance(1_000, 0), id="no-history"),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, monthly_part=1_000, credit_part=300)],
+            _JAN,
+            Balance(0, -300),
+            id="first-month-debt-is-not-repaid-in-the-month-it-was-made",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, monthly_part=1_000, credit_part=200, granted=500)],
+            _FEB,
+            Balance(1_000, 300),
+            id="no-debt-credit-carries-over",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, credit_part=500)],
+            _FEB,
+            Balance(500, 0),
+            id="debt-repaid-from-next-allowance",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, credit_part=500)],
+            _MAR,
+            Balance(1_000, 0),
+            id="debt-repaid-by-idle-month-leaves-full-allowance-after",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, credit_part=1_500)],
+            _FEB,
+            Balance(0, -500),
+            id="debt-over-one-allowance-first-month-of-repayment",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, credit_part=1_500)],
+            _MAR,
+            Balance(500, 0),
+            id="debt-over-one-allowance-repaid-in-second-month",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, credit_part=500), _month(_FEB, granted=2_000)],
+            _FEB,
+            Balance(500, 2_000),
+            id="grant-mid-month-leaves-the-repayment-fixed",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_JAN, credit_part=400), _month(_FEB, monthly_part=600, credit_part=200)],
+            _FEB,
+            Balance(0, -200),
+            id="spending-in-the-repayment-month",
+        ),
+        pytest.param(
+            500,
+            [_month(_JAN, monthly_part=800, granted=300)],
+            _JAN,
+            Balance(0, 300),
+            id="lowered-allowance-mid-month-leaves-credit-untouched",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_FEB, credit_part=100), _month(_JAN, granted=50)],
+            _MAR,
+            Balance(950, 0),
+            id="months-in-any-order",
+        ),
+        pytest.param(
+            _ALLOWANCE,
+            [_month(_MAR, credit_part=700)],
+            _FEB,
+            Balance(1_000, 0),
+            id="months-after-the-current-one-are-ignored",
+        ),
+    ],
+)
+def test_balance(
+    monthly_amount: int, months: list[MonthTotals], current: date, expected: Balance
+) -> None:
+    result = balance(monthly_amount, months, current)
+
+    assert result == expected
+    assert result.available == expected.monthly_left + expected.credit

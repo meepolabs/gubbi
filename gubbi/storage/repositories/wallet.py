@@ -5,8 +5,10 @@ is in weighted tokens. A month is the first day of a UTC calendar month, read
 from the database clock, so every reader and the charge writer agree on it.
 
 A user's available balance is what remains of this month's allowance plus
-credit: ``max(monthly_amount - monthly use this month, 0) + granted credit -
-credit spent``. Credit may be negative, so the balance may be too.
+credit. Credit may go negative; each month's allowance first pays off the debt
+carried into that month, and only the rest is spendable. Repayment is derived,
+never written: ``gubbi.extraction.wallet.balance`` folds the user's per-month
+totals into the current balance.
 
 Reads work on an RLS-scoped connection for the user's own id, and on the
 admin pool across users.
@@ -26,14 +28,16 @@ MonthUsage      -- dataclass returned by month_usage
 from __future__ import annotations
 
 import hashlib
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, cast
 from uuid import UUID
 
-from gubbi.extraction.wallet import ChargeSplit, split_charge
+from gubbi.extraction.wallet import Balance, ChargeSplit, MonthTotals, balance, split_charge
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Mapping, Sequence
+    from datetime import date
 
     import asyncpg
 
@@ -92,49 +96,73 @@ def _wallet_lock_key(user_id: UUID) -> int:
     return int.from_bytes(digest, "big", signed=True)
 
 
+# One row per (user, month with activity), plus one row with a NULL month for
+# a user with none; every row carries the current month. A grant counts in the
+# UTC month it was created in.
+_MONTH_TOTALS_SQL: Final = f"""
+    WITH activity AS (
+        SELECT user_id, month, monthly_part, credit_part, 0::bigint AS granted
+        FROM llm_charges
+        WHERE user_id = ANY($1::uuid[])
+        UNION ALL
+        SELECT user_id, (date_trunc('month', created_at AT TIME ZONE 'UTC'))::date,
+               0, 0, amount
+        FROM credit_grants
+        WHERE user_id = ANY($1::uuid[])
+    ), monthly AS (
+        SELECT user_id, month,
+               sum(monthly_part) AS monthly_part,
+               sum(credit_part) AS credit_part,
+               sum(granted) AS granted
+        FROM activity
+        GROUP BY user_id, month
+    )
+    SELECT u.user_id, {CURRENT_MONTH_SQL} AS current_month,
+           m.month, m.monthly_part, m.credit_part, m.granted
+    FROM unnest($1::uuid[]) AS u(user_id)
+    LEFT JOIN monthly AS m ON m.user_id = u.user_id
+"""  # noqa: S608 - the interpolated expression is fixed SQL; values are bound
+
+
+async def _balances(
+    conn: asyncpg.Connection, monthly_amounts: Mapping[UUID, int]
+) -> tuple[date, dict[UUID, Balance]]:
+    """Return the current month and each user's balance in it, from one statement."""
+    rows: Sequence[asyncpg.Record] = await conn.fetch(_MONTH_TOTALS_SQL, list(monthly_amounts))
+    months: dict[UUID, list[MonthTotals]] = defaultdict(list)
+    for r in rows:
+        if r["month"] is not None:
+            months[UUID(str(r["user_id"]))].append(
+                MonthTotals(
+                    month=r["month"],
+                    monthly_part=int(r["monthly_part"]),
+                    credit_part=int(r["credit_part"]),
+                    granted=int(r["granted"]),
+                )
+            )
+    current_month: date = rows[0]["current_month"]
+    # Every month is folded with today's allowance; a per-month plan history
+    # would change this to the allowance in force in each month.
+    return current_month, {
+        user_id: balance(amount, months[user_id], current_month)
+        for user_id, amount in monthly_amounts.items()
+    }
+
+
 async def available(
     conn: asyncpg.Connection, monthly_amounts: Mapping[UUID, int]
 ) -> dict[UUID, int]:
     """Return the available balance of every user in ``monthly_amounts``.
 
     ``monthly_amounts`` maps each user to their monthly allowance. A user with
-    no charges and no grants has the whole allowance available.
+    no charges and no grants has the whole allowance available. Debt carried
+    into this month has already taken its share of the allowance. Anonymous
+    charges belong to no user and count in no balance.
     """
-    ids = list(monthly_amounts)
-    rows = await conn.fetch(
-        f"""
-        WITH charges AS (
-            SELECT user_id,
-                   sum(monthly_part) FILTER (WHERE month = {CURRENT_MONTH_SQL}) AS monthly_used,
-                   sum(credit_part) AS credit_spent
-            FROM llm_charges
-            WHERE user_id = ANY($1::uuid[])
-            GROUP BY user_id
-        ), grants AS (
-            SELECT user_id, sum(amount) AS granted
-            FROM credit_grants
-            WHERE user_id = ANY($1::uuid[])
-            GROUP BY user_id
-        )
-        SELECT u.user_id,
-               coalesce(c.monthly_used, 0) AS monthly_used,
-               coalesce(c.credit_spent, 0) AS credit_spent,
-               coalesce(g.granted, 0) AS granted
-        FROM (SELECT unnest($1::uuid[]) AS user_id) AS u
-        LEFT JOIN charges AS c ON c.user_id = u.user_id
-        LEFT JOIN grants AS g ON g.user_id = u.user_id
-        """,  # noqa: S608 - the interpolated expression is fixed SQL; values are bound
-        ids,
-    )
-    # Overspend is recorded in credit_part, so monthly use past a (lowered) allowance is no debt.
-    return {
-        UUID(str(r["user_id"])): max(
-            monthly_amounts[UUID(str(r["user_id"]))] - int(r["monthly_used"]), 0
-        )
-        + int(r["granted"])
-        - int(r["credit_spent"])
-        for r in rows
-    }
+    if not monthly_amounts:
+        return {}
+    _, balances = await _balances(conn, monthly_amounts)
+    return {user_id: b.available for user_id, b in balances.items()}
 
 
 async def global_used(conn: asyncpg.Connection) -> int:
@@ -207,7 +235,8 @@ async def charge(
     Must run inside the caller's transaction. A per-user advisory transaction
     lock serializes charges of one user, so two attempts finishing at once
     never both spend the same remaining allowance. The charge goes to the
-    current month, read from the database clock once. A zero ``weighted``
+    current month, read from the database clock once, and spends what debt
+    repayment left of that month's allowance before credit. A zero ``weighted``
     writes nothing, and so does an attempt already charged.
     """
     if attempt.weighted <= 0:
@@ -215,22 +244,8 @@ async def charge(
     await conn.execute(
         "SELECT pg_advisory_xact_lock($1::bigint)", _wallet_lock_key(attempt.user_id)
     )
-    row = cast(
-        "asyncpg.Record",
-        await conn.fetchrow(
-            f"""
-            SELECT m.month,
-                   coalesce((
-                       SELECT sum(c.monthly_part)
-                       FROM llm_charges AS c
-                       WHERE c.user_id = $1 AND c.month = m.month
-                   ), 0) AS monthly_used
-            FROM (SELECT {CURRENT_MONTH_SQL} AS month) AS m
-            """,  # noqa: S608 - the interpolated expression is fixed SQL; values are bound
-            attempt.user_id,
-        ),
-    )
-    split = split_charge(monthly_amount - int(row["monthly_used"]), attempt.weighted)
+    month, balances = await _balances(conn, {attempt.user_id: monthly_amount})
+    split = split_charge(balances[attempt.user_id].monthly_left, attempt.weighted)
     written = await conn.fetchval(
         """
         INSERT INTO llm_charges
@@ -250,6 +265,6 @@ async def charge(
         attempt.weighted,
         split.monthly_part,
         split.credit_part,
-        row["month"],
+        month,
     )
     return Charge(job_kind=attempt.job_kind, split=split) if written else None

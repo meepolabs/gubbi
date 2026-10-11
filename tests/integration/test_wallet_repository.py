@@ -153,22 +153,128 @@ async def test_concurrent_charges_of_one_user_never_both_spend_the_same_allowanc
     # Each charge pauses after reading this month's use until the other has
     # read it too, or a second passes. Serialized charges never meet there;
     # unserialized ones both read 0 used and both take 800 from the allowance.
-    original_fetchrow = asyncpg.connection.Connection.fetchrow
+    original_fetch = asyncpg.connection.Connection.fetch
     both_read = asyncio.Barrier(2)
+    reads: list[str] = []
 
-    async def _fetchrow_then_wait(self: asyncpg.Connection, query: str, *args: object) -> object:
-        row = await original_fetchrow(self, query, *args)
-        if "monthly_used" in query:
+    async def _fetch_then_wait(self: asyncpg.Connection, query: str, *args: object) -> object:
+        rows = await original_fetch(self, query, *args)
+        if "llm_charges" in query:
+            reads.append(query)
             with contextlib.suppress(TimeoutError):
                 await asyncio.wait_for(both_read.wait(), timeout=1)
-        return row
+        return rows
 
-    with patch.object(asyncpg.connection.Connection, "fetchrow", _fetchrow_then_wait):
+    with patch.object(asyncpg.connection.Connection, "fetch", _fetch_then_wait):
         await asyncio.gather(*(_charge(clean_rls_db, a) for a in attempts))
 
     parts = await _parts(clean_rls_db, tenant_a)
+    assert len(reads) == 2
     assert sum(monthly for monthly, _ in parts) == _MONTHLY
     assert sorted(parts) == [(200, 600), (800, 0)]
+
+
+# ---------------------------------------------------------------------------
+# debt repayment from later allowances
+# ---------------------------------------------------------------------------
+
+
+async def _record_past_charge(
+    pool: asyncpg.Pool, user_id: UUID, months_ago: int, monthly_part: int, credit_part: int
+) -> None:
+    await pool.execute(
+        """
+        INSERT INTO llm_charges
+            (user_id, job_kind, job_id, attempt, input_tokens, cached_input_tokens,
+             output_tokens, weighted, monthly_part, credit_part, month)
+        VALUES ($1, 'live', $2, 1, $3, 0, 0, $3, $4, $5,
+                (date_trunc('month', now() AT TIME ZONE 'UTC')
+                 - make_interval(months => $6))::date)
+        """,
+        user_id,
+        uuid4(),
+        monthly_part + credit_part,
+        monthly_part,
+        credit_part,
+        months_ago,
+    )
+
+
+async def _record_past_grant(
+    pool: asyncpg.Pool, user_id: UUID, months_ago: int, amount: int
+) -> None:
+    await pool.execute(
+        """
+        INSERT INTO credit_grants (user_id, amount, reason, idempotency_key, created_at)
+        VALUES ($1, $2, 'test', $3,
+                (date_trunc('month', now() AT TIME ZONE 'UTC')
+                 - make_interval(months => $4) + interval '20 days') AT TIME ZONE 'UTC')
+        """,
+        user_id,
+        amount,
+        f"test:{uuid4()}",
+        months_ago,
+    )
+
+
+@pytest.mark.parametrize(
+    ("history", "available", "next_split"),
+    [
+        pytest.param(
+            [("charge", 1, 1_000, 500)], 500, (500, 100), id="last-months-debt-repaid-first"
+        ),
+        pytest.param(
+            [("charge", 2, 1_000, 500)], _MONTHLY, (600, 0), id="debt-repaid-by-an-idle-month"
+        ),
+        pytest.param(
+            [("charge", 1, 0, 1_500)], -500, (0, 600), id="debt-larger-than-one-allowance"
+        ),
+        pytest.param(
+            [("charge", 2, 0, 1_500)], 500, (500, 100), id="large-debt-repaid-over-two-months"
+        ),
+        pytest.param(
+            [("grant", 1, 300), ("charge", 1, 1_000, 800)],
+            500,
+            (500, 100),
+            id="grant-in-the-debt-month-offsets-it",
+        ),
+    ],
+)
+async def test_negative_credit_is_repaid_from_the_next_months_allowance(
+    clean_rls_db: asyncpg.Pool,
+    tenant_a: UUID,
+    history: list[tuple[object, ...]],
+    available: int,
+    next_split: tuple[int, int],
+) -> None:
+    for kind, *row in history:
+        if kind == "charge":
+            await _record_past_charge(clean_rls_db, tenant_a, *row)  # type: ignore[arg-type]
+        else:
+            await _record_past_grant(clean_rls_db, tenant_a, *row)  # type: ignore[arg-type]
+
+    before = await _available(clean_rls_db, tenant_a)
+    charge = await _charge(clean_rls_db, _attempt(tenant_a, 600))
+
+    assert before == available
+    assert charge is not None
+    assert (charge.split.monthly_part, charge.split.credit_part) == next_split
+    assert await _available(clean_rls_db, tenant_a) == available - 600
+
+
+async def test_available_folds_each_users_own_history(
+    clean_rls_db: asyncpg.Pool, tenant_a: UUID, tenant_b: UUID
+) -> None:
+    await _record_past_charge(clean_rls_db, tenant_a, 2, 0, 400)
+    await _record_past_grant(clean_rls_db, tenant_b, 3, 100)
+    await _record_past_charge(clean_rls_db, tenant_b, 2, 1_000, 1_500)
+    await _charge(clean_rls_db, _attempt(tenant_b, 50))
+
+    async with clean_rls_db.acquire() as conn:
+        balances = await wallet_repo.available(conn, {tenant_a: _MONTHLY, tenant_b: _MONTHLY})
+
+    # tenant_b owes 1_400 entering last month and 400 entering this one.
+    assert balances == {tenant_a: _MONTHLY, tenant_b: _MONTHLY - 400 - 50}
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +296,13 @@ async def test_available_reads_every_requested_user_in_one_call(
         )
 
     assert balances == {tenant_a: 900 + 250, tenant_b: -300, untouched: 2_000}
+
+
+async def test_available_of_no_users_is_empty(clean_rls_db: asyncpg.Pool) -> None:
+    async with clean_rls_db.acquire() as conn:
+        balances = await wallet_repo.available(conn, {})
+
+    assert balances == {}
 
 
 async def test_available_reads_charges_and_grants_in_one_statement(
