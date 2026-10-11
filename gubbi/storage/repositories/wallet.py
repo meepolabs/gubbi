@@ -178,8 +178,11 @@ async def grant_credit(
     """Grant ``amount`` of credit to ``user_id``; return whether a grant was written.
 
     A grant with the same ``idempotency_key`` already present writes nothing,
-    so a retried grant source credits once. ``amount`` must be positive; the
-    table's CHECK rejects anything else.
+    so a retried grant source credits once. ``amount`` must be positive and at
+    most the table's single-grant bound; its CHECK rejects anything else. On a
+    journal_app connection the policies admit only the scoped user's
+    onboarding grant (reason ``onboarding``, key ``onboarding:<user id>``);
+    any other grant kind needs a journal_admin connection.
     """
     inserted = await conn.fetchval(
         """

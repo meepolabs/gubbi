@@ -17,6 +17,8 @@ from gubbi.scripts.release_held_extraction_jobs import release_held
 from gubbi.storage.repositories import extraction_queue as queue_repo
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     from tests.fixtures.tenants import TenantSeed
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.integration]
@@ -193,7 +195,7 @@ class _FetchThroughCursor:
     version, which only the quals on the locked row recheck.
     """
 
-    def __init__(self, conn: asyncpg.Connection, between: Any) -> None:
+    def __init__(self, conn: asyncpg.Connection, between: Callable[[], Awaitable[None]]) -> None:
         self._conn = conn
         self._between = between
 

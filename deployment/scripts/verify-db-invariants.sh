@@ -20,7 +20,8 @@ set -euo pipefail
 #   - 2 audit_log functions (audit_log_immutable, audit_log_admin_no_user_actor)
 #   - 3 audit_log triggers (no_update, no_delete, admin_no_user_actor)
 #   - RLS enabled + force-RLS on every gubbi tenant table
-#   - each gubbi table's expected named policy exists, scoped TO journal_app
+#   - each gubbi table's expected named policy exists, scoped TO journal_app;
+#     credit_grants' onboarding-only INSERT policy is RESTRICTIVE
 #   - audit_log's SELECT-applicable policy set is EXACTLY one permissive policy
 #     named audit_log_app_select_self_only, TO journal_app, whose USING
 #     predicate and the INSERT policy's WITH CHECK each match the literal
@@ -225,6 +226,7 @@ declare -a POLICY_PAIRS=(
     "audit_log:audit_log_app_insert_self_only"
     "audit_log:audit_log_app_select_self_only"
     "conversations:tenant_isolation"
+    "credit_grants:credit_grants_app_insert_onboarding_only"
     "credit_grants:credit_grants_user_isolation"
     "entries:tenant_isolation"
     "entry_embeddings:tenant_isolation"
@@ -241,6 +243,11 @@ for pair in "${POLICY_PAIRS[@]}"; do
     assert_true "policy_${table}.${policy}" \
         "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='${table}' AND policyname='${policy}' AND roles::text='{journal_app}')"
 done
+
+# A PERMISSIVE policy of the same name would be OR-ed with the user-isolation
+# policy and narrow nothing, so the onboarding-only shape must be RESTRICTIVE.
+assert_true "policy_credit_grants.credit_grants_app_insert_onboarding_only: restrictive INSERT" \
+    "SELECT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname='public' AND tablename='credit_grants' AND policyname='credit_grants_app_insert_onboarding_only' AND permissive='RESTRICTIVE' AND cmd='INSERT')"
 
 # ---------------------------------------------------------------------------
 # 5b. audit_log SELECT policy set -- EXACT, not just present.

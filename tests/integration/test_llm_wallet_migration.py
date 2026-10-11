@@ -38,6 +38,7 @@ EXPECTED_INDEXES = {
 
 EXPECTED_POLICIES = {
     ("credit_grants", "credit_grants_user_isolation", "{journal_app}"),
+    ("credit_grants", "credit_grants_app_insert_onboarding_only", "{journal_app}"),
     ("llm_charges", "llm_charges_user_isolation", "{journal_app}"),
 }
 

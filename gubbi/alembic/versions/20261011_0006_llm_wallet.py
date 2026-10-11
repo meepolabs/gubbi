@@ -1,9 +1,9 @@
 """Add the per-user LLM wallet: append-only credit grants and charges.
 
 ``credit_grants`` -- one row per credit given to a user. ``amount`` is in
-weighted tokens and always positive. ``idempotency_key`` is unique, so a grant
-source that retries (``onboarding:<user id>``, a payment id) inserts at most
-once.
+weighted tokens, always positive and at most 1000000000, a sanity bound on any
+single grant. ``idempotency_key`` is unique, so a grant source that retries
+(``onboarding:<user id>``, a payment id) inserts at most once.
 
 ``llm_charges`` -- one row per worker attempt that used the model, from the
 usage the provider reported: raw input, cached input and output tokens, the
@@ -28,6 +28,13 @@ journal_app matching ``extraction_jobs``; an anonymous charge matches no user,
 so journal_app neither sees nor writes one. journal_app may only SELECT and
 INSERT: the tables are append-only. journal_admin holds ALL, as on every
 other table.
+
+A RESTRICTIVE INSERT policy narrows what journal_app may grant to the
+onboarding shape: reason ``onboarding``, key ``onboarding:<user id>`` and an
+amount of at most 250000000. With the unique key, journal_app can write at
+most one grant per user, so a fault on an app path cannot mint credit beyond
+it. Every other grant kind (paid top-ups, admin comps) is written through
+journal_admin, which bypasses RLS.
 
 Every user present at upgrade is granted 25000000 weighted tokens of
 onboarding credit under the key ``onboarding:<user id>``, the same key later
@@ -54,7 +61,7 @@ CREATE TABLE public.credit_grants (
         CONSTRAINT credit_grants_user_id_fkey
         REFERENCES public.users(id) ON DELETE CASCADE,
     amount bigint NOT NULL
-        CONSTRAINT credit_grants_amount_check CHECK (amount > 0),
+        CONSTRAINT credit_grants_amount_check CHECK (amount > 0 AND amount <= 1000000000),
     reason text NOT NULL,
     idempotency_key text NOT NULL
         CONSTRAINT credit_grants_idempotency_key_key UNIQUE,
@@ -104,6 +111,16 @@ CREATE POLICY {table}_user_isolation ON public.{table} TO journal_app
     WITH CHECK (user_id = (SELECT public.app_current_user_active()))
 """
 
+_APP_INSERT_ONBOARDING_ONLY_POLICY = """
+CREATE POLICY credit_grants_app_insert_onboarding_only ON public.credit_grants
+    AS RESTRICTIVE FOR INSERT TO journal_app
+    WITH CHECK (
+        reason = 'onboarding'
+        AND idempotency_key = 'onboarding:' || user_id::text
+        AND amount <= 250000000
+    )
+"""
+
 _SEED_ONBOARDING_CREDIT = """
 INSERT INTO public.credit_grants (user_id, amount, reason, idempotency_key)
 SELECT id, 25000000, 'onboarding', 'onboarding:' || id::text
@@ -126,7 +143,7 @@ def _secure(table: str) -> list[str]:
 
 
 def upgrade() -> None:
-    """Create both tables, their indexes, RLS and grants, then seed onboarding credit."""
+    """Create both tables, indexes, RLS, policies and grants; seed onboarding credit."""
     op.execute(_CREATE_CREDIT_GRANTS)
     op.execute(_CREATE_LLM_CHARGES)
     for statement in _CREATE_INDEXES:
@@ -134,6 +151,7 @@ def upgrade() -> None:
     for table in _TABLES:
         for statement in _secure(table):
             op.execute(statement)
+    op.execute(_APP_INSERT_ONBOARDING_ONLY_POLICY)
     op.execute(_SEED_ONBOARDING_CREDIT)
 
 

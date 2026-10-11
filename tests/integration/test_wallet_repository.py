@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+from collections.abc import Callable
 from datetime import date
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -18,6 +19,8 @@ from gubbi.storage.repositories.wallet import AttemptUsage
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.integration]
 
 _MONTHLY = 1_000
+_APP_GRANT_CEILING = 250_000_000
+_SINGLE_GRANT_BOUND = 1_000_000_000
 
 
 def _attempt(user_id: UUID, weighted: int, *, job_id: UUID | None = None) -> AttemptUsage:
@@ -291,18 +294,87 @@ async def test_grant_credit_is_idempotent_per_key(
     assert await _available(clean_rls_db, tenant_a) == _MONTHLY + 25_000 + 7
 
 
-async def test_the_app_role_grants_credit_to_its_own_user_under_rls(
+async def test_the_app_role_grants_onboarding_credit_to_its_own_user_under_rls(
     clean_rls_db: asyncpg.Pool, app_pool: asyncpg.Pool, tenant_a: UUID, tenant_b: UUID
 ) -> None:
     async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
-        assert await wallet_repo.grant_credit(conn, tenant_a, 50, "onboarding", "own")
+        assert await wallet_repo.grant_credit(
+            conn, tenant_a, _APP_GRANT_CEILING, "onboarding", f"onboarding:{tenant_a}"
+        )
 
     with pytest.raises(asyncpg.InsufficientPrivilegeError):
         async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
-            await wallet_repo.grant_credit(conn, tenant_b, 50, "onboarding", "other")
+            await wallet_repo.grant_credit(
+                conn, tenant_b, 50, "onboarding", f"onboarding:{tenant_b}"
+            )
 
-    assert await _available(clean_rls_db, tenant_a) == _MONTHLY + 50
+    assert await _available(clean_rls_db, tenant_a) == _MONTHLY + _APP_GRANT_CEILING
     assert await _available(clean_rls_db, tenant_b) == _MONTHLY
+
+
+@pytest.mark.parametrize(
+    ("reason", "key_of", "amount"),
+    [
+        pytest.param("top-up", lambda own, other: f"onboarding:{own}", 50, id="wrong-reason"),
+        pytest.param(
+            "onboarding", lambda own, other: f"onboarding:{other}", 50, id="another-users-key"
+        ),
+        pytest.param(
+            "onboarding", lambda own, other: f"onboarding:{own}:again", 50, id="key-suffix"
+        ),
+        pytest.param("onboarding", lambda own, other: "payment:abc", 50, id="non-onboarding-key"),
+        pytest.param(
+            "onboarding",
+            lambda own, other: f"onboarding:{own}",
+            _APP_GRANT_CEILING + 1,
+            id="amount-over-the-app-ceiling",
+        ),
+    ],
+)
+async def test_the_app_role_may_grant_only_the_onboarding_shape(
+    clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    tenant_b: UUID,
+    reason: str,
+    key_of: Callable[[UUID, UUID], str],
+    amount: int,
+) -> None:
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+        async with user_scoped_connection(app_pool, user_id=tenant_a) as conn:
+            await wallet_repo.grant_credit(
+                conn, tenant_a, amount, reason, key_of(tenant_a, tenant_b)
+            )
+
+    assert await _available(clean_rls_db, tenant_a) == _MONTHLY
+
+
+async def test_the_admin_role_grants_credit_of_any_kind(
+    clean_rls_db: asyncpg.Pool, tenant_a: UUID
+) -> None:
+    async with clean_rls_db.acquire() as conn:
+        granted = await wallet_repo.grant_credit(
+            conn, tenant_a, _APP_GRANT_CEILING + 1, "top-up", "payment:abc"
+        )
+
+    assert granted is True
+    assert await _available(clean_rls_db, tenant_a) == _MONTHLY + _APP_GRANT_CEILING + 1
+
+
+async def test_a_grant_over_the_single_grant_bound_is_rejected_for_every_role(
+    clean_rls_db: asyncpg.Pool, tenant_a: UUID
+) -> None:
+    with pytest.raises(asyncpg.CheckViolationError):
+        async with clean_rls_db.acquire() as conn:
+            await wallet_repo.grant_credit(
+                conn, tenant_a, _SINGLE_GRANT_BOUND + 1, "top-up", "payment:big"
+            )
+    async with clean_rls_db.acquire() as conn:
+        at_bound = await wallet_repo.grant_credit(
+            conn, tenant_a, _SINGLE_GRANT_BOUND, "top-up", "payment:max"
+        )
+
+    assert at_bound is True
 
 
 async def test_the_app_role_cannot_rewrite_or_delete_wallet_rows(
