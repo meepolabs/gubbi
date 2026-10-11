@@ -190,6 +190,10 @@ async def test_a_running_row_counted_by_release_is_retried_once_swept_as_worker_
     cipher: ContentCipher,
 ) -> None:
     job_id = (await _plant_jobs(admin_pool, tenant_a, "release-running"))["running_held"]
+    # Every planted row shares one conversation; any sibling would block or supersede this one.
+    await admin_pool.execute(
+        "DELETE FROM extraction_jobs WHERE user_id = $1 AND id <> $2", tenant_a, job_id
+    )
     expected = await _stored_tokens(
         admin_pool, (await _job(admin_pool, job_id))["conversation_id"], cipher
     )

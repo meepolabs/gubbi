@@ -42,6 +42,7 @@ async def _insert(
     status: str,
     created: timedelta,
     error_code: str | None = None,
+    source: str = "chatgpt",
 ) -> UUID:
     """Insert one runnable-if-allowed job on ``seed``'s conversation, created ``created`` from now."""
     job_id: UUID = await pool.fetchval(
@@ -49,7 +50,7 @@ async def _insert(
         INSERT INTO extraction_jobs
             (user_id, conversation_id, source, status, error_code, run_after, created_at,
              filtered_tokens, token_count_version, attempts)
-        VALUES ($1, $2, 'chatgpt', $3, $4, now() - interval '1 minute', now() + $5::interval,
+        VALUES ($1, $2, $7, $3, $4, now() - interval '1 minute', now() + $5::interval,
                 100, $6, 1)
         RETURNING id
         """,
@@ -59,6 +60,7 @@ async def _insert(
         error_code,
         created,
         TOKEN_COUNT_VERSION,
+        source,
     )
     return job_id
 
@@ -83,18 +85,28 @@ _SUPERSEDED = ("failed", ErrorCode.SUPERSEDED.value, True)
 
 
 @pytest.mark.parametrize(
-    ("newer_status", "newer_code"),
+    ("newer_status", "newer_code", "newer_source"),
     [
-        pytest.param("failed", ErrorCode.LLM_REFUSED.value, id="newer-terminal-failure"),
-        pytest.param("completed", None, id="newer-completed"),
+        pytest.param("failed", ErrorCode.LLM_REFUSED.value, "chatgpt", id="newer-terminal-failure"),
+        pytest.param("completed", None, "chatgpt", id="newer-completed"),
+        pytest.param("completed", None, "claude", id="newer-completed-other-source"),
     ],
 )
 async def test_a_failed_job_behind_a_finished_newer_job_is_superseded_not_run(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, newer_status: str, newer_code: str | None
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    newer_status: str,
+    newer_code: str | None,
+    newer_source: str,
 ) -> None:
     older = await _older_worker_lost(clean_rls_db, seeded_a)
     await _insert(
-        clean_rls_db, seeded_a, status=newer_status, created=_NEWER, error_code=newer_code
+        clean_rls_db,
+        seeded_a,
+        status=newer_status,
+        created=_NEWER,
+        error_code=newer_code,
+        source=newer_source,
     )
     arq = _RecordingArq()
 
@@ -107,11 +119,20 @@ async def test_a_failed_job_behind_a_finished_newer_job_is_superseded_not_run(
         assert await queue_repo.select_runnable(conn, limit=10) == []
 
 
+@pytest.mark.parametrize(
+    "newer_source",
+    [
+        pytest.param("chatgpt", id="same-source"),
+        pytest.param("claude", id="other-source"),
+    ],
+)
 async def test_a_failed_job_behind_a_pending_newer_job_is_superseded_and_the_newer_one_runs(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, newer_source: str
 ) -> None:
     older = await _older_worker_lost(clean_rls_db, seeded_a)
-    newer = await _insert(clean_rls_db, seeded_a, status="pending", created=_NEWER)
+    newer = await _insert(
+        clean_rls_db, seeded_a, status="pending", created=_NEWER, source=newer_source
+    )
     arq = _RecordingArq()
 
     result = await ExtractionScheduler(clean_rls_db, arq, _CONFIG).tick()
@@ -172,3 +193,22 @@ async def test_supersede_leaves_a_terminal_failure_and_the_newest_job_untouched(
         "SELECT id, xmin::text AS version FROM extraction_jobs ORDER BY id"
     )
     assert [tuple(row) for row in after] == [tuple(row) for row in before]
+
+
+async def test_an_active_job_of_another_source_keeps_a_failed_job_of_its_conversation_from_running(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    await _insert(clean_rls_db, seeded_a, status="running", created=_OLDER, source="claude")
+    failed = await _insert(
+        clean_rls_db,
+        seeded_a,
+        status="failed",
+        created=_NEWER,
+        error_code=ErrorCode.WORKER_LOST.value,
+    )
+
+    async with clean_rls_db.acquire() as conn, conn.transaction():
+        runnable = await queue_repo.select_runnable(conn, limit=10)
+
+    assert runnable == []
+    assert await _state(clean_rls_db, failed) == ("failed", ErrorCode.WORKER_LOST.value, False)

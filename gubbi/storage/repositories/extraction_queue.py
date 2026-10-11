@@ -244,7 +244,6 @@ EXISTS (
     FROM extraction_jobs AS newer
     WHERE newer.user_id = j.user_id
       AND newer.conversation_id = j.conversation_id
-      AND newer.source = j.source
       AND (newer.created_at, newer.id) > (j.created_at, j.id)
 )
 """
@@ -324,7 +323,6 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
                         FROM extraction_jobs AS active
                         WHERE active.user_id = j.user_id
                           AND active.conversation_id = j.conversation_id
-                          AND active.source = j.source
                           AND active.status NOT IN ('completed', 'failed')
                  )
                  AND NOT {_NEWER_JOB_EXISTS})
