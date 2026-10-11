@@ -26,7 +26,6 @@ from fastapi.responses import JSONResponse
 from gubbi_common.auth.prm import build_prm_metadata_url
 from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
-from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 from redis.exceptions import RedisError
 from starlette.types import ASGIApp  # noqa: TC002 (used in runtime variable annotation)
 
@@ -394,23 +393,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.arq_pool = arq_pool
         app_ctx.arq_pool = arq_pool
 
-        # BudgetHelper -- shared facade over Redis pre-charge + delta writes.
-        # Disabled in self-host mode (Mode 1/2); constructed only when the
-        # operator has opted into LLM budget enforcement.
-        if settings.llm.llm_budget_enabled:
-            pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
-            budget_helper = BudgetHelper(
-                redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
-                pre_charge_script=pre_charge_script,
-            )
-            app.state.budget_helper = budget_helper
-            app_ctx.budget_helper = budget_helper
-            await logger.info("BudgetHelper ready (lifespan)")
-        else:
-            app.state.budget_helper = None
-            app_ctx.budget_helper = None
-            await logger.info("BudgetHelper disabled (llm_budget_enabled=False)")
-
         # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
         # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
         # admin pool is configured (single-tenant dev fallback).
@@ -420,7 +402,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 run_orphan_cleanup(
                     admin_pool,
                     threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
-                    budget_helper=app.state.budget_helper,
                 ),
             )
             app.state.background_tasks.add(cron_task)

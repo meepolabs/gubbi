@@ -336,12 +336,6 @@ async def test_lifespan_populates_app_state_before_first_request(
         assert hasattr(app.state, "gubbi_gateway_secret")
         # None is a valid configured-disabled state.
 
-        # budget_helper: must be set (or None) after lifespan startup.
-        # With JOURNAL_LLM_BUDGET_ENABLED unset (default False), the value is None.
-        assert hasattr(app.state, "budget_helper")
-        # The value is None in minimal-env (budget disabled by default).
-        assert app.state.budget_helper is None
-
         # require_*() accessors must NOT raise for the populated fields.
         scope = {"type": "http", "app": app, "headers": []}
         request = httpx.Request("GET", "http://testserver/")

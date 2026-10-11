@@ -1,8 +1,10 @@
 """Repository module for scheduling and admission over extraction_jobs.
 
-Every function runs on a connection from the admin pool (BYPASSRLS): the
-scheduler works across tenants, so queries filter on user_id explicitly where
-a result is per user.
+The scheduler calls these on a connection from the admin pool (BYPASSRLS) to
+work across tenants, so queries filter on user_id explicitly where a result is
+per user. The per-user reads (``user_period_usage``, ``first_upload_at``) are
+also correct on a user-scoped RLS connection for that user's own id; other
+users then read as having no jobs.
 
 A job is queued while it is ``pending`` with ``admitted_at IS NULL``. Admission
 writes ``admitted_at`` and ``budget_period_start`` exactly once; usage figures

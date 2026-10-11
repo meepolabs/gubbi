@@ -24,7 +24,7 @@ The global ceiling, in filtered tokens per period, stops backfill at
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Final
@@ -38,7 +38,9 @@ __all__: list[str] = [
     "Decision",
     "DeferReason",
     "UserUsage",
+    "budget_period",
     "decide",
+    "monthly_allowance_exhausted",
     "order_candidates",
     "user_usage_from_totals",
 ]
@@ -145,6 +147,32 @@ def decide(
         elif candidate.lane is not Lane.BACKFILL:
             deferred_ahead_of_backfill.add(candidate.user_id)
     return decisions
+
+
+def budget_period(now: datetime) -> date:
+    """Return the budget period containing ``now``: the first day of its UTC month.
+
+    Raises:
+        ValueError: ``now`` is naive.
+    """
+    if now.tzinfo is None:
+        raise ValueError("now must be timezone-aware")
+    return now.astimezone(UTC).date().replace(day=1)
+
+
+def monthly_allowance_exhausted(usage: UserUsage, limits: ExtractionLimits) -> bool:
+    """Whether the user's next paste or live job would wait for the next period.
+
+    True once either monthly limit is reached, so even a one-token job would
+    not fit, except while the user has charged nothing this period:
+    :func:`decide` admits that next job whatever its size.
+    """
+    if _month_unused(usage):
+        return False
+    return (
+        usage.monthly_conversations >= limits.monthly_conversations
+        or usage.monthly_tokens >= limits.monthly_tokens
+    )
 
 
 def user_usage_from_totals(

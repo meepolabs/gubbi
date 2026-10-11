@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -13,7 +13,9 @@ from gubbi.extraction.admission import (
     Decision,
     DeferReason,
     UserUsage,
+    budget_period,
     decide,
+    monthly_allowance_exhausted,
     order_candidates,
     user_usage_from_totals,
 )
@@ -390,3 +392,55 @@ def test_repository_usage_feeds_usage_from_totals_by_name() -> None:
     usage = user_usage_from_totals(**asdict(totals), limits=LIMITS)
 
     assert usage == UserUsage(2, 200, 3, 600)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("usage", "exhausted"),
+    [
+        pytest.param(UserUsage(), False, id="unused-month"),
+        pytest.param(UserUsage(2, 998), False, id="below-both-limits"),
+        pytest.param(UserUsage(3, 10), True, id="conversation-limit-reached"),
+        pytest.param(UserUsage(1, 1_000), True, id="token-limit-reached"),
+        pytest.param(UserUsage(0, 0, 2, 500), False, id="backfill-inside-first-sync"),
+    ],
+)
+def test_monthly_allowance_exhausted(usage: UserUsage, exhausted: bool) -> None:
+    assert monthly_allowance_exhausted(usage, LIMITS) is exhausted
+
+
+@pytest.mark.unit
+def test_zero_allowance_is_not_exhausted_before_anything_is_charged() -> None:
+    zero = replace(LIMITS, monthly_conversations=0, monthly_tokens=0)
+
+    assert monthly_allowance_exhausted(UserUsage(), zero) is False
+
+
+@pytest.mark.unit
+def test_monthly_allowance_exhausted_agrees_with_decide_for_a_minimal_live_job() -> None:
+    for usage in (UserUsage(2, 998), UserUsage(2, 999), UserUsage(3, 10), UserUsage(1, 1_000)):
+        live = _job(Lane.LIVE, tokens=1)
+        (decision,) = decide([live], {ALICE: usage}, 0, LIMITS)
+        assert monthly_allowance_exhausted(usage, LIMITS) is not decision.admitted
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("now", "expected"),
+    [
+        pytest.param(datetime(2026, 10, 31, 23, 59, tzinfo=UTC), date(2026, 10, 1), id="utc"),
+        pytest.param(
+            datetime(2026, 10, 31, 20, tzinfo=timezone(timedelta(hours=-5))),
+            date(2026, 11, 1),
+            id="offset-crosses-month-in-utc",
+        ),
+    ],
+)
+def test_budget_period_is_the_utc_month_start(now: datetime, expected: date) -> None:
+    assert budget_period(now) == expected
+
+
+@pytest.mark.unit
+def test_budget_period_rejects_naive_time() -> None:
+    with pytest.raises(ValueError, match="timezone-aware"):
+        budget_period(datetime(2026, 10, 1))

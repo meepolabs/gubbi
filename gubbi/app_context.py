@@ -11,7 +11,6 @@ if TYPE_CHECKING:
     import asyncpg
     import structlog
     from arq.connections import ArqRedis
-    from gubbi_common.budget import BudgetHelper
 
     from gubbi.config import Settings
     from gubbi.crypto.cipher import ContentCipher
@@ -60,4 +59,3 @@ class AppContext:
     operator_user_id: UUID | None = None
     cipher: ContentCipher | None = None
     arq_pool: ArqRedis | None = field(default=None)
-    budget_helper: BudgetHelper | None = field(default=None)

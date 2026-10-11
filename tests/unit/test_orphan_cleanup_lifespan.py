@@ -76,10 +76,7 @@ async def test_cron_task_runs_against_admin_pool_during_lifespan(
         assert seen["calls"] == [
             (
                 admin_pool,
-                {
-                    "threshold_minutes": get_settings().llm.orphan_cleanup_threshold_minutes,
-                    "budget_helper": app.state.budget_helper,
-                },
+                {"threshold_minutes": get_settings().llm.orphan_cleanup_threshold_minutes},
             )
         ]
 

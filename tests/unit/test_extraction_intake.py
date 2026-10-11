@@ -13,6 +13,7 @@ from gubbi.extraction.intake import (
     assign_lane,
     count_filtered_tokens,
     next_nightly_window,
+    run_after_for,
 )
 
 WINDOW = timedelta(days=7)
@@ -209,3 +210,15 @@ def test_count_filtered_tokens_ignores_system_and_tool_turns() -> None:
 
     assert tokens == sum(estimate_tokens(m.content) for m in kept)
     assert tokens > 0
+
+
+@pytest.mark.parametrize(
+    ("lane", "expected"),
+    [
+        pytest.param(Lane.PASTE, DAY0, id="paste-now"),
+        pytest.param(Lane.BACKFILL, DAY0, id="backfill-now"),
+        pytest.param(Lane.LIVE, datetime(2026, 1, 2, 3, tzinfo=UTC), id="live-next-night"),
+    ],
+)
+def test_run_after_for_defers_only_live_work(lane: Lane, expected: datetime) -> None:
+    assert run_after_for(lane, DAY0, 3) == expected

@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import asyncpg
 import pytest
+from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.extraction.intake import Lane
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode, is_terminal
@@ -518,3 +519,48 @@ async def test_first_upload_at_is_none_without_jobs(
 ) -> None:
     async with clean_rls_db.acquire() as conn:
         assert await queue_repo.first_upload_at(conn, tenant_a, None) is None
+
+
+# ---------------------------------------------------------------------------
+# Reads under RLS (the ingest request path runs as the user, not the admin pool)
+# ---------------------------------------------------------------------------
+
+
+async def test_first_upload_at_under_rls_sees_only_the_users_own_jobs(
+    clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    seeded_b: TenantSeed,
+) -> None:
+    def day(n: int) -> datetime:
+        return datetime(2026, 10, n, tzinfo=UTC)
+
+    await _insert(clean_rls_db, seeded_a, Job(lane="live", source="chatgpt", created_at=day(5)))
+    await _insert(clean_rls_db, seeded_b, Job(lane="live", source="chatgpt", created_at=day(2)))
+
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        own = await queue_repo.first_upload_at(conn, seeded_a.user_id, "chatgpt")
+        own_any = await queue_repo.first_upload_at(conn, seeded_a.user_id, None)
+        other = await queue_repo.first_upload_at(conn, seeded_b.user_id, None)
+
+    assert (own, own_any, other) == (day(5), day(5), None)
+
+
+async def test_user_period_usage_under_rls_counts_the_users_own_admitted_jobs(
+    clean_rls_db: asyncpg.Pool,
+    app_pool: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    seeded_b: TenantSeed,
+) -> None:
+    await _insert(clean_rls_db, seeded_a, _admitted(filtered_tokens=30))
+    await _insert(clean_rls_db, seeded_b, _admitted(filtered_tokens=70))
+
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        usage = await queue_repo.user_period_usage(
+            conn, [seeded_a.user_id, seeded_b.user_id], _PERIOD
+        )
+
+    assert usage == {
+        seeded_a.user_id: UserPeriodUsage(1, 30, 0, 0, 0, 0),
+        seeded_b.user_id: _ZERO_USAGE,
+    }

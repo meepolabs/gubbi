@@ -84,6 +84,19 @@ def next_nightly_window(now: datetime, hour: int) -> datetime:
     return today_window + timedelta(days=1)
 
 
+def run_after_for(lane: Lane, now: datetime, nightly_hour: int) -> datetime:
+    """Return when a new job in ``lane`` becomes runnable.
+
+    Live work waits for the next nightly window; paste and backfill run now.
+
+    Raises:
+        ValueError: as :func:`next_nightly_window`, for a live lane.
+    """
+    if lane is Lane.LIVE:
+        return next_nightly_window(now, nightly_hour)
+    return now
+
+
 def count_filtered_tokens(messages: Iterable[ConversationTurn]) -> int:
     """Estimate the input tokens of the role-filtered transcript.
 

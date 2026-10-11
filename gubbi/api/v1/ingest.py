@@ -1,20 +1,23 @@
 """REST API: POST /api/v1/ingest/conversations.
 
 Accepts normalized conversation batches from the browser extension.
-Transforms, dedupes, and saves to conversations table.
-No LLM calls. Pure data ingest.
+Transforms, dedupes, saves to the conversations table, and records one
+pending extraction job per saved conversation with its scheduling lane, run
+time and filtered token count. No LLM calls and no job dispatch: the
+extraction scheduler admits and runs queued jobs.
 """
 
 from __future__ import annotations
 
 import contextlib
+from dataclasses import asdict, dataclass
 
 # datetime is a Pydantic field type on MessagePayload / ConversationPayload;
 # UUID is a FastAPI Depends() Annotated type. Both are resolved at runtime
 # (validator-build / route-registration), so they must stay runtime imports
 # despite `from __future__ import annotations` -- ruff TC would otherwise
 # push them under TYPE_CHECKING and break Pydantic model_rebuild().
-from datetime import datetime  # noqa: TC003
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID  # noqa: TC003
 
@@ -22,20 +25,31 @@ import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Request
 from gubbi_common.audit.targets import TargetKind
-from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
-from redis.exceptions import RedisError
 
 from gubbi.api.v1.auth import require_scope
-from gubbi.app_state import get_optional_arq_pool, require_app_ctx
+from gubbi.app_state import require_app_ctx
 from gubbi.audit.sql import record_audit
+from gubbi.config import get_settings
 from gubbi.crypto.guard import require_cipher
+from gubbi.extraction.admission import (
+    budget_period,
+    monthly_allowance_exhausted,
+    user_usage_from_totals,
+)
+from gubbi.extraction.intake import (
+    TOKEN_COUNT_VERSION,
+    assign_lane,
+    count_filtered_tokens,
+    run_after_for,
+)
+from gubbi.extraction.limits import ExtractionLimits, limits_for
 from gubbi.models.conversation import Message, keep_conversation_roles
 from gubbi.storage.connection import safe_acquire
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
-from gubbi.storage.repositories import extraction_jobs
+from gubbi.storage.repositories import extraction_jobs, extraction_queue
 from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
 from gubbi.storage.repositories.topics import TopicAlreadyExists
 from gubbi.storage.repositories.topics import create as create_topic
@@ -43,6 +57,8 @@ from gubbi.storage.repositories.topics import get_id as get_topic_id
 from gubbi.validation import validate_title
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Mapping
+
     from gubbi.app_context import AppContext
 
 __all__: list[str] = [
@@ -93,20 +109,25 @@ class IngestConversationRequest(BaseModel):
 
 
 class IngestConversationResponse(BaseModel):
-    """Response with per-batch save + extraction-enqueue counters.
+    """Response with per-batch save + extraction-queue counters.
 
     conversations_saved        -- rows committed to ``conversations``.
     conversations_skipped_dedupe -- rows skipped because the user already had
                                   this (platform, platform_id) pair.
-    extractions_enqueued       -- arq jobs enqueued for new saves.
-    extractions_skipped_budget -- saves where pre_charge denied (budget cap hit).
-    extractions_skipped_error  -- saves where TXN 2 (extraction_jobs INSERT) failed;
-                                  conversation row is durable, pre-charge refunded.
-    budget_exhausted           -- True if any conversation hit the cap in this batch.
+    extractions_enqueued       -- saves with a queued extraction job: a job
+                                  created by this request, or an earlier one
+                                  for the same conversation still in flight.
+    extractions_skipped_budget -- always 0: extraction work is queued, never
+                                  refused for budget.
+    extractions_skipped_error  -- saves whose extraction job could not be
+                                  recorded; the conversation row is durable.
+    budget_exhausted           -- True when the user has used up the current
+                                  month's extraction allowance, so new work
+                                  waits for the next period. Always False
+                                  when budgets are disabled.
 
     Invariant:
-    conversations_saved == extractions_enqueued + extractions_skipped_budget
-                        + extractions_skipped_error
+    conversations_saved == extractions_enqueued + extractions_skipped_error
     """
 
     conversations_saved: int
@@ -125,6 +146,52 @@ def _get_app_ctx(request: Request) -> AppContext:
     ``main.py``.
     """
     return require_app_ctx(request)
+
+
+@dataclass(frozen=True, slots=True)
+class _PriorUploads:
+    """The user's earliest sync uploads recorded before the current request."""
+
+    any_platform: datetime | None
+    by_platform: Mapping[str, datetime | None]
+
+
+async def _read_prior_uploads(
+    conn: asyncpg.Connection, user_id: UUID, platforms: Iterable[str]
+) -> _PriorUploads:
+    """Read the user's first uploads; RLS scopes the read to the user's own jobs."""
+    async with conn.transaction():
+        await _set_user_rls_local(conn, user_id)
+        any_platform = await extraction_queue.first_upload_at(conn, user_id, None)
+        by_platform = {
+            platform: await extraction_queue.first_upload_at(conn, user_id, platform)
+            for platform in sorted(set(platforms))
+        }
+    return _PriorUploads(any_platform=any_platform, by_platform=by_platform)
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _activity_at(conv: ConversationPayload, kept: Iterable[MessagePayload]) -> datetime:
+    """Latest timestamp among the kept messages, else the conversation's creation time."""
+    stamps = [_as_utc(msg.timestamp) for msg in kept if msg.timestamp is not None]
+    return max(stamps, default=_as_utc(conv.created_at))
+
+
+async def _budget_exhausted(
+    conn: asyncpg.Connection,
+    user_id: UUID,
+    limits: ExtractionLimits,
+    now: datetime,
+) -> bool:
+    """Whether the user's monthly extraction allowance is used up for the current period."""
+    async with conn.transaction():
+        await _set_user_rls_local(conn, user_id)
+        totals = await extraction_queue.user_period_usage(conn, [user_id], budget_period(now))
+    usage = user_usage_from_totals(**asdict(totals[user_id]), limits=limits)
+    return monthly_allowance_exhausted(usage, limits)
 
 
 async def _set_user_rls_local(conn: asyncpg.Connection, user_id: UUID) -> None:
@@ -158,9 +225,18 @@ async def ingest_conversations(
 ) -> IngestConversationResponse:
     """Ingest normalized conversation batches from browser extension clients.
 
-    Each conversation is deduped by (user_id, platform, platform_id),
-    saved under the default "inbox" topic, and returns counts of saved
-    vs skipped conversations.
+    Each conversation is deduped by (user_id, platform, platform_id), saved
+    under the default "inbox" topic, and gets a pending extraction job. The
+    job carries its scheduling lane, when it may first run, the latest
+    message time and the filtered token count; nothing is enqueued or charged
+    here -- the extraction scheduler admits queued jobs against the budget.
+
+    Lanes: a paste request is ``paste`` and runs now. A synced conversation
+    is ``backfill`` (runs now) when it predates the user's first upload from
+    its platform or arrives within the onboarding window after their first
+    upload of any platform, else ``live`` (runs at the next nightly window).
+    Those first uploads are read once, before this request records any job,
+    so every conversation of one request is judged against the same history.
 
     Transaction design:
     - Acquires ONE bare connection for the request via ``safe_acquire``.
@@ -172,26 +248,22 @@ async def ingest_conversations(
     - Dedupe pre-check, conversation save (TXN 1), and extraction_jobs
       INSERT (TXN 2) are each their own top-level transaction. They commit
       independently: a TXN 2 failure does NOT roll back TXN 1's
-      conversation row, and the per-conversation pre-charge happens
-      OUTSIDE any open transaction (no network IO inside an open PG txn).
-    - On TXN 2 failure: refund pre-charge, count as extractions_skipped_error,
-      continue (HTTP 200).
+      conversation row.
+    - On TXN 2 failure: count as extractions_skipped_error, continue (HTTP 200).
     """
     user_id, _scopes = auth
     app_ctx = _get_app_ctx(request)
     cipher = require_cipher(app_ctx)
     log = bound_logger(request)
 
-    helper = app_ctx.budget_helper  # may be None (self-host / budget disabled)
-    period_start = current_period_start()  # compute once outside the loop
+    now = datetime.now(UTC)
+    limits = limits_for(user_id)
 
     conversations_saved = 0
     conversations_skipped_dedupe = 0
-    extractions_skipped_budget = 0
+    extractions_enqueued = 0
     extractions_skipped_error = 0
-    budget_exhausted = False
     superseded_json_paths: list[str] = []
-    enqueue_tasks: list[tuple[UUID, int]] = []
 
     async with safe_acquire(app_ctx.pool) as conn:
         # Ensure inbox topic exists -- own transaction, GUC set with SET LOCAL.
@@ -210,15 +282,20 @@ async def ingest_conversations(
                 except TopicNotFoundError:
                     await create_topic(conn, DEFAULT_INBOX_TOPIC, title="Inbox")
 
+        prior_uploads = await _read_prior_uploads(
+            conn, user_id, (conv.platform for conv in body.conversations)
+        )
+
         for conv in body.conversations:
-            messages = keep_conversation_roles(
+            kept_payloads = keep_conversation_roles(conv.messages)
+            messages = [
                 Message(
                     role=msg.role,
                     content=msg.content,
                     timestamp=msg.timestamp.isoformat() if msg.timestamp else None,
                 )
-                for msg in conv.messages
-            )
+                for msg in kept_payloads
+            ]
             if not messages:
                 await log.info(
                     "ingest_conversation_empty_after_role_filter",
@@ -296,33 +373,23 @@ async def ingest_conversations(
             if save_result.superseded_json_path is not None:
                 superseded_json_paths.append(save_result.superseded_json_path)
 
-            # ============================================================
-            # PRE-CHARGE: outside any txn.
-            # helper is None -> budget disabled -> treat as pre_charged=True.
-            # ============================================================
-            if helper is None:
-                pre_charged = True
-            else:
-                pre_charged = await helper.pre_charge(
-                    user_id=user_id,
-                    period_start=period_start,
-                    estimated_cents=PRE_CHARGE_CENTS,
-                )
-
-            if not pre_charged:
-                extractions_skipped_budget += 1
-                budget_exhausted = True
-                continue  # conv committed; just don't enqueue.
+            activity_at = _activity_at(conv, kept_payloads)
+            lane = assign_lane(
+                body.source,
+                activity_at=activity_at,
+                now=now,
+                first_upload_at_platform=prior_uploads.by_platform[conv.platform],
+                first_upload_at_any=prior_uploads.any_platform,
+                onboarding_window=limits.onboarding_window,
+            )
 
             # ============================================================
             # TRANSACTION 2: extraction_jobs INSERT + audit.
             # Top-level transaction; rollback here only undoes TXN 2,
             # leaving TXN 1's conversation row durable. SET LOCAL applies
             # the RLS GUC for this transaction only.
-            # On failure: refund pre-charge, log, count, CONTINUE.
-            # HTTP 200 is still returned; save is durable.
+            # On failure: log, count, CONTINUE. HTTP 200 is still returned.
             # ============================================================
-            job_uuid: UUID | None = None
             try:
                 async with conn.transaction():
                     await _set_user_rls_local(conn, user_id)
@@ -332,7 +399,11 @@ async def ingest_conversations(
                             user_id=user_id,
                             conversation_id=save_result.conversation_id,
                             source=conv.platform,
-                            period_start=period_start,
+                            lane=lane.value,
+                            run_after=run_after_for(lane, now, limits.nightly_window_hour),
+                            activity_at=activity_at,
+                            filtered_tokens=count_filtered_tokens(messages),
+                            token_count_version=TOKEN_COUNT_VERSION,
                         )
                     except ExtractionJobAlreadyInFlight as exc:
                         job_uuid = exc.existing_job_id
@@ -347,27 +418,11 @@ async def ingest_conversations(
                         metadata={
                             "conversation_id": save_result.conversation_id,
                             "source": conv.platform,
+                            "lane": lane.value,
                         },
                     )
             except Exception:
-                # TXN 2 rolled back.  Conv save (TXN 1) is already durable.
-                # Refund pre-charge so user is not over-billed.
                 extractions_skipped_error += 1
-                if helper is not None:
-                    try:
-                        await helper.record_actual_cost(
-                            user_id=user_id,
-                            period_start=period_start,
-                            actual_cents=0,
-                            estimated_cents=PRE_CHARGE_CENTS,
-                        )
-                    except Exception:
-                        await log.warning(
-                            "pre_charge_refund_failed",
-                            user_id=str(user_id),
-                            conversation_id=save_result.conversation_id,
-                            exc_info=True,
-                        )
                 await log.warning(
                     "extraction_job_txn_failed",
                     user_id=str(user_id),
@@ -376,48 +431,11 @@ async def ingest_conversations(
                 )
                 continue  # do NOT re-raise; conv save is durable, return 200.
 
-            # TXN 2 committed.  Collect for post-commit arq enqueue.
-            assert job_uuid is not None  # noqa: S101  -- mypy; TXN 2 sets this
-            enqueue_tasks.append((job_uuid, save_result.conversation_id))
+            extractions_enqueued += 1
 
-    # Outside the connection.  Post-commit: enqueue arq jobs AFTER the DB
-    # transactions have committed so the worker cannot race ahead of the rows.
-    #
-    # ``str(job_uuid)`` is passed BOTH as the 4th positional arg AND as the
-    # ``_job_id=`` kwarg. They serve different roles -- arq does not bridge
-    # them. ``_job_id=`` is arq-internal: it becomes the queue key + result
-    # key (used for dedup + result lookup) and is NOT forwarded to the
-    # worker function. The 4th positional is what the worker function
-    # receives as its ``job_id`` parameter -- it is the one
-    # ``extract_conversation`` reads to gate ``mark_running`` /
-    # ``mark_completed`` / ``mark_failed`` and route the audit ``target_id``.
-    # Dropping the positional makes the worker run with the
-    # ``job_id="unknown"`` default and silently skips every FSM transition,
-    # leaving ``extraction_jobs.status`` stuck at ``'pending'``.
-    arq_pool = get_optional_arq_pool(request)
-    if arq_pool is not None:
-        # Wrap the enqueue loop: a Redis blip between TX2 commit and
-        # enqueue would otherwise leak the extraction_jobs row into the
-        # 'pending' state with PRE_CHARGE_CENTS already debited. The
-        # conversation IS saved (TX2 already committed); orphan_cleanup's
-        # pending sweep will mark these rows failed and refund the
-        # pre-charge so the user is not over-billed.
-        try:
-            for job_uuid, conversation_id in enqueue_tasks:
-                await arq_pool.enqueue_job(
-                    "extract_conversation",
-                    conversation_id,
-                    str(user_id),
-                    str(job_uuid),
-                    _job_id=str(job_uuid),
-                )
-        except (RedisError, OSError, TimeoutError) as exc:
-            await log.warning(
-                "ingest_enqueue_failed",
-                error_class=type(exc).__name__,
-                pending_jobs=len(enqueue_tasks),
-                exc_info=True,
-            )
+        budget_exhausted = get_settings().llm.llm_budget_enabled and await _budget_exhausted(
+            conn, user_id, limits, now
+        )
 
     for path in superseded_json_paths:
         conv_repo.delete_superseded_json_archive(app_ctx.settings.conversations_json_dir, path)
@@ -425,8 +443,8 @@ async def ingest_conversations(
     return IngestConversationResponse(
         conversations_saved=conversations_saved,
         conversations_skipped_dedupe=conversations_skipped_dedupe,
-        extractions_enqueued=len(enqueue_tasks),
-        extractions_skipped_budget=extractions_skipped_budget,
+        extractions_enqueued=extractions_enqueued,
+        extractions_skipped_budget=0,
         extractions_skipped_error=extractions_skipped_error,
         budget_exhausted=budget_exhausted,
     )
