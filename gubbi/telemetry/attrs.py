@@ -81,6 +81,9 @@ class MetricNames:
     # app_env) cap cardinality at the small product of {probe-set} *
     # {ok|warn|fail} * {dev|ci|staging|production}.
     STARTUP_PROBE_OUTCOME: Final[str] = "startup.probe.outcome_total"
+    # A background loop lost a tick or stopped; ``task`` names the loop,
+    # ``stage`` is tick, loop or not_started.
+    BACKGROUND_TASK_DIED: Final[str] = "background_task.died_total"
 
 
 # ---------------------------------------------------------------------------

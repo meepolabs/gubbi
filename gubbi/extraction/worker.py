@@ -22,7 +22,11 @@ from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 
 from gubbi.bootstrap import ReplicaCountWarnProbe
 from gubbi.config import Settings, get_settings
-from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
+from gubbi.constants import (
+    ARQ_JOB_TIMEOUT_SECS,
+    EXTRACTION_JOB_TIMEOUT_SECS,
+    EXTRACTION_WORKER_MAX_JOBS,
+)
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
@@ -451,7 +455,7 @@ class WorkerSettings:
     ]
     on_startup = startup
     on_shutdown = shutdown
-    max_jobs = 10
+    max_jobs = EXTRACTION_WORKER_MAX_JOBS
     job_timeout = ARQ_JOB_TIMEOUT_SECS
     keep_result = 86400
     poll_delay = 0.5

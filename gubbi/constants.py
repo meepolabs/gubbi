@@ -43,6 +43,8 @@ ARQ_JOB_TIMEOUT_SECS: Final = 600  # Arq worker job timeout (seconds)
 # the call in flight at the deadline and the persist step.
 EXTRACTION_JOB_DEADLINE_SECS: Final = 1500
 EXTRACTION_JOB_TIMEOUT_SECS: Final = 1800
+# Concurrent jobs per extraction worker process.
+EXTRACTION_WORKER_MAX_JOBS: Final = 10
 
 # -- LLM retry budgets ----------------------------------------------------------
 

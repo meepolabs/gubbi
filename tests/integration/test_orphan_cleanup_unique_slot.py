@@ -29,7 +29,7 @@ pytestmark = [
     pytest.mark.integration,
 ]
 
-# ``patch`` on the module's ``asyncio.sleep`` replaces the attribute on the
+# ``patch`` on the loop helper's ``asyncio.sleep`` replaces the attribute on the
 # shared asyncio module, so the fake only intercepts calls carrying this
 # value and delegates every other sleep to the real implementation.
 _CYCLE_SLEEP_SECONDS = 7
@@ -52,7 +52,7 @@ async def _run_one_cycle(admin_pool: asyncpg.Pool) -> None:
             await asyncio.Event().wait()
         return None
 
-    with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_fake_sleep):
+    with patch("gubbi.extraction.supervised_loop.asyncio.sleep", side_effect=_fake_sleep):
         task = asyncio.create_task(
             run_orphan_cleanup(admin_pool, sleep_seconds=_CYCLE_SLEEP_SECONDS)
         )

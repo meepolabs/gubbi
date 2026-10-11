@@ -48,6 +48,7 @@ from gubbi.telemetry.attrs import MetricNames
 __all__: list[str] = [
     "initialize_metrics",
     "record_audit_persistence_failure",
+    "record_background_task_died",
     "record_replica_count_warning",
     "record_startup_probe_outcome",
     "record_tool_call",
@@ -115,6 +116,15 @@ def initialize_metrics() -> dict[str, object]:
             "service.name. Cardinality bounded by the small product of "
             "probe-set x {ok, warn, fail} x {dev, ci, staging, "
             "production}."
+        ),
+        unit="1",
+    )
+    inst[MetricNames.BACKGROUND_TASK_DIED] = meter.create_counter(
+        name=MetricNames.BACKGROUND_TASK_DIED,
+        description=(
+            "Incremented when a background loop's tick raises (stage=tick), "
+            "the loop itself stops (stage=loop) or it cannot be started "
+            "(stage=not_started)"
         ),
         unit="1",
     )
@@ -245,3 +255,9 @@ def record_startup_probe_outcome(*, name: str, outcome: str, app_env: str) -> No
             1,
             {"name": name, "outcome": outcome, "app_env": app_env},
         )
+
+
+def record_background_task_died(*, task: str, stage: str) -> None:
+    """Increment the background_task.died_total counter for loop ``task`` at ``stage``."""
+    attrs = _validate_metric_attrs({"task": task, "stage": stage})
+    cast("Counter", initialize_metrics()[MetricNames.BACKGROUND_TASK_DIED]).add(1, attributes=attrs)

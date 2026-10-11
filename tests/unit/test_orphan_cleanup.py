@@ -33,7 +33,7 @@ async def _run_cycles(sweep: AsyncMock, cycles: int) -> None:
             await asyncio.Event().wait()
 
     with (
-        patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_sleep),
+        patch("gubbi.extraction.supervised_loop.asyncio.sleep", side_effect=_sleep),
         patch("gubbi.extraction.orphan_cleanup._sweep_running", sweep),
     ):
         task = asyncio.create_task(run_orphan_cleanup(MagicMock(), sleep_seconds=1))

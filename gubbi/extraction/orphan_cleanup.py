@@ -16,7 +16,6 @@ owns, however long it waits for its lane or budget.
 
 from __future__ import annotations
 
-import asyncio
 import functools
 from typing import TYPE_CHECKING
 
@@ -26,13 +25,16 @@ from opentelemetry.metrics import Counter, get_meter
 
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
 from gubbi.extraction.retry_policy import ErrorCode, next_run_after
+from gubbi.extraction.supervised_loop import run_every
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-__all__: list[str] = ["run_orphan_cleanup"]
+__all__: list[str] = ["ORPHAN_CLEANUP_TASK_NAME", "run_orphan_cleanup"]
 
 logger = structlog.get_logger(__name__)
+
+ORPHAN_CLEANUP_TASK_NAME = "orphan_cleanup"
 
 
 @functools.lru_cache(maxsize=1)
@@ -106,26 +108,33 @@ async def _sweep_running(admin_pool: asyncpg.Pool) -> int:
     return len(stale)
 
 
+async def _sweep_once(admin_pool: asyncpg.Pool) -> None:
+    """Run one sweep and count its outcome; a database or socket error is logged and skipped."""
+    log = logger.bind(component="orphan_cleanup")
+    try:
+        swept = await _sweep_running(admin_pool)
+    except (asyncpg.PostgresError, OSError):
+        await log.warning("orphan_cleanup_failed", exc_info=True)
+        return
+    if swept > 0:
+        await log.info("orphan_cleanup_swept", swept=swept, state="running")
+        _get_orphan_cleanup_swept_counter().add(
+            swept, attributes={"result": "swept", "state": "running"}
+        )
+    else:
+        _get_orphan_cleanup_swept_counter().add(
+            1, attributes={"result": "none", "state": "running"}
+        )
+
+
 async def run_orphan_cleanup(admin_pool: asyncpg.Pool, *, sleep_seconds: int = 300) -> None:
     """Forever-loop cron: every ``sleep_seconds``, fail rows stuck in 'running'.
 
     Uses admin_pool (BYPASSRLS) so the sweep is cross-tenant.
     Runs until the task is cancelled (e.g. lifespan teardown).
     """
-    log = logger.bind(component="orphan_cleanup")
-    while True:
-        await asyncio.sleep(sleep_seconds)
-        try:
-            swept = await _sweep_running(admin_pool)
-        except (asyncpg.PostgresError, OSError):
-            await log.warning("orphan_cleanup_failed", exc_info=True)
-            continue
-        if swept > 0:
-            await log.info("orphan_cleanup_swept", swept=swept, state="running")
-            _get_orphan_cleanup_swept_counter().add(
-                swept, attributes={"result": "swept", "state": "running"}
-            )
-        else:
-            _get_orphan_cleanup_swept_counter().add(
-                1, attributes={"result": "none", "state": "running"}
-            )
+    await run_every(
+        ORPHAN_CLEANUP_TASK_NAME,
+        functools.partial(_sweep_once, admin_pool),
+        interval_secs=sleep_seconds,
+    )

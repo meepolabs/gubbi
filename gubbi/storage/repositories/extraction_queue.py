@@ -20,6 +20,8 @@ select_runnable         -- queued or retryable-failed rows whose run_after has p
 terminal_failure_sql    -- SQL predicate: a failed row the retry policy never runs again
 terminal_failure_args   -- the parameters terminal_failure_sql binds
 admit                   -- charge rows to a period, once per row
+revive_failed           -- move failed rows back to pending for another run
+lock_if_pending         -- lock a row and report whether it is still pending
 defer                   -- record why a queued row was held back
 stale_admitted_pending  -- admitted rows still pending after a given age
 inflight_admitted_count -- admitted rows that are pending or running
@@ -54,6 +56,8 @@ __all__: list[str] = [
     "first_upload_at",
     "global_period_tokens",
     "inflight_admitted_count",
+    "lock_if_pending",
+    "revive_failed",
     "select_runnable",
     "stale_admitted_pending",
     "terminal_failure_args",
@@ -97,6 +101,7 @@ class RunnableJob:
     filtered_tokens: int
     attempts: int
     admitted_at: datetime | None
+    status: str
 
 
 def _to_runnable_job(row: asyncpg.Record) -> RunnableJob:
@@ -110,6 +115,7 @@ def _to_runnable_job(row: asyncpg.Record) -> RunnableJob:
         filtered_tokens=int(row["filtered_tokens"]),
         attempts=int(row["attempts"]),
         admitted_at=row["admitted_at"],
+        status=str(row["status"]),
     )
 
 
@@ -245,7 +251,7 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
     rows = await conn.fetch(
         f"""
         SELECT id, user_id, conversation_id, source, lane, activity_at,
-               filtered_tokens, attempts, admitted_at
+               filtered_tokens, attempts, admitted_at, status
         FROM extraction_jobs
         WHERE run_after <= now()
           AND (
@@ -272,7 +278,7 @@ async def stale_admitted_pending(
     rows = await conn.fetch(
         """
         SELECT id, user_id, conversation_id, source, lane, activity_at,
-               filtered_tokens, attempts, admitted_at
+               filtered_tokens, attempts, admitted_at, status
         FROM extraction_jobs
         WHERE status = 'pending'
           AND admitted_at IS NOT NULL
@@ -344,3 +350,48 @@ async def defer(conn: asyncpg.Connection, job_id: UUID, reason: str) -> bool:
         reason,
     )
     return str(result) == "UPDATE 1"
+
+
+async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> set[UUID]:
+    """Move ``failed`` rows back to ``pending`` for another run; return the ids moved.
+
+    Only one job per conversation may be active (pending or running), so a row
+    stays failed while its conversation has an active job, and of several
+    failed rows of one conversation only the newest moves. The admission
+    charge is untouched.
+    """
+    rows = await conn.fetch(
+        """
+        WITH pick AS (
+            SELECT DISTINCT ON (j.user_id, j.conversation_id, j.source) j.id
+            FROM extraction_jobs AS j
+            WHERE j.id = ANY($1::uuid[])
+              AND j.status = 'failed'
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM extraction_jobs AS active
+                    WHERE active.user_id = j.user_id
+                      AND active.conversation_id = j.conversation_id
+                      AND active.source = j.source
+                      AND active.status NOT IN ('completed', 'failed')
+              )
+            ORDER BY j.user_id, j.conversation_id, j.source, j.created_at DESC, j.id
+        )
+        UPDATE extraction_jobs AS job
+        SET status = 'pending'
+        FROM pick
+        WHERE job.id = pick.id
+        RETURNING job.id
+        """,
+        list(job_ids),
+    )
+    return {UUID(str(row["id"])) for row in rows}
+
+
+async def lock_if_pending(conn: asyncpg.Connection, job_id: UUID) -> bool:
+    """Lock the row until the transaction ends; return whether it is ``pending``."""
+    status = await conn.fetchval(
+        "SELECT status FROM extraction_jobs WHERE id = $1 FOR UPDATE",
+        job_id,
+    )
+    return bool(status == "pending")

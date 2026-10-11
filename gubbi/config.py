@@ -10,6 +10,8 @@ from gubbi_common.bootstrap import PgLogProbeMode
 from pydantic import BaseModel, Field, ValidationInfo, field_validator, model_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
+from gubbi.constants import EXTRACTION_WORKER_MAX_JOBS
+
 __all__: list[str] = [
     "DEFAULT_ALLOWED_ORIGINS",
     "HYDRA_INTROSPECT_TIMEOUT_SECS",
@@ -389,6 +391,20 @@ class LLMConfig(BaseSettings):
     )
     onboarding_window_days: int = Field(
         default=7, ge=0, validation_alias="JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS"
+    )
+    # The scheduler admits and dispatches nothing while paused.
+    extraction_scheduler_paused: bool = Field(
+        default=False, validation_alias="JOURNAL_EXTRACTION_SCHEDULER_PAUSED"
+    )
+    extraction_scheduler_interval_secs: float = Field(
+        default=30, gt=0, validation_alias="JOURNAL_EXTRACTION_SCHEDULER_INTERVAL_SECS"
+    )
+    # Most admitted jobs pending or running at once, so queued work stays in
+    # Postgres, where a later higher-priority job can still overtake it.
+    extraction_dispatch_bound: int = Field(
+        default=2 * EXTRACTION_WORKER_MAX_JOBS,
+        ge=1,
+        validation_alias="JOURNAL_EXTRACTION_DISPATCH_BOUND",
     )
 
     @field_validator("base_url")

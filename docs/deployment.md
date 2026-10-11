@@ -104,6 +104,9 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_EXTRACTION_BACKFILL_STOP_RATIO` | no | Fraction (0 to 1) of the global ceiling past which backfill work is no longer admitted. Default `0.8`. | `0.8` |
 | `JOURNAL_EXTRACTION_NIGHTLY_HOUR` | no | UTC hour (0 to 23) at which ongoing-sync conversations are extracted. Default `3`. | `3` |
 | `JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS` | no | Days after a user's first upload during which every synced conversation counts as first-sync backfill. Default `7`. | `7` |
+| `JOURNAL_EXTRACTION_SCHEDULER_PAUSED` | no | When `true`, the HTTP server's queue scheduler admits and dispatches no extraction jobs; saved conversations stay queued. Default `false`. | `false` |
+| `JOURNAL_EXTRACTION_SCHEDULER_INTERVAL_SECS` | no | Seconds between scheduler passes over the extraction queue. Default `30`. | `30` |
+| `JOURNAL_EXTRACTION_DISPATCH_BOUND` | no | Most extraction jobs handed to the worker and not yet finished at once; the rest wait in the queue, where later higher-priority work can overtake them. Default `20` (twice the worker's concurrency). | `20` |
 
 #### Releasing held extraction jobs
 

@@ -59,7 +59,17 @@ from gubbi.constants import (
     REDIS_HEALTH_PING_TIMEOUT_SECS,
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
-from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
+from gubbi.extraction.orphan_cleanup import ORPHAN_CLEANUP_TASK_NAME, run_orphan_cleanup
+from gubbi.extraction.scheduler import (
+    SCHEDULER_TASK_NAME,
+    SchedulerConfig,
+    run_extraction_scheduler,
+)
+from gubbi.extraction.supervised_loop import (
+    report_not_started,
+    start_supervised,
+    stop_supervised,
+)
 from gubbi.mcp_validation import JournalFastMCP
 from gubbi.middleware import (
     CorrelationIDMiddleware,
@@ -270,6 +280,30 @@ async def _build_app_ctx(
     return app_ctx, pool, admin_pool, mcp
 
 
+async def _start_extraction_loops(
+    tasks: set[asyncio.Task[None]],
+    admin_pool: asyncpg.Pool | None,
+    arq_pool: ArqRedis,
+    settings: Settings,
+) -> None:
+    """Start the orphan sweep and the queue scheduler on the cross-tenant admin pool.
+
+    Without an admin pool no extraction job is ever dispatched, so each loop
+    is reported as not started rather than skipped silently.
+    """
+    if admin_pool is None:
+        for name in (ORPHAN_CLEANUP_TASK_NAME, SCHEDULER_TASK_NAME):
+            await report_not_started(name, reason="no_admin_pool")
+        return
+    tasks.add(start_supervised(ORPHAN_CLEANUP_TASK_NAME, run_orphan_cleanup(admin_pool)))
+    tasks.add(
+        start_supervised(
+            SCHEDULER_TASK_NAME,
+            run_extraction_scheduler(admin_pool, arq_pool, SchedulerConfig.from_settings(settings)),
+        )
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan: startup and shutdown.
@@ -310,7 +344,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     oauth_storage: OAuthStorage | None = None
     hydra_http_client: httpx.AsyncClient | None = None
     arq_pool: ArqRedis | None = None
-    cron_task: asyncio.Task[None] | None = None
+    background_tasks: set[asyncio.Task[None]] = set()
 
     runner = StartupRunner(
         app_env=settings.app_env,
@@ -393,13 +427,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.arq_pool = arq_pool
         app_ctx.arq_pool = arq_pool
 
-        # Orphan cleanup cron: fails extraction_jobs rows stuck in 'running'.
-        # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
-        # admin pool is configured (single-tenant dev fallback).
-        app.state.background_tasks = set()
-        if admin_pool is not None:
-            cron_task = asyncio.create_task(run_orphan_cleanup(admin_pool))
-            app.state.background_tasks.add(cron_task)
+        app.state.background_tasks = background_tasks
+        await _start_extraction_loops(background_tasks, admin_pool, arq_pool, settings)
 
         # Mode 3 (hosted) disables the shared static API key path -- operators
         # authenticate via Hydra like any user. Pass api_key="" so the timing-safe
@@ -476,10 +505,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             yield
     finally:
         await logger.info("Server shutting down")
-        if cron_task is not None:
-            cron_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await cron_task
+        await stop_supervised(background_tasks)
         if arq_pool is not None:
             with suppress(Exception, asyncio.CancelledError):
                 await arq_pool.close()
