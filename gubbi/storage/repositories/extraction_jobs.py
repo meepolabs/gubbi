@@ -12,6 +12,7 @@ WITH CHECK clause requires it to match the session variable.
 Public surface
 --------------
 create_pending      -- INSERT a new pending job; raises ExtractionJobAlreadyInFlight on conflict
+refresh_queued      -- rewrite the queue inputs of a pending, not yet admitted job
 mark_running        -- claim a job for a run; returns the status it was claimed from
 update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
 mark_completed      -- terminal UPDATE to 'completed'; adds this run's usage to the row
@@ -45,6 +46,7 @@ __all__: list[str] = [
     "mark_completed",
     "mark_failed",
     "mark_running",
+    "refresh_queued",
     "update_progress",
 ]
 
@@ -185,6 +187,49 @@ async def _find_in_flight_job(
     if existing_row is None:
         return None
     return UUID(str(existing_row["id"]))
+
+
+# ---------------------------------------------------------------------------
+# refresh_queued
+# ---------------------------------------------------------------------------
+
+
+async def refresh_queued(
+    conn: asyncpg.Connection,
+    job_id: UUID,
+    *,
+    lane: str,
+    run_after: datetime,
+    activity_at: datetime,
+    filtered_tokens: int,
+    token_count_version: int,
+) -> bool:
+    """Replace the queue inputs of a job that is still pending and not yet admitted.
+
+    Returns True when the row was rewritten. An admitted, running or finished
+    job is left unchanged and False is returned: admission has already charged
+    its token count against a budget period.
+    """
+    result = await conn.execute(
+        """
+        UPDATE extraction_jobs
+        SET lane = $2,
+            run_after = $3,
+            activity_at = $4,
+            filtered_tokens = $5,
+            token_count_version = $6
+        WHERE id = $1
+          AND status = 'pending'
+          AND admitted_at IS NULL
+        """,
+        job_id,
+        lane,
+        run_after,
+        activity_at,
+        filtered_tokens,
+        token_count_version,
+    )
+    return str(result) == "UPDATE 1"
 
 
 # ---------------------------------------------------------------------------

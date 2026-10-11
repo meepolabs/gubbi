@@ -28,6 +28,7 @@ from gubbi.storage.repositories.extraction_jobs import (
     mark_completed,
     mark_failed,
     mark_running,
+    refresh_queued,
 )
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
@@ -313,6 +314,93 @@ async def test_create_pending_gives_up_when_no_active_row_is_ever_found(
             )
 
     assert hooked.inserts == 3
+
+
+# ---------------------------------------------------------------------------
+# Tests: refresh_queued
+# ---------------------------------------------------------------------------
+
+_REFRESH_RUN_AFTER = datetime(2026, 7, 2, 3, 0, tzinfo=UTC)
+_REFRESH_ACTIVITY_AT = datetime(2026, 7, 1, 21, 0, tzinfo=UTC)
+_REFRESHED = {
+    "lane": "live",
+    "run_after": _REFRESH_RUN_AFTER,
+    "activity_at": _REFRESH_ACTIVITY_AT,
+    "filtered_tokens": 5000,
+    "token_count_version": 2,
+}
+
+
+async def _refresh(conn: asyncpg.Connection, job_id: UUID) -> bool:
+    return await refresh_queued(
+        conn,
+        job_id,
+        lane="live",
+        run_after=_REFRESH_RUN_AFTER,
+        activity_at=_REFRESH_ACTIVITY_AT,
+        filtered_tokens=5000,
+        token_count_version=2,
+    )
+
+
+async def _queue_fields(admin_pool: asyncpg.Pool, job_id: UUID) -> dict[str, object]:
+    row = await admin_pool.fetchrow(
+        "SELECT lane, run_after, activity_at, filtered_tokens, token_count_version"
+        " FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    assert row is not None
+    return dict(row)
+
+
+async def test_refresh_queued_rewrites_unadmitted_pending_job(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(
+            conn, user_a, conversation_id, "chatgpt", lane="backfill", filtered_tokens=10
+        )
+        refreshed = await _refresh(conn, job_id)
+
+    assert refreshed is True
+    assert await _queue_fields(admin_pool, job_id) == _REFRESHED
+
+
+@pytest.mark.parametrize(
+    "state_sql",
+    [
+        pytest.param(
+            "UPDATE extraction_jobs SET admitted_at = now(),"
+            " budget_period_start = date '2026-07-01' WHERE id = $1",
+            id="admitted-pending",
+        ),
+        pytest.param("UPDATE extraction_jobs SET status = 'running' WHERE id = $1", id="running"),
+    ],
+)
+async def test_refresh_queued_leaves_admitted_or_running_job_unchanged(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+    state_sql: str,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(
+            conn, user_a, conversation_id, "chatgpt", lane="backfill", filtered_tokens=10
+        )
+    await admin_pool.execute(state_sql, job_id)
+    before = await _queue_fields(admin_pool, job_id)
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        refreshed = await _refresh(conn, job_id)
+
+    assert refreshed is False
+    assert await _queue_fields(admin_pool, job_id) == before
 
 
 # ---------------------------------------------------------------------------

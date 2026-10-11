@@ -7,7 +7,9 @@ Verifies that POST /api/v1/ingest/conversations:
   - Assigns lanes from the user's uploads recorded before the request
   - Reports budget_exhausted when the user's monthly allowance is used up
   - Skipped-by-dedup conversations produce no row
-  - An audit row is written for each created job
+  - An audit row is written for each created job, none for a reused one
+  - A conversation and its job are stored together or not at all
+  - A re-upload refreshes the queue inputs of a job not yet admitted
   - Replay (re-POST same payload) does NOT duplicate in-flight rows (idempotency)
 
 Run:
@@ -53,6 +55,8 @@ TEST_USER_ID = UUID("cccccccc-cccc-cccc-cccc-cccccccccccc")
 NIGHTLY_HOUR = 3
 _OLD_ACTIVITY = datetime(2020, 1, 1, tzinfo=UTC)
 _PAST_ONBOARDING = timedelta(days=8)
+_CREATED = datetime(2026, 2, 1, 8, tzinfo=UTC)
+_UPDATED = datetime(2026, 2, 3, 20, tzinfo=UTC)
 
 
 def _build_conv(
@@ -106,6 +110,27 @@ async def _job_for(pool: asyncpg.Pool, platform_id: str) -> asyncpg.Record:
         )
     assert row is not None, f"no extraction job for {platform_id}"
     return row
+
+
+async def _job_by_id(pool: asyncpg.Pool, job_id: UUID) -> asyncpg.Record:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM extraction_jobs WHERE id = $1", job_id)
+    assert row is not None, f"no extraction job {job_id}"
+    return row
+
+
+async def _counts_for(pool: asyncpg.Pool, platform_id: str) -> tuple[int, int]:
+    """Count the user's conversations with ``platform_id`` and all their jobs."""
+    async with pool.acquire() as conn:
+        conversations = await conn.fetchval(
+            "SELECT COUNT(*) FROM conversations WHERE user_id = $1 AND platform_id = $2",
+            TEST_USER_ID,
+            platform_id,
+        )
+        jobs = await conn.fetchval(
+            "SELECT COUNT(*) FROM extraction_jobs WHERE user_id = $1", TEST_USER_ID
+        )
+    return int(conversations), int(jobs)
 
 
 async def _backdate_jobs(pool: asyncpg.Pool, age: timedelta) -> None:
@@ -299,17 +324,29 @@ class TestIngestQueuesExtraction:
         assert job["token_count_version"] == TOKEN_COUNT_VERSION
         assert job["activity_at"] == late
 
-    async def test_activity_falls_back_to_created_at_without_timestamps(
+    @pytest.mark.parametrize(
+        ("updated_at", "expected"),
+        [
+            pytest.param(_UPDATED, _UPDATED, id="updated_at"),
+            pytest.param(None, _CREATED, id="created_at"),
+        ],
+    )
+    async def test_activity_falls_back_without_message_timestamps(
         self,
         client: AsyncClient,
         pool: asyncpg.Pool,
+        updated_at: datetime | None,
+        expected: datetime,
     ) -> None:
+        """Without message times, activity is the update time, else the creation time."""
         conv = _build_conv("no-stamps-001", title="No stamps")
+        conv["created_at"] = _CREATED.isoformat()
+        conv["updated_at"] = updated_at.isoformat() if updated_at else None
 
         await _post(client, "extension_chatgpt", conv)
 
         job = await _job_for(pool, "no-stamps-001")
-        assert job["activity_at"] == datetime.fromisoformat(conv["created_at"])
+        assert job["activity_at"] == expected
 
     async def test_naive_message_times_are_read_as_utc(
         self,
@@ -539,33 +576,114 @@ class TestIngestQueuesExtraction:
         assert len(first_ids) == 1
         assert job_ids == first_ids
 
-    async def test_job_insert_failure_keeps_conversation_and_counts_error(
+    async def test_job_insert_failure_stores_nothing_and_counts_failed_save(
         self,
         client: AsyncClient,
         pool: asyncpg.Pool,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """TXN 2 failure is counted, not propagated: HTTP 200 and the conversation persists."""
+        """A job insert failure rolls back the conversation; HTTP 200, one failed save."""
 
         async def _boom(*args: Any, **kwargs: Any) -> Any:
             raise asyncpg.PostgresError("simulated insert failure")
 
         monkeypatch.setattr("gubbi.api.v1.ingest.extraction_jobs.create_pending", _boom)
 
-        data = await _post(client, "extension_chatgpt", _build_conv("txn2-001", title="Txn2"))
+        data = await _post(client, "extension_chatgpt", _build_conv("atomic-001", title="Atomic"))
+
+        assert (data["conversations_saved"], data["extractions_enqueued"]) == (0, 0)
+        assert data["extractions_skipped_error"] == 1
+        assert await _counts_for(pool, "atomic-001") == (0, 0)
+
+    async def test_resend_after_failed_save_stores_conversation_and_job(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Replaying a request whose save failed is accepted, not dropped as a duplicate."""
+
+        async def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise asyncpg.PostgresError("simulated insert failure")
+
+        conv = _build_conv("atomic-002", title="Atomic replay")
+        monkeypatch.setattr("gubbi.api.v1.ingest.extraction_jobs.create_pending", _boom)
+        await _post(client, "extension_chatgpt", conv)
+        monkeypatch.undo()
+
+        data = await _post(client, "extension_chatgpt", conv)
 
         assert data["conversations_saved"] == 1
-        assert data["extractions_enqueued"] == 0
-        assert data["extractions_skipped_error"] == 1
+        assert data["conversations_skipped_dedupe"] == 0
+        assert data["extractions_enqueued"] == 1
+        assert await _counts_for(pool, "atomic-002") == (1, 1)
+
+    async def test_resave_refreshes_queue_inputs_of_unadmitted_job(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        """A grown thread re-uploaded before admission updates its queued job in place."""
+        await _post(client, "extension_chatgpt", _build_conv("grow-seed", title="Seed"))
+        await _backdate_jobs(pool, _PAST_ONBOARDING)
+        await _post(
+            client,
+            "extension_chatgpt",
+            _build_conv("grow-001", title="Growing", message_times=[_OLD_ACTIVITY]),
+        )
+        before = await _job_for(pool, "grow-001")
+
+        fresh = datetime.now(UTC) + timedelta(hours=1)
+        await _post(
+            client,
+            "extension_chatgpt",
+            _build_conv("grow-002", title="Growing", msg_count=6, message_times=[fresh]),
+        )
+
+        after = await _job_by_id(pool, before["id"])
+        assert (before["lane"], after["lane"]) == ("backfill", "live")
+        assert after["run_after"] > before["run_after"]
+        assert after["activity_at"] == fresh
+        assert after["filtered_tokens"] > before["filtered_tokens"]
+
+    async def test_resave_leaves_admitted_job_unchanged(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        """An admitted job keeps the inputs it was charged on."""
+        await _post(client, "extension_chatgpt", _build_conv("adm-001", title="Admitted"))
+        await _admit_all_jobs(pool)
+        before = await _job_for(pool, "adm-001")
+
+        fresh = datetime.now(UTC) + timedelta(hours=1)
+        data = await _post(
+            client,
+            "extension_chatgpt",
+            _build_conv("adm-002", title="Admitted", msg_count=6, message_times=[fresh]),
+        )
+
+        assert data["extractions_enqueued"] == 1
+        assert dict(await _job_by_id(pool, before["id"])) == dict(before)
+
+    async def test_reused_job_is_not_audited_as_created(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        """Only the upload that created the job writes extraction_job.created."""
+        await _post(client, "extension_chatgpt", _build_conv("reuse-001", title="Reuse audit"))
+        job = await _job_for(pool, "reuse-001")
+
+        await _post(client, "extension_chatgpt", _build_conv("reuse-002", title="Reuse audit"))
+
         async with pool.acquire() as conn:
-            conv_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM conversations WHERE user_id = $1 AND platform_id = 'txn2-001'",
-                TEST_USER_ID,
+            created = await conn.fetchval(
+                "SELECT COUNT(*) FROM audit_log"
+                " WHERE action = 'extraction_job.created' AND target_id = $1",
+                str(job["id"]),
             )
-            job_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM extraction_jobs WHERE user_id = $1", TEST_USER_ID
-            )
-        assert (conv_count, job_count) == (1, 0)
+        assert created == 1
 
     async def test_already_in_flight_job_counts_as_queued(
         self,
@@ -573,7 +691,7 @@ class TestIngestQueuesExtraction:
         pool: asyncpg.Pool,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """An in-flight job for the conversation is reused: queued, not an error."""
+        """An in-flight job for the conversation is reused: queued, not an error, not audited."""
         existing_job_id = uuid4()
 
         async def _already_in_flight(*args: object, **kwargs: object) -> UUID:
@@ -595,4 +713,4 @@ class TestIngestQueuesExtraction:
                 "SELECT COUNT(*) FROM audit_log WHERE target_id = $1",
                 str(existing_job_id),
             )
-        assert audited == 1
+        assert audited == 0

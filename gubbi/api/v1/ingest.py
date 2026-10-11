@@ -119,15 +119,17 @@ class IngestConversationResponse(BaseModel):
                                   for the same conversation still in flight.
     extractions_skipped_budget -- always 0: extraction work is queued, never
                                   refused for budget.
-    extractions_skipped_error  -- saves whose extraction job could not be
-                                  recorded; the conversation row is durable.
+    extractions_skipped_error  -- conversations that failed to save: the
+                                  conversation and its extraction job are
+                                  stored together or not at all, so nothing
+                                  was kept and a re-send is accepted.
     budget_exhausted           -- True when the user has used up the current
                                   month's extraction allowance, so new work
                                   waits for the next period. Always False
                                   when budgets are disabled.
 
     Invariant:
-    conversations_saved == extractions_enqueued + extractions_skipped_error
+    conversations_saved == extractions_enqueued
     """
 
     conversations_saved: int
@@ -175,9 +177,59 @@ def _as_utc(value: datetime) -> datetime:
 
 
 def _activity_at(conv: ConversationPayload, kept: Iterable[MessagePayload]) -> datetime:
-    """Latest timestamp among the kept messages, else the conversation's creation time."""
+    """Latest timestamp among the kept messages, else the conversation's update, else creation."""
     stamps = [_as_utc(msg.timestamp) for msg in kept if msg.timestamp is not None]
-    return max(stamps, default=_as_utc(conv.created_at))
+    return max(stamps, default=_as_utc(conv.updated_at or conv.created_at))
+
+
+@dataclass(frozen=True, slots=True)
+class _QueueFields:
+    """Scheduling inputs of a conversation's extraction job."""
+
+    lane: str
+    run_after: datetime
+    activity_at: datetime
+    filtered_tokens: int
+    token_count_version: int
+
+
+async def _queue_extraction(
+    conn: asyncpg.Connection,
+    user_id: UUID,
+    conversation_id: int,
+    source: str,
+    fields: _QueueFields,
+) -> None:
+    """Create the conversation's pending job, or reuse and refresh the one in flight.
+
+    Must run inside the caller's transaction, after the RLS GUC is set. Only a
+    newly created job is audited as created.
+    """
+    try:
+        job_uuid = await extraction_jobs.create_pending(
+            conn,
+            user_id=user_id,
+            conversation_id=conversation_id,
+            source=source,
+            **asdict(fields),
+        )
+    except ExtractionJobAlreadyInFlight as exc:
+        await extraction_jobs.refresh_queued(conn, exc.existing_job_id, **asdict(fields))
+        return
+
+    await record_audit(
+        conn,
+        actor_type="user",
+        actor_id=str(user_id),
+        action="extraction_job.created",
+        target_kind=TargetKind.EXTRACTION_JOB,
+        target_id=str(job_uuid),
+        metadata={
+            "conversation_id": conversation_id,
+            "source": source,
+            "lane": fields.lane,
+        },
+    )
 
 
 async def _budget_exhausted(
@@ -245,11 +297,16 @@ async def ingest_conversations(
       inside that transaction. ``SET LOCAL`` is transaction-scoped, so the
       GUC unwinds at COMMIT/ROLLBACK and the connection cannot return to
       the pool carrying a session-level GUC for the prior user.
-    - Dedupe pre-check, conversation save (TXN 1), and extraction_jobs
-      INSERT (TXN 2) are each their own top-level transaction. They commit
-      independently: a TXN 2 failure does NOT roll back TXN 1's
-      conversation row.
-    - On TXN 2 failure: count as extractions_skipped_error, continue (HTTP 200).
+    - The dedupe pre-check is its own transaction. The conversation save,
+      its platform metadata, its extraction job and the job's audit row
+      share ONE transaction: if any of them fails, nothing is stored, the
+      conversation counts as extractions_skipped_error and the request
+      continues (HTTP 200). A re-send of it is then accepted, since no row
+      carries its platform id.
+    - An existing in-flight job for the conversation is reused. While it is
+      pending and not yet admitted, its lane, run time, activity and token
+      count are refreshed from this upload; only a newly created job is
+      audited as created.
     """
     user_id, _scopes = auth
     app_ctx = _get_app_ctx(request)
@@ -332,12 +389,23 @@ async def ingest_conversations(
             except ValueError:
                 title = validate_title(f"Conversation {conv.created_at.isoformat()}")
 
-            # ============================================================
-            # TRANSACTION 1: save conversation + set platform metadata.
-            # Top-level transaction; commits independently of TXN 2 below.
-            # SET LOCAL applies the RLS GUC for this transaction only.
-            # ============================================================
-            save_result = None
+            activity_at = _activity_at(conv, kept_payloads)
+            lane = assign_lane(
+                body.source,
+                activity_at=activity_at,
+                now=now,
+                first_upload_at_platform=prior_uploads.by_platform[conv.platform],
+                first_upload_at_any=prior_uploads.any_platform,
+                onboarding_window=limits.onboarding_window,
+            )
+            queue_fields = _QueueFields(
+                lane=lane.value,
+                run_after=run_after_for(lane, now, limits.nightly_window_hour),
+                activity_at=activity_at,
+                filtered_tokens=count_filtered_tokens(messages),
+                token_count_version=TOKEN_COUNT_VERSION,
+            )
+
             try:
                 async with conn.transaction():
                     await _set_user_rls_local(conn, user_id)
@@ -358,6 +426,9 @@ async def ingest_conversations(
                         conv.platform,
                         conv.platform_id,
                     )
+                    await _queue_extraction(
+                        conn, user_id, save_result.conversation_id, conv.platform, queue_fields
+                    )
             except asyncpg.UniqueViolationError:
                 await log.warning(
                     "Dedupe race: platform_id already exists, treating as skip",
@@ -366,72 +437,21 @@ async def ingest_conversations(
                 )
                 conversations_skipped_dedupe += 1
                 continue
-
-            # TXN 1 committed -- conversation row is durable.
-            assert save_result is not None  # noqa: S101  -- mypy; TXN 1 sets this
-            conversations_saved += 1
-            if save_result.superseded_json_path is not None:
-                superseded_json_paths.append(save_result.superseded_json_path)
-
-            activity_at = _activity_at(conv, kept_payloads)
-            lane = assign_lane(
-                body.source,
-                activity_at=activity_at,
-                now=now,
-                first_upload_at_platform=prior_uploads.by_platform[conv.platform],
-                first_upload_at_any=prior_uploads.any_platform,
-                onboarding_window=limits.onboarding_window,
-            )
-
-            # ============================================================
-            # TRANSACTION 2: extraction_jobs INSERT + audit.
-            # Top-level transaction; rollback here only undoes TXN 2,
-            # leaving TXN 1's conversation row durable. SET LOCAL applies
-            # the RLS GUC for this transaction only.
-            # On failure: log, count, CONTINUE. HTTP 200 is still returned.
-            # ============================================================
-            try:
-                async with conn.transaction():
-                    await _set_user_rls_local(conn, user_id)
-                    try:
-                        job_uuid = await extraction_jobs.create_pending(
-                            conn,
-                            user_id=user_id,
-                            conversation_id=save_result.conversation_id,
-                            source=conv.platform,
-                            lane=lane.value,
-                            run_after=run_after_for(lane, now, limits.nightly_window_hour),
-                            activity_at=activity_at,
-                            filtered_tokens=count_filtered_tokens(messages),
-                            token_count_version=TOKEN_COUNT_VERSION,
-                        )
-                    except ExtractionJobAlreadyInFlight as exc:
-                        job_uuid = exc.existing_job_id
-
-                    await record_audit(
-                        conn,
-                        actor_type="user",
-                        actor_id=str(user_id),
-                        action="extraction_job.created",
-                        target_kind=TargetKind.EXTRACTION_JOB,
-                        target_id=str(job_uuid),
-                        metadata={
-                            "conversation_id": save_result.conversation_id,
-                            "source": conv.platform,
-                            "lane": lane.value,
-                        },
-                    )
             except Exception:
                 extractions_skipped_error += 1
                 await log.warning(
-                    "extraction_job_txn_failed",
+                    "ingest_conversation_save_failed",
                     user_id=str(user_id),
-                    conversation_id=save_result.conversation_id,
+                    platform=conv.platform,
+                    platform_id=conv.platform_id,
                     exc_info=True,
                 )
-                continue  # do NOT re-raise; conv save is durable, return 200.
+                continue
 
+            conversations_saved += 1
             extractions_enqueued += 1
+            if save_result.superseded_json_path is not None:
+                superseded_json_paths.append(save_result.superseded_json_path)
 
         budget_exhausted = get_settings().llm.llm_budget_enabled and await _budget_exhausted(
             conn, user_id, limits, now
