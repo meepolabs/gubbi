@@ -105,6 +105,20 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_EXTRACTION_NIGHTLY_HOUR` | no | UTC hour (0 to 23) at which ongoing-sync conversations are extracted. Default `3`. | `3` |
 | `JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS` | no | Days after a user's first upload during which every synced conversation counts as first-sync backfill. Default `7`. | `7` |
 
+#### Releasing held extraction jobs
+
+Some pending or failed extraction jobs are held: the scheduler never runs them until an operator releases them. Upgrading to the schema that added the job queue holds every pending or failed job present at upgrade, so an old backlog is not re-queued unnoticed. A failure with no retries left is held the same way.
+
+```bash
+# Count held jobs by status and error class (read-only)
+docker compose exec gubbi python -m gubbi.scripts.release_parked_extraction_jobs --dry-run
+
+# Make every held job runnable now
+docker compose exec gubbi python -m gubbi.scripts.release_parked_extraction_jobs --release
+```
+
+`--release` never releases failures whose error is terminal (for example a model refusal); those stay held and are counted as `held_terminal`. Completed and running jobs are never touched, and a second release changes nothing. The command needs `JOURNAL_DB_ADMIN_URL` and prints JSON log lines with counts only.
+
 ### Operator provisioning
 
 Operator row is auto-scaffolded by the app on Mode 1 / Mode 2 startup. No manual
