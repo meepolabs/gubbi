@@ -26,7 +26,8 @@ import structlog
 from opentelemetry.metrics import Counter, get_meter
 
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
-from gubbi.extraction.retry_policy import ErrorCode, next_run_after
+from gubbi.extraction.failure_metrics import record_job_failures
+from gubbi.extraction.retry_policy import ErrorCode, failure_outcome, next_run_after
 from gubbi.extraction.supervised_loop import run_every
 
 if TYPE_CHECKING:
@@ -74,7 +75,8 @@ async def _sweep_running(admin_pool: asyncpg.Pool) -> int:
     """Fail every row running past the threshold as worker_lost; return rows swept.
 
     The stale rows are locked before they are read, so a row is never failed
-    after another transaction moved it on.
+    after another transaction moved it on. Each failure is counted once the
+    transaction commits.
     """
     async with admin_pool.acquire() as conn, conn.transaction():
         stale = await conn.fetch(
@@ -107,6 +109,9 @@ async def _sweep_running(admin_pool: asyncpg.Pool) -> int:
                 for row in stale
             ],
         )
+    for row in stale:
+        outcome = failure_outcome(ErrorCode.WORKER_LOST, max(int(row["attempts"]), 1))
+        record_job_failures(ErrorCode.WORKER_LOST, outcome)
     return len(stale)
 
 

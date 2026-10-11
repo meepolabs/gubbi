@@ -155,6 +155,9 @@ def _patch_worker_dependencies(
     # that don't care about counter emission need a no-op so the runner
     # callback path is inert.
     monkeypatch.setattr(worker_module, "record_startup_probe_outcome", MagicMock())
+    # The heartbeat loop would outlive the test on the shared event loop.
+    monkeypatch.setattr(worker_module, "run_worker_heartbeat", MagicMock())
+    monkeypatch.setattr(worker_module, "start_supervised", MagicMock())
 
     return {
         "pool": pool,

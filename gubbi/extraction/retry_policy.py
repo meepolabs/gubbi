@@ -53,6 +53,13 @@ RETRY_CLASSES: Final[Mapping[ErrorCode, RetryClass]] = MappingProxyType(
 )
 
 
+class FailureOutcome(StrEnum):
+    """Whether a failed job runs again."""
+
+    RETRY = "retry"
+    TERMINAL = "terminal"
+
+
 def _codes_of(cls: RetryClass) -> frozenset[str]:
     return frozenset(code.value for code, c in RETRY_CLASSES.items() if c is cls)
 
@@ -91,6 +98,14 @@ def is_terminal(code: str | None, attempts: int) -> bool:
     if cls is RetryClass.TERMINAL:
         return True
     return cls is RetryClass.DETERMINISTIC and attempts >= DETERMINISTIC_MAX_ATTEMPTS
+
+
+def failure_outcome(code: str | None, attempts: int) -> FailureOutcome:
+    """Return whether a job that failed with ``code`` after ``attempts`` runs runs again.
+
+    Follows :func:`is_terminal`.
+    """
+    return FailureOutcome.TERMINAL if is_terminal(code, attempts) else FailureOutcome.RETRY
 
 
 def next_run_after(

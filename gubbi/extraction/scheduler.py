@@ -47,8 +47,10 @@ from gubbi.extraction.admission import (
     order_candidates,
     user_usage_from_totals,
 )
+from gubbi.extraction.failure_metrics import record_job_failures
 from gubbi.extraction.limits import ExtractionLimits, limits_for
 from gubbi.extraction.queue_metrics import record_queue_metrics
+from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.extraction.supervised_loop import run_every
 from gubbi.storage.pg_setup import advisory_unlock, try_advisory_lock
 from gubbi.storage.repositories import extraction_queue as queue_repo
@@ -200,7 +202,10 @@ class ExtractionScheduler:
         failed = dispatched.failed_ids | redispatched.failed_ids
         lost = 0
         for job_id in failed:
-            lost += await queue_repo.fail_enqueue_lost(conn, job_id)
+            outcome = await queue_repo.fail_enqueue_lost(conn, job_id)
+            if outcome is not None:
+                lost += 1
+                record_job_failures(ErrorCode.ENQUEUE_LOST, outcome)
         await self._record_metrics(conn, period)
         return TickResult(
             admitted=sum(1 for job in dispatch if job.admitted_at is None),

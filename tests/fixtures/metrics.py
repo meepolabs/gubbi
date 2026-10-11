@@ -8,7 +8,7 @@ import pytest
 from opentelemetry.metrics import _internal as otel_metrics_internal
 from opentelemetry.metrics import set_meter_provider
 from opentelemetry.sdk.metrics import MeterProvider
-from opentelemetry.sdk.metrics.export import InMemoryMetricReader
+from opentelemetry.sdk.metrics.export import Histogram, InMemoryMetricReader
 
 from gubbi.telemetry import metrics as gubbi_metrics
 
@@ -34,10 +34,11 @@ def metric_reader() -> Iterator[InMemoryMetricReader]:
 
 
 def collect_gauges(reader: InMemoryMetricReader) -> dict[str, GaugePoints]:
-    """Collect once and return each gauge's points keyed by name, then sorted attributes.
+    """Collect once and return each gauge's or counter's points keyed by name, then attributes.
 
     A gauge reports its last value only to the first collection after it is
-    set, so read every gauge of interest from one call.
+    set, so read every gauge of interest from one call. A counter's point is
+    its running total. Histograms are skipped.
     """
     data = reader.get_metrics_data()
     gauges: dict[str, GaugePoints] = {}
@@ -46,6 +47,8 @@ def collect_gauges(reader: InMemoryMetricReader) -> dict[str, GaugePoints]:
     for resource_metrics in data.resource_metrics:
         for scope_metrics in resource_metrics.scope_metrics:
             for metric in scope_metrics.metrics:
+                if isinstance(metric.data, Histogram):
+                    continue
                 points = gauges.setdefault(metric.name, {})
                 for point in metric.data.data_points:
                     attrs = tuple(

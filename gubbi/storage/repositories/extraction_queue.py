@@ -22,7 +22,8 @@ terminal_failure_sql    -- SQL predicate: a failed row the retry policy never ru
 terminal_failure_args   -- the parameters terminal_failure_sql binds
 admit                   -- charge rows to a period, once per row
 revive_failed           -- move failed rows back to pending for another run
-fail_enqueue_lost       -- fail a pending row whose enqueue raised, with growing backoff
+fail_enqueue_lost       -- fail a pending row whose enqueue raised, with growing backoff;
+                           returns whether the row runs again
 defer                   -- hold rows back with a reason until a recheck time
 stale_admitted_pending  -- admitted rows still pending after a given age
 inflight_admitted_count -- admitted rows that are pending or running
@@ -46,6 +47,8 @@ from gubbi.extraction.retry_policy import (
     DETERMINISTIC_MAX_ATTEMPTS,
     TERMINAL_CODES,
     ErrorCode,
+    FailureOutcome,
+    failure_outcome,
     next_run_after,
 )
 
@@ -478,14 +481,15 @@ async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> 
     return revived
 
 
-async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> bool:
-    """Fail a ``pending`` row whose hand-off to the worker queue raised; return whether it failed.
+async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> FailureOutcome | None:
+    """Fail a ``pending`` row whose hand-off to the worker queue raised.
 
-    The row is locked first, so a row a worker claimed meanwhile is left
-    alone. ``dispatch_failures`` counts consecutive lost hand-offs and is the
-    backoff exponent, so the delay grows through an outage; ``attempts``
-    counts worker runs only and is untouched, so a lost hand-off never uses
-    up a deterministic retry.
+    Returns whether the row runs again, or None when it was not failed: the
+    row is locked first, so a row a worker claimed meanwhile is left alone.
+    ``dispatch_failures`` counts consecutive lost hand-offs and is the backoff
+    exponent, so the delay grows through an outage; ``attempts`` counts worker
+    runs only and is untouched, so a lost hand-off never uses up a
+    deterministic retry.
     """
     async with conn.transaction():
         row = await conn.fetchrow(
@@ -499,7 +503,7 @@ async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> bool:
             job_id,
         )
         if row is None:
-            return False
+            return None
         failures = int(row["dispatch_failures"]) + 1
         retry_at = next_run_after(ErrorCode.ENQUEUE_LOST, failures, row["db_now"])
         await conn.execute(
@@ -517,7 +521,7 @@ async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> bool:
             "infinity" if retry_at is None else retry_at.isoformat(),
             failures,
         )
-    return True
+    return failure_outcome(ErrorCode.ENQUEUE_LOST, failures)
 
 
 # ---------------------------------------------------------------------------

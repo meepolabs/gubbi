@@ -21,6 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from gubbi.extraction.jobs import extract_conversation as job_module
 from gubbi.extraction.llm.provider import LLMMessage, LLMResponse, LLMUsage
 from gubbi.extraction.persist import PersistResult
+from gubbi.extraction.retry_policy import FailureOutcome
 from gubbi.extraction.service import ExtractionService
 from gubbi.models.conversation import Message
 from gubbi.storage.repositories.conversations import ExtractionState
@@ -234,7 +235,7 @@ def patched_job(
             set_extraction_state=enter(f"{conv}.set_extraction_state", return_value=True),
             mark_running=enter(f"{jobs}.mark_running", return_value=True),
             mark_completed=enter(f"{jobs}.mark_completed", return_value=True),
-            mark_failed=enter(f"{jobs}.mark_failed", return_value=True),
+            mark_failed=enter(f"{jobs}.mark_failed", return_value=FailureOutcome.RETRY),
             persist=AsyncMock(return_value=persisted),
             record_audit=AsyncMock(),
         )

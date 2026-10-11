@@ -25,3 +25,4 @@ class ExtractionContext(TypedDict):
     health_thread: NotRequired[threading.Thread]
     job_id: NotRequired[str]
     cancel_cleanups: NotRequired[set[asyncio.Task[None]]]
+    heartbeat_task: NotRequired[asyncio.Task[None]]

@@ -5,7 +5,8 @@ Defines and initializes the gubbi-side metric instruments:
     - mcp.tool_call_count (counter)
     - mcp.tool_response_size_chars (histogram)
     - audit.persistence_failure (counter)
-    - extraction queue and budget gauges (see ``GUBBI_METRIC_ALLOWLIST``)
+    - extraction queue and budget gauges, the worker heartbeat and the
+      failed-job counter (see ``GUBBI_METRIC_ALLOWLIST``)
 
 The instruments are built lazily through ``initialize_metrics()`` so that
 they bind to the meter provider configured by ``configure_otel()`` during
@@ -55,6 +56,7 @@ __all__: list[str] = [
     "initialize_metrics",
     "record_audit_persistence_failure",
     "record_background_task_died",
+    "record_counter",
     "record_gauge",
     "record_replica_count_warning",
     "record_startup_probe_outcome",
@@ -137,6 +139,8 @@ def initialize_metrics() -> dict[str, object]:
     )
     for name, description, unit in _GAUGES:
         inst[name] = meter.create_gauge(name=name, description=description, unit=unit)
+    for name, description in _COUNTERS:
+        inst[name] = meter.create_counter(name=name, description=description, unit="1")
     return inst
 
 
@@ -161,6 +165,18 @@ _GAUGES: tuple[tuple[str, str, str], ...] = (
         MetricNames.EXTRACTION_PROVIDER_TOKENS_MONTH,
         "Provider-reported tokens of the extraction jobs charged to this budget period",
         "1",
+    ),
+)
+
+
+_COUNTERS: tuple[tuple[str, str], ...] = (
+    (
+        MetricNames.EXTRACTION_WORKER_HEARTBEAT,
+        "Incremented by the extraction worker on a fixed interval while it runs",
+    ),
+    (
+        MetricNames.EXTRACTION_JOBS_FAILED,
+        "Extraction job failures written, by retry class and whether the job runs again",
     ),
 )
 
@@ -317,3 +333,13 @@ def record_gauge(name: str, value: float, attrs: Mapping[str, str] | None = None
     """
     filtered = _allowlisted_metric_attrs(name, attrs or {})
     cast("_Gauge", initialize_metrics()[name]).set(value, attributes=filtered)
+
+
+def record_counter(name: str, attrs: Mapping[str, str] | None = None, *, amount: int = 1) -> None:
+    """Add ``amount`` to counter ``name`` for the allowlisted subset of ``attrs``.
+
+    Raises:
+        KeyError: ``name`` is not a counter in ``GUBBI_METRIC_ALLOWLIST``.
+    """
+    filtered = _allowlisted_metric_attrs(name, attrs or {})
+    cast("Counter", initialize_metrics()[name]).add(amount, attributes=filtered)

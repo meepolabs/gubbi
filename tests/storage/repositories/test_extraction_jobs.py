@@ -662,7 +662,7 @@ async def test_mark_failed_noop_when_already_completed(
     assert row is not None
     assert row["status"] == "completed"
     assert row["error_code"] is None
-    assert updated is False
+    assert updated is None
 
 
 # ---------------------------------------------------------------------------

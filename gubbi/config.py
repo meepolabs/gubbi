@@ -399,6 +399,9 @@ class LLMConfig(BaseSettings):
     extraction_scheduler_interval_secs: float = Field(
         default=30, gt=0, validation_alias="JOURNAL_EXTRACTION_SCHEDULER_INTERVAL_SECS"
     )
+    extraction_worker_heartbeat_secs: float = Field(
+        default=30, gt=0, validation_alias="JOURNAL_EXTRACTION_WORKER_HEARTBEAT_SECS"
+    )
     # Most admitted jobs pending or running at once, so queued work stays in
     # Postgres, where a later higher-priority job can still overtake it.
     extraction_dispatch_bound: int = Field(

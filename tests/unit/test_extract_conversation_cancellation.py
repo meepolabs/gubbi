@@ -17,6 +17,7 @@ from gubbi.extraction.chunking import chunk_messages
 from gubbi.extraction.jobs import extract_conversation as job_module
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.provider import LLMMessage, LLMResponse
+from gubbi.extraction.retry_policy import FailureOutcome
 from gubbi.models.conversation import Message
 from tests.fixtures.extraction_job import (
     CALL_CENTS,
@@ -178,10 +179,10 @@ async def test_a_second_cancellation_does_not_abandon_the_cleanup() -> None:
     marking = asyncio.Event()
     release = asyncio.Event()
 
-    async def _slow_mark_failed(*_args: Any, **_kwargs: Any) -> bool:
+    async def _slow_mark_failed(*_args: Any, **_kwargs: Any) -> FailureOutcome:
         marking.set()
         await release.wait()
-        return True
+        return FailureOutcome.RETRY
 
     with patched_job(tracker) as mocks:
         mocks.mark_failed.side_effect = _slow_mark_failed

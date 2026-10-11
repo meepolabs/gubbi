@@ -106,6 +106,7 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS` | no | Days after a user's first upload during which every synced conversation counts as first-sync backfill. Default `7`. | `7` |
 | `JOURNAL_EXTRACTION_SCHEDULER_PAUSED` | no | When `true`, the HTTP server's queue scheduler admits and dispatches no extraction jobs; saved conversations stay queued. Default `false`. | `false` |
 | `JOURNAL_EXTRACTION_SCHEDULER_INTERVAL_SECS` | no | Seconds between scheduler passes over the extraction queue. Default `30`. | `30` |
+| `JOURNAL_EXTRACTION_WORKER_HEARTBEAT_SECS` | no | Seconds between increments of the extraction worker's `extraction.worker.heartbeat` counter. Alert when the counter stops increasing for several intervals: the worker is down or stalled, whether or not jobs are queued. Default `30`. | `30` |
 | `JOURNAL_EXTRACTION_DISPATCH_BOUND` | no | Most extraction jobs handed to the worker and not yet finished at once; the rest wait in the queue, where later higher-priority work can overtake them. Default `20` (twice the worker's concurrency). | `20` |
 | `JOURNAL_EXTRACTION_DEFER_RECHECK_SECS` | no | Seconds before the scheduler looks again at a job it held back for a budget limit; a job held back late in the month is looked at again when the next month starts, if that comes first. Default `3600`. | `3600` |
 

@@ -29,10 +29,12 @@ from gubbi.constants import (
 )
 from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.health import app as health_app
+from gubbi.extraction.heartbeat import WORKER_HEARTBEAT_TASK_NAME, run_worker_heartbeat
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.service import ExtractionService
+from gubbi.extraction.supervised_loop import start_supervised, stop_supervised
 from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.pg_setup import init_pool
 from gubbi.telemetry import rebind_metrics_after_configure
@@ -360,6 +362,10 @@ async def startup(ctx: ExtractionContext) -> None:
         ctx["embedding_service"] = EmbeddingService()
 
         await logger.info("Extraction worker Redis client ready")
+        ctx["heartbeat_task"] = start_supervised(
+            WORKER_HEARTBEAT_TASK_NAME,
+            run_worker_heartbeat(interval_secs=settings.llm.extraction_worker_heartbeat_secs),
+        )
     except BaseException:
         # Catch BaseException (not Exception) so CancelledError /
         # KeyboardInterrupt during init still close the pool + redis
@@ -403,15 +409,19 @@ async def _drain_cancel_cleanups(ctx: ExtractionContext) -> None:
 
 
 async def shutdown(ctx: ExtractionContext) -> None:
-    """Arq worker shutdown hook: drain cancellation cleanups, then close PG and Redis.
+    """Arq worker shutdown hook: stop the heartbeat, drain job cleanups, close PG and Redis.
 
-    Cleanups of cancelled jobs still write job state through the PG pool,
-    so they are waited for (bounded) first.
+    The heartbeat stops first, so a worker going down stops reporting itself
+    alive. Cleanups of cancelled jobs still write job state through the PG
+    pool, so they are waited for (bounded) next.
     Reverse-lifecycle order matches the startup-fail teardown above
     (redis_client.aclose -> redis_pool.aclose -> pool.close): close
     last-opened first so a Redis hiccup during shutdown cannot leak
     the redis pool while the PG pool drains.
     """
+    heartbeat = ctx.get("heartbeat_task")
+    if heartbeat is not None:
+        await stop_supervised([heartbeat])
     await _drain_cancel_cleanups(ctx)
     redis_client = ctx.get("redis")
     if redis_client is not None:

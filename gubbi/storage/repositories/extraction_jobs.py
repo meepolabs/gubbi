@@ -16,7 +16,8 @@ refresh_queued      -- rewrite the queue inputs of a pending, not yet admitted j
 mark_running        -- claim an admitted, runnable pending job and count the attempt
 update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
 mark_completed      -- terminal UPDATE to 'completed'; adds this run's usage to the row
-mark_failed         -- UPDATE to 'failed' with the retry policy's run_after; adds this run's usage
+mark_failed         -- UPDATE to 'failed' with the retry policy's run_after; adds this run's usage;
+                       returns whether the job runs again
 get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint)
 ExtractionJobAlreadyInFlight -- raised by create_pending on partial-unique conflict
 StatusCounts        -- dataclass returned by get_status_counts
@@ -30,7 +31,12 @@ from uuid import UUID
 
 import asyncpg
 
-from gubbi.extraction.retry_policy import ErrorCode, next_run_after
+from gubbi.extraction.retry_policy import (
+    ErrorCode,
+    FailureOutcome,
+    failure_outcome,
+    next_run_after,
+)
 
 if TYPE_CHECKING:
     from datetime import date, datetime
@@ -400,7 +406,7 @@ async def mark_failed(
     reasoning_tokens: int = 0,
     llm_calls: int = 0,
     chunks: int = 0,
-) -> bool:
+) -> FailureOutcome | None:
     """Transition job to 'failed', record the error_code and when it may run again.
 
     ``run_after`` comes from :func:`retry_policy.next_run_after` over the
@@ -409,9 +415,10 @@ async def mark_failed(
     totals over every model call made before the failure, failed attempts
     included; they are ADDED to the row's counters, as in :func:`mark_completed`.
 
-    No-op, returning False, if the row is already 'completed' or 'failed' or
-    is not visible. Runs in a savepoint so the row lock taken to read
-    ``attempts`` is held until the UPDATE.
+    Returns whether the job runs again, or None, changing nothing, if the
+    row is already 'completed' or 'failed' or is not visible. Runs in a
+    savepoint so the row lock taken to read ``attempts`` is held until the
+    UPDATE.
     """
     async with conn.transaction():
         row = await conn.fetchrow(
@@ -425,8 +432,9 @@ async def mark_failed(
             job_id,
         )
         if row is None:
-            return False
-        run_after = _run_after_text(error_code, int(row["attempts"]), row["db_now"])
+            return None
+        attempts = int(row["attempts"])
+        run_after = _run_after_text(error_code, attempts, row["db_now"])
         result = await conn.execute(
             """
             UPDATE extraction_jobs
@@ -454,7 +462,9 @@ async def mark_failed(
             llm_calls,
             chunks,
         )
-    return str(result) == "UPDATE 1"
+    if str(result) != "UPDATE 1":
+        return None
+    return failure_outcome(error_code, max(attempts, 1))
 
 
 def _run_after_text(code: ErrorCode, attempts: int, now: datetime) -> str:

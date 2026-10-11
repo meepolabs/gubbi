@@ -33,6 +33,7 @@ from gubbi.audit import record_audit
 from gubbi.config import get_settings
 from gubbi.constants import EXTRACTION_JOB_DEADLINE_SECS, EXTRACTION_VERSION
 from gubbi.extraction.dedupe import embed_texts
+from gubbi.extraction.failure_metrics import record_job_failures
 from gubbi.extraction.llm.provider import (
     LLMProviderError,
     LLMRateLimitError,
@@ -396,14 +397,14 @@ async def _mark_job_failed(
     """
     try:
         async with user_scoped_connection(pool, user_id=user_uuid) as conn:
-            updated = await extraction_jobs.mark_failed(
+            outcome = await extraction_jobs.mark_failed(
                 conn,
                 UUID(job_id),
                 error_code=error_code,
                 cents_spent=spend.cents,
                 **_usage_kwargs(spend),
             )
-            if updated:
+            if outcome is not None:
                 await record_audit(
                     conn,
                     action="extraction_job.failed",
@@ -413,6 +414,8 @@ async def _mark_job_failed(
                     target_id=str(job_id),
                     metadata={"error_code": str(error_code), "conversation_id": conversation_id},
                 )
+        if outcome is not None:
+            record_job_failures(error_code, outcome)
     except Exception as exc:
         # Swallow secondary failure -- the original exception is what Arq needs.
         # The job row may remain in 'running' until the orphan sweep fails it.

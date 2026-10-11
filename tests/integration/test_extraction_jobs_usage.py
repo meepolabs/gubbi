@@ -78,10 +78,14 @@ async def _fail(
     conn: asyncpg.Connection, job_id: UUID, usage: dict[str, int], cents: int | None = None
 ) -> bool:
     if cents is None:
-        return await jobs_repo.mark_failed(conn, job_id, error_code=ErrorCode.LLM_REFUSED, **usage)
-    return await jobs_repo.mark_failed(
-        conn, job_id, error_code=ErrorCode.LLM_REFUSED, cents_spent=cents, **usage
-    )
+        outcome = await jobs_repo.mark_failed(
+            conn, job_id, error_code=ErrorCode.LLM_REFUSED, **usage
+        )
+    else:
+        outcome = await jobs_repo.mark_failed(
+            conn, job_id, error_code=ErrorCode.LLM_REFUSED, cents_spent=cents, **usage
+        )
+    return outcome is not None
 
 
 _TERMINAL_WRITERS: list[Any] = [

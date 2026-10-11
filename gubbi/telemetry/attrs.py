@@ -92,6 +92,11 @@ class MetricNames:
     EXTRACTION_QUEUE_DEFERRED: Final[str] = "extraction.queue.deferred"
     EXTRACTION_BUDGET_GLOBAL_USED_RATIO: Final[str] = "extraction.budget.global_used_ratio"
     EXTRACTION_PROVIDER_TOKENS_MONTH: Final[str] = "extraction.provider.tokens_month"
+    # Incremented by the extraction worker on a fixed interval while it runs.
+    EXTRACTION_WORKER_HEARTBEAT: Final[str] = "extraction.worker.heartbeat"
+    # One per extraction job failure written, by retry class and whether the
+    # job will run again.
+    EXTRACTION_JOBS_FAILED: Final[str] = "extraction.jobs.failed_total"
 
 
 # Attribute keys each allowlisted metric may carry; any other key is dropped.
@@ -102,6 +107,8 @@ GUBBI_METRIC_ALLOWLIST: Mapping[str, frozenset[str]] = {
     MetricNames.EXTRACTION_QUEUE_DEFERRED: frozenset({"defer_reason"}),
     MetricNames.EXTRACTION_BUDGET_GLOBAL_USED_RATIO: frozenset(),
     MetricNames.EXTRACTION_PROVIDER_TOKENS_MONTH: frozenset({"kind"}),
+    MetricNames.EXTRACTION_WORKER_HEARTBEAT: frozenset(),
+    MetricNames.EXTRACTION_JOBS_FAILED: frozenset({"error_class", "outcome"}),
 }
 
 
