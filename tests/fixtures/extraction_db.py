@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.service import ExtractionService
 from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.repositories import extraction_jobs, extraction_queue
@@ -110,7 +111,7 @@ async def seed_job(
     *,
     admitted: bool = True,
 ) -> UUID:
-    """Insert a pending extraction job for the conversation, under the user's RLS scope.
+    """Insert a counted pending extraction job for the conversation, under the user's RLS scope.
 
     ``admitted`` charges it to ``period_start`` as the scheduler does before
     dispatch; only an admitted job can be claimed by a worker.
@@ -119,7 +120,12 @@ async def seed_job(
 
     async with user_scoped_connection(app_pool, user_id=user_id) as conn:
         job_id = await extraction_jobs.create_pending(
-            conn, user_id, conversation_id, "extension_chatgpt", period_start=period_start
+            conn,
+            user_id,
+            conversation_id,
+            "extension_chatgpt",
+            period_start=period_start,
+            token_count_version=TOKEN_COUNT_VERSION,
         )
         if admitted:
             await extraction_queue.admit(conn, [job_id], period_start)

@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 from gubbi_common.db.user_scoped import user_scoped_connection
 
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode
 from gubbi.storage.repositories.extraction_jobs import (
     ExtractionJobAlreadyInFlight,
@@ -408,7 +409,7 @@ async def test_refresh_queued_rewrites_unadmitted_pending_job(
     "state_sql",
     [
         pytest.param(
-            "UPDATE extraction_jobs SET admitted_at = now(),"
+            "UPDATE extraction_jobs SET admitted_at = now(), token_count_version = 1,"
             " budget_period_start = date '2026-07-01' WHERE id = $1",
             id="admitted-pending",
         ),
@@ -445,7 +446,9 @@ async def test_refresh_queued_leaves_admitted_or_running_job_unchanged(
 async def _create_admitted(
     conn: asyncpg.Connection, user_id: UUID, conversation_id: int, source: str = "chatgpt"
 ) -> UUID:
-    job_id = await create_pending(conn, user_id, conversation_id, source)
+    job_id = await create_pending(
+        conn, user_id, conversation_id, source, token_count_version=TOKEN_COUNT_VERSION
+    )
     await admit(conn, [job_id], _PERIOD)
     return job_id
 

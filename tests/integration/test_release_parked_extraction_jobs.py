@@ -13,6 +13,7 @@ from uuid import UUID
 import asyncpg
 import pytest
 
+from gubbi.extraction import orphan_cleanup
 from gubbi.extraction.intake import TOKEN_COUNT_VERSION, count_filtered_tokens
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS
 from gubbi.extraction.scheduler import ExtractionScheduler, SchedulerConfig
@@ -70,7 +71,7 @@ _RELEASABLE = {
     "failed_unknown_code_held",
 }
 
-_HYDRATABLE = _RELEASABLE | {"pending_scheduled"}
+_HYDRATABLE = _RELEASABLE | {"pending_scheduled", "running_held"}
 
 
 async def _plant_jobs(
@@ -177,8 +178,46 @@ async def test_release_frees_held_rows_except_terminal_failures(
     assert after["pending_scheduled"][1] == before["pending_scheduled"][1]
     assert after["failed_refused_held"][1] == "infinity"
     assert after["failed_deterministic_exhausted_held"][1] == "infinity"
+    assert after["running_held"][1] == "infinity"
     assert sum(group.count for group in result.released) == len(_RELEASABLE)
     assert result.held_terminal == 2
+    assert result.hydrated == len(_HYDRATABLE)
+
+
+async def test_a_running_row_counted_by_release_is_retried_once_swept_as_worker_lost(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    cipher: ContentCipher,
+) -> None:
+    job_id = (await _plant_jobs(admin_pool, tenant_a, "release-running"))["running_held"]
+    expected = await _stored_tokens(
+        admin_pool, (await _job(admin_pool, job_id))["conversation_id"], cipher
+    )
+
+    await release_parked(admin_pool, cipher)
+    counted = await admin_pool.fetchrow(
+        "SELECT status, filtered_tokens, token_count_version FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    await admin_pool.execute(
+        "UPDATE extraction_jobs SET started_at = now() - interval '1 day' WHERE id = $1", job_id
+    )
+    await orphan_cleanup._sweep_running(admin_pool)
+    await admin_pool.execute(
+        "UPDATE extraction_jobs SET run_after = now() - interval '1 minute' WHERE id = $1", job_id
+    )
+    async with admin_pool.acquire() as conn, conn.transaction():
+        runnable = await queue_repo.select_runnable(conn, limit=1000)
+
+    assert expected > 0
+    assert counted is not None
+    assert dict(counted) == {
+        "status": "running",
+        "filtered_tokens": expected,
+        "token_count_version": TOKEN_COUNT_VERSION,
+    }
+    swept = [job for job in runnable if job.job_id == job_id]
+    assert [(job.status, job.filtered_tokens) for job in swept] == [("failed", expected)]
 
 
 async def test_second_release_is_a_no_op(
@@ -294,6 +333,29 @@ async def test_a_row_whose_conversation_does_not_decrypt_stays_held(
     assert (held["held"], held["token_count_version"], held["filtered_tokens"]) == (True, None, 0)
 
 
+async def test_an_unreadable_running_row_is_not_reported_as_held(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    cipher: ContentCipher,
+) -> None:
+    job_ids = await _plant_jobs(admin_pool, tenant_a, "release-running-unreadable")
+    async with admin_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM extraction_jobs WHERE id <> $1 AND conversation_id ="
+            " (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
+            job_ids["running_held"],
+        )
+        await conn.execute(
+            "UPDATE messages SET content_encrypted = 'not ciphertext'::bytea"
+            " WHERE conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
+            job_ids["running_held"],
+        )
+
+    dry_run = await count_parked(admin_pool, cipher)
+
+    assert (dry_run.held_unhydrated, dry_run.held_unhydrated_parked) == (1, 0)
+
+
 async def _plant_uncounted_pending(
     admin_pool: asyncpg.Pool, job_user_id: UUID, conversation_id: int, run_after: str
 ) -> UUID:
@@ -362,11 +424,20 @@ async def test_a_row_whose_conversation_has_another_owner_is_never_decrypted(
     assert (held["held"], held["token_count_version"]) == (True, None)
 
 
+@pytest.mark.parametrize(
+    ("concurrent_change", "version_after"),
+    [
+        pytest.param("token_count_version = $2", TOKEN_COUNT_VERSION, id="counted"),
+        pytest.param("status = 'completed', completed_at = now()", None, id="completed"),
+    ],
+)
 async def test_hydrated_count_reports_only_rows_actually_written(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
     cipher: ContentCipher,
     monkeypatch: pytest.MonkeyPatch,
+    concurrent_change: str,
+    version_after: int | None,
 ) -> None:
     seed = await seed_for(admin_pool, tenant_a, topic_path="release-race", n_entries=0)
     assert seed.conversation_id is not None
@@ -375,10 +446,11 @@ async def test_hydrated_count_reports_only_rows_actually_written(
 
     async def count_then_race(conn: Any, cipher: Any) -> Any:
         tokens = await real_count(conn, cipher)
+        args = (TOKEN_COUNT_VERSION,) if "$2" in concurrent_change else ()
         await conn.execute(
-            "UPDATE extraction_jobs SET token_count_version = $2 WHERE id = $1",
+            f"UPDATE extraction_jobs SET {concurrent_change} WHERE id = $1",  # noqa: S608 - parametrize literal
             job_id,
-            TOKEN_COUNT_VERSION,
+            *args,
         )
         return tokens
 
@@ -387,4 +459,5 @@ async def test_hydrated_count_reports_only_rows_actually_written(
     result = await release_parked(admin_pool, cipher)
 
     assert result.hydrated == 0
-    assert (await _job(admin_pool, job_id))["filtered_tokens"] == 0
+    row = await _job(admin_pool, job_id)
+    assert (row["filtered_tokens"], row["token_count_version"]) == (0, version_after)

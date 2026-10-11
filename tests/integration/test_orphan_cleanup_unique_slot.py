@@ -21,6 +21,7 @@ import asyncpg
 import pytest
 
 from gubbi.extraction import orphan_cleanup
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
 from tests.fixtures.tenants import TenantSeed
 
@@ -77,9 +78,9 @@ async def _seed_job(
         """
         INSERT INTO extraction_jobs
             (id, user_id, conversation_id, source, status, period_start,
-             created_at, started_at, attempts, filtered_tokens, admitted_at,
-             budget_period_start)
-        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6, $7, $8, $5,
+             created_at, started_at, attempts, filtered_tokens, token_count_version,
+             admitted_at, budget_period_start)
+        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6, $7, $8, $9, $5,
                 '2026-05-01'::date)
         """,
         job_id,
@@ -90,6 +91,7 @@ async def _seed_job(
         at if status == "running" else None,
         attempts,
         _CHARGED_TOKENS,
+        TOKEN_COUNT_VERSION,
     )
     return job_id
 

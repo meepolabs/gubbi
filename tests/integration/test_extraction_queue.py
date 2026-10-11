@@ -157,6 +157,20 @@ async def test_admit_leaves_a_row_that_is_not_pending_uncharged(
     assert await _usage(clean_rls_db, seeded_a.user_id, _PERIOD) == _ZERO_USAGE
 
 
+async def test_admit_leaves_a_row_without_a_token_count_uncharged(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    job_id = await _insert(clean_rls_db, seeded_a, Job(token_count_version=None))
+
+    async with clean_rls_db.acquire() as conn:
+        charged = await queue_repo.admit(conn, [job_id], _PERIOD)
+        admitted_at = await conn.fetchval(
+            "SELECT admitted_at FROM extraction_jobs WHERE id = $1", job_id
+        )
+
+    assert (charged, admitted_at) == (0, None)
+
+
 async def test_admit_clears_the_defer_reason(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:

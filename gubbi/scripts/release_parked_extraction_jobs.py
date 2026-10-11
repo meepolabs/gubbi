@@ -8,16 +8,18 @@ upgrade, and a failure with no retry left is held the same way.
 the retry policy treats the row as terminal, inside a read-only transaction.
 ``--release`` makes every held row runnable now, except terminal failed rows
 (a terminal error code, or a deterministic one past its attempt limit);
-completed and running rows are never touched. A failed row with no or an
+completed and running rows are never released. A failed row with no or an
 unrecognised error code is counted as ``unclassified`` and released: it retries
 as a transient failure. Releasing twice is a no-op.
 
-A row the queue-columns migration holds carries no token count, and so does
-a pending or failed row an older server version inserts while it still runs
+Every row present when the queue-columns migration applies carries no token
+count, and so does a row an older server version inserts while it still runs
 beside the migrated schema, whatever its ``run_after``; the scheduler never
-admits such a row. ``--release`` first counts the tokens of every unfinished,
-unadmitted, non-terminal row that has no count, from the stored conversation
-with the estimator ingest uses, and only then releases held rows. A row whose
+admits or retries such a row. ``--release`` first counts the tokens of every
+pending, failed or running row that has no count and is not a terminal
+failure, from the stored conversation with the estimator ingest uses, and only
+then releases held rows. A running row keeps its status and ``run_after``; the
+count lets the scheduler retry it once the orphan sweep fails it. A row whose
 conversation is missing, belongs to another user, or cannot be decrypted keeps
 no count (a held one stays held) and is counted as ``held_unhydrated``.
 ``--dry-run`` reports how many rows would be counted and how many would not.
@@ -79,12 +81,12 @@ _RELEASABLE: Final = (
     f"run_after = 'infinity' AND status IN ('pending', 'failed') AND NOT {_TERMINAL_FAILURE}"
 )
 
-_UNCOUNTED: Final = (
-    "status IN ('pending', 'failed') AND admitted_at IS NULL AND token_count_version IS NULL"
-)
+_UNCOUNTED: Final = "status IN ('pending', 'failed', 'running') AND token_count_version IS NULL"
 
 _UNCOUNTED_SQL: Final = f"""
-SELECT j.id, j.conversation_id, j.run_after = 'infinity' AS parked, c.id IS NOT NULL AS owned
+SELECT j.id, j.conversation_id,
+       j.run_after = 'infinity' AND j.status IN ('pending', 'failed') AS parked,
+       c.id IS NOT NULL AS owned
 FROM extraction_jobs AS j
 LEFT JOIN conversations AS c
        ON c.id = j.conversation_id

@@ -8,7 +8,9 @@ worker queue since the last worker claim) and ``activity_at`` (the
 conversation's latest message time).
 
 Admission charge, written once when the job is admitted: ``filtered_tokens``,
-``token_count_version``, ``admitted_at`` and ``budget_period_start``.
+``token_count_version``, ``admitted_at`` and ``budget_period_start``. A check
+constraint rejects an admitted row without a ``token_count_version``, so no job
+is charged before its tokens are counted.
 
 ``period_start`` gains a column default of the first day of the current UTC
 month, so an INSERT may omit it.
@@ -60,6 +62,8 @@ ALTER TABLE public.extraction_jobs
     ADD COLUMN token_count_version smallint,
     ADD COLUMN admitted_at timestamp with time zone,
     ADD COLUMN budget_period_start date,
+    ADD CONSTRAINT extraction_jobs_admitted_counted_check
+        CHECK (admitted_at IS NULL OR token_count_version IS NOT NULL),
     ALTER COLUMN period_start SET DEFAULT (date_trunc('month', now() AT TIME ZONE 'UTC'))::date
 """
 
@@ -92,6 +96,7 @@ _DROP_INDEXES = (
 _DROP_COLUMNS = """
 ALTER TABLE public.extraction_jobs
     ALTER COLUMN period_start DROP DEFAULT,
+    DROP CONSTRAINT extraction_jobs_admitted_counted_check,
     DROP COLUMN budget_period_start,
     DROP COLUMN admitted_at,
     DROP COLUMN token_count_version,

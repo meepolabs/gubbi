@@ -351,8 +351,9 @@ async def admit(
 ) -> int:
     """Charge each ``pending`` row to ``period`` and clear its defer reason; return rows charged.
 
-    A row already admitted is left untouched, so a retried or re-dispatched
-    row is never charged twice and never moves to a later period.
+    A row without a token count is never charged. A row already admitted is
+    left untouched, so a retried or re-dispatched row is never charged twice
+    and never moves to a later period.
     """
     result = await conn.execute(
         """
@@ -363,6 +364,7 @@ async def admit(
         WHERE id = ANY($1::uuid[])
           AND status = 'pending'
           AND admitted_at IS NULL
+          AND token_count_version IS NOT NULL
         """,
         list(job_ids),
         period,

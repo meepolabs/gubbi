@@ -64,6 +64,9 @@ EXPECTED_CONSTRAINTS: dict[str, str] = {
     "extraction_jobs_defer_reason_check": (
         "CHECK ((defer_reason = ANY (ARRAY['budget'::text, 'global'::text, 'provider'::text])))"
     ),
+    "extraction_jobs_admitted_counted_check": (
+        "CHECK (((admitted_at IS NULL) OR (token_count_version IS NOT NULL)))"
+    ),
 }
 
 EXPECTED_INDEXES: dict[str, str] = {
@@ -431,6 +434,37 @@ async def test_insert_with_a_known_value_is_accepted(
 
     assert inserted is not None
     assert (inserted["lane"], inserted["defer_reason"]) == (lane, defer_reason)
+
+
+@pytest.mark.parametrize(
+    "admit_sql",
+    [
+        pytest.param(
+            "INSERT INTO extraction_jobs (user_id, conversation_id, source, status, admitted_at) "
+            "VALUES ($1, $2, 'other', 'pending', now())",
+            id="insert-admitted",
+        ),
+        pytest.param(
+            "UPDATE extraction_jobs SET admitted_at = now(), token_count_version = NULL "
+            "WHERE user_id = $1 AND conversation_id = $2",
+            id="update-admitted",
+        ),
+    ],
+)
+@pytest.mark.asyncio(loop_scope="session")
+async def test_an_admitted_row_without_a_token_count_is_rejected(
+    round_trip: RoundTrip, admit_sql: str
+) -> None:
+    async with _rolled_back_tenant(round_trip.dsn) as (conn, user_id, conversation_id):
+        await conn.execute(
+            "INSERT INTO extraction_jobs "
+            "(user_id, conversation_id, source, status, token_count_version) "
+            "VALUES ($1, $2, 'claude', 'pending', 1)",
+            user_id,
+            conversation_id,
+        )
+        with pytest.raises(asyncpg.CheckViolationError):
+            await conn.execute(admit_sql, user_id, conversation_id)
 
 
 @pytest.mark.asyncio(loop_scope="session")

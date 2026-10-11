@@ -10,6 +10,7 @@ import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
 from gubbi.extraction import orphan_cleanup
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.storage.repositories import extraction_jobs as jobs_repo
 from gubbi.storage.repositories import extraction_queue as queue_repo
@@ -43,7 +44,12 @@ _USAGE_SQL = (
 async def _create_job(conn: asyncpg.Connection, seed: TenantSeed) -> UUID:
     assert seed.conversation_id is not None
     return await jobs_repo.create_pending(
-        conn, seed.user_id, seed.conversation_id, "chatgpt", period_start=date(2026, 10, 1)
+        conn,
+        seed.user_id,
+        seed.conversation_id,
+        "chatgpt",
+        period_start=date(2026, 10, 1),
+        token_count_version=TOKEN_COUNT_VERSION,
     )
 
 
