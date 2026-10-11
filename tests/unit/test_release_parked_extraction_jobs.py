@@ -72,7 +72,10 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
         GroupCount("pending", "none", 5),
     )
 
-    log_dry_run(build_logger(stream), DryRunResult(groups, would_hydrate=3, held_unhydrated=1))
+    log_dry_run(
+        build_logger(stream),
+        DryRunResult(groups, would_hydrate=3, held_unhydrated=2, held_unhydrated_parked=1),
+    )
 
     lines = _lines(stream)
     assert [(line["event"], line.get("count")) for line in lines] == [
@@ -87,7 +90,7 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
         summary["terminal"],
         summary["would_hydrate"],
         summary["held_unhydrated"],
-    ) == (7, 4, 2, 3, 1)
+    ) == (7, 4, 2, 3, 2)
 
 
 def test_release_log_reports_released_total_and_held_terminal() -> None:

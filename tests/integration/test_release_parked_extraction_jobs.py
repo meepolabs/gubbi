@@ -70,6 +70,8 @@ _RELEASABLE = {
     "failed_unknown_code_held",
 }
 
+_HYDRATABLE = _RELEASABLE | {"pending_scheduled"}
+
 
 async def _plant_jobs(
     admin_pool: asyncpg.Pool, user_id: UUID, topic_path: str = "release-parked"
@@ -131,7 +133,7 @@ async def test_dry_run_counts_held_rows_by_status_and_error_class_without_writin
         GroupCount("failed", "unclassified", 2),
         GroupCount("pending", "none", 1),
     }
-    assert (result.would_hydrate, result.held_unhydrated) == (len(_RELEASABLE), 0)
+    assert (result.would_hydrate, result.held_unhydrated) == (len(_HYDRATABLE), 0)
     assert await _snapshot(admin_pool, job_ids) == before
 
 
@@ -170,8 +172,9 @@ async def test_release_frees_held_rows_except_terminal_failures(
 
     after = await _snapshot(admin_pool, job_ids)
     changed = {label for label in job_ids if after[label] != before[label]}
-    assert changed == _RELEASABLE
+    assert changed == _HYDRATABLE
     assert all(after[label][1] != "infinity" for label in _RELEASABLE)
+    assert after["pending_scheduled"][1] == before["pending_scheduled"][1]
     assert after["failed_refused_held"][1] == "infinity"
     assert after["failed_deterministic_exhausted_held"][1] == "infinity"
     assert sum(group.count for group in result.released) == len(_RELEASABLE)
@@ -289,3 +292,99 @@ async def test_a_row_whose_conversation_does_not_decrypt_stays_held(
     assert (await _job(admin_pool, readable))["held"] is False
     held = await _job(admin_pool, unreadable)
     assert (held["held"], held["token_count_version"], held["filtered_tokens"]) == (True, None, 0)
+
+
+async def _plant_uncounted_pending(
+    admin_pool: asyncpg.Pool, job_user_id: UUID, conversation_id: int, run_after: str
+) -> UUID:
+    job_id: UUID = await admin_pool.fetchval(
+        """
+        INSERT INTO extraction_jobs (user_id, conversation_id, source, status, run_after)
+        VALUES ($1, $2, 'uncounted', 'pending', $3::text::timestamptz)
+        RETURNING id
+        """,
+        job_user_id,
+        conversation_id,
+        run_after,
+    )
+    return job_id
+
+
+async def test_release_counts_a_scheduled_row_left_without_a_token_count(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    cipher: ContentCipher,
+) -> None:
+    seed = await seed_for(admin_pool, tenant_a, topic_path="release-deploy-window", n_entries=0)
+    assert seed.conversation_id is not None
+    job_id = await _plant_uncounted_pending(
+        admin_pool, tenant_a, seed.conversation_id, "2000-01-01T00:00:00Z"
+    )
+    expected = await _stored_tokens(admin_pool, seed.conversation_id, cipher)
+
+    dry_run = await count_parked(admin_pool, cipher)
+    result = await release_parked(admin_pool, cipher)
+    async with admin_pool.acquire() as conn, conn.transaction():
+        runnable = await queue_repo.select_runnable(conn, limit=10)
+
+    assert expected > 0
+    assert (dry_run.would_hydrate, dry_run.held_unhydrated) == (1, 0)
+    assert (result.hydrated, result.released) == (1, ())
+    assert [(job.job_id, job.filtered_tokens) for job in runnable] == [(job_id, expected)]
+
+
+async def test_a_row_whose_conversation_has_another_owner_is_never_decrypted(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    tenant_b: UUID,
+    cipher: ContentCipher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_for(admin_pool, tenant_a, topic_path="release-owner", n_entries=0)
+    assert seed.conversation_id is not None
+    job_id = await _plant_uncounted_pending(admin_pool, tenant_b, seed.conversation_id, "infinity")
+    decrypted: list[int] = []
+    real_tokens = release_script._conversation_tokens
+
+    async def recording_tokens(conn: Any, cipher: Any, conversation_id: int) -> int | None:
+        decrypted.append(conversation_id)
+        return await real_tokens(conn, cipher, conversation_id)
+
+    monkeypatch.setattr(release_script, "_conversation_tokens", recording_tokens)
+
+    dry_run = await count_parked(admin_pool, cipher)
+    result = await release_parked(admin_pool, cipher)
+
+    assert decrypted == []
+    assert (dry_run.would_hydrate, dry_run.held_unhydrated) == (0, 1)
+    assert (result.hydrated, result.held_unhydrated, result.released) == (0, 1, ())
+    held = await _job(admin_pool, job_id)
+    assert (held["held"], held["token_count_version"]) == (True, None)
+
+
+async def test_hydrated_count_reports_only_rows_actually_written(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    cipher: ContentCipher,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seed = await seed_for(admin_pool, tenant_a, topic_path="release-race", n_entries=0)
+    assert seed.conversation_id is not None
+    job_id = await _plant_uncounted_pending(admin_pool, tenant_a, seed.conversation_id, "infinity")
+    real_count = release_script._count_uncounted_tokens
+
+    async def count_then_race(conn: Any, cipher: Any) -> Any:
+        tokens = await real_count(conn, cipher)
+        await conn.execute(
+            "UPDATE extraction_jobs SET token_count_version = $2 WHERE id = $1",
+            job_id,
+            TOKEN_COUNT_VERSION,
+        )
+        return tokens
+
+    monkeypatch.setattr(release_script, "_count_uncounted_tokens", count_then_race)
+
+    result = await release_parked(admin_pool, cipher)
+
+    assert result.hydrated == 0
+    assert (await _job(admin_pool, job_id))["filtered_tokens"] == 0
