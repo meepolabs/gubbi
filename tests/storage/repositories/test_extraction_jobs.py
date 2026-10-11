@@ -10,7 +10,7 @@ Run:
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 import asyncpg
@@ -126,17 +126,6 @@ async def test_create_pending_returns_uuid(
     # Verify the row exists via admin pool (bypasses RLS for inspection).
 
 
-@pytest.mark.skip(
-    reason="QUARANTINE (prod-code gap, not test-only): create_pending catches "
-    "UniqueViolationError then runs a recovery SELECT on the SAME connection to "
-    "surface ExtractionJobAlreadyInFlight. That SELECT only succeeds in autocommit; "
-    "under any open transaction (user_scoped_connection here, and conn.transaction() "
-    "in gubbi/api/v1/ingest.py:319) the failed INSERT aborts the transaction and the "
-    "recovery SELECT raises InFailedSQLTransactionError. Reproduced directly against "
-    "the baseline. Un-skip once the in-flight conflict path is reworked (e.g. a "
-    "SAVEPOINT around the INSERT in create_pending) -- that is a prod change, out of "
-    "scope for this TEST-ONLY quarantine burn-down."
-)
 async def test_create_pending_duplicate_raises(
     app_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],
@@ -181,6 +170,77 @@ async def test_create_pending_after_terminal_succeeds(
 
     assert isinstance(second_id, UUID)
     assert second_id != first_id
+
+
+async def test_create_pending_stores_queue_fields(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    """Every queue field passed to create_pending lands on the row."""
+    user_a, _ = rls_users
+    run_after = datetime(2026, 6, 2, 3, 0, tzinfo=UTC)
+    activity_at = datetime(2026, 6, 1, 18, 30, tzinfo=UTC)
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(
+            conn,
+            user_a,
+            conversation_id,
+            "extension_chatgpt",
+            period_start=date(2026, 6, 1),
+            lane="live",
+            run_after=run_after,
+            activity_at=activity_at,
+            filtered_tokens=1234,
+            token_count_version=1,
+        )
+
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, period_start, lane, run_after, activity_at, filtered_tokens,"
+            " token_count_version FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert dict(row) == {
+        "status": "pending",
+        "period_start": date(2026, 6, 1),
+        "lane": "live",
+        "run_after": run_after,
+        "activity_at": activity_at,
+        "filtered_tokens": 1234,
+        "token_count_version": 1,
+    }
+
+
+async def test_create_pending_omitted_fields_take_column_defaults(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    """Fields left out of create_pending get the column defaults, period_start included."""
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "extension_chatgpt")
+
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT period_start = date_trunc('month', now() AT TIME ZONE 'UTC')::date"
+            " AS is_current_month, lane, run_after <= now() AS is_runnable, activity_at,"
+            " filtered_tokens, token_count_version FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    assert dict(row) == {
+        "is_current_month": True,
+        "lane": "backfill",
+        "is_runnable": True,
+        "activity_at": None,
+        "filtered_tokens": 0,
+        "token_count_version": None,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -424,12 +484,6 @@ async def test_get_status_counts_buckets(
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skip(
-    reason="QUARANTINE (prod-code gap, not test-only): same root cause as "
-    "test_create_pending_duplicate_raises -- create_pending's post-UniqueViolation "
-    "recovery SELECT raises InFailedSQLTransactionError under an open transaction. "
-    "Un-skip once create_pending wraps its INSERT in a SAVEPOINT (prod change)."
-)
 async def test_create_pending_raises_already_in_flight_for_existing_pending_row(
     app_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],

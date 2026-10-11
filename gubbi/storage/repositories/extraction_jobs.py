@@ -93,11 +93,17 @@ async def create_pending(
     conversation_id: int,
     source: str,
     *,
-    period_start: date,
+    period_start: date | None = None,
+    lane: str | None = None,
+    run_after: datetime | None = None,
+    activity_at: datetime | None = None,
+    filtered_tokens: int | None = None,
+    token_count_version: int | None = None,
 ) -> UUID:
     """INSERT a new extraction job row with status='pending'.
 
-    Returns the generated UUID job id.
+    Returns the generated UUID job id. Each keyword argument left as None is
+    omitted from the INSERT, so the column default applies.
 
     If an active job (status NOT IN ('completed', 'failed')) already exists
     for the same (user_id, conversation_id, source), raises
@@ -106,45 +112,31 @@ async def create_pending(
 
     The partial unique index idx_extraction_jobs_active_per_conversation
     (migration 0023) enforces this at the database level; we catch the
-    UniqueViolationError and surface it as the typed exception.
+    UniqueViolationError and surface it as the typed exception. The INSERT
+    runs in a savepoint so the lookup of the existing job still works when
+    the caller holds an open transaction.
     """
+    optional_columns = {
+        "period_start": period_start,
+        "lane": lane,
+        "run_after": run_after,
+        "activity_at": activity_at,
+        "filtered_tokens": filtered_tokens,
+        "token_count_version": token_count_version,
+    }
+    supplied = {name: value for name, value in optional_columns.items() if value is not None}
+    columns = ["user_id", "conversation_id", "source", *supplied]
+    values = [user_id, conversation_id, source, *supplied.values()]
+    placeholders = ", ".join(f"${index}" for index in range(1, len(values) + 1))
+    insert_sql = (
+        f"INSERT INTO extraction_jobs ({', '.join(columns)}, status) "  # noqa: S608 - fixed column names
+        f"VALUES ({placeholders}, 'pending') RETURNING id"
+    )
     try:
-        row = await conn.fetchrow(
-            """
-            INSERT INTO extraction_jobs
-                (user_id, conversation_id, source, status, period_start)
-            VALUES ($1, $2, $3, 'pending', $4)
-            RETURNING id
-            """,
-            user_id,
-            conversation_id,
-            source,
-            period_start,
-        )
+        async with conn.transaction():
+            row = await conn.fetchrow(insert_sql, *values)
     except asyncpg.UniqueViolationError:
-        # The partial unique index fired -- an in-flight job exists.
-        # Look up the existing job_id to return via the exception.
-        existing_row = await conn.fetchrow(
-            """
-            SELECT id
-            FROM extraction_jobs
-            WHERE user_id = $1
-              AND conversation_id = $2
-              AND source = $3
-              AND status NOT IN ('completed', 'failed')
-            LIMIT 1
-            """,
-            user_id,
-            conversation_id,
-            source,
-        )
-        if existing_row is None:
-            raise RuntimeError(
-                "Conflict on "
-                f"(user_id={user_id}, conversation_id={conversation_id}, source={source}) "
-                "but no existing row found"
-            ) from None
-        existing_id = UUID(str(existing_row["id"]))
+        existing_id = await _find_in_flight_job(conn, user_id, conversation_id, source)
         raise ExtractionJobAlreadyInFlight(existing_id) from None
 
     if row is None:
@@ -153,6 +145,36 @@ async def create_pending(
             f"user_id={user_id} conversation_id={conversation_id} source={source!r}"
         )
     return UUID(str(row["id"]))
+
+
+async def _find_in_flight_job(
+    conn: asyncpg.Connection,
+    user_id: UUID,
+    conversation_id: int,
+    source: str,
+) -> UUID:
+    """Return the id of the active job that made create_pending's INSERT conflict."""
+    existing_row = await conn.fetchrow(
+        """
+        SELECT id
+        FROM extraction_jobs
+        WHERE user_id = $1
+          AND conversation_id = $2
+          AND source = $3
+          AND status NOT IN ('completed', 'failed')
+        LIMIT 1
+        """,
+        user_id,
+        conversation_id,
+        source,
+    )
+    if existing_row is None:
+        raise RuntimeError(
+            "Conflict on "
+            f"(user_id={user_id}, conversation_id={conversation_id}, source={source}) "
+            "but no existing row found"
+        )
+    return UUID(str(existing_row["id"]))
 
 
 # ---------------------------------------------------------------------------

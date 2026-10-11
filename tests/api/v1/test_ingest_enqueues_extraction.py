@@ -368,6 +368,50 @@ class TestIngestEnqueuesExtraction:
 
         assert count_after == count_before
 
+    async def test_resave_with_pending_job_reuses_job_id(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+        app_with_arq: FastAPI,
+    ) -> None:
+        """A re-saved conversation whose job is still pending reuses that job's id.
+
+        The second upload carries a new platform_id, so the platform-level dedupe
+        lets it through; the same title upserts the same conversation row, and
+        the job INSERT conflicts with the pending job inside the ingest transaction.
+        """
+        mock_arq: AsyncMock = app_with_arq.state.arq_pool
+        first = _build_conv("enq-resave-001", title="Resave pending job")
+        second = _build_conv("enq-resave-002", title="Resave pending job")
+        headers = {"X-Auth-User-Id": str(TEST_USER_ID)}
+
+        resp1 = await client.post(
+            ENDPOINT,
+            json={"source": "extension_chatgpt", "conversations": [first]},
+            headers=headers,
+        )
+        assert resp1.status_code == 200, resp1.text
+        first_job_id = mock_arq.enqueue_job.call_args[1]["_job_id"]
+        mock_arq.enqueue_job.reset_mock()
+
+        resp2 = await client.post(
+            ENDPOINT,
+            json={"source": "extension_chatgpt", "conversations": [second]},
+            headers=headers,
+        )
+
+        assert resp2.status_code == 200, resp2.text
+        data = resp2.json()
+        assert data["conversations_saved"] == 1
+        assert data["extractions_skipped_error"] == 0
+        assert data["extractions_enqueued"] == 1
+        assert mock_arq.enqueue_job.call_args[1]["_job_id"] == first_job_id
+        async with pool.acquire() as conn:
+            job_ids = await conn.fetch(
+                "SELECT id FROM extraction_jobs WHERE user_id = $1", TEST_USER_ID
+            )
+        assert [str(row["id"]) for row in job_ids] == [first_job_id]
+
     async def test_pre_charge_denies_save_commits_no_enqueue(
         self,
         client: AsyncClient,
