@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict, replace
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
@@ -19,6 +19,7 @@ from gubbi.extraction.admission import (
 )
 from gubbi.extraction.intake import Lane
 from gubbi.extraction.limits import ExtractionLimits
+from gubbi.storage.repositories.extraction_queue import UserPeriodUsage
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 ALICE = UUID(int=1)
@@ -179,6 +180,48 @@ def test_global_ceiling(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("lane", "usage", "global_used", "expected"),
+    [
+        pytest.param(Lane.LIVE, UserUsage(0, 0), 0, [None], id="live-on-empty-month"),
+        pytest.param(Lane.LIVE, UserUsage(0, 1), 0, [DeferReason.BUDGET], id="live-on-used-month"),
+        pytest.param(
+            Lane.LIVE, UserUsage(0, 0), 8_000, [DeferReason.GLOBAL], id="live-past-global-headroom"
+        ),
+        pytest.param(
+            Lane.BACKFILL,
+            UserUsage(0, 0, 2, 500),
+            0,
+            [None],
+            id="backfill-past-first-sync-on-empty-month",
+        ),
+        pytest.param(
+            Lane.BACKFILL,
+            UserUsage(1, 0, 2, 500),
+            0,
+            [DeferReason.BUDGET],
+            id="backfill-past-first-sync-on-used-month",
+        ),
+    ],
+)
+def test_oversized_job(
+    lane: Lane, usage: UserUsage, global_used: int, expected: list[DeferReason | None]
+) -> None:
+    decisions = decide([_job(lane, 2_500)], {ALICE: usage}, global_used, LIMITS)
+
+    assert _reasons(decisions) == expected
+
+
+@pytest.mark.unit
+def test_oversized_job_consumes_the_month_for_later_work_in_the_same_call() -> None:
+    oversized, small = _job(Lane.LIVE, 2_500, minute=2), _job(Lane.LIVE, 1, minute=1)
+
+    decisions = decide([oversized, small], {}, 0, LIMITS)
+
+    assert _reasons(decisions) == [None, DeferReason.BUDGET]
+
+
+@pytest.mark.unit
 def test_global_reason_wins_over_budget() -> None:
     usage = {ALICE: UserUsage(3, 1_000)}
 
@@ -331,3 +374,19 @@ def test_usage_from_totals_matches_charges_made_by_decide() -> None:
 
     assert rebuilt == UserUsage(2, 200, 3, 600)
     assert _reasons(follow_up) == [None]
+
+
+@pytest.mark.unit
+def test_repository_usage_feeds_usage_from_totals_by_name() -> None:
+    totals = UserPeriodUsage(
+        period_conversations=4,
+        period_tokens=700,
+        period_backfill_conversations=3,
+        period_backfill_tokens=600,
+        lifetime_backfill_conversations=3,
+        lifetime_backfill_tokens=600,
+    )
+
+    usage = user_usage_from_totals(**asdict(totals), limits=LIMITS)
+
+    assert usage == UserUsage(2, 200, 3, 600)

@@ -11,7 +11,7 @@ and is never runnable.
 
 Public surface
 --------------
-user_period_usage       -- per-user monthly and lifetime-backfill usage
+user_period_usage       -- per-user period, period-backfill and lifetime-backfill usage
 global_period_tokens    -- filtered tokens admitted in a period, all users
 first_upload_at         -- earliest live/backfill job of a user, optionally per platform
 select_runnable         -- queued or retryable-failed rows whose run_after has passed
@@ -54,13 +54,21 @@ class UserPeriodUsage:
     """Admitted usage of one user.
 
     period_conversations / period_tokens : admitted in the requested budget period
-    backfill_conversations / backfill_tokens : admitted in the backfill lane, any period
+    period_backfill_conversations / period_backfill_tokens : the backfill-lane
+        subset of the period figures
+    lifetime_backfill_conversations / lifetime_backfill_tokens : admitted in the
+        backfill lane, any period
+
+    Field names match the keywords of
+    :func:`gubbi.extraction.admission.user_usage_from_totals` one-to-one.
     """
 
     period_conversations: int
     period_tokens: int
-    backfill_conversations: int
-    backfill_tokens: int
+    period_backfill_conversations: int
+    period_backfill_tokens: int
+    lifetime_backfill_conversations: int
+    lifetime_backfill_tokens: int
 
 
 @dataclass(frozen=True)
@@ -110,9 +118,16 @@ async def user_period_usage(
             count(j.id) FILTER (WHERE j.budget_period_start = $2) AS period_conversations,
             coalesce(sum(j.filtered_tokens) FILTER (WHERE j.budget_period_start = $2), 0)
                 AS period_tokens,
-            count(j.id) FILTER (WHERE j.lane = 'backfill') AS backfill_conversations,
+            count(j.id) FILTER (WHERE j.budget_period_start = $2 AND j.lane = 'backfill')
+                AS period_backfill_conversations,
+            coalesce(
+                sum(j.filtered_tokens)
+                    FILTER (WHERE j.budget_period_start = $2 AND j.lane = 'backfill'),
+                0
+            ) AS period_backfill_tokens,
+            count(j.id) FILTER (WHERE j.lane = 'backfill') AS lifetime_backfill_conversations,
             coalesce(sum(j.filtered_tokens) FILTER (WHERE j.lane = 'backfill'), 0)
-                AS backfill_tokens
+                AS lifetime_backfill_tokens
         FROM (SELECT DISTINCT unnest($1::uuid[]) AS user_id) AS u
         LEFT JOIN extraction_jobs AS j
                ON j.user_id = u.user_id
@@ -126,8 +141,10 @@ async def user_period_usage(
         UUID(str(row["user_id"])): UserPeriodUsage(
             period_conversations=int(row["period_conversations"]),
             period_tokens=int(row["period_tokens"]),
-            backfill_conversations=int(row["backfill_conversations"]),
-            backfill_tokens=int(row["backfill_tokens"]),
+            period_backfill_conversations=int(row["period_backfill_conversations"]),
+            period_backfill_tokens=int(row["period_backfill_tokens"]),
+            lifetime_backfill_conversations=int(row["lifetime_backfill_conversations"]),
+            lifetime_backfill_tokens=int(row["lifetime_backfill_tokens"]),
         )
         for row in rows
     }

@@ -13,7 +13,10 @@ Budgets, per user, counted in conversations and filtered input tokens:
   first; whatever part of a job exceeds it draws on the monthly allowance,
   which is checked only after the same user's paste and live work in the call.
 - A monthly allowance is exhausted when either its conversation or its token
-  limit would be exceeded.
+  limit would be exceeded. The exception is a user who has charged nothing to
+  the current month: their next job is admitted whatever its size, so a
+  conversation larger than the whole allowance does not wait forever. It
+  consumes the month and the user's later work waits.
 
 The global ceiling, in filtered tokens per period, stops backfill at
 ``backfill_stop_ratio`` of the ceiling and all work at the ceiling.
@@ -237,8 +240,14 @@ def _budget_reason(
             return None
         if candidate.user_id in deferred_ahead_of_backfill:
             return DeferReason.BUDGET
+    if _month_unused(before):
+        return None
     within = (
         after.monthly_conversations <= limits.monthly_conversations
         and after.monthly_tokens <= limits.monthly_tokens
     )
     return None if within else DeferReason.BUDGET
+
+
+def _month_unused(usage: UserUsage) -> bool:
+    return usage.monthly_conversations == 0 and usage.monthly_tokens == 0

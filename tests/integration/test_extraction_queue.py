@@ -25,7 +25,7 @@ _NOW = datetime.now(UTC)
 _PAST = _NOW - timedelta(hours=1)
 _FUTURE = _NOW + timedelta(days=1)
 _INFINITY = "infinity"
-_ZERO_USAGE = UserPeriodUsage(0, 0, 0, 0)
+_ZERO_USAGE = UserPeriodUsage(0, 0, 0, 0, 0, 0)
 
 
 @dataclass(frozen=True)
@@ -119,7 +119,9 @@ async def test_admit_charges_a_row_only_once(
 
     assert (first, second) == (1, 0)
     assert after == charged
-    assert await _usage(clean_rls_db, seeded_a.user_id, _PERIOD) == UserPeriodUsage(1, 700, 0, 0)
+    assert await _usage(clean_rls_db, seeded_a.user_id, _PERIOD) == UserPeriodUsage(
+        1, 700, 0, 0, 0, 0
+    )
     assert await _usage(clean_rls_db, seeded_a.user_id, _OTHER_PERIOD) == _ZERO_USAGE
 
 
@@ -158,6 +160,7 @@ async def test_user_period_usage_counts_only_admitted_rows(
             admitted_at=_PAST, budget_period_start=_OTHER_PERIOD, lane="live", filtered_tokens=40000
         ),
         Job(lane="backfill", filtered_tokens=500000),
+        Job(lane="backfill", budget_period_start=_PERIOD, filtered_tokens=8000000),
         Job(lane="live", filtered_tokens=6000000),
     ):
         await _insert(clean_rls_db, seeded_a, job)
@@ -172,10 +175,12 @@ async def test_user_period_usage_counts_only_admitted_rows(
         seeded_a.user_id: UserPeriodUsage(
             period_conversations=2,
             period_tokens=210,
-            backfill_conversations=2,
-            backfill_tokens=3200,
+            period_backfill_conversations=1,
+            period_backfill_tokens=200,
+            lifetime_backfill_conversations=2,
+            lifetime_backfill_tokens=3200,
         ),
-        seeded_b.user_id: UserPeriodUsage(1, 70000000, 1, 70000000),
+        seeded_b.user_id: UserPeriodUsage(1, 70000000, 1, 70000000, 1, 70000000),
     }
 
 
