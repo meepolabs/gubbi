@@ -24,9 +24,11 @@ pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.integration
 
 _PERIOD = date(2026, 10, 1)
 _OTHER_PERIOD = date(2026, 9, 1)
-_NOW = datetime.now(UTC)
-_PAST = _NOW - timedelta(hours=1)
-_FUTURE = _NOW + timedelta(days=1)
+# Relative times are offsets from the database's now() at insert, so a long
+# run never ages a fixture row past a threshold the test compares it with.
+_NOW = timedelta(0)
+_PAST = timedelta(hours=-1)
+_FUTURE = timedelta(days=1)
 _INFINITY = "infinity"
 _ZERO_USAGE = UserPeriodUsage(0, 0, 0, 0, 0, 0)
 
@@ -34,21 +36,26 @@ _ZERO_USAGE = UserPeriodUsage(0, 0, 0, 0, 0, 0)
 @dataclass(frozen=True)
 class Job:
     status: str = "pending"
-    run_after: datetime | str = _PAST
+    run_after: timedelta | str = _PAST
     error_code: str | None = None
     lane: str = "live"
     source: str = "chatgpt"
     activity_at: datetime | None = None
     filtered_tokens: int = 0
-    admitted_at: datetime | None = None
+    admitted_at: datetime | timedelta | None = None
     budget_period_start: date | None = None
-    created_at: datetime = _NOW
+    created_at: datetime | timedelta = _NOW
     attempts: int = 0
+
+
+def _at(db_now: datetime, value: datetime | timedelta) -> datetime:
+    return db_now + value if isinstance(value, timedelta) else value
 
 
 async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
     """Insert one job on its own conversation, so the active-job unique index never collides."""
     async with pool.acquire() as conn:
+        db_now: datetime = await conn.fetchval("SELECT now()")
         conversation_id = await conn.fetchval(
             """
             INSERT INTO conversations
@@ -75,14 +82,16 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             conversation_id,
             job.source,
             job.status,
-            job.run_after if isinstance(job.run_after, str) else job.run_after.isoformat(),
+            job.run_after
+            if isinstance(job.run_after, str)
+            else _at(db_now, job.run_after).isoformat(),
             job.error_code,
             job.lane,
             job.activity_at,
             job.filtered_tokens,
-            job.admitted_at,
+            None if job.admitted_at is None else _at(db_now, job.admitted_at),
             job.budget_period_start,
-            job.created_at,
+            _at(db_now, job.created_at),
             job.attempts,
         )
     return UUID(str(job_id))
@@ -452,11 +461,11 @@ async def test_defer_rejects_an_unknown_reason(
 async def test_stale_admitted_pending_returns_old_admitted_pending_rows(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
-    old = _NOW - timedelta(minutes=30)
+    old = timedelta(minutes=-30)
     older = await _insert(clean_rls_db, seeded_a, Job(admitted_at=old - timedelta(minutes=1)))
     stale = await _insert(clean_rls_db, seeded_a, Job(admitted_at=old))
     for job in (
-        Job(admitted_at=_NOW - timedelta(minutes=1)),
+        Job(admitted_at=timedelta(minutes=-1)),
         Job(admitted_at=old, status="running"),
         Job(admitted_at=old, status="failed", error_code="worker_lost"),
         Job(),

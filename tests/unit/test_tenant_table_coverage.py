@@ -17,6 +17,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 _TENANT_TABLES = frozenset(
     {
         "topics",
@@ -70,12 +72,6 @@ _SKIP_KEYWORDS = frozenset(
         "no",
         "json",
         "sql",
-        # CTE aliases used in app SQL (not table names)
-        "deleted",
-        "new_entry",
-        "updated",
-        "counts",
-        "ref_check",
         # Singular noun forms that appear in string literals (e.g. title="Update Entry")
         "entry",
         # Common English word that appears as false positive after FROM in prose
@@ -97,12 +93,31 @@ _SQL_KEYWORD_RE = re.compile(
 )
 
 
-def _extract_table_names(source: str) -> set[str]:
-    """Parse a SQL string and return the set of table names referenced."""
+_CTE_ALIAS_RE = re.compile(
+    r"(?:\bWITH(?:\s+RECURSIVE)?|,)\s*([a-zA-Z_][a-zA-Z0-9_]*)\s+AS\s*(?:NOT\s+)?(?:MATERIALIZED\s*)?\(",
+    re.IGNORECASE,
+)
+
+
+def _cte_aliases(source: str) -> set[str]:
+    """Return the lowercased CTE names a SQL string defines in its WITH clause."""
+    if not re.search(r"\bWITH\b", source, re.IGNORECASE):
+        return set()
+    return {m.group(1).lower() for m in _CTE_ALIAS_RE.finditer(source)}
+
+
+def _extract_table_names(source: str, statement: str | None = None) -> set[str]:
+    """Parse a SQL string and return the set of table names referenced.
+
+    CTE names defined in ``statement`` (default: ``source`` itself) are
+    subtracted, so an alias defined in one statement never hides a real
+    table of the same name in another.
+    """
+    aliases = _cte_aliases(source if statement is None else statement)
     tables: set[str] = set()
     for match in _SQL_KEYWORD_RE.finditer(source):
         name = match.group(1)
-        if name.lower() in _SKIP_KEYWORDS:
+        if name.lower() in _SKIP_KEYWORDS or name.lower() in aliases:
             continue
         if name.startswith("pg_") or name == "information_schema":
             continue
@@ -112,6 +127,21 @@ def _extract_table_names(source: str) -> set[str]:
             continue
         tables.add(name)
     return tables
+
+
+def _enclosing_statement(node: ast.Constant, parent: ast.AST | None) -> str | None:
+    """Return the literal text of the f-string ``node`` belongs to, if any.
+
+    An f-string splits into one constant per literal segment; a CTE defined
+    before an interpolation is referenced in a later segment.
+    """
+    if not isinstance(parent, ast.JoinedStr):
+        return None
+    return " ".join(
+        part.value
+        for part in parent.values
+        if isinstance(part, ast.Constant) and isinstance(part.value, str)
+    )
 
 
 def _collect_sql_tables(root: Path) -> set[str]:
@@ -153,7 +183,7 @@ def _collect_sql_tables(root: Path) -> set[str]:
                 r"UPDATE\s+\w+", val, re.IGNORECASE
             ):
                 continue
-            found |= _extract_table_names(val)
+            found |= _extract_table_names(val, _enclosing_statement(node, parent))
     return found
 
 
@@ -169,6 +199,56 @@ def test_all_app_sql_tables_are_accounted_for() -> None:
             for t in sorted(unknown)
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        pytest.param(
+            "WITH released AS (UPDATE extraction_jobs SET run_after = now() RETURNING status) "
+            "SELECT status FROM released",
+            {"extraction_jobs"},
+            id="cte-alias-subtracted",
+        ),
+        pytest.param(
+            "WITH counts AS (SELECT user_id FROM entries), _upd AS (UPDATE topics SET x = 1) "
+            "SELECT * FROM counts JOIN _upd ON true",
+            {"entries", "topics"},
+            id="multiple-cte-aliases-subtracted",
+        ),
+        pytest.param(
+            "WITH released AS (SELECT id FROM extraction_jobs) "
+            "SELECT * FROM released JOIN unscoped_table ON true",
+            {"extraction_jobs", "unscoped_table"},
+            id="real-table-beside-cte-still-flagged",
+        ),
+    ],
+)
+def test_extract_table_names_subtracts_only_own_cte_aliases(sql: str, expected: set[str]) -> None:
+    assert _extract_table_names(sql) == expected
+
+
+def test_cte_alias_does_not_hide_same_named_table_in_another_statement(tmp_path: Path) -> None:
+    (tmp_path / "queries.py").write_text(
+        "A = 'WITH ledger AS (SELECT id FROM entries) SELECT id FROM ledger'\n"
+        "B = 'SELECT id FROM ledger'\n",
+        encoding="utf-8",
+    )
+
+    found = _collect_sql_tables(tmp_path)
+
+    assert found == {"entries", "ledger"}
+
+
+def test_cte_alias_spans_fstring_interpolation(tmp_path: Path) -> None:
+    (tmp_path / "queries.py").write_text(
+        "W = 'x'\nA = f'WITH ledger AS (SELECT id FROM entries WHERE {W}) SELECT id FROM ledger'\n",
+        encoding="utf-8",
+    )
+
+    found = _collect_sql_tables(tmp_path)
+
+    assert found == {"entries"}
 
 
 def test_users_table_in_tenant_tables() -> None:
