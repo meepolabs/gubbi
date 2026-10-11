@@ -1,6 +1,6 @@
 """Unit tests for Settings model validators (AAA-pattern, pytest.parametrize).
 
-Pins behaviour of the three model-validators on ``Settings``:
+Pins behaviour of the model-validators on ``Settings``:
 
 * ``_validate_deploy_shape`` -- the 3-shape matrix
   (Mode 1 = API-key only; Mode 2 = full self-host; Mode 3 = multi-tenant
@@ -9,6 +9,8 @@ Pins behaviour of the three model-validators on ``Settings``:
   warning on AuthConfig.
 * ``_validate_trust_gateway_signature`` -- the env-gated trust-gateway
   signature requirement (deployed envs only).
+* ``_validate_hosted_llm_budget`` -- Mode 3 refuses to boot with LLM budgets
+  off unless the unlimited override is set.
 
 Also pins the structural-guard sentinel pattern that closes the
 JSON-decode bypass attack class on the parent Settings sub-config fields.
@@ -162,6 +164,7 @@ def test_validate_deploy_shape_rejects(
             "JOURNAL_HYDRA_PUBLIC_ISSUER_URL": "https://auth/",
             "JOURNAL_API_KEY": "",
             "JOURNAL_OPERATOR_EMAIL": "",
+            "JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE": "true",
         },
     ],
 )
@@ -176,6 +179,70 @@ def test_validate_deploy_shape_accepts(
 
     # Act + Assert (must not raise)
     Settings()
+
+
+# -------- _validate_hosted_llm_budget --------
+
+_MODE3_ENV: dict[str, str] = {
+    "JOURNAL_HYDRA_ADMIN_URL": "http://h:4445",
+    "JOURNAL_HYDRA_PUBLIC_URL": "https://auth/",
+    "JOURNAL_HYDRA_PUBLIC_ISSUER_URL": "https://auth/",
+    "JOURNAL_API_KEY": "",
+    "JOURNAL_OPERATOR_EMAIL": "",
+}
+
+
+@pytest.mark.unit
+def test_hosted_mode_refuses_boot_with_budgets_off_and_no_override(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Arrange
+    _base_env(monkeypatch)
+    for k, v in _MODE3_ENV.items():
+        monkeypatch.setenv(k, v)
+
+    # Act + Assert
+    with pytest.raises(ValidationError, match="JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE"):
+        Settings()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "env",
+    [
+        pytest.param(
+            {
+                "JOURNAL_LLM_BUDGET_ENABLED": "true",
+                "JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING": "1000000000",
+            },
+            id="budgets-on",
+        ),
+        pytest.param({"JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE": "true"}, id="override"),
+    ],
+)
+def test_hosted_mode_boots_with_budgets_on_or_override(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str]
+) -> None:
+    # Arrange
+    _base_env(monkeypatch)
+    for k, v in {**_MODE3_ENV, **env}.items():
+        monkeypatch.setenv(k, v)
+
+    # Act + Assert (must not raise)
+    Settings()
+
+
+@pytest.mark.unit
+def test_self_host_boots_with_budgets_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Arrange
+    _base_env(monkeypatch)
+
+    # Act
+    settings = Settings()
+
+    # Assert
+    assert settings.llm.llm_budget_enabled is False
+    assert settings.llm.llm_budget_unlimited_override is False
 
 
 # -------- _warn_on_require_signature_without_secret --------

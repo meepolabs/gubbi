@@ -96,6 +96,14 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_LLM_INPUT_PRICE_PER_MTOK` / `JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK` | no | USD per million input / output tokens, used for cost accounting. Defaults `1.00` / `5.00`. | `0.40` |
 | `JOURNAL_EXTRACTION_MODE` | no | `single` (default: one structured call per transcript chunk returns topic, summary and entries) or `two_call` (one call picks the topic, then one entries call per chunk). `two_call` is experimental and may be removed; leave the default unless comparing the two. | `single` |
 | `JOURNAL_EXTRACTION_TRIAGE` | no | When `true`, each transcript chunk is first screened by one small "anything worth recording?" call and skipped if the answer is no. Adds one call per chunk; useful with a cheap local model. Default `false`. | `false` |
+| `JOURNAL_LLM_BUDGET_ENABLED` | no | Enables LLM budget enforcement for extraction. Default `false` (self-host runs unlimited). | `false` |
+| `JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE` | no | Mode 3 (multi-tenant hosted) refuses to start unless `JOURNAL_LLM_BUDGET_ENABLED=true` or this is `true`. Default `false`. | `false` |
+| `JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING` | when budgets are on | Deployment-wide monthly ceiling on role-filtered input tokens across all users; must be positive. No default. | `500000000` |
+| `JOURNAL_EXTRACTION_MONTHLY_CONVERSATIONS` / `JOURNAL_EXTRACTION_MONTHLY_TOKENS` | no | Per-user monthly allowance in conversations / role-filtered input tokens. Defaults `200` / `4000000`. | `200` |
+| `JOURNAL_EXTRACTION_FIRST_SYNC_CONVERSATIONS` / `JOURNAL_EXTRACTION_FIRST_SYNC_TOKENS` | no | Per-user first-sync (backfill) allowance. Defaults `500` / `10000000`. | `500` |
+| `JOURNAL_EXTRACTION_BACKFILL_STOP_RATIO` | no | Fraction (0 to 1) of the global ceiling past which backfill work is no longer admitted. Default `0.8`. | `0.8` |
+| `JOURNAL_EXTRACTION_NIGHTLY_HOUR` | no | UTC hour (0 to 23) at which ongoing-sync conversations are extracted. Default `3`. | `3` |
+| `JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS` | no | Days after a user's first upload during which every synced conversation counts as first-sync backfill. Default `7`. | `7` |
 
 ### Operator provisioning
 

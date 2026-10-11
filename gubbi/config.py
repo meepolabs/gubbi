@@ -358,6 +358,38 @@ class LLMConfig(BaseSettings):
     extraction_triage: bool = Field(default=False, validation_alias="JOURNAL_EXTRACTION_TRIAGE")
     # Gates budget delta writes from worker (hosted: True; self-host: False).
     llm_budget_enabled: bool = Field(default=False, validation_alias="JOURNAL_LLM_BUDGET_ENABLED")
+    # Lets a hosted (Mode 3) deployment boot with budgets off.
+    llm_budget_unlimited_override: bool = Field(
+        default=False, validation_alias="JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE"
+    )
+    # Per-user allowances, counted in conversations and role-filtered input tokens.
+    monthly_conversation_limit: int = Field(
+        default=200, ge=0, validation_alias="JOURNAL_EXTRACTION_MONTHLY_CONVERSATIONS"
+    )
+    monthly_token_limit: int = Field(
+        default=4_000_000, ge=0, validation_alias="JOURNAL_EXTRACTION_MONTHLY_TOKENS"
+    )
+    first_sync_conversation_limit: int = Field(
+        default=500, ge=0, validation_alias="JOURNAL_EXTRACTION_FIRST_SYNC_CONVERSATIONS"
+    )
+    first_sync_token_limit: int = Field(
+        default=10_000_000, ge=0, validation_alias="JOURNAL_EXTRACTION_FIRST_SYNC_TOKENS"
+    )
+    # Deployment-wide monthly input-token ceiling across all users.
+    global_monthly_token_ceiling: int | None = Field(
+        default=None, gt=0, validation_alias="JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING"
+    )
+    # Fraction of the global ceiling past which backfill work stops being admitted.
+    backfill_stop_ratio: float = Field(
+        default=0.8, ge=0, le=1, validation_alias="JOURNAL_EXTRACTION_BACKFILL_STOP_RATIO"
+    )
+    # UTC hour at which ongoing-sync extraction runs.
+    nightly_window_hour: int = Field(
+        default=3, ge=0, le=23, validation_alias="JOURNAL_EXTRACTION_NIGHTLY_HOUR"
+    )
+    onboarding_window_days: int = Field(
+        default=7, ge=0, validation_alias="JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS"
+    )
     # Stale pending-job sweep window.
     orphan_cleanup_threshold_minutes: int = Field(
         default=30, validation_alias="JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES"
@@ -378,6 +410,15 @@ class LLMConfig(BaseSettings):
         if problem is not None:
             raise ValueError(f"JOURNAL_LLM_BASE_URL is not accepted: {problem}")
         return v
+
+    @model_validator(mode="after")
+    def _require_global_ceiling_with_budget(self) -> Self:
+        if self.llm_budget_enabled and self.global_monthly_token_ceiling is None:
+            raise ValueError(
+                "JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING is required when "
+                "JOURNAL_LLM_BUDGET_ENABLED is true."
+            )
+        return self
 
 
 # Canonical Environment Literal (mirrored byte-for-byte across gubbi + gubbi-cloud).
@@ -626,6 +667,21 @@ class Settings(BaseSettings):
                 "auth.trust_gateway=True requires "
                 "auth.gateway_require_signature=True in deployed envs "
                 "(staging/production)"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_hosted_llm_budget(self) -> Self:
+        """Refuse a hosted (Mode 3) boot with LLM budgets off unless explicitly overridden."""
+        if (
+            self.auth.hydra_admin_url
+            and not self.llm.llm_budget_enabled
+            and not self.llm.llm_budget_unlimited_override
+        ):
+            raise ValueError(
+                "JOURNAL_LLM_BUDGET_ENABLED=true is required when JOURNAL_HYDRA_ADMIN_URL "
+                "is set (multi-tenant hosted). Set JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE=true "
+                "to run hosted extraction without budgets."
             )
         return self
 
