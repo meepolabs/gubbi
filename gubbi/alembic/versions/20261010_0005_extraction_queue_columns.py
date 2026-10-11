@@ -15,11 +15,13 @@ Existing rows read ``lane = 'backfill'``. Rows still ``pending`` or ``failed``
 get ``run_after = 'infinity'``: they are held until released explicitly, so
 applying this revision never puts a backlog of old jobs back in the queue.
 
-Three partial indexes: runnable selection over ``(status, run_after)`` for
+Four partial indexes: runnable selection over ``(status, run_after)`` for
 pending and failed rows, per-user period usage over
-``(user_id, budget_period_start)`` for admitted rows, and the global period
-sum over ``(budget_period_start) INCLUDE (filtered_tokens)`` for admitted rows,
-so the sum is answered from the index alone.
+``(user_id, budget_period_start)`` for admitted rows, the global period sum
+over ``(budget_period_start) INCLUDE (filtered_tokens)`` for admitted rows, so
+the sum is answered from the index alone, and ``(status, admitted_at)`` for
+admitted rows that are pending or running, which the scheduler counts against
+its dispatch bound and scans for lost dispatches.
 
 The table already carries FORCE ROW LEVEL SECURITY and table-level grants to
 journal_app and journal_admin, so the new columns inherit both; no policy or
@@ -72,9 +74,13 @@ _CREATE_INDEXES = (
     "CREATE INDEX idx_extraction_jobs_period_admitted "
     "ON public.extraction_jobs USING btree (budget_period_start) INCLUDE (filtered_tokens) "
     "WHERE (admitted_at IS NOT NULL)",
+    "CREATE INDEX idx_extraction_jobs_admitted_inflight "
+    "ON public.extraction_jobs USING btree (status, admitted_at) "
+    "WHERE (admitted_at IS NOT NULL AND status IN ('pending', 'running'))",
 )
 
 _DROP_INDEXES = (
+    "DROP INDEX public.idx_extraction_jobs_admitted_inflight",
     "DROP INDEX public.idx_extraction_jobs_period_admitted",
     "DROP INDEX public.idx_extraction_jobs_user_period_admitted",
     "DROP INDEX public.idx_extraction_jobs_runnable",

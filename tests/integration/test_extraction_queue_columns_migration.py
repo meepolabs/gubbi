@@ -80,6 +80,11 @@ EXPECTED_INDEXES: dict[str, str] = {
         " USING btree (budget_period_start) INCLUDE (filtered_tokens)"
         " WHERE (admitted_at IS NOT NULL)"
     ),
+    "idx_extraction_jobs_admitted_inflight": (
+        "CREATE INDEX idx_extraction_jobs_admitted_inflight ON public.extraction_jobs"
+        " USING btree (status, admitted_at) WHERE ((admitted_at IS NOT NULL)"
+        " AND (status = ANY (ARRAY['pending'::text, 'running'::text])))"
+    ),
 }
 
 

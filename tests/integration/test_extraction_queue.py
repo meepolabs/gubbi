@@ -140,12 +140,25 @@ async def test_admit_charges_a_row_only_once(
     assert await _usage(clean_rls_db, seeded_a.user_id, _OTHER_PERIOD) == _ZERO_USAGE
 
 
+@pytest.mark.parametrize("status", ["running", "failed", "completed"])
+async def test_admit_leaves_a_row_that_is_not_pending_uncharged(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, status: str
+) -> None:
+    job_id = await _insert(clean_rls_db, seeded_a, Job(status=status, filtered_tokens=700))
+
+    async with clean_rls_db.acquire() as conn:
+        charged = await queue_repo.admit(conn, [job_id], _PERIOD)
+
+    assert charged == 0
+    assert await _usage(clean_rls_db, seeded_a.user_id, _PERIOD) == _ZERO_USAGE
+
+
 async def test_admit_clears_the_defer_reason(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
     job_id = await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn:
-        await queue_repo.defer(conn, job_id, "budget")
+        await _defer(conn, job_id, "budget")
         await queue_repo.admit(conn, [job_id], _PERIOD)
         reason = await conn.fetchval(
             "SELECT defer_reason FROM extraction_jobs WHERE id = $1", job_id
@@ -415,33 +428,82 @@ async def test_select_runnable_returns_the_scheduling_fields(
 # ---------------------------------------------------------------------------
 
 
+_FAR_PERIOD_START = datetime(2999, 1, 1, tzinfo=UTC)
+_HOUR = timedelta(hours=1)
+
+
+async def _defer(conn: asyncpg.Connection, job_id: UUID, reason: str) -> int:
+    return await queue_repo.defer(
+        conn, [job_id], reason, next_period_start=_FAR_PERIOD_START, recheck=_HOUR
+    )
+
+
 @pytest.mark.parametrize("reason", ["budget", "global", "provider"])
 async def test_defer_records_the_reason(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, reason: str
 ) -> None:
     job_id = await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn:
-        changed = await queue_repo.defer(conn, job_id, reason)
+        changed = await _defer(conn, job_id, reason)
         stored = await conn.fetchval(
             "SELECT defer_reason FROM extraction_jobs WHERE id = $1", job_id
         )
 
-    assert changed is True
+    assert changed == 1
     assert stored == reason
 
 
-async def test_defer_leaves_a_finished_row_untouched(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+@pytest.mark.parametrize(
+    ("next_period_start_in", "expected_run_after_in"),
+    [
+        pytest.param(timedelta(days=30), _HOUR, id="recheck_first"),
+        pytest.param(timedelta(minutes=10), timedelta(minutes=10), id="period_first"),
+    ],
+)
+async def test_defer_holds_the_row_until_the_earlier_of_recheck_and_next_period(
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    next_period_start_in: timedelta,
+    expected_run_after_in: timedelta,
 ) -> None:
-    job_id = await _insert(clean_rls_db, seeded_a, Job(status="completed"))
-    async with clean_rls_db.acquire() as conn:
-        changed = await queue_repo.defer(conn, job_id, "budget")
-        stored = await conn.fetchval(
-            "SELECT defer_reason FROM extraction_jobs WHERE id = $1", job_id
+    job_id = await _insert(clean_rls_db, seeded_a, Job())
+    async with clean_rls_db.acquire() as conn, conn.transaction():
+        db_now: datetime = await conn.fetchval("SELECT now()")
+        await queue_repo.defer(
+            conn,
+            [job_id],
+            "budget",
+            next_period_start=db_now + next_period_start_in,
+            recheck=_HOUR,
+        )
+        run_after = await conn.fetchval(
+            "SELECT run_after - now() FROM extraction_jobs WHERE id = $1", job_id
         )
 
-    assert changed is False
-    assert stored is None
+    assert run_after == expected_run_after_in
+
+
+@pytest.mark.parametrize(
+    "job",
+    [
+        pytest.param(Job(status="completed"), id="completed"),
+        pytest.param(Job(status="running"), id="running"),
+        pytest.param(_admitted(), id="admitted"),
+    ],
+)
+async def test_defer_leaves_a_row_that_is_not_queued_untouched(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, job: Job
+) -> None:
+    job_id = await _insert(clean_rls_db, seeded_a, job)
+    async with clean_rls_db.acquire() as conn:
+        before = await conn.fetchval("SELECT run_after FROM extraction_jobs WHERE id = $1", job_id)
+        changed = await _defer(conn, job_id, "budget")
+        stored = await conn.fetchrow(
+            "SELECT defer_reason, run_after FROM extraction_jobs WHERE id = $1", job_id
+        )
+
+    assert changed == 0
+    assert (stored["defer_reason"], stored["run_after"]) == (None, before)
 
 
 async def test_defer_rejects_an_unknown_reason(
@@ -450,7 +512,39 @@ async def test_defer_rejects_an_unknown_reason(
     job_id = await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
-            await queue_repo.defer(conn, job_id, "whim")
+            await _defer(conn, job_id, "whim")
+
+
+# ---------------------------------------------------------------------------
+# revive_failed
+# ---------------------------------------------------------------------------
+
+
+async def test_revive_failed_skips_a_row_whose_conversation_became_active(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    blocked = await _insert(clean_rls_db, seeded_a, Job(status="failed", error_code="worker_lost"))
+    free = await _insert(clean_rls_db, seeded_a, Job(status="failed", error_code="worker_lost"))
+    async with clean_rls_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO extraction_jobs (user_id, conversation_id, source, status)"
+            " SELECT user_id, conversation_id, source, 'pending' FROM extraction_jobs"
+            " WHERE id = $1",
+            blocked,
+        )
+        async with conn.transaction():
+            revived = await queue_repo.revive_failed(conn, [blocked, free])
+            in_transaction = await conn.fetchval("SELECT 1")
+        statuses = dict(
+            await conn.fetch(
+                "SELECT id, status FROM extraction_jobs WHERE id = ANY($1::uuid[])",
+                [blocked, free],
+            )
+        )
+
+    assert revived == {free}
+    assert in_transaction == 1
+    assert statuses == {blocked: "failed", free: "pending"}
 
 
 # ---------------------------------------------------------------------------

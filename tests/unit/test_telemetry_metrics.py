@@ -322,6 +322,35 @@ def test_record_replica_count_warning_increments_with_attributes() -> None:
         gubbi_metrics.initialize_metrics.cache_clear()
 
 
+def test_record_background_task_died_counts_with_task_and_stage_attributes() -> None:
+    gubbi_metrics.initialize_metrics.cache_clear()
+    reader = InMemoryMetricReader()
+    _set_provider(MeterProvider(metric_readers=[reader]))
+
+    try:
+        gubbi_metrics.record_background_task_died(task="extraction_scheduler", stage="tick")
+        gubbi_metrics.record_background_task_died(task="extraction_scheduler", stage="tick")
+        gubbi_metrics.record_background_task_died(task="orphan_cleanup", stage="loop")
+
+        metrics_data = reader.get_metrics_data()
+        assert metrics_data is not None, "reader returned no metrics data"
+        points = {
+            tuple(sorted(point.attributes.items())): int(point.value)
+            for resource_metrics in metrics_data.resource_metrics
+            for scope_metrics in resource_metrics.scope_metrics
+            for metric in scope_metrics.metrics
+            if metric.name == MetricNames.BACKGROUND_TASK_DIED
+            for point in metric.data.data_points
+        }
+    finally:
+        gubbi_metrics.initialize_metrics.cache_clear()
+
+    assert points == {
+        (("stage", "tick"), ("task", "extraction_scheduler")): 2,
+        (("stage", "loop"), ("task", "orphan_cleanup")): 1,
+    }
+
+
 def test_replica_count_warning_instrument_registered() -> None:
     """``initialize_metrics`` always registers the replica-count counter.
 

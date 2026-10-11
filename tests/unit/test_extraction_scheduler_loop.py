@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
+from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,21 +51,23 @@ async def test_a_crashing_tick_increments_the_task_died_counter() -> None:
     }
 
 
-def test_scheduler_settings_default_to_running_every_30s_with_twice_worker_concurrency(
+def test_scheduler_settings_default_to_30s_ticks_twice_worker_concurrency_and_hourly_recheck(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for name in (
         "JOURNAL_EXTRACTION_SCHEDULER_PAUSED",
         "JOURNAL_EXTRACTION_SCHEDULER_INTERVAL_SECS",
         "JOURNAL_EXTRACTION_DISPATCH_BOUND",
+        "JOURNAL_EXTRACTION_DEFER_RECHECK_SECS",
     ):
         monkeypatch.delenv(name, raising=False)
     get_settings.cache_clear()
 
     config = SchedulerConfig.from_settings(get_settings())
 
-    assert (config.paused, config.interval_secs, config.dispatch_bound) == (
-        False,
-        30,
-        2 * WorkerSettings.max_jobs,
-    )
+    assert (
+        config.paused,
+        config.interval_secs,
+        config.dispatch_bound,
+        config.defer_recheck,
+    ) == (False, 30, 2 * WorkerSettings.max_jobs, timedelta(hours=1))

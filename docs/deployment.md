@@ -107,6 +107,9 @@ The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns s
 | `JOURNAL_EXTRACTION_SCHEDULER_PAUSED` | no | When `true`, the HTTP server's queue scheduler admits and dispatches no extraction jobs; saved conversations stay queued. Default `false`. | `false` |
 | `JOURNAL_EXTRACTION_SCHEDULER_INTERVAL_SECS` | no | Seconds between scheduler passes over the extraction queue. Default `30`. | `30` |
 | `JOURNAL_EXTRACTION_DISPATCH_BOUND` | no | Most extraction jobs handed to the worker and not yet finished at once; the rest wait in the queue, where later higher-priority work can overtake them. Default `20` (twice the worker's concurrency). | `20` |
+| `JOURNAL_EXTRACTION_DEFER_RECHECK_SECS` | no | Seconds before the scheduler looks again at a job it held back for a budget limit; a job held back late in the month is looked at again when the next month starts, if that comes first. Default `3600`. | `3600` |
+
+The queue scheduler runs inside the HTTP server on the `JOURNAL_DB_ADMIN_URL` pool and holds a session-level PostgreSQL advisory lock for each pass, so only one server replica schedules at a time. `JOURNAL_DB_ADMIN_URL` must therefore reach PostgreSQL directly or through a proxy in session-pooling mode. Behind a transaction-pooling proxy (for example PgBouncer with `pool_mode = transaction`) a session lock can be taken on one server connection and released on another, so two replicas may schedule at once.
 
 #### Releasing held extraction jobs
 

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Iterator
+from contextlib import suppress
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any
@@ -25,6 +26,7 @@ from gubbi.extraction.scheduler import (
     SchedulerConfig,
     TickResult,
 )
+from gubbi.storage.repositories import extraction_queue as queue_repo
 
 if TYPE_CHECKING:
     from tests.fixtures.tenants import TenantSeed
@@ -72,6 +74,7 @@ async def _insert_jobs(
     activity_offset: timedelta = timedelta(0),
     admitted: bool = False,
     attempts: int = 0,
+    filtered_tokens: int = 100,
 ) -> list[UUID]:
     """Insert ``count`` runnable jobs, each on its own conversation, newest activity first."""
     async with pool.acquire() as conn:
@@ -93,7 +96,7 @@ async def _insert_jobs(
                 (user_id, conversation_id, source, status, error_code, lane, run_after,
                  activity_at, filtered_tokens, admitted_at, budget_period_start, attempts)
             SELECT $2, numbered.id, 'chatgpt', $4, $5, $6, now() - interval '1 minute',
-                   now() + $7::interval - numbered.n * interval '1 second', 100,
+                   now() + $7::interval - numbered.n * interval '1 second', $10,
                    CASE WHEN $8 THEN now() - interval '1 hour' END,
                    CASE WHEN $8 THEN date_trunc('month', now())::date END,
                    $9
@@ -110,6 +113,7 @@ async def _insert_jobs(
             activity_offset,
             admitted,
             attempts,
+            filtered_tokens,
         )
     return [UUID(str(row["id"])) for row in rows]
 
@@ -226,9 +230,16 @@ async def test_the_dispatch_bound_holds_and_later_live_work_overtakes_backfill(
     assert await _admitted_count(clean_rls_db) == 25
 
 
+@pytest.mark.parametrize("budget_enabled", [False, True], ids=["budget_off", "budget_on"])
 async def test_a_retryable_failed_row_runs_again_without_a_second_charge(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    monkeypatch: pytest.MonkeyPatch,
+    budget_enabled: bool,
 ) -> None:
+    # Its own earlier charge uses the user's only monthly conversation: deciding
+    # the row again would defer it.
+    monkeypatch.setenv("JOURNAL_EXTRACTION_MONTHLY_CONVERSATIONS", "1")
     (job_id,) = await _insert_jobs(
         clean_rls_db,
         seeded_a,
@@ -240,8 +251,9 @@ async def test_a_retryable_failed_row_runs_again_without_a_second_charge(
     )
     before = (await _row(clean_rls_db, job_id))["admitted_at"]
     arq = FakeArq()
+    config = replace(_CONFIG, budget_enabled=budget_enabled)
 
-    result = await ExtractionScheduler(clean_rls_db, arq, _CONFIG).tick()
+    result = await ExtractionScheduler(clean_rls_db, arq, config).tick()
 
     row = await _row(clean_rls_db, job_id)
     assert result == TickResult(enqueued=1)
@@ -285,26 +297,61 @@ async def _failing_enqueue(_job_id: str | None) -> None:
     raise RedisConnectionError("redis down")
 
 
-async def test_repeated_enqueue_failures_fail_the_row_as_enqueue_lost(
+async def _elapse_backoff(pool: asyncpg.Pool, job_id: UUID) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE extraction_jobs SET run_after = now() - interval '1 second' WHERE id = $1",
+            job_id,
+        )
+
+
+async def test_an_enqueue_failure_fails_the_row_as_enqueue_lost(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
     (job_id,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
-    config = replace(_CONFIG, stale_after=timedelta(0), max_enqueue_failures=3)
-    scheduler = ExtractionScheduler(clean_rls_db, FakeArq(hook=_failing_enqueue), config)
+    scheduler = ExtractionScheduler(clean_rls_db, FakeArq(hook=_failing_enqueue), _CONFIG)
 
-    first = await scheduler.tick()
-    after_first = await _row(clean_rls_db, job_id)
-    await scheduler.tick()
-    third = await scheduler.tick()
+    result = await scheduler.tick()
 
-    assert (first, after_first["status"]) == (TickResult(admitted=1, enqueue_failed=1), "pending")
-    assert third == TickResult(enqueue_failed=1, enqueue_lost=1)
+    assert result == TickResult(admitted=1, enqueue_failed=1, enqueue_lost=1)
     row = await _row(clean_rls_db, job_id)
-    assert (row["status"], row["error_code"], row["backed_off"]) == (
+    assert (row["status"], row["error_code"], row["backed_off"], row["admitted_at"] is None) == (
         "failed",
         ErrorCode.ENQUEUE_LOST.value,
         True,
+        False,
     )
+
+
+async def test_enqueue_failures_across_two_instances_fail_the_row_until_one_dispatches_it(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    (job_id,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
+    first_failing = ExtractionScheduler(clean_rls_db, FakeArq(hook=_failing_enqueue), _CONFIG)
+    second_failing = ExtractionScheduler(clean_rls_db, FakeArq(hook=_failing_enqueue), _CONFIG)
+    healthy_arq = FakeArq()
+    healthy = ExtractionScheduler(clean_rls_db, healthy_arq, _CONFIG)
+
+    first = await first_failing.tick()
+    after_first = await _row(clean_rls_db, job_id)
+    await _elapse_backoff(clean_rls_db, job_id)
+    second = await second_failing.tick()
+    after_second = await _row(clean_rls_db, job_id)
+    await _elapse_backoff(clean_rls_db, job_id)
+    third = await healthy.tick()
+
+    lost = ("failed", ErrorCode.ENQUEUE_LOST.value)
+    assert (first, (after_first["status"], after_first["error_code"])) == (
+        TickResult(admitted=1, enqueue_failed=1, enqueue_lost=1),
+        lost,
+    )
+    assert (second, (after_second["status"], after_second["error_code"])) == (
+        TickResult(enqueue_failed=1, enqueue_lost=1),
+        lost,
+    )
+    assert third == TickResult(enqueued=1)
+    assert [call[2] for call in healthy_arq.calls] == [f"{job_id}:0"]
+    assert (await _row(clean_rls_db, job_id))["status"] == "pending"
 
 
 async def test_a_row_a_worker_claimed_is_not_failed_as_enqueue_lost(
@@ -319,21 +366,15 @@ async def test_a_row_a_worker_claimed_is_not_failed_as_enqueue_lost(
             )
         raise RedisConnectionError("redis down")
 
-    config = replace(_CONFIG, max_enqueue_failures=1)
-    result = await ExtractionScheduler(clean_rls_db, FakeArq(hook=_claim_then_fail), config).tick()
+    result = await ExtractionScheduler(clean_rls_db, FakeArq(hook=_claim_then_fail), _CONFIG).tick()
 
     assert result == TickResult(enqueue_failed=1)
     assert (await _row(clean_rls_db, job_id))["status"] == "running"
 
 
-async def test_a_failed_row_stays_failed_while_its_conversation_has_an_active_job(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
-) -> None:
-    (active,) = await _insert_jobs(clean_rls_db, seeded_a, 1, admitted=True)
-    (failed,) = await _insert_jobs(
-        clean_rls_db, seeded_a, 1, status="failed", error_code=ErrorCode.WORKER_LOST.value
-    )
-    async with clean_rls_db.acquire() as conn:
+async def _share_conversation(pool: asyncpg.Pool, active: UUID, failed: UUID) -> None:
+    """Move ``active`` onto ``failed``'s conversation and mark it running."""
+    async with pool.acquire() as conn:
         await conn.execute(
             "UPDATE extraction_jobs SET status = 'running',"
             " conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $2)"
@@ -341,11 +382,234 @@ async def test_a_failed_row_stays_failed_while_its_conversation_has_an_active_jo
             active,
             failed,
         )
+
+
+@pytest.mark.parametrize("budget_enabled", [False, True], ids=["budget_off", "budget_on"])
+async def test_a_failed_row_stays_failed_while_its_conversation_has_an_active_job(
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    monkeypatch: pytest.MonkeyPatch,
+    budget_enabled: bool,
+) -> None:
+    # The running job uses one of two monthly conversations, so the later
+    # candidate fits only if the blocked failed row is not counted as usage.
+    monkeypatch.setenv("JOURNAL_EXTRACTION_MONTHLY_CONVERSATIONS", "2")
+    (active,) = await _insert_jobs(clean_rls_db, seeded_a, 1, admitted=True)
+    (failed,) = await _insert_jobs(
+        clean_rls_db, seeded_a, 1, status="failed", error_code=ErrorCode.WORKER_LOST.value
+    )
+    (later,) = await _insert_jobs(clean_rls_db, seeded_a, 1, activity_offset=timedelta(days=-1))
+    await _share_conversation(clean_rls_db, active, failed)
+    arq = FakeArq()
+    config = replace(_CONFIG, budget_enabled=budget_enabled)
+
+    result = await ExtractionScheduler(clean_rls_db, arq, config).tick()
+
+    row = await _row(clean_rls_db, failed)
+    assert result == TickResult(admitted=1, enqueued=1)
+    assert arq.job_ids == [later]
+    assert (row["status"], row["admitted_at"], row["defer_reason"]) == ("failed", None, None)
+
+
+async def test_a_failed_row_an_ingest_reactivates_mid_tick_is_skipped_without_aborting_the_tick(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (failed,) = await _insert_jobs(
+        clean_rls_db, seeded_a, 1, status="failed", error_code=ErrorCode.WORKER_LOST.value
+    )
+    (later,) = await _insert_jobs(clean_rls_db, seeded_a, 1, activity_offset=timedelta(days=-1))
+    revivable = queue_repo.revivable_failed
+
+    async def _ingest_after_check(conn: asyncpg.Connection, job_ids: list[UUID]) -> set[UUID]:
+        found = await revivable(conn, job_ids)
+        async with clean_rls_db.acquire() as ingest:
+            await ingest.execute(
+                "INSERT INTO extraction_jobs (user_id, conversation_id, source, status)"
+                " SELECT user_id, conversation_id, source, 'pending'"
+                " FROM extraction_jobs WHERE id = $1",
+                failed,
+            )
+        return found
+
+    monkeypatch.setattr(queue_repo, "revivable_failed", _ingest_after_check)
     arq = FakeArq()
 
     result = await ExtractionScheduler(clean_rls_db, arq, _CONFIG).tick()
 
     row = await _row(clean_rls_db, failed)
-    assert result == TickResult()
-    assert arq.calls == []
+    assert result == TickResult(admitted=1, enqueued=1)
+    assert arq.job_ids == [later]
     assert (row["status"], row["admitted_at"]) == ("failed", None)
+
+
+# ---------------------------------------------------------------------------
+# Deferral and capacity
+# ---------------------------------------------------------------------------
+
+
+async def test_deferred_rows_ahead_of_runnable_work_stop_hiding_it_within_two_ticks(
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    seeded_b: TenantSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("JOURNAL_EXTRACTION_MONTHLY_CONVERSATIONS", "1")
+    await _insert_jobs(clean_rls_db, seeded_a, 1, status="completed", admitted=True)
+    over_budget = await _insert_jobs(clean_rls_db, seeded_a, 550)
+    (runnable,) = await _insert_jobs(clean_rls_db, seeded_b, 1, activity_offset=timedelta(days=-30))
+    arq = FakeArq()
+    scheduler = ExtractionScheduler(clean_rls_db, arq, replace(_CONFIG, budget_enabled=True))
+
+    first = await scheduler.tick()
+    second = await scheduler.tick()
+
+    assert first == TickResult(deferred=500)
+    assert second == TickResult(admitted=1, deferred=50, enqueued=1)
+    assert arq.job_ids == [runnable]
+    async with clean_rls_db.acquire() as conn:
+        held = await conn.fetchval(
+            "SELECT count(*) FROM extraction_jobs WHERE id = ANY($1::uuid[])"
+            " AND defer_reason = 'budget' AND run_after > now()"
+            " AND run_after <= now() + interval '1 hour'",
+            over_budget,
+        )
+    assert held == len(over_budget)
+
+
+async def test_a_full_dispatch_bound_still_records_later_limit_deferrals(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Ceiling 200 with 100 tokens admitted: a 100-token live row fits; backfill
+    # stops at 160, so a 100-token backfill row is held for the global ceiling.
+    monkeypatch.setenv("JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING", "200")
+    (inflight,) = await _insert_jobs(clean_rls_db, seeded_a, 1, admitted=True)
+    async with clean_rls_db.acquire() as conn:
+        await conn.execute("UPDATE extraction_jobs SET status = 'running' WHERE id = $1", inflight)
+    (fitting,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
+    (blocked,) = await _insert_jobs(clean_rls_db, seeded_a, 1, lane="backfill")
+    arq = FakeArq()
+    config = replace(_CONFIG, budget_enabled=True, dispatch_bound=1)
+
+    result = await ExtractionScheduler(clean_rls_db, arq, config).tick()
+
+    fitting_row, blocked_row = await _row(clean_rls_db, fitting), await _row(clean_rls_db, blocked)
+    assert result == TickResult(deferred=1)
+    assert arq.calls == []
+    assert (fitting_row["admitted_at"], fitting_row["defer_reason"]) == (None, None)
+    assert (blocked_row["admitted_at"], blocked_row["defer_reason"]) == (None, "global")
+
+
+async def test_a_row_that_fits_once_unplaced_work_is_uncounted_is_not_deferred(
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    seeded_b: TenantSeed,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Ceiling 200 with 100 tokens admitted: either 100-token live row fits
+    # alone, both together do not. Neither is dispatched, so neither is charged.
+    monkeypatch.setenv("JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING", "200")
+    (inflight,) = await _insert_jobs(clean_rls_db, seeded_a, 1, admitted=True)
+    async with clean_rls_db.acquire() as conn:
+        await conn.execute("UPDATE extraction_jobs SET status = 'running' WHERE id = $1", inflight)
+    (first,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
+    (second,) = await _insert_jobs(clean_rls_db, seeded_b, 1, activity_offset=timedelta(days=-1))
+    config = replace(_CONFIG, budget_enabled=True, dispatch_bound=1)
+
+    result = await ExtractionScheduler(clean_rls_db, FakeArq(), config).tick()
+
+    rows = [await _row(clean_rls_db, job_id) for job_id in (first, second)]
+    assert result == TickResult()
+    assert [(row["admitted_at"], row["defer_reason"]) for row in rows] == [(None, None)] * 2
+
+
+# ---------------------------------------------------------------------------
+# Candidate locking
+# ---------------------------------------------------------------------------
+
+
+async def test_ingest_cannot_rewrite_a_candidate_while_the_tick_decides_it(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (job_id,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
+    inflight_count = queue_repo.inflight_admitted_count
+    refresh_outcome: list[str] = []
+
+    async def _refresh_mid_tick(conn: asyncpg.Connection) -> int:
+        async with clean_rls_db.acquire() as ingest, ingest.transaction():
+            await ingest.execute("SET LOCAL lock_timeout = '200ms'")
+            try:
+                await ingest.execute(
+                    "UPDATE extraction_jobs SET filtered_tokens = 999999"
+                    " WHERE id = $1 AND status = 'pending' AND admitted_at IS NULL",
+                    job_id,
+                )
+            except asyncpg.LockNotAvailableError:
+                refresh_outcome.append("blocked")
+            else:
+                refresh_outcome.append("rewritten")
+        return await inflight_count(conn)
+
+    monkeypatch.setattr(queue_repo, "inflight_admitted_count", _refresh_mid_tick)
+
+    result = await ExtractionScheduler(clean_rls_db, FakeArq(), _CONFIG).tick()
+
+    async with clean_rls_db.acquire() as conn:
+        tokens = await conn.fetchval(
+            "SELECT filtered_tokens FROM extraction_jobs WHERE id = $1", job_id
+        )
+    assert result == TickResult(admitted=1, enqueued=1)
+    assert (refresh_outcome, tokens) == (["blocked"], 100)
+
+
+async def test_a_row_another_transaction_holds_is_skipped_not_waited_on(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    (held,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
+    (free,) = await _insert_jobs(clean_rls_db, seeded_a, 1, activity_offset=timedelta(days=-1))
+    arq = FakeArq()
+
+    async with clean_rls_db.acquire() as ingest, ingest.transaction():
+        await ingest.execute("SELECT 1 FROM extraction_jobs WHERE id = $1 FOR UPDATE", held)
+        result = await asyncio.wait_for(ExtractionScheduler(clean_rls_db, arq, _CONFIG).tick(), 5)
+
+    assert result == TickResult(admitted=1, enqueued=1)
+    assert arq.job_ids == [free]
+    assert (await _row(clean_rls_db, held))["admitted_at"] is None
+
+
+# ---------------------------------------------------------------------------
+# Advisory lock release
+# ---------------------------------------------------------------------------
+
+
+class _TickCrashed(Exception):
+    pass
+
+
+async def _raise_mid_tick(_job_id: str | None) -> None:
+    raise _TickCrashed
+
+
+async def _block_forever(_job_id: str | None) -> None:
+    await asyncio.Event().wait()
+
+
+@pytest.mark.parametrize("hook", [_raise_mid_tick, _block_forever], ids=["raises", "cancelled"])
+async def test_a_tick_that_ends_abnormally_releases_the_scheduler_lock(
+    clean_rls_db: asyncpg.Pool,
+    seeded_a: TenantSeed,
+    hook: Callable[[str | None], Any],
+) -> None:
+    await _insert_jobs(clean_rls_db, seeded_a, 1)
+    crashing = ExtractionScheduler(clean_rls_db, FakeArq(hook=hook), _CONFIG)
+    healthy_arq = FakeArq()
+
+    tick = asyncio.create_task(crashing.tick())
+    done, _ = await asyncio.wait({tick}, timeout=0.5)
+    if not done:
+        tick.cancel()
+    with suppress(_TickCrashed, asyncio.CancelledError):
+        await tick
+    result = await ExtractionScheduler(clean_rls_db, healthy_arq, _CONFIG).tick()
+
+    assert result == TickResult()

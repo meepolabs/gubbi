@@ -16,13 +16,14 @@ Public surface
 user_period_usage       -- per-user period, period-backfill and lifetime-backfill usage
 global_period_tokens    -- filtered tokens admitted in a period, all users
 first_upload_at         -- earliest live/backfill job of a user, optionally per platform
-select_runnable         -- queued or retryable-failed rows whose run_after has passed
+select_runnable         -- lock queued or retryable-failed rows whose run_after has passed
 terminal_failure_sql    -- SQL predicate: a failed row the retry policy never runs again
 terminal_failure_args   -- the parameters terminal_failure_sql binds
 admit                   -- charge rows to a period, once per row
+revivable_failed        -- failed rows that may move back to pending now
 revive_failed           -- move failed rows back to pending for another run
 lock_if_pending         -- lock a row and report whether it is still pending
-defer                   -- record why a queued row was held back
+defer                   -- hold rows back with a reason until a recheck time
 stale_admitted_pending  -- admitted rows still pending after a given age
 inflight_admitted_count -- admitted rows that are pending or running
 UserPeriodUsage         -- dataclass returned by user_period_usage
@@ -35,6 +36,8 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
 
+import asyncpg
+
 from gubbi.extraction.intake import Lane
 from gubbi.extraction.retry_policy import (
     DETERMINISTIC_CODES,
@@ -46,8 +49,6 @@ if TYPE_CHECKING:
     from collections.abc import Collection
     from datetime import date, datetime, timedelta
 
-    import asyncpg
-
 __all__: list[str] = [
     "RunnableJob",
     "UserPeriodUsage",
@@ -57,6 +58,7 @@ __all__: list[str] = [
     "global_period_tokens",
     "inflight_admitted_count",
     "lock_if_pending",
+    "revivable_failed",
     "revive_failed",
     "select_runnable",
     "stale_admitted_pending",
@@ -235,7 +237,11 @@ def terminal_failure_args() -> tuple[list[str], list[str], int]:
 
 
 async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[RunnableJob]:
-    """Return up to ``limit`` rows the scheduler may admit or dispatch now.
+    """Lock and return up to ``limit`` rows the scheduler may admit or dispatch now.
+
+    Rows are locked ``FOR UPDATE SKIP LOCKED`` until the caller's transaction
+    ends, so ingest cannot rewrite a row's queue inputs between this read and
+    its admission; a row another transaction holds is skipped this time.
 
     Runnable: ``pending`` and not yet admitted, or ``failed`` and not terminal
     per :func:`terminal_failure_sql` (a missing or unrecognised ``error_code``
@@ -263,6 +269,7 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
                  created_at,
                  id
         LIMIT $1
+        FOR UPDATE SKIP LOCKED
         """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
         limit,
         *terminal_failure_args(),
@@ -313,7 +320,7 @@ async def admit(
     job_ids: Collection[UUID],
     period: date,
 ) -> int:
-    """Charge each row to ``period`` and clear its defer reason; return rows charged.
+    """Charge each ``pending`` row to ``period`` and clear its defer reason; return rows charged.
 
     A row already admitted is left untouched, so a retried or re-dispatched
     row is never charged twice and never moves to a later period.
@@ -325,6 +332,7 @@ async def admit(
             budget_period_start = $2,
             defer_reason = NULL
         WHERE id = ANY($1::uuid[])
+          AND status = 'pending'
           AND admitted_at IS NULL
         """,
         list(job_ids),
@@ -333,59 +341,89 @@ async def admit(
     return int(str(result).rsplit(" ", 1)[-1])
 
 
-async def defer(conn: asyncpg.Connection, job_id: UUID, reason: str) -> bool:
-    """Set ``defer_reason`` on a ``pending`` or ``failed`` row; return whether a row changed.
+async def defer(
+    conn: asyncpg.Connection,
+    job_ids: Collection[UUID],
+    reason: str,
+    *,
+    next_period_start: datetime,
+    recheck: timedelta,
+) -> int:
+    """Hold rows back with ``reason``; return rows changed.
 
-    ``reason`` must be one the ``extraction_jobs_defer_reason_check`` constraint
-    accepts; any other value raises ``asyncpg.CheckViolationError``.
+    Each row's ``run_after`` becomes the earlier of ``next_period_start`` and
+    ``now() + recheck``. Only rows not yet admitted and still ``pending`` or
+    ``failed`` change. ``reason`` must be one the
+    ``extraction_jobs_defer_reason_check`` constraint accepts; any other value
+    raises ``asyncpg.CheckViolationError``.
     """
     result = await conn.execute(
         """
         UPDATE extraction_jobs
-        SET defer_reason = $2
-        WHERE id = $1
+        SET defer_reason = $2,
+            run_after = least($3::timestamptz, now() + $4::interval)
+        WHERE id = ANY($1::uuid[])
           AND status IN ('pending', 'failed')
+          AND admitted_at IS NULL
         """,
-        job_id,
+        list(job_ids),
         reason,
+        next_period_start,
+        recheck,
     )
-    return str(result) == "UPDATE 1"
+    return int(str(result).rsplit(" ", 1)[-1])
 
 
-async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> set[UUID]:
-    """Move ``failed`` rows back to ``pending`` for another run; return the ids moved.
+async def revivable_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> set[UUID]:
+    """Return the ``failed`` rows among ``job_ids`` that may move back to pending now.
 
     Only one job per conversation may be active (pending or running), so a row
-    stays failed while its conversation has an active job, and of several
-    failed rows of one conversation only the newest moves. The admission
-    charge is untouched.
+    whose conversation has an active job is excluded, and of several failed
+    rows of one conversation only the newest is returned. Reads only.
     """
     rows = await conn.fetch(
         """
-        WITH pick AS (
-            SELECT DISTINCT ON (j.user_id, j.conversation_id, j.source) j.id
-            FROM extraction_jobs AS j
-            WHERE j.id = ANY($1::uuid[])
-              AND j.status = 'failed'
-              AND NOT EXISTS (
-                    SELECT 1
-                    FROM extraction_jobs AS active
-                    WHERE active.user_id = j.user_id
-                      AND active.conversation_id = j.conversation_id
-                      AND active.source = j.source
-                      AND active.status NOT IN ('completed', 'failed')
-              )
-            ORDER BY j.user_id, j.conversation_id, j.source, j.created_at DESC, j.id
-        )
-        UPDATE extraction_jobs AS job
-        SET status = 'pending'
-        FROM pick
-        WHERE job.id = pick.id
-        RETURNING job.id
+        SELECT DISTINCT ON (j.user_id, j.conversation_id, j.source) j.id
+        FROM extraction_jobs AS j
+        WHERE j.id = ANY($1::uuid[])
+          AND j.status = 'failed'
+          AND NOT EXISTS (
+                SELECT 1
+                FROM extraction_jobs AS active
+                WHERE active.user_id = j.user_id
+                  AND active.conversation_id = j.conversation_id
+                  AND active.source = j.source
+                  AND active.status NOT IN ('completed', 'failed')
+          )
+        ORDER BY j.user_id, j.conversation_id, j.source, j.created_at DESC, j.id
         """,
         list(job_ids),
     )
     return {UUID(str(row["id"])) for row in rows}
+
+
+async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> set[UUID]:
+    """Move ``failed`` rows back to ``pending``; return the ids moved.
+
+    Each row moves in its own savepoint. A row whose conversation gained an
+    active job meanwhile (an ingest racing this call) violates the one active
+    job per conversation index and stays failed; the caller's transaction is
+    unaffected. The admission charge is untouched.
+    """
+    revived: set[UUID] = set()
+    for job_id in job_ids:
+        try:
+            async with conn.transaction():
+                result = await conn.execute(
+                    "UPDATE extraction_jobs SET status = 'pending'"
+                    " WHERE id = $1 AND status = 'failed'",
+                    job_id,
+                )
+        except asyncpg.UniqueViolationError:
+            continue
+        if str(result) == "UPDATE 1":
+            revived.add(job_id)
+    return revived
 
 
 async def lock_if_pending(conn: asyncpg.Connection, job_id: UUID) -> bool:

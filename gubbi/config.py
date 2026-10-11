@@ -406,6 +406,11 @@ class LLMConfig(BaseSettings):
         ge=1,
         validation_alias="JOURNAL_EXTRACTION_DISPATCH_BOUND",
     )
+    # Within a budget period admitted usage only grows, so a deferred job is
+    # not looked at again until this many seconds pass or the period ends.
+    extraction_defer_recheck_secs: int = Field(
+        default=3600, ge=1, validation_alias="JOURNAL_EXTRACTION_DEFER_RECHECK_SECS"
+    )
 
     @field_validator("base_url")
     @classmethod
