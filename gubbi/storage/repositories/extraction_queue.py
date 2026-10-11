@@ -16,13 +16,12 @@ Public surface
 user_period_usage       -- per-user period, period-backfill and lifetime-backfill usage
 global_period_tokens    -- filtered tokens admitted in a period, all users
 first_upload_at         -- earliest live/backfill job of a user, optionally per platform
-select_runnable         -- lock queued or retryable-failed rows whose run_after has passed
+select_runnable         -- lock queued or revivable failed rows whose run_after has passed
 terminal_failure_sql    -- SQL predicate: a failed row the retry policy never runs again
 terminal_failure_args   -- the parameters terminal_failure_sql binds
 admit                   -- charge rows to a period, once per row
-revivable_failed        -- failed rows that may move back to pending now
 revive_failed           -- move failed rows back to pending for another run
-lock_if_pending         -- lock a row and report whether it is still pending
+fail_enqueue_lost       -- fail a pending row whose enqueue raised, with growing backoff
 defer                   -- hold rows back with a reason until a recheck time
 stale_admitted_pending  -- admitted rows still pending after a given age
 inflight_admitted_count -- admitted rows that are pending or running
@@ -43,6 +42,8 @@ from gubbi.extraction.retry_policy import (
     DETERMINISTIC_CODES,
     DETERMINISTIC_MAX_ATTEMPTS,
     TERMINAL_CODES,
+    ErrorCode,
+    next_run_after,
 )
 
 if TYPE_CHECKING:
@@ -54,11 +55,10 @@ __all__: list[str] = [
     "UserPeriodUsage",
     "admit",
     "defer",
+    "fail_enqueue_lost",
     "first_upload_at",
     "global_period_tokens",
     "inflight_admitted_count",
-    "lock_if_pending",
-    "revivable_failed",
     "revive_failed",
     "select_runnable",
     "stale_admitted_pending",
@@ -245,10 +245,19 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
 
     Runnable: ``pending`` and not yet admitted, or ``failed`` and not terminal
     per :func:`terminal_failure_sql` (a missing or unrecognised ``error_code``
-    retries as transient); in both cases ``run_after <= now()``. A failed row
-    the retry policy never runs again is excluded whatever its ``run_after``.
-    An admitted ``pending`` row is already dispatched and is excluded; see
-    :func:`stale_admitted_pending` for lost dispatches.
+    retries as transient); in both cases ``run_after <= now()`` and a token
+    count is recorded (``token_count_version`` set), so no row is ever charged
+    an unknown size. A failed row the retry policy never runs again is
+    excluded whatever its ``run_after``. An admitted ``pending`` row is
+    already dispatched and is excluded; see :func:`stale_admitted_pending`
+    for lost dispatches.
+
+    Only one job per conversation may be active (pending or running), so a
+    failed row whose conversation has an active job is excluded, and of
+    several failed rows of one conversation only the newest may be returned.
+    Both exclusions apply before ``limit``, so blocked failed rows never fill
+    the batch. A job made active after this read is caught by
+    :func:`revive_failed`.
 
     Order: lane ``paste``, ``live``, ``backfill``; newest ``activity_at`` first
     within a lane (unknown last); then ``created_at`` and ``id`` so equal rows
@@ -256,20 +265,40 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
     """
     rows = await conn.fetch(
         f"""
-        SELECT id, user_id, conversation_id, source, lane, activity_at,
-               filtered_tokens, attempts, admitted_at, status
-        FROM extraction_jobs
-        WHERE run_after <= now()
+        SELECT j.id, j.user_id, j.conversation_id, j.source, j.lane, j.activity_at,
+               j.filtered_tokens, j.attempts, j.admitted_at, j.status
+        FROM extraction_jobs AS j
+        WHERE j.run_after <= now()
+          AND j.token_count_version IS NOT NULL
           AND (
-                (status = 'pending' AND admitted_at IS NULL)
-             OR (status = 'failed' AND NOT {terminal_failure_sql(2)})
+                (j.status = 'pending' AND j.admitted_at IS NULL)
+             OR (j.status = 'failed'
+                 AND NOT {terminal_failure_sql(2)}
+                 AND NOT EXISTS (
+                        SELECT 1
+                        FROM extraction_jobs AS active
+                        WHERE active.user_id = j.user_id
+                          AND active.conversation_id = j.conversation_id
+                          AND active.source = j.source
+                          AND active.status NOT IN ('completed', 'failed')
+                 )
+                 AND NOT EXISTS (
+                        SELECT 1
+                        FROM extraction_jobs AS newer
+                        WHERE newer.conversation_id = j.conversation_id
+                          AND newer.user_id = j.user_id
+                          AND newer.source = j.source
+                          AND newer.status = 'failed'
+                          AND (newer.created_at > j.created_at
+                               OR (newer.created_at = j.created_at AND newer.id < j.id))
+                 ))
           )
-        ORDER BY CASE lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
-                 activity_at DESC NULLS LAST,
-                 created_at,
-                 id
+        ORDER BY CASE j.lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
+                 j.activity_at DESC NULLS LAST,
+                 j.created_at,
+                 j.id
         LIMIT $1
-        FOR UPDATE SKIP LOCKED
+        FOR UPDATE OF j SKIP LOCKED
         """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
         limit,
         *terminal_failure_args(),
@@ -374,34 +403,6 @@ async def defer(
     return int(str(result).rsplit(" ", 1)[-1])
 
 
-async def revivable_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> set[UUID]:
-    """Return the ``failed`` rows among ``job_ids`` that may move back to pending now.
-
-    Only one job per conversation may be active (pending or running), so a row
-    whose conversation has an active job is excluded, and of several failed
-    rows of one conversation only the newest is returned. Reads only.
-    """
-    rows = await conn.fetch(
-        """
-        SELECT DISTINCT ON (j.user_id, j.conversation_id, j.source) j.id
-        FROM extraction_jobs AS j
-        WHERE j.id = ANY($1::uuid[])
-          AND j.status = 'failed'
-          AND NOT EXISTS (
-                SELECT 1
-                FROM extraction_jobs AS active
-                WHERE active.user_id = j.user_id
-                  AND active.conversation_id = j.conversation_id
-                  AND active.source = j.source
-                  AND active.status NOT IN ('completed', 'failed')
-          )
-        ORDER BY j.user_id, j.conversation_id, j.source, j.created_at DESC, j.id
-        """,
-        list(job_ids),
-    )
-    return {UUID(str(row["id"])) for row in rows}
-
-
 async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> set[UUID]:
     """Move ``failed`` rows back to ``pending``; return the ids moved.
 
@@ -426,10 +427,43 @@ async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> 
     return revived
 
 
-async def lock_if_pending(conn: asyncpg.Connection, job_id: UUID) -> bool:
-    """Lock the row until the transaction ends; return whether it is ``pending``."""
-    status = await conn.fetchval(
-        "SELECT status FROM extraction_jobs WHERE id = $1 FOR UPDATE",
-        job_id,
-    )
-    return bool(status == "pending")
+async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> bool:
+    """Fail a ``pending`` row whose hand-off to the worker queue raised; return whether it failed.
+
+    The row is locked first, so a row a worker claimed meanwhile is left
+    alone. ``dispatch_failures`` counts consecutive lost hand-offs and is the
+    backoff exponent, so the delay grows through an outage; ``attempts``
+    counts worker runs only and is untouched, so a lost hand-off never uses
+    up a deterministic retry.
+    """
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT dispatch_failures, clock_timestamp() AS db_now
+            FROM extraction_jobs
+            WHERE id = $1
+              AND status = 'pending'
+            FOR UPDATE
+            """,
+            job_id,
+        )
+        if row is None:
+            return False
+        failures = int(row["dispatch_failures"]) + 1
+        retry_at = next_run_after(ErrorCode.ENQUEUE_LOST, failures, row["db_now"])
+        await conn.execute(
+            """
+            UPDATE extraction_jobs
+            SET status = 'failed',
+                error_code = $2,
+                run_after = $3::text::timestamptz,
+                dispatch_failures = $4,
+                completed_at = now()
+            WHERE id = $1
+            """,
+            job_id,
+            ErrorCode.ENQUEUE_LOST.value,
+            "infinity" if retry_at is None else retry_at.isoformat(),
+            failures,
+        )
+    return True

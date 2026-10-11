@@ -2,8 +2,10 @@
 
 Scheduling: ``lane`` (``backfill`` | ``live`` | ``paste``), ``run_after`` (the
 earliest time the job may run), ``defer_reason`` (NULL, or why admission held
-the job back: ``budget`` | ``global`` | ``provider``), ``attempts`` and
-``activity_at`` (the conversation's latest message time).
+the job back: ``budget`` | ``global`` | ``provider``), ``attempts`` (worker
+runs started), ``dispatch_failures`` (consecutive failed hand-offs to the
+worker queue since the last worker claim) and ``activity_at`` (the
+conversation's latest message time).
 
 Admission charge, written once when the job is admitted: ``filtered_tokens``,
 ``token_count_version``, ``admitted_at`` and ``budget_period_start``.
@@ -52,6 +54,7 @@ ALTER TABLE public.extraction_jobs
         CONSTRAINT extraction_jobs_defer_reason_check
         CHECK (defer_reason IN ('budget', 'global', 'provider')),
     ADD COLUMN attempts integer DEFAULT 0 NOT NULL,
+    ADD COLUMN dispatch_failures integer DEFAULT 0 NOT NULL,
     ADD COLUMN activity_at timestamp with time zone,
     ADD COLUMN filtered_tokens integer DEFAULT 0 NOT NULL,
     ADD COLUMN token_count_version smallint,
@@ -94,6 +97,7 @@ ALTER TABLE public.extraction_jobs
     DROP COLUMN token_count_version,
     DROP COLUMN filtered_tokens,
     DROP COLUMN activity_at,
+    DROP COLUMN dispatch_failures,
     DROP COLUMN attempts,
     DROP COLUMN defer_reason,
     DROP COLUMN run_after,

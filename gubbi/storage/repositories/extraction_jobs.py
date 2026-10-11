@@ -247,7 +247,8 @@ async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> bool:
     or not visible. A delayed or duplicate delivery of a job is therefore a
     no-op. The row is locked before its status is read, so of concurrent
     claims exactly one succeeds. Every claim counts one attempt, resets
-    started_at and clears the previous run's error_code; the admission
+    started_at and dispatch_failures and clears the previous run's
+    error_code; the admission
     charge is kept, so a retried row is never charged again.
     """
     claimed = await conn.fetchval(
@@ -256,7 +257,8 @@ async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> bool:
         SET status = 'running',
             started_at = now(),
             error_code = NULL,
-            attempts = job.attempts + 1
+            attempts = job.attempts + 1,
+            dispatch_failures = 0
         FROM (
             SELECT id, status, admitted_at, run_after
             FROM extraction_jobs

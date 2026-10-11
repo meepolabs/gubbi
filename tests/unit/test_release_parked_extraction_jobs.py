@@ -8,6 +8,7 @@ import json
 import pytest
 
 from gubbi.scripts.release_parked_extraction_jobs import (
+    DryRunResult,
     GroupCount,
     ReleaseResult,
     _build_parser,
@@ -71,7 +72,7 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
         GroupCount("pending", "none", 5),
     )
 
-    log_dry_run(build_logger(stream), groups)
+    log_dry_run(build_logger(stream), DryRunResult(groups, would_hydrate=3, held_unhydrated=1))
 
     lines = _lines(stream)
     assert [(line["event"], line.get("count")) for line in lines] == [
@@ -79,7 +80,14 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
         ("parked_jobs", 5),
         ("dry_run_summary", None),
     ]
-    assert (lines[-1]["parked"], lines[-1]["releasable"], lines[-1]["terminal"]) == (7, 5, 2)
+    summary = lines[-1]
+    assert (
+        summary["parked"],
+        summary["releasable"],
+        summary["terminal"],
+        summary["would_hydrate"],
+        summary["held_unhydrated"],
+    ) == (7, 4, 2, 3, 1)
 
 
 def test_release_log_reports_released_total_and_held_terminal() -> None:
@@ -87,16 +95,20 @@ def test_release_log_reports_released_total_and_held_terminal() -> None:
     result = ReleaseResult(
         released=(GroupCount("failed", "transient", 3), GroupCount("pending", "none", 1)),
         held_terminal=2,
+        hydrated=3,
+        held_unhydrated=1,
     )
 
     log_release(build_logger(stream), result)
 
     summary = _lines(stream)[-1]
-    assert (summary["event"], summary["released"], summary["held_terminal"]) == (
-        "release_summary",
-        4,
-        2,
-    )
+    assert (
+        summary["event"],
+        summary["released"],
+        summary["held_terminal"],
+        summary["hydrated"],
+        summary["held_unhydrated"],
+    ) == ("release_summary", 4, 2, 3, 1)
 
 
 @pytest.mark.parametrize(

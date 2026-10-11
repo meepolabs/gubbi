@@ -123,7 +123,7 @@ docker compose exec gubbi python -m gubbi.scripts.release_parked_extraction_jobs
 docker compose exec gubbi python -m gubbi.scripts.release_parked_extraction_jobs --release
 ```
 
-`--release` never releases failures whose error is terminal (for example a model refusal); those stay held and are counted as `held_terminal`. Completed and running jobs are never touched, and a second release changes nothing. The command needs `JOURNAL_DB_ADMIN_URL` and prints JSON log lines with counts only.
+`--release` never releases failures whose error is terminal (for example a model refusal); those stay held and are counted as `held_terminal`. Jobs held by the upgrade carry no token count, and the scheduler never runs a job without one, so `--release` first counts each such job's tokens from its stored conversation, the same way ingest counts a new upload; those tokens then count against the user's and the global token limits like any other job. A job whose conversation is missing or cannot be decrypted stays held and is counted as `held_unhydrated`; `--dry-run` reports how many jobs would be counted and how many would stay held. Completed and running jobs are never touched, and a second release changes nothing. The command needs `JOURNAL_DB_ADMIN_URL` and the `JOURNAL_ENCRYPTION_MASTER_KEY_V*` keys, and prints JSON log lines with counts only.
 
 ### Operator provisioning
 

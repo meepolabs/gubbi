@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -11,13 +11,14 @@ import asyncpg
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from gubbi.extraction.intake import Lane
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION, Lane
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode, is_terminal
 from gubbi.scripts.release_parked_extraction_jobs import release_parked
 from gubbi.storage.repositories import extraction_queue as queue_repo
 from gubbi.storage.repositories.extraction_queue import UserPeriodUsage
 
 if TYPE_CHECKING:
+    from gubbi.crypto.cipher import ContentCipher
     from tests.fixtures.tenants import TenantSeed
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.integration]
@@ -46,6 +47,7 @@ class Job:
     budget_period_start: date | None = None
     created_at: datetime | timedelta = _NOW
     attempts: int = 0
+    token_count_version: int | None = TOKEN_COUNT_VERSION
 
 
 def _at(db_now: datetime, value: datetime | timedelta) -> datetime:
@@ -74,8 +76,9 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             INSERT INTO extraction_jobs
                 (user_id, conversation_id, source, status, run_after, error_code, lane,
                  activity_at, filtered_tokens, admitted_at, budget_period_start, created_at,
-                 attempts)
-            VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9, $10, $11, $12, $13)
+                 attempts, token_count_version)
+            VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9, $10, $11, $12, $13,
+                    $14)
             RETURNING id
             """,
             seed.user_id,
@@ -93,6 +96,7 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             job.budget_period_start,
             _at(db_now, job.created_at),
             job.attempts,
+            job.token_count_version,
         )
     return UUID(str(job_id))
 
@@ -269,6 +273,11 @@ async def test_global_period_tokens_sums_admitted_rows_of_the_period(
             id="failed-backoff-not-elapsed",
         ),
         pytest.param(_admitted(), id="pending-already-admitted"),
+        pytest.param(Job(token_count_version=None), id="pending-without-token-count"),
+        pytest.param(
+            Job(status="failed", error_code="worker_lost", token_count_version=None),
+            id="failed-without-token-count",
+        ),
         pytest.param(Job(status="running"), id="running"),
         pytest.param(Job(status="completed"), id="completed"),
     ],
@@ -313,6 +322,23 @@ async def test_select_runnable_retries_an_unclassified_failure(
     assert await _runnable_ids(clean_rls_db) == [unclassified]
 
 
+async def test_select_runnable_returns_only_the_newest_failed_row_of_a_conversation(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    failed = Job(status="failed", error_code="worker_lost")
+    older = await _insert(clean_rls_db, seeded_a, replace(failed, created_at=_PAST))
+    newer = await _insert(clean_rls_db, seeded_a, failed)
+    async with clean_rls_db.acquire() as conn:
+        await conn.execute(
+            "UPDATE extraction_jobs SET conversation_id ="
+            " (SELECT conversation_id FROM extraction_jobs WHERE id = $2) WHERE id = $1",
+            older,
+            newer,
+        )
+
+    assert await _runnable_ids(clean_rls_db) == [newer]
+
+
 # ---------------------------------------------------------------------------
 # terminal_failure_sql
 # ---------------------------------------------------------------------------
@@ -353,7 +379,7 @@ _HELD_FAILURE_CASES = [
 
 
 async def test_release_never_frees_a_failed_row_the_scheduler_will_not_select(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, cipher: ContentCipher
 ) -> None:
     job_ids = {
         case: await _insert(
@@ -364,7 +390,7 @@ async def test_release_never_frees_a_failed_row_the_scheduler_will_not_select(
         for case in _HELD_FAILURE_CASES
     }
 
-    await release_parked(clean_rls_db)
+    await release_parked(clean_rls_db, cipher)
 
     selected = set(await _runnable_ids(clean_rls_db, limit=len(job_ids) + 1))
     still_held = set(

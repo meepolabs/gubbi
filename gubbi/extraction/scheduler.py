@@ -4,7 +4,8 @@ One tick, serialized across API replicas by a session advisory lock:
 
 1. Lock runnable rows: queued ``pending`` rows and retryable ``failed`` rows
    whose ``run_after`` has passed, in lane order. A failed row whose
-   conversation already has an active job is left for a later tick.
+   conversation already has an active job is left for a later tick, and so
+   is a row with no recorded token count.
 2. Decide admission for the rows not yet charged, against per-user and global
    limits (everything is admitted while budgets are disabled). A failed row
    that was charged before runs again without a second decision or charge.
@@ -18,7 +19,8 @@ One tick, serialized across API replicas by a session advisory lock:
    it is dispatched, so the worker claims it as usual.
 4. Re-enqueue admitted rows still ``pending`` after ``stale_after``; a lost
    Arq job is restored. A row whose enqueue raises is failed as
-   ``enqueue_lost`` and revived after the retry policy's backoff.
+   ``enqueue_lost`` and revived after the retry policy's backoff, which
+   grows with each consecutive lost enqueue.
 
 A row that does not fit a limit is deferred with a reason and never refused.
 """
@@ -42,10 +44,8 @@ from gubbi.extraction.admission import (
     user_usage_from_totals,
 )
 from gubbi.extraction.limits import ExtractionLimits, limits_for
-from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.extraction.supervised_loop import run_every
 from gubbi.storage.pg_setup import advisory_unlock, try_advisory_lock
-from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import extraction_queue as queue_repo
 
 if TYPE_CHECKING:
@@ -195,7 +195,7 @@ class ExtractionScheduler:
         failed = dispatched.failed_ids | redispatched.failed_ids
         lost = 0
         for job_id in failed:
-            lost += await _fail_enqueue_lost(conn, job_id)
+            lost += await queue_repo.fail_enqueue_lost(conn, job_id)
         return TickResult(
             admitted=sum(1 for job in dispatch if job.admitted_at is None),
             deferred=len(plan.deferrals),
@@ -206,7 +206,7 @@ class ExtractionScheduler:
         )
 
     async def _plan(self, conn: asyncpg.Connection, period: date) -> _Plan:
-        jobs = await _revivable_runnable(conn, self._config.batch_size)
+        jobs = await queue_repo.select_runnable(conn, self._config.batch_size)
         if not jobs:
             return _Plan(dispatch=(), deferrals=())
         capacity = self._config.dispatch_bound - await queue_repo.inflight_admitted_count(conn)
@@ -270,20 +270,6 @@ class ExtractionScheduler:
         return _DispatchOutcome(enqueued_ids=frozenset(enqueued), failed_ids=frozenset(failed))
 
 
-async def _revivable_runnable(conn: asyncpg.Connection, limit: int) -> list[RunnableJob]:
-    """Lock the runnable rows; drop failed rows that cannot move back to pending now.
-
-    A dropped row is neither decided nor charged, so it never counts toward
-    the usage later rows are decided against.
-    """
-    jobs = await queue_repo.select_runnable(conn, limit)
-    failed = [job.job_id for job in jobs if job.status == "failed"]
-    if not failed:
-        return jobs
-    revivable = await queue_repo.revivable_failed(conn, failed)
-    return [job for job in jobs if job.status != "failed" or job.job_id in revivable]
-
-
 def _plan_dispatch(
     jobs: Sequence[RunnableJob],
     decisions: Sequence[Decision],
@@ -334,15 +320,6 @@ async def _claim(
     if fresh:
         await queue_repo.admit(conn, fresh, period)
     return claimed
-
-
-async def _fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> int:
-    """Fail a job as ``enqueue_lost`` unless a worker claimed it meanwhile; return rows failed."""
-    async with conn.transaction():
-        if not await queue_repo.lock_if_pending(conn, job_id):
-            return 0
-        failed = await extraction_jobs.mark_failed(conn, job_id, error_code=ErrorCode.ENQUEUE_LOST)
-    return int(failed)
 
 
 def _next_period_start(period: date) -> datetime:

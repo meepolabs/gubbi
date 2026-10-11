@@ -19,13 +19,15 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from gubbi.config import get_settings
-from gubbi.extraction.retry_policy import ErrorCode
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION
+from gubbi.extraction.retry_policy import TRANSIENT_BASE_DELAY, ErrorCode
 from gubbi.extraction.scheduler import (
     EXTRACT_CONVERSATION_JOB,
     ExtractionScheduler,
     SchedulerConfig,
     TickResult,
 )
+from gubbi.storage.repositories import extraction_jobs
 from gubbi.storage.repositories import extraction_queue as queue_repo
 
 if TYPE_CHECKING:
@@ -94,9 +96,10 @@ async def _insert_jobs(
             )
             INSERT INTO extraction_jobs
                 (user_id, conversation_id, source, status, error_code, lane, run_after,
-                 activity_at, filtered_tokens, admitted_at, budget_period_start, attempts)
+                 activity_at, filtered_tokens, token_count_version, admitted_at,
+                 budget_period_start, attempts)
             SELECT $2, numbered.id, 'chatgpt', $4, $5, $6, now() - interval '1 minute',
-                   now() + $7::interval - numbered.n * interval '1 second', $10,
+                   now() + $7::interval - numbered.n * interval '1 second', $10, $11,
                    CASE WHEN $8 THEN now() - interval '1 hour' END,
                    CASE WHEN $8 THEN date_trunc('month', now())::date END,
                    $9
@@ -114,6 +117,7 @@ async def _insert_jobs(
             admitted,
             attempts,
             filtered_tokens,
+            TOKEN_COUNT_VERSION,
         )
     return [UUID(str(row["id"])) for row in rows]
 
@@ -354,6 +358,53 @@ async def test_enqueue_failures_across_two_instances_fail_the_row_until_one_disp
     assert (await _row(clean_rls_db, job_id))["status"] == "pending"
 
 
+async def _dispatch_state(pool: asyncpg.Pool, job_id: UUID) -> asyncpg.Record:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT attempts, dispatch_failures, run_after - completed_at AS delay"
+            " FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    return row
+
+
+async def test_consecutive_enqueue_losses_back_off_longer_without_counting_attempts(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    (job_id,) = await _insert_jobs(clean_rls_db, seeded_a, 1, attempts=1)
+    scheduler = ExtractionScheduler(clean_rls_db, FakeArq(hook=_failing_enqueue), _CONFIG)
+
+    await scheduler.tick()
+    first = await _dispatch_state(clean_rls_db, job_id)
+    await _elapse_backoff(clean_rls_db, job_id)
+    await scheduler.tick()
+    second = await _dispatch_state(clean_rls_db, job_id)
+
+    assert (first["attempts"], first["dispatch_failures"]) == (1, 1)
+    assert (second["attempts"], second["dispatch_failures"]) == (1, 2)
+    # Jitter only shortens a delay, so a second delay past the first-attempt
+    # base delay is backoff growth, not jitter.
+    assert first["delay"] < second["delay"]
+    assert second["delay"] > TRANSIENT_BASE_DELAY
+
+
+async def test_a_worker_claim_resets_the_enqueue_loss_count(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    (job_id,) = await _insert_jobs(clean_rls_db, seeded_a, 1)
+    await ExtractionScheduler(clean_rls_db, FakeArq(hook=_failing_enqueue), _CONFIG).tick()
+    await _elapse_backoff(clean_rls_db, job_id)
+    await ExtractionScheduler(clean_rls_db, FakeArq(), _CONFIG).tick()
+
+    async with clean_rls_db.acquire() as conn:
+        claimed = await extraction_jobs.mark_running(conn, job_id)
+    state = await _dispatch_state(clean_rls_db, job_id)
+
+    assert claimed is True
+    assert (state["attempts"], state["dispatch_failures"]) == (1, 0)
+
+
 async def test_a_row_a_worker_claimed_is_not_failed_as_enqueue_lost(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
@@ -411,6 +462,33 @@ async def test_a_failed_row_stays_failed_while_its_conversation_has_an_active_jo
     assert (row["status"], row["admitted_at"], row["defer_reason"]) == ("failed", None, None)
 
 
+async def test_blocked_failed_rows_filling_a_batch_do_not_hide_later_runnable_work(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    config = replace(_CONFIG, batch_size=3)
+    blocked = await _insert_jobs(
+        clean_rls_db,
+        seeded_a,
+        config.batch_size + 2,
+        status="failed",
+        error_code=ErrorCode.WORKER_LOST.value,
+    )
+    async with clean_rls_db.acquire() as conn:
+        await conn.execute(
+            "INSERT INTO extraction_jobs (user_id, conversation_id, source, status)"
+            " SELECT user_id, conversation_id, source, 'running'"
+            " FROM extraction_jobs WHERE id = ANY($1::uuid[])",
+            blocked,
+        )
+    (later,) = await _insert_jobs(clean_rls_db, seeded_a, 1, activity_offset=timedelta(days=-1))
+    arq = FakeArq()
+
+    result = await ExtractionScheduler(clean_rls_db, arq, config).tick()
+
+    assert result == TickResult(admitted=1, enqueued=1)
+    assert arq.job_ids == [later]
+
+
 async def test_a_failed_row_an_ingest_reactivates_mid_tick_is_skipped_without_aborting_the_tick(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -418,10 +496,10 @@ async def test_a_failed_row_an_ingest_reactivates_mid_tick_is_skipped_without_ab
         clean_rls_db, seeded_a, 1, status="failed", error_code=ErrorCode.WORKER_LOST.value
     )
     (later,) = await _insert_jobs(clean_rls_db, seeded_a, 1, activity_offset=timedelta(days=-1))
-    revivable = queue_repo.revivable_failed
+    select_runnable = queue_repo.select_runnable
 
-    async def _ingest_after_check(conn: asyncpg.Connection, job_ids: list[UUID]) -> set[UUID]:
-        found = await revivable(conn, job_ids)
+    async def _ingest_after_check(conn: asyncpg.Connection, limit: int) -> list[Any]:
+        found = await select_runnable(conn, limit)
         async with clean_rls_db.acquire() as ingest:
             await ingest.execute(
                 "INSERT INTO extraction_jobs (user_id, conversation_id, source, status)"
@@ -431,7 +509,7 @@ async def test_a_failed_row_an_ingest_reactivates_mid_tick_is_skipped_without_ab
             )
         return found
 
-    monkeypatch.setattr(queue_repo, "revivable_failed", _ingest_after_check)
+    monkeypatch.setattr(queue_repo, "select_runnable", _ingest_after_check)
     arq = FakeArq()
 
     result = await ExtractionScheduler(clean_rls_db, arq, _CONFIG).tick()

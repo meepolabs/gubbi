@@ -6,19 +6,28 @@ Skipped automatically when the RLS test database is unreachable.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 import asyncpg
 import pytest
 
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION, count_filtered_tokens
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS
+from gubbi.extraction.scheduler import ExtractionScheduler, SchedulerConfig
+from gubbi.models.conversation import Message
 from gubbi.scripts import release_parked_extraction_jobs as release_script
 from gubbi.scripts.release_parked_extraction_jobs import (
     GroupCount,
     count_parked,
     release_parked,
 )
+from gubbi.storage.repositories import extraction_queue as queue_repo
 from tests.fixtures.tenants import seed_for
+
+if TYPE_CHECKING:
+    from gubbi.crypto.cipher import ContentCipher
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
@@ -62,8 +71,10 @@ _RELEASABLE = {
 }
 
 
-async def _plant_jobs(admin_pool: asyncpg.Pool, user_id: UUID) -> dict[str, UUID]:
-    seed = await seed_for(admin_pool, user_id, topic_path="release-parked", n_entries=0)
+async def _plant_jobs(
+    admin_pool: asyncpg.Pool, user_id: UUID, topic_path: str = "release-parked"
+) -> dict[str, UUID]:
+    seed = await seed_for(admin_pool, user_id, topic_path=topic_path, n_entries=0)
     assert seed.conversation_id is not None
     job_ids: dict[str, UUID] = {}
     async with admin_pool.acquire() as conn, conn.transaction():
@@ -105,13 +116,14 @@ async def _snapshot(
 async def test_dry_run_counts_held_rows_by_status_and_error_class_without_writing(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
+    cipher: ContentCipher,
 ) -> None:
     job_ids = await _plant_jobs(admin_pool, tenant_a)
     before = await _snapshot(admin_pool, job_ids)
 
-    groups = await count_parked(admin_pool)
+    result = await count_parked(admin_pool, cipher)
 
-    assert set(groups) == {
+    assert set(result.groups) == {
         GroupCount("failed", "deterministic", 1),
         GroupCount("failed", "deterministic", 1, terminal=True),
         GroupCount("failed", "terminal", 1, terminal=True),
@@ -119,12 +131,14 @@ async def test_dry_run_counts_held_rows_by_status_and_error_class_without_writin
         GroupCount("failed", "unclassified", 2),
         GroupCount("pending", "none", 1),
     }
+    assert (result.would_hydrate, result.held_unhydrated) == (len(_RELEASABLE), 0)
     assert await _snapshot(admin_pool, job_ids) == before
 
 
 async def test_dry_run_query_runs_in_a_read_only_transaction(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
+    cipher: ContentCipher,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     job_ids = await _plant_jobs(admin_pool, tenant_a)
@@ -139,7 +153,7 @@ async def test_dry_run_query_runs_in_a_read_only_transaction(
     )
 
     with pytest.raises(asyncpg.exceptions.ReadOnlySQLTransactionError):
-        await count_parked(admin_pool)
+        await count_parked(admin_pool, cipher)
 
     assert await _snapshot(admin_pool, job_ids) == before
 
@@ -147,11 +161,12 @@ async def test_dry_run_query_runs_in_a_read_only_transaction(
 async def test_release_frees_held_rows_except_terminal_failures(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
+    cipher: ContentCipher,
 ) -> None:
     job_ids = await _plant_jobs(admin_pool, tenant_a)
     before = await _snapshot(admin_pool, job_ids)
 
-    result = await release_parked(admin_pool)
+    result = await release_parked(admin_pool, cipher)
 
     after = await _snapshot(admin_pool, job_ids)
     changed = {label for label in job_ids if after[label] != before[label]}
@@ -166,13 +181,111 @@ async def test_release_frees_held_rows_except_terminal_failures(
 async def test_second_release_is_a_no_op(
     admin_pool: asyncpg.Pool,
     tenant_a: UUID,
+    cipher: ContentCipher,
 ) -> None:
     job_ids = await _plant_jobs(admin_pool, tenant_a)
-    await release_parked(admin_pool)
+    await release_parked(admin_pool, cipher)
     after_first = await _snapshot(admin_pool, job_ids)
 
-    second = await release_parked(admin_pool)
+    second = await release_parked(admin_pool, cipher)
 
-    assert second.released == ()
+    assert (second.released, second.hydrated) == ((), 0)
     assert second.held_terminal == 2
     assert await _snapshot(admin_pool, job_ids) == after_first
+
+
+async def _plant_legacy_pending(admin_pool: asyncpg.Pool, user_id: UUID, topic_path: str) -> UUID:
+    """One pending row as the queue-columns migration leaves it: held, no token count."""
+    job_ids = await _plant_jobs(admin_pool, user_id, topic_path)
+    async with admin_pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM extraction_jobs WHERE id <> ALL($1::uuid[])"
+            " AND conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $2)",
+            [job_ids["pending_held"]],
+            job_ids["pending_held"],
+        )
+    return job_ids["pending_held"]
+
+
+async def _job(admin_pool: asyncpg.Pool, job_id: UUID) -> asyncpg.Record:
+    row = await admin_pool.fetchrow(
+        "SELECT conversation_id, filtered_tokens, token_count_version,"
+        " run_after = 'infinity' AS held FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    assert row is not None
+    return row
+
+
+async def _stored_tokens(admin_pool: asyncpg.Pool, conversation_id: int, cipher: Any) -> int:
+    rows = await admin_pool.fetch(
+        "SELECT role, content_encrypted, content_nonce FROM messages"
+        " WHERE conversation_id = $1 ORDER BY position",
+        conversation_id,
+    )
+    return count_filtered_tokens(
+        Message(
+            role=row["role"], content=cipher.decrypt(row["content_encrypted"], row["content_nonce"])
+        )
+        for row in rows
+    )
+
+
+class _RecordingArq:
+    async def enqueue_job(
+        self, function: str, *args: Any, _job_id: str | None = None, **kwargs: Any
+    ) -> object:
+        return object()
+
+
+async def test_released_legacy_work_is_charged_its_stored_token_count(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    cipher: ContentCipher,
+) -> None:
+    job_id = await _plant_legacy_pending(admin_pool, tenant_a, "release-legacy")
+    expected = await _stored_tokens(
+        admin_pool, (await _job(admin_pool, job_id))["conversation_id"], cipher
+    )
+
+    result = await release_parked(admin_pool, cipher)
+    hydrated = await _job(admin_pool, job_id)
+    config = SchedulerConfig(paused=False, budget_enabled=True, dispatch_bound=5)
+    await ExtractionScheduler(admin_pool, _RecordingArq(), config).tick()
+    async with admin_pool.acquire() as conn:
+        usage = await queue_repo.user_period_usage(
+            conn, [tenant_a], datetime.now(UTC).date().replace(day=1)
+        )
+
+    assert expected > 0
+    assert (result.hydrated, result.held_unhydrated) == (1, 0)
+    assert (hydrated["filtered_tokens"], hydrated["token_count_version"]) == (
+        expected,
+        TOKEN_COUNT_VERSION,
+    )
+    assert (usage[tenant_a].period_conversations, usage[tenant_a].period_tokens) == (1, expected)
+
+
+async def test_a_row_whose_conversation_does_not_decrypt_stays_held(
+    admin_pool: asyncpg.Pool,
+    tenant_a: UUID,
+    cipher: ContentCipher,
+) -> None:
+    readable = await _plant_legacy_pending(admin_pool, tenant_a, "release-readable")
+    unreadable = await _plant_legacy_pending(admin_pool, tenant_a, "release-unreadable")
+    async with admin_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE messages SET content_encrypted = 'not ciphertext'::bytea"
+            " WHERE conversation_id = (SELECT conversation_id FROM extraction_jobs WHERE id = $1)",
+            unreadable,
+        )
+
+    dry_run = await count_parked(admin_pool, cipher)
+    result = await release_parked(admin_pool, cipher)
+
+    assert (dry_run.would_hydrate, dry_run.held_unhydrated) == (1, 1)
+    assert (result.hydrated, result.held_unhydrated) == (1, 1)
+    assert sum(group.count for group in result.released) == 1
+    assert (await _job(admin_pool, readable))["held"] is False
+    held = await _job(admin_pool, unreadable)
+    assert (held["held"], held["token_count_version"], held["filtered_tokens"]) == (True, None, 0)

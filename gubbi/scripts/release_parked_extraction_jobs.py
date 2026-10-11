@@ -12,11 +12,20 @@ completed and running rows are never touched. A failed row with no or an
 unrecognised error code is counted as ``unclassified`` and released: it retries
 as a transient failure. Releasing twice is a no-op.
 
+A row held by the queue-columns migration carries no token count, and the
+scheduler never admits such a row. ``--release`` first counts its tokens from
+the stored conversation with the estimator ingest uses; a row whose
+conversation cannot be loaded or decrypted stays held and is counted as
+``held_unhydrated``. ``--dry-run`` reports how many rows would be counted and
+how many would stay held. Both modes need the content encryption keys
+(``JOURNAL_ENCRYPTION_MASTER_KEY_V*``).
+
 Output is one JSON log line per count group on stderr, counts only.
 
 USAGE::
 
     JOURNAL_DB_ADMIN_URL="postgresql://admin@host:5432/journal" \\
+    JOURNAL_ENCRYPTION_MASTER_KEY_V1="..." \\
         python -m gubbi.scripts.release_parked_extraction_jobs --dry-run
 
     Replace ``--dry-run`` with ``--release`` to release the held rows.
@@ -35,8 +44,12 @@ from typing import TYPE_CHECKING, Final, Protocol, TextIO
 import structlog
 from pydantic import ValidationError
 
+from gubbi.crypto.cipher import ContentCipher, DecryptionError, load_master_keys_from_env
+from gubbi.extraction.intake import TOKEN_COUNT_VERSION, count_filtered_tokens
 from gubbi.extraction.retry_policy import ErrorCode, retry_class
+from gubbi.storage.exceptions import ConversationNotFoundError
 from gubbi.storage.pg_setup import init_pool
+from gubbi.storage.repositories.conversations import read_conversation_by_id
 from gubbi.storage.repositories.extraction_queue import (
     terminal_failure_args,
     terminal_failure_sql,
@@ -44,6 +57,7 @@ from gubbi.storage.repositories.extraction_queue import (
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, Sequence
+    from uuid import UUID
 
     import asyncpg
 
@@ -59,13 +73,33 @@ WHERE run_after = 'infinity' AND status IN ('pending', 'failed')
 GROUP BY 1, 2, 3
 """  # noqa: S608 - fixed SQL fragments; values are bound
 
+_RELEASABLE: Final = (
+    f"run_after = 'infinity' AND status IN ('pending', 'failed') AND NOT {_TERMINAL_FAILURE}"
+)
+
+_UNCOUNTED_SQL: Final = f"""
+SELECT id, conversation_id
+FROM extraction_jobs
+WHERE {_RELEASABLE}
+  AND token_count_version IS NULL
+ORDER BY conversation_id, id
+"""  # noqa: S608 - fixed SQL fragments; values are bound
+
+_HYDRATE_SQL: Final = """
+UPDATE extraction_jobs
+SET filtered_tokens = $2,
+    token_count_version = $3
+WHERE id = $1
+  AND run_after = 'infinity'
+  AND token_count_version IS NULL
+"""
+
 _RELEASE_SQL: Final = f"""
 WITH released AS (
     UPDATE extraction_jobs
     SET run_after = now()
-    WHERE run_after = 'infinity'
-      AND status IN ('pending', 'failed')
-      AND NOT {_TERMINAL_FAILURE}
+    WHERE {_RELEASABLE}
+      AND token_count_version IS NOT NULL
     RETURNING status, error_code
 )
 SELECT status, error_code, false AS terminal, count(*) AS n
@@ -108,11 +142,28 @@ class GroupCount:
 
 
 @dataclass(frozen=True)
+class DryRunResult:
+    """Held rows by group, and how many uncounted rows would be counted or stay held."""
+
+    groups: tuple[GroupCount, ...]
+    would_hydrate: int = 0
+    held_unhydrated: int = 0
+
+
+@dataclass(frozen=True)
 class ReleaseResult:
-    """Rows released, by group, and terminal rows left held."""
+    """Rows released, by group; rows whose token count was filled in; rows left held."""
 
     released: tuple[GroupCount, ...]
     held_terminal: int
+    hydrated: int = 0
+    held_unhydrated: int = 0
+
+
+@dataclass(frozen=True)
+class _TokenCounts:
+    counted: dict[UUID, int]
+    unloadable: frozenset[UUID]
 
 
 def error_class_of(status: str, error_code: str | None) -> str:
@@ -148,20 +199,69 @@ def group_counts(rows: Iterable[Mapping[str, object]]) -> tuple[GroupCount, ...]
     )
 
 
-async def count_parked(pool: asyncpg.Pool) -> tuple[GroupCount, ...]:
+async def _count_uncounted_tokens(conn: asyncpg.Connection, cipher: ContentCipher) -> _TokenCounts:
+    """Count the filtered tokens of every releasable held row that has no token count.
+
+    Tokens come from the stored conversation, counted as ingest counts them.
+    A row whose conversation is missing or does not decrypt is unloadable.
+    """
+    counted: dict[UUID, int] = {}
+    unloadable: set[UUID] = set()
+    by_conversation: dict[int, int | None] = {}
+    for row in await conn.fetch(_UNCOUNTED_SQL, *terminal_failure_args()):
+        conversation_id = int(row["conversation_id"])
+        if conversation_id not in by_conversation:
+            by_conversation[conversation_id] = await _conversation_tokens(
+                conn, cipher, conversation_id
+            )
+        tokens = by_conversation[conversation_id]
+        if tokens is None:
+            unloadable.add(row["id"])
+        else:
+            counted[row["id"]] = tokens
+    return _TokenCounts(counted=counted, unloadable=frozenset(unloadable))
+
+
+async def _conversation_tokens(
+    conn: asyncpg.Connection, cipher: ContentCipher, conversation_id: int
+) -> int | None:
+    try:
+        _meta, messages, _total = await read_conversation_by_id(conn, cipher, conversation_id)
+    except (ConversationNotFoundError, DecryptionError):
+        return None
+    return count_filtered_tokens(messages)
+
+
+async def count_parked(pool: asyncpg.Pool, cipher: ContentCipher) -> DryRunResult:
     """Count held rows by status and error class without writing anything."""
     async with pool.acquire() as conn, conn.transaction(readonly=True):
         rows = await conn.fetch(_COUNT_PARKED_SQL, *terminal_failure_args())
-    return group_counts(rows)
+        tokens = await _count_uncounted_tokens(conn, cipher)
+    return DryRunResult(
+        groups=group_counts(rows),
+        would_hydrate=len(tokens.counted),
+        held_unhydrated=len(tokens.unloadable),
+    )
 
 
-async def release_parked(pool: asyncpg.Pool) -> ReleaseResult:
-    """Make every non-terminal held row runnable now."""
+async def release_parked(pool: asyncpg.Pool, cipher: ContentCipher) -> ReleaseResult:
+    """Count tokens where missing, then make every non-terminal, counted held row runnable now."""
     args = terminal_failure_args()
     async with pool.acquire() as conn, conn.transaction():
+        tokens = await _count_uncounted_tokens(conn, cipher)
+        if tokens.counted:
+            await conn.executemany(
+                _HYDRATE_SQL,
+                [(job_id, n, TOKEN_COUNT_VERSION) for job_id, n in tokens.counted.items()],
+            )
         rows = await conn.fetch(_RELEASE_SQL, *args)
         held_terminal = await conn.fetchval(_COUNT_HELD_TERMINAL_SQL, *args)
-    return ReleaseResult(released=group_counts(rows), held_terminal=int(held_terminal or 0))
+    return ReleaseResult(
+        released=group_counts(rows),
+        held_terminal=int(held_terminal or 0),
+        hydrated=len(tokens.counted),
+        held_unhydrated=len(tokens.unloadable),
+    )
 
 
 def build_logger(stream: TextIO) -> EventLogger:
@@ -178,8 +278,9 @@ def build_logger(stream: TextIO) -> EventLogger:
     return logger
 
 
-def log_dry_run(log: EventLogger, groups: Sequence[GroupCount]) -> None:
+def log_dry_run(log: EventLogger, result: DryRunResult) -> None:
     """Emit one line per held group, then a summary."""
+    groups = result.groups
     for group in groups:
         log.info(
             "parked_jobs",
@@ -190,7 +291,14 @@ def log_dry_run(log: EventLogger, groups: Sequence[GroupCount]) -> None:
         )
     terminal = sum(group.count for group in groups if group.terminal)
     parked = sum(group.count for group in groups)
-    log.info("dry_run_summary", parked=parked, releasable=parked - terminal, terminal=terminal)
+    log.info(
+        "dry_run_summary",
+        parked=parked,
+        releasable=parked - terminal - result.held_unhydrated,
+        terminal=terminal,
+        would_hydrate=result.would_hydrate,
+        held_unhydrated=result.held_unhydrated,
+    )
 
 
 def log_release(log: EventLogger, result: ReleaseResult) -> None:
@@ -203,6 +311,8 @@ def log_release(log: EventLogger, result: ReleaseResult) -> None:
         "release_summary",
         released=sum(group.count for group in result.released),
         held_terminal=result.held_terminal,
+        hydrated=result.hydrated,
+        held_unhydrated=result.held_unhydrated,
     )
 
 
@@ -225,6 +335,17 @@ def _resolve_admin_dsn() -> str:
     )
 
 
+def _build_cipher() -> ContentCipher:
+    """Return the content cipher from the encryption key environment variables."""
+    keys = load_master_keys_from_env()
+    if not keys:
+        sys.exit(
+            "FATAL: JOURNAL_ENCRYPTION_MASTER_KEY_V* is required; it decrypts stored "
+            "conversations to count the tokens of held jobs that have no count."
+        )
+    return ContentCipher(keys)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Count or release extraction jobs held with run_after = 'infinity'.",
@@ -236,18 +357,19 @@ def _build_parser() -> argparse.ArgumentParser:
     mode.add_argument(
         "--release",
         action="store_true",
-        help="Make held rows runnable now, except terminal failures.",
+        help="Make held rows runnable now, except terminal failures and rows "
+        "whose conversation cannot be read.",
     )
     return parser
 
 
-async def _run(dsn: str, *, release: bool, log: EventLogger) -> None:
+async def _run(dsn: str, cipher: ContentCipher, *, release: bool, log: EventLogger) -> None:
     pool = await init_pool(dsn, min_size=1, max_size=1)
     try:
         if release:
-            log_release(log, await release_parked(pool))
+            log_release(log, await release_parked(pool, cipher))
         else:
-            log_dry_run(log, await count_parked(pool))
+            log_dry_run(log, await count_parked(pool, cipher))
     finally:
         await pool.close()
 
@@ -256,9 +378,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     """CLI entry-point."""
     args = _build_parser().parse_args(argv)
     dsn = _resolve_admin_dsn()
+    cipher = _build_cipher()
     log = build_logger(sys.stderr)
     try:
-        asyncio.run(_run(dsn, release=args.release, log=log))
+        asyncio.run(_run(dsn, cipher, release=args.release, log=log))
     except Exception as exc:
         log.error("release_parked_jobs_failed", release=args.release, error_type=type(exc).__name__)
         raise SystemExit(1) from None
