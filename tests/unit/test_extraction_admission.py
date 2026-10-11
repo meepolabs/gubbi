@@ -2,445 +2,188 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, replace
-from datetime import UTC, date, datetime, timedelta, timezone
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 
 from gubbi.extraction.admission import (
+    Budget,
     Candidate,
     Decision,
     DeferReason,
-    UserUsage,
-    budget_period,
+    UserState,
     decide,
-    monthly_allowance_exhausted,
     order_candidates,
-    user_usage_from_totals,
 )
 from gubbi.extraction.intake import Lane
-from gubbi.extraction.limits import ExtractionLimits
-from gubbi.storage.repositories.extraction_queue import UserPeriodUsage
+from gubbi.extraction.spend_rules import GlobalCeiling, WalletLimits
+
+pytestmark = pytest.mark.unit
 
 T0 = datetime(2026, 1, 1, tzinfo=UTC)
 ALICE = UUID(int=1)
 BOB = UUID(int=2)
 
-LIMITS = ExtractionLimits(
-    monthly_conversations=3,
-    monthly_tokens=1_000,
-    first_sync_conversations=2,
-    first_sync_tokens=500,
-    global_monthly_token_ceiling=10_000,
-    backfill_stop_ratio=0.8,
-    nightly_window_hour=3,
-    onboarding_window=timedelta(days=7),
-)
+LIMITS = WalletLimits(monthly_amount=5_000, background_reserve=1_000, running_cap=3)
+CEILING = GlobalCeiling(tokens=10_000, background_ratio=0.8)
+ROOMY = 100
 
 
-def _job(
-    lane: Lane,
-    tokens: int = 100,
-    *,
-    user: UUID = ALICE,
-    minute: int | None = 0,
-) -> Candidate:
+def _job(lane: Lane, *, user: UUID = ALICE, minute: int | None = 0) -> Candidate:
     activity = None if minute is None else T0 + timedelta(minutes=minute)
-    return Candidate(
-        job_id=uuid4(), user_id=user, lane=lane, activity_at=activity, filtered_tokens=tokens
+    return Candidate(job_id=uuid4(), user_id=user, lane=lane, activity_at=activity)
+
+
+def _state(available: int = 5_000, inflight: int = 0, cap: int = 3) -> UserState:
+    return UserState(
+        limits=replace(LIMITS, running_cap=cap), available=available, inflight=inflight
     )
 
 
-def _reasons(decisions: list[Decision]) -> list[DeferReason | None]:
-    return [d.defer_reason for d in decisions]
+def _budget(global_used: int = 0) -> Budget:
+    return Budget(global_used=global_used, ceiling=CEILING)
 
 
-@pytest.mark.unit
+def _outcome(decision: Decision) -> str:
+    if decision.defer_reason is not None:
+        return decision.defer_reason.value
+    return "admitted" if decision.admitted else "queued"
+
+
 def test_order_is_paste_live_backfill_newest_first_within_lane() -> None:
-    backfill_old = _job(Lane.BACKFILL, minute=1)
-    live_undated = _job(Lane.LIVE, minute=None)
-    live_new = _job(Lane.LIVE, minute=9)
-    paste_old = _job(Lane.PASTE, minute=0)
-    backfill_new = _job(Lane.BACKFILL, minute=5)
-    paste_new = _job(Lane.PASTE, minute=3)
+    old_live = _job(Lane.LIVE, minute=1)
+    new_live = _job(Lane.LIVE, minute=5)
+    undated_live = _job(Lane.LIVE, minute=None)
+    backfill = _job(Lane.BACKFILL, minute=9)
+    paste = _job(Lane.PASTE, minute=0)
 
-    ordered = order_candidates(
-        [backfill_old, live_undated, live_new, paste_old, backfill_new, paste_new]
-    )
+    ordered = order_candidates([backfill, old_live, undated_live, paste, new_live])
 
-    assert ordered == [paste_new, paste_old, live_new, live_undated, backfill_new, backfill_old]
+    assert ordered == [paste, new_live, old_live, undated_live, backfill]
 
 
-@pytest.mark.unit
 def test_decisions_follow_admission_order() -> None:
-    backfill = _job(Lane.BACKFILL)
-    paste = _job(Lane.PASTE)
+    backfill, live, paste = _job(Lane.BACKFILL), _job(Lane.LIVE), _job(Lane.PASTE)
 
-    decisions = decide([backfill, paste], {}, 0, LIMITS)
+    decisions = decide([backfill, live, paste], {ALICE: _state()}, _budget(), ROOMY)
 
-    assert [d.job_id for d in decisions] == [paste.job_id, backfill.job_id]
-
-
-@pytest.mark.unit
-def test_every_candidate_gets_a_decision_and_none_is_refused() -> None:
-    candidates = [_job(lane, 400, user=user) for lane in Lane for user in (ALICE, BOB)] * 3
-    usage = {ALICE: UserUsage(monthly_conversations=2, monthly_tokens=900)}
-
-    decisions = decide(candidates, usage, 9_000, LIMITS)
-
-    assert sorted(d.job_id for d in decisions) == sorted(c.job_id for c in candidates)
-    assert {d.defer_reason for d in decisions} <= {None, DeferReason.BUDGET, DeferReason.GLOBAL}
+    assert [d.job_id for d in decisions] == [paste.job_id, live.job_id, backfill.job_id]
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize("lane", [Lane.PASTE, Lane.LIVE, Lane.BACKFILL])
-def test_budgets_disabled_admits_everything(lane: Lane) -> None:
-    candidates = [_job(lane, 10**9) for _ in range(5)]
-    usage = {ALICE: UserUsage(10**6, 10**12, 10**6, 10**12)}
+@pytest.mark.parametrize(
+    ("lane", "available", "global_used", "inflight", "expected"),
+    [
+        # Global share: paste and live run to the whole ceiling, backfill to 80%.
+        pytest.param(Lane.PASTE, 5_000, 9_999, 0, "admitted", id="paste-just-under-ceiling"),
+        pytest.param(Lane.PASTE, 5_000, 10_000, 0, "global", id="paste-at-ceiling"),
+        pytest.param(Lane.LIVE, 5_000, 10_000, 0, "global", id="live-at-ceiling"),
+        pytest.param(Lane.LIVE, 5_000, 12_000, 0, "global", id="live-over-ceiling"),
+        pytest.param(Lane.BACKFILL, 5_000, 7_999, 0, "admitted", id="backfill-under-80"),
+        pytest.param(Lane.BACKFILL, 5_000, 8_000, 0, "global", id="backfill-at-80"),
+        pytest.param(Lane.LIVE, 5_000, 8_000, 0, "admitted", id="live-past-backfill-share"),
+        # Stop line: paste and live stop at nothing available, backfill below the reserve.
+        pytest.param(Lane.PASTE, 1, 0, 0, "admitted", id="paste-one-left"),
+        pytest.param(Lane.PASTE, 0, 0, 0, "budget", id="paste-nothing-left"),
+        pytest.param(Lane.LIVE, -50, 0, 0, "budget", id="live-negative-balance"),
+        pytest.param(Lane.BACKFILL, 1_000, 0, 0, "admitted", id="backfill-at-reserve"),
+        pytest.param(Lane.BACKFILL, 999, 0, 0, "budget", id="backfill-below-reserve"),
+        pytest.param(Lane.LIVE, 999, 0, 0, "admitted", id="live-below-reserve"),
+        # Running cap: in flight counts dispatched-not-started jobs too.
+        pytest.param(Lane.LIVE, 5_000, 0, 2, "admitted", id="live-under-cap"),
+        pytest.param(Lane.LIVE, 5_000, 0, 3, "queued", id="live-at-cap"),
+        pytest.param(Lane.BACKFILL, 5_000, 0, 3, "queued", id="backfill-at-cap"),
+        # Order of checks: global first, then the stop line, then the cap.
+        pytest.param(Lane.LIVE, 0, 10_000, 0, "global", id="global-wins-over-budget"),
+        pytest.param(Lane.LIVE, 0, 0, 3, "budget", id="budget-wins-over-cap"),
+    ],
+)
+def test_decide(lane: Lane, available: int, global_used: int, inflight: int, expected: str) -> None:
+    job = _job(lane)
 
-    decisions = decide(candidates, usage, 10**15, None)
+    [decision] = decide([job], {ALICE: _state(available, inflight)}, _budget(global_used), ROOMY)
 
-    assert all(d.admitted for d in decisions)
+    assert _outcome(decision) == expected
 
 
-@pytest.mark.unit
+@pytest.mark.parametrize("lane", list(Lane))
+def test_budgets_disabled_ignores_wallet_and_ceiling(lane: Lane) -> None:
+    [decision] = decide([_job(lane)], {ALICE: _state(available=-1_000_000)}, None, ROOMY)
+
+    assert _outcome(decision) == "admitted"
+
+
+def test_budgets_disabled_still_applies_the_running_cap() -> None:
+    [decision] = decide([_job(Lane.PASTE)], {ALICE: _state(inflight=3)}, None, ROOMY)
+
+    assert _outcome(decision) == "queued"
+
+
 def test_no_global_ceiling_never_defers_global() -> None:
-    limits = replace(LIMITS, global_monthly_token_ceiling=None)
+    budget = Budget(global_used=10**12, ceiling=None)
 
-    decisions = decide([_job(Lane.BACKFILL, 100)], {}, 10**15, limits)
+    [decision] = decide([_job(Lane.BACKFILL)], {ALICE: _state()}, budget, ROOMY)
 
-    assert _reasons(decisions) == [None]
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("lane", "usage", "tokens", "expected"),
-    [
-        pytest.param(Lane.LIVE, UserUsage(2, 900), 100, None, id="live-lands-on-both-caps"),
-        pytest.param(Lane.LIVE, UserUsage(3, 0), 1, DeferReason.BUDGET, id="live-conversation-cap"),
-        pytest.param(Lane.PASTE, UserUsage(0, 900), 101, DeferReason.BUDGET, id="paste-token-cap"),
-        pytest.param(
-            Lane.BACKFILL,
-            UserUsage(3, 1_000, 0, 0),
-            500,
-            None,
-            id="backfill-inside-first-sync-ignores-monthly-cap",
-        ),
-        pytest.param(
-            Lane.BACKFILL,
-            UserUsage(3, 0, 2, 0),
-            1,
-            DeferReason.BUDGET,
-            id="backfill-past-first-sync-conversations-hits-monthly-cap",
-        ),
-        pytest.param(
-            Lane.BACKFILL,
-            UserUsage(0, 990, 0, 450),
-            60,
-            None,
-            id="backfill-token-overflow-fits-monthly",
-        ),
-        pytest.param(
-            Lane.BACKFILL,
-            UserUsage(0, 990, 0, 450),
-            61,
-            DeferReason.BUDGET,
-            id="backfill-token-overflow-exceeds-monthly",
-        ),
-    ],
-)
-def test_user_budget(
-    lane: Lane, usage: UserUsage, tokens: int, expected: DeferReason | None
-) -> None:
-    decisions = decide([_job(lane, tokens)], {ALICE: usage}, 0, LIMITS)
-
-    assert _reasons(decisions) == [expected]
+    assert _outcome(decision) == "admitted"
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("lane", "global_used", "tokens", "expected"),
-    [
-        pytest.param(Lane.BACKFILL, 7_900, 100, None, id="backfill-lands-on-stop-ratio"),
-        pytest.param(
-            Lane.BACKFILL, 7_900, 101, DeferReason.GLOBAL, id="backfill-crosses-stop-ratio"
-        ),
-        pytest.param(Lane.BACKFILL, 8_000, 1, DeferReason.GLOBAL, id="backfill-at-stop-ratio"),
-        pytest.param(Lane.LIVE, 8_000, 100, None, id="live-past-stop-ratio"),
-        pytest.param(Lane.PASTE, 9_900, 100, None, id="paste-lands-on-ceiling"),
-        pytest.param(Lane.LIVE, 9_900, 101, DeferReason.GLOBAL, id="live-crosses-ceiling"),
-        pytest.param(Lane.PASTE, 10_000, 1, DeferReason.GLOBAL, id="paste-at-ceiling"),
-    ],
-)
-def test_global_ceiling(
-    lane: Lane, global_used: int, tokens: int, expected: DeferReason | None
-) -> None:
-    decisions = decide([_job(lane, tokens)], {}, global_used, LIMITS)
+def test_dispatches_in_one_call_count_toward_the_running_cap() -> None:
+    jobs = [_job(Lane.LIVE, minute=m) for m in range(4)]
 
-    assert _reasons(decisions) == [expected]
+    decisions = decide(jobs, {ALICE: _state(inflight=1)}, _budget(), ROOMY)
+
+    assert [_outcome(d) for d in decisions] == ["admitted", "admitted", "queued", "queued"]
 
 
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("lane", "usage", "global_used", "expected"),
-    [
-        pytest.param(Lane.LIVE, UserUsage(0, 0), 0, [None], id="live-on-empty-month"),
-        pytest.param(Lane.LIVE, UserUsage(0, 1), 0, [DeferReason.BUDGET], id="live-on-used-month"),
-        pytest.param(
-            Lane.LIVE, UserUsage(0, 0), 8_000, [DeferReason.GLOBAL], id="live-past-global-headroom"
-        ),
-        pytest.param(
-            Lane.BACKFILL,
-            UserUsage(0, 0, 2, 500),
-            0,
-            [None],
-            id="backfill-past-first-sync-on-empty-month",
-        ),
-        pytest.param(
-            Lane.BACKFILL,
-            UserUsage(1, 0, 2, 500),
-            0,
-            [DeferReason.BUDGET],
-            id="backfill-past-first-sync-on-used-month",
-        ),
-    ],
-)
-def test_oversized_job(
-    lane: Lane, usage: UserUsage, global_used: int, expected: list[DeferReason | None]
-) -> None:
-    decisions = decide([_job(lane, 2_500)], {ALICE: usage}, global_used, LIMITS)
+def test_one_users_cap_does_not_hold_back_another_user() -> None:
+    alice = [_job(Lane.PASTE, minute=m) for m in range(5)]
+    bob = _job(Lane.BACKFILL, user=BOB)
 
-    assert _reasons(decisions) == expected
+    decisions = decide([*alice, bob], {ALICE: _state(), BOB: _state()}, _budget(), ROOMY)
+
+    by_id = {d.job_id: _outcome(d) for d in decisions}
+    assert sorted(by_id[j.job_id] for j in alice) == ["admitted"] * 3 + ["queued"] * 2
+    assert by_id[bob.job_id] == "admitted"
 
 
-@pytest.mark.unit
-def test_oversized_job_consumes_the_month_for_later_work_in_the_same_call() -> None:
-    oversized, small = _job(Lane.LIVE, 2_500, minute=2), _job(Lane.LIVE, 1, minute=1)
+def test_capacity_bounds_admissions_across_users() -> None:
+    jobs = [_job(Lane.LIVE, user=ALICE), _job(Lane.LIVE, user=BOB), _job(Lane.BACKFILL)]
 
-    decisions = decide([oversized, small], {}, 0, LIMITS)
+    decisions = decide(jobs, {ALICE: _state(), BOB: _state()}, _budget(), capacity=2)
 
-    assert _reasons(decisions) == [None, DeferReason.BUDGET]
-
-
-@pytest.mark.unit
-def test_global_reason_wins_over_budget() -> None:
-    usage = {ALICE: UserUsage(3, 1_000)}
-
-    decisions = decide([_job(Lane.LIVE, 100)], usage, 10_000, LIMITS)
-
-    assert _reasons(decisions) == [DeferReason.GLOBAL]
+    assert [_outcome(d) for d in decisions] == ["admitted", "admitted", "queued"]
 
 
-@pytest.mark.unit
-def test_user_usage_accumulates_within_one_call() -> None:
-    first, second, other_user = (
-        _job(Lane.LIVE, 600, minute=2),
-        _job(Lane.LIVE, 600, minute=1),
-        _job(Lane.LIVE, 600, user=BOB, minute=0),
-    )
+def test_admission_adds_nothing_to_balance_or_global_usage() -> None:
+    jobs = [_job(Lane.LIVE, minute=m) for m in range(3)]
 
-    decisions = decide([first, second, other_user], {}, 0, LIMITS)
+    decisions = decide(jobs, {ALICE: _state(available=1)}, _budget(global_used=9_999), ROOMY)
 
-    assert _reasons(decisions) == [None, DeferReason.BUDGET, None]
-
-
-@pytest.mark.unit
-def test_global_usage_accumulates_within_one_call() -> None:
-    candidates = [_job(Lane.LIVE, 600, user=uuid4(), minute=m) for m in (3, 2, 1)]
-
-    decisions = decide(candidates, {}, 8_900, LIMITS)
-
-    assert _reasons(decisions) == [None, DeferReason.GLOBAL, DeferReason.GLOBAL]
-
-
-@pytest.mark.unit
-def test_first_sync_allowance_accumulates_within_one_call() -> None:
-    candidates = [_job(Lane.BACKFILL, 10, minute=m) for m in (5, 4, 3, 2, 1, 0)]
-
-    decisions = decide(candidates, {ALICE: UserUsage(2, 0)}, 0, LIMITS)
-
-    assert _reasons(decisions) == [None, None, None, *[DeferReason.BUDGET] * 3]
-
-
-@pytest.mark.unit
-def test_live_is_admitted_before_backfill_draws_spare_monthly() -> None:
-    backfill = _job(Lane.BACKFILL, 401, minute=9)
-    live = _job(Lane.LIVE, 400, minute=0)
-    usage = {ALICE: UserUsage(0, 200, 2, 500)}
-
-    decisions = decide([backfill, live], usage, 0, LIMITS)
-
-    assert decisions == [Decision(live.job_id, None), Decision(backfill.job_id, DeferReason.BUDGET)]
-
-
-@pytest.mark.unit
-def test_backfill_spare_monthly_waits_behind_deferred_live_work() -> None:
-    big_live = _job(Lane.LIVE, 900)
-    small_backfill = _job(Lane.BACKFILL, 50)
-    usage = {ALICE: UserUsage(0, 200, 2, 500)}
-
-    decisions = decide([big_live, small_backfill], usage, 0, LIMITS)
-
-    assert _reasons(decisions) == [DeferReason.BUDGET, DeferReason.BUDGET]
-
-
-@pytest.mark.unit
-def test_deferred_live_does_not_block_backfill_inside_first_sync() -> None:
-    big_live = _job(Lane.LIVE, 900)
-    small_backfill = _job(Lane.BACKFILL, 50)
-    usage = {ALICE: UserUsage(0, 200, 0, 0)}
-
-    decisions = decide([big_live, small_backfill], usage, 0, LIMITS)
-
-    assert _reasons(decisions) == [DeferReason.BUDGET, None]
-
-
-@pytest.mark.unit
-def test_deferred_live_of_another_user_does_not_block_backfill() -> None:
-    bob_live = _job(Lane.LIVE, 900, user=BOB)
-    alice_backfill = _job(Lane.BACKFILL, 50)
-    usage = {BOB: UserUsage(0, 200), ALICE: UserUsage(0, 200, 2, 500)}
-
-    decisions = decide([bob_live, alice_backfill], usage, 0, LIMITS)
-
-    assert _reasons(decisions) == [DeferReason.BUDGET, None]
-
-
-@pytest.mark.unit
-def test_input_usage_mapping_is_not_mutated() -> None:
-    usage = {ALICE: UserUsage(0, 0)}
-
-    decide([_job(Lane.LIVE, 100)], usage, 0, LIMITS)
-
-    assert usage == {ALICE: UserUsage(0, 0)}
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("totals", "expected"),
-    [
-        pytest.param(
-            (5, 900, 0, 0, 0, 0), UserUsage(5, 900, 0, 0), id="no-backfill-is-all-monthly"
-        ),
-        pytest.param(
-            (3, 600, 2, 500, 2, 500), UserUsage(1, 100, 2, 500), id="backfill-inside-allowance"
-        ),
-        pytest.param(
-            (4, 800, 4, 800, 4, 800), UserUsage(2, 300, 4, 800), id="period-crosses-allowance"
-        ),
-        pytest.param(
-            (3, 300, 3, 300, 9, 900), UserUsage(3, 300, 9, 900), id="allowance-used-earlier"
-        ),
-        pytest.param(
-            (3, 300, 3, 300, 4, 600), UserUsage(2, 100, 4, 600), id="allowance-split-across-periods"
-        ),
-    ],
-)
-def test_user_usage_from_totals(totals: tuple[int, ...], expected: UserUsage) -> None:
-    period_conv, period_tok, period_bf_conv, period_bf_tok, life_bf_conv, life_bf_tok = totals
-
-    usage = user_usage_from_totals(
-        period_conversations=period_conv,
-        period_tokens=period_tok,
-        period_backfill_conversations=period_bf_conv,
-        period_backfill_tokens=period_bf_tok,
-        lifetime_backfill_conversations=life_bf_conv,
-        lifetime_backfill_tokens=life_bf_tok,
-        limits=LIMITS,
-    )
-
-    assert usage == expected
-
-
-@pytest.mark.unit
-def test_usage_from_totals_matches_charges_made_by_decide() -> None:
-    backfill = [_job(Lane.BACKFILL, 200, minute=m) for m in (5, 4, 3)]
-    live = _job(Lane.LIVE, 100)
-    limits = replace(LIMITS, monthly_conversations=10)
-    decisions = decide([*backfill, live], {}, 0, limits)
     assert all(d.admitted for d in decisions)
 
-    rebuilt = user_usage_from_totals(
-        period_conversations=4,
-        period_tokens=700,
-        period_backfill_conversations=3,
-        period_backfill_tokens=600,
-        lifetime_backfill_conversations=3,
-        lifetime_backfill_tokens=600,
-        limits=limits,
-    )
-    follow_up = decide(
-        [_job(Lane.LIVE, 1_000 - rebuilt.monthly_tokens)], {ALICE: rebuilt}, 0, limits
+
+def test_a_deferred_user_does_not_affect_another_user() -> None:
+    broke = _job(Lane.LIVE, user=ALICE)
+    funded = _job(Lane.LIVE, user=BOB)
+
+    decisions = decide(
+        [broke, funded], {ALICE: _state(available=0), BOB: _state()}, _budget(), ROOMY
     )
 
-    assert rebuilt == UserUsage(2, 200, 3, 600)
-    assert _reasons(follow_up) == [None]
+    assert {d.job_id: _outcome(d) for d in decisions} == {
+        broke.job_id: "budget",
+        funded.job_id: "admitted",
+    }
 
 
-@pytest.mark.unit
-def test_repository_usage_feeds_usage_from_totals_by_name() -> None:
-    totals = UserPeriodUsage(
-        period_conversations=4,
-        period_tokens=700,
-        period_backfill_conversations=3,
-        period_backfill_tokens=600,
-        lifetime_backfill_conversations=3,
-        lifetime_backfill_tokens=600,
+def test_deferred_decisions_carry_their_user_and_lane() -> None:
+    job = _job(Lane.BACKFILL, user=BOB)
+
+    [decision] = decide([job], {BOB: _state(available=0)}, _budget(), ROOMY)
+
+    assert (decision.user_id, decision.lane, decision.defer_reason) == (
+        BOB,
+        Lane.BACKFILL,
+        DeferReason.BUDGET,
     )
-
-    usage = user_usage_from_totals(**asdict(totals), limits=LIMITS)
-
-    assert usage == UserUsage(2, 200, 3, 600)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("usage", "exhausted"),
-    [
-        pytest.param(UserUsage(), False, id="unused-month"),
-        pytest.param(UserUsage(2, 998), False, id="below-both-limits"),
-        pytest.param(UserUsage(3, 10), True, id="conversation-limit-reached"),
-        pytest.param(UserUsage(1, 1_000), True, id="token-limit-reached"),
-        pytest.param(UserUsage(0, 0, 2, 500), False, id="backfill-inside-first-sync"),
-    ],
-)
-def test_monthly_allowance_exhausted(usage: UserUsage, exhausted: bool) -> None:
-    assert monthly_allowance_exhausted(usage, LIMITS) is exhausted
-
-
-@pytest.mark.unit
-def test_zero_allowance_is_not_exhausted_before_anything_is_charged() -> None:
-    zero = replace(LIMITS, monthly_conversations=0, monthly_tokens=0)
-
-    assert monthly_allowance_exhausted(UserUsage(), zero) is False
-
-
-@pytest.mark.unit
-def test_monthly_allowance_exhausted_agrees_with_decide_for_a_minimal_live_job() -> None:
-    for usage in (UserUsage(2, 998), UserUsage(2, 999), UserUsage(3, 10), UserUsage(1, 1_000)):
-        live = _job(Lane.LIVE, tokens=1)
-        (decision,) = decide([live], {ALICE: usage}, 0, LIMITS)
-        assert monthly_allowance_exhausted(usage, LIMITS) is not decision.admitted
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
-    ("now", "expected"),
-    [
-        pytest.param(datetime(2026, 10, 31, 23, 59, tzinfo=UTC), date(2026, 10, 1), id="utc"),
-        pytest.param(
-            datetime(2026, 10, 31, 20, tzinfo=timezone(timedelta(hours=-5))),
-            date(2026, 11, 1),
-            id="offset-crosses-month-in-utc",
-        ),
-    ],
-)
-def test_budget_period_is_the_utc_month_start(now: datetime, expected: date) -> None:
-    assert budget_period(now) == expected
-
-
-@pytest.mark.unit
-def test_budget_period_rejects_naive_time() -> None:
-    with pytest.raises(ValueError, match="timezone-aware"):
-        budget_period(datetime(2026, 10, 1))

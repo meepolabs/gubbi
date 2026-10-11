@@ -4,15 +4,9 @@ Pure functions only: no I/O, no logging, no clock reads. Callers pass ``now``
 and the user's upload history so every decision is reproducible in tests.
 """
 
-from collections.abc import Iterable
 from datetime import UTC, datetime, time, timedelta
 from enum import StrEnum
 from typing import Final
-
-from gubbi.extraction.chunking import estimate_tokens
-from gubbi.models.conversation import ConversationTurn, keep_conversation_roles
-
-TOKEN_COUNT_VERSION: Final = 1
 
 PASTE_SOURCES: Final = frozenset({"paste_memories"})
 SYNC_SOURCES: Final = frozenset({"extension_chatgpt", "extension_claude", "zip_upload"})
@@ -82,26 +76,3 @@ def next_nightly_window(now: datetime, hour: int) -> datetime:
     if now_utc <= today_window:
         return today_window
     return today_window + timedelta(days=1)
-
-
-def run_after_for(lane: Lane, now: datetime, nightly_hour: int) -> datetime:
-    """Return when a new job in ``lane`` becomes runnable.
-
-    Live work waits for the next nightly window; paste and backfill run now.
-
-    Raises:
-        ValueError: as :func:`next_nightly_window`, for a live lane.
-    """
-    if lane is Lane.LIVE:
-        return next_nightly_window(now, nightly_hour)
-    return now
-
-
-def count_filtered_tokens(messages: Iterable[ConversationTurn]) -> int:
-    """Estimate the input tokens of the role-filtered transcript.
-
-    Only the turns kept for extraction count, so system prompts and tool
-    output never draw on a user's budget. The result is stable for a given
-    :data:`TOKEN_COUNT_VERSION`.
-    """
-    return sum(estimate_tokens(m.content) for m in keep_conversation_roles(messages))

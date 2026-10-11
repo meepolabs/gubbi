@@ -2,9 +2,9 @@
 
 Accepts normalized conversation batches from the browser extension.
 Transforms, dedupes, saves to the conversations table, and records one
-pending extraction job per saved conversation with its scheduling lane, run
-time and filtered token count. No LLM calls and no job dispatch: the
-extraction scheduler admits and runs queued jobs.
+pending extraction job per saved conversation with its scheduling lane and run
+time. No LLM calls and no job dispatch: the extraction scheduler admits and
+runs queued jobs.
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from dataclasses import asdict, dataclass
 # (validator-build / route-registration), so they must stay runtime imports
 # despite `from __future__ import annotations` -- ruff TC would otherwise
 # push them under TYPE_CHECKING and break Pydantic model_rebuild().
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID  # noqa: TC003
 
@@ -33,23 +33,14 @@ from gubbi.app_state import require_app_ctx
 from gubbi.audit.sql import record_audit
 from gubbi.config import get_settings
 from gubbi.crypto.guard import require_cipher
-from gubbi.extraction.admission import (
-    budget_period,
-    monthly_allowance_exhausted,
-    user_usage_from_totals,
-)
-from gubbi.extraction.intake import (
-    TOKEN_COUNT_VERSION,
-    assign_lane,
-    count_filtered_tokens,
-    run_after_for,
-)
-from gubbi.extraction.limits import ExtractionLimits, limits_for
+from gubbi.extraction.intake import assign_lane
+from gubbi.extraction.spend_rules import limits_for, run_after_for
 from gubbi.models.conversation import Message, keep_conversation_roles
 from gubbi.storage.connection import safe_acquire
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import extraction_jobs, extraction_queue
+from gubbi.storage.repositories import wallet as wallet_repo
 from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
 from gubbi.storage.repositories.topics import TopicAlreadyExists
 from gubbi.storage.repositories.topics import create as create_topic
@@ -123,10 +114,11 @@ class IngestConversationResponse(BaseModel):
                                   conversation and its extraction job are
                                   stored together or not at all, so nothing
                                   was kept and a re-send is accepted.
-    budget_exhausted           -- True when the user has used up the current
-                                  month's extraction allowance, so new work
-                                  waits for the next period. Always False
-                                  when budgets are disabled.
+    budget_exhausted           -- True when the user's extraction wallet has
+                                  nothing left (monthly allowance and credit
+                                  used up), so new work waits for the next
+                                  month or more credit. Always False when
+                                  budgets are disabled.
 
     Invariant:
     conversations_saved == extractions_enqueued
@@ -176,10 +168,16 @@ def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
-def _activity_at(conv: ConversationPayload, kept: Iterable[MessagePayload]) -> datetime:
-    """Latest timestamp among the kept messages, else the conversation's update, else creation."""
+def _activity_at(
+    conv: ConversationPayload, kept: Iterable[MessagePayload], now: datetime
+) -> datetime:
+    """Latest timestamp among the kept messages, else the conversation's update, else creation.
+
+    Never later than ``now``: a client clock ahead of the server cannot push a
+    conversation ahead of others in its lane.
+    """
     stamps = [_as_utc(msg.timestamp) for msg in kept if msg.timestamp is not None]
-    return max(stamps, default=_as_utc(conv.updated_at or conv.created_at))
+    return min(max(stamps, default=_as_utc(conv.updated_at or conv.created_at)), now)
 
 
 @dataclass(frozen=True, slots=True)
@@ -189,8 +187,6 @@ class _QueueFields:
     lane: str
     run_after: datetime
     activity_at: datetime
-    filtered_tokens: int
-    token_count_version: int
 
 
 async def _queue_extraction(
@@ -232,18 +228,12 @@ async def _queue_extraction(
     )
 
 
-async def _budget_exhausted(
-    conn: asyncpg.Connection,
-    user_id: UUID,
-    limits: ExtractionLimits,
-    now: datetime,
-) -> bool:
-    """Whether the user's monthly extraction allowance is used up for the current period."""
+async def _budget_exhausted(conn: asyncpg.Connection, user_id: UUID) -> bool:
+    """Whether the user's wallet has nothing available."""
     async with conn.transaction():
         await _set_user_rls_local(conn, user_id)
-        totals = await extraction_queue.user_period_usage(conn, [user_id], budget_period(now))
-    usage = user_usage_from_totals(**asdict(totals[user_id]), limits=limits)
-    return monthly_allowance_exhausted(usage, limits)
+        balances = await wallet_repo.available(conn, {user_id: limits_for(user_id).monthly_amount})
+    return balances[user_id] <= 0
 
 
 async def _set_user_rls_local(conn: asyncpg.Connection, user_id: UUID) -> None:
@@ -279,9 +269,10 @@ async def ingest_conversations(
 
     Each conversation is deduped by (user_id, platform, platform_id), saved
     under the default "inbox" topic, and gets a pending extraction job. The
-    job carries its scheduling lane, when it may first run, the latest
-    message time and the filtered token count; nothing is enqueued or charged
-    here -- the extraction scheduler admits queued jobs against the budget.
+    job carries its scheduling lane, when it may first run and the latest
+    message time (never later than now); nothing is enqueued or charged here
+    -- the extraction scheduler admits queued jobs against the budget, and a
+    job is charged after it runs.
 
     Lanes: a paste request is ``paste`` and runs now. A synced conversation
     is ``backfill`` (runs now) when it predates the user's first upload from
@@ -304,9 +295,9 @@ async def ingest_conversations(
       continues (HTTP 200). A re-send of it is then accepted, since no row
       carries its platform id.
     - An existing in-flight job for the conversation is reused. While it is
-      pending and not yet admitted, its lane, run time, activity and token
-      count are refreshed from this upload; only a newly created job is
-      audited as created.
+      pending and not yet dispatched, its lane, run time and activity are
+      refreshed from this upload; only a newly created job is audited as
+      created.
     """
     user_id, _scopes = auth
     app_ctx = _get_app_ctx(request)
@@ -314,7 +305,7 @@ async def ingest_conversations(
     log = bound_logger(request)
 
     now = datetime.now(UTC)
-    limits = limits_for(user_id)
+    llm_settings = get_settings().llm
 
     conversations_saved = 0
     conversations_skipped_dedupe = 0
@@ -389,21 +380,19 @@ async def ingest_conversations(
             except ValueError:
                 title = validate_title(f"Conversation {conv.created_at.isoformat()}")
 
-            activity_at = _activity_at(conv, kept_payloads)
+            activity_at = _activity_at(conv, kept_payloads, now)
             lane = assign_lane(
                 body.source,
                 activity_at=activity_at,
                 now=now,
                 first_upload_at_platform=prior_uploads.by_platform[conv.platform],
                 first_upload_at_any=prior_uploads.any_platform,
-                onboarding_window=limits.onboarding_window,
+                onboarding_window=timedelta(days=llm_settings.onboarding_window_days),
             )
             queue_fields = _QueueFields(
                 lane=lane.value,
-                run_after=run_after_for(lane, now, limits.nightly_window_hour),
+                run_after=run_after_for(lane, now, llm_settings.nightly_window_hour),
                 activity_at=activity_at,
-                filtered_tokens=count_filtered_tokens(messages),
-                token_count_version=TOKEN_COUNT_VERSION,
             )
 
             try:
@@ -453,8 +442,8 @@ async def ingest_conversations(
             if save_result.superseded_json_path is not None:
                 superseded_json_paths.append(save_result.superseded_json_path)
 
-        budget_exhausted = get_settings().llm.llm_budget_enabled and await _budget_exhausted(
-            conn, user_id, limits, now
+        budget_exhausted = llm_settings.llm_budget_enabled and await _budget_exhausted(
+            conn, user_id
         )
 
     for path in superseded_json_paths:

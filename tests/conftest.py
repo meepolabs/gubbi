@@ -526,7 +526,8 @@ async def clean_rls_db(admin_pool: asyncpg.Pool) -> AsyncIterator[asyncpg.Pool]:
     """
     truncate_sql = (
         "TRUNCATE topics, entries, conversations, messages, entry_embeddings,"
-        " users, audit_log, extraction_jobs RESTART IDENTITY CASCADE"
+        " users, audit_log, extraction_jobs, credit_grants, llm_charges"
+        " RESTART IDENTITY CASCADE"
     )
     async with admin_pool.acquire() as conn:
         await conn.execute(truncate_sql)

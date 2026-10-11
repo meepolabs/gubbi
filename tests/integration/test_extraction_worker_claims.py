@@ -19,7 +19,13 @@ from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.extraction.worker import WorkerSettings
 from gubbi.storage.repositories import extraction_jobs as jobs_repo
 from gubbi.storage.repositories import extraction_queue as queue_repo
-from tests.fixtures.extraction_db import SeedMessage, job_ctx, seed_conversation, seed_job
+from tests.fixtures.extraction_db import (
+    SeedMessage,
+    charges_of,
+    job_ctx,
+    seed_conversation,
+    seed_job,
+)
 from tests.fixtures.extraction_job import ScriptedProvider, chunk_output, entry
 
 if TYPE_CHECKING:
@@ -53,7 +59,7 @@ async def _job_row(admin_pool: asyncpg.Pool, job_id: UUID) -> asyncpg.Record:
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT status, error_code, attempts, run_after > now() AS backed_off,"
-            " cents_spent, llm_calls, filtered_tokens FROM extraction_jobs WHERE id = $1",
+            " cents_spent, llm_calls FROM extraction_jobs WHERE id = $1",
             job_id,
         )
     assert row is not None
@@ -108,7 +114,7 @@ async def test_a_revived_job_of_an_already_processed_conversation_completes_with
     async with admin_pool.acquire() as conn:
         assert await queue_repo.revive_failed(conn, [job_id]) == {job_id}
         await conn.execute(
-            "UPDATE extraction_jobs SET run_after = now(), filtered_tokens = 900 WHERE id = $1",
+            "UPDATE extraction_jobs SET run_after = now() WHERE id = $1",
             job_id,
         )
         await conn.execute("UPDATE conversations SET processed_at = now() WHERE id = $1", conv_id)
@@ -121,9 +127,5 @@ async def test_a_revived_job_of_an_already_processed_conversation_completes_with
     row = await _job_row(admin_pool, job_id)
     assert result["skipped"] is True
     assert provider.user_contents == []
-    assert (row["status"], row["cents_spent"], row["llm_calls"], row["filtered_tokens"]) == (
-        "completed",
-        0,
-        0,
-        0,
-    )
+    assert (row["status"], row["cents_spent"], row["llm_calls"]) == ("completed", 0, 0)
+    assert await charges_of(admin_pool, job_id) == []

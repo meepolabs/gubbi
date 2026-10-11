@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
-from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.service import ExtractionService
 from gubbi.storage.embedding_service import EmbeddingService
 from gubbi.storage.repositories import extraction_jobs, extraction_queue
@@ -111,10 +110,10 @@ async def seed_job(
     *,
     admitted: bool = True,
 ) -> UUID:
-    """Insert a counted pending extraction job for the conversation, under the user's RLS scope.
+    """Insert a pending extraction job for the conversation, under the user's RLS scope.
 
-    ``admitted`` charges it to ``period_start`` as the scheduler does before
-    dispatch; only an admitted job can be claimed by a worker.
+    ``admitted`` marks it dispatched as the scheduler does; only a dispatched
+    job can be claimed by a worker.
     """
     from gubbi_common.db.user_scoped import user_scoped_connection
 
@@ -125,10 +124,9 @@ async def seed_job(
             conversation_id,
             "extension_chatgpt",
             period_start=period_start,
-            token_count_version=TOKEN_COUNT_VERSION,
         )
         if admitted:
-            await extraction_queue.admit(conn, [job_id], period_start)
+            await extraction_queue.admit(conn, [job_id])
         return job_id
 
 
@@ -141,3 +139,16 @@ def job_ctx(app_pool: asyncpg.Pool, cipher: ContentCipher, provider: LLMProvider
         "embedding_service": embedding_service(),
         "redis": AsyncMock(),
     }
+
+
+async def charges_of(admin_pool: asyncpg.Pool, job_id: UUID) -> list[asyncpg.Record]:
+    """Every wallet charge written for ``job_id``, oldest attempt first."""
+    async with admin_pool.acquire() as conn:
+        return list(
+            await conn.fetch(
+                "SELECT attempt, job_kind, input_tokens, cached_input_tokens, output_tokens,"
+                " weighted, monthly_part, credit_part, month"
+                " FROM llm_charges WHERE job_id = $1 ORDER BY attempt",
+                job_id,
+            )
+        )

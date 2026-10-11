@@ -9,7 +9,6 @@ from uuid import UUID
 import asyncpg
 import pytest
 
-from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.extraction.scheduler import ExtractionScheduler, SchedulerConfig, TickResult
 from gubbi.storage.repositories import extraction_queue as queue_repo
@@ -49,9 +48,8 @@ async def _insert(
         """
         INSERT INTO extraction_jobs
             (user_id, conversation_id, source, status, error_code, run_after, created_at,
-             filtered_tokens, token_count_version, attempts)
-        VALUES ($1, $2, $7, $3, $4, now() - interval '1 minute', now() + $5::interval,
-                100, $6, 1)
+             attempts)
+        VALUES ($1, $2, $6, $3, $4, now() - interval '1 minute', now() + $5::interval, 1)
         RETURNING id
         """,
         seed.user_id,
@@ -59,7 +57,6 @@ async def _insert(
         status,
         error_code,
         created,
-        TOKEN_COUNT_VERSION,
         source,
     )
     return job_id
@@ -116,7 +113,7 @@ async def test_a_failed_job_behind_a_finished_newer_job_is_superseded_not_run(
     assert arq.job_ids == []
     assert await _state(clean_rls_db, older) == _SUPERSEDED
     async with clean_rls_db.acquire() as conn, conn.transaction():
-        assert await queue_repo.select_runnable(conn, limit=10) == []
+        assert await queue_repo.select_runnable(conn, limit=10, per_user=10) == []
 
 
 @pytest.mark.parametrize(
@@ -208,7 +205,7 @@ async def test_an_active_job_of_another_source_keeps_a_failed_job_of_its_convers
     )
 
     async with clean_rls_db.acquire() as conn, conn.transaction():
-        runnable = await queue_repo.select_runnable(conn, limit=10)
+        runnable = await queue_repo.select_runnable(conn, limit=10, per_user=10)
 
     assert runnable == []
     assert await _state(clean_rls_db, failed) == ("failed", ErrorCode.WORKER_LOST.value, False)

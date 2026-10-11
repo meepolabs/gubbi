@@ -97,6 +97,9 @@ class MetricNames:
     # One per extraction job failure written, by retry class and whether the
     # job will run again.
     EXTRACTION_JOBS_FAILED: Final[str] = "extraction.jobs.failed_total"
+    # Weighted tokens charged to user wallets, by lane and by which balance
+    # paid: ``monthly`` allowance or ``credit``.
+    EXTRACTION_CHARGES_WEIGHTED: Final[str] = "extraction.charges.weighted_total"
 
 
 # Attribute keys each allowlisted metric may carry; any other key is dropped.
@@ -109,6 +112,7 @@ GUBBI_METRIC_ALLOWLIST: Mapping[str, frozenset[str]] = {
     MetricNames.EXTRACTION_PROVIDER_TOKENS_MONTH: frozenset({"kind"}),
     MetricNames.EXTRACTION_WORKER_HEARTBEAT: frozenset(),
     MetricNames.EXTRACTION_JOBS_FAILED: frozenset({"error_class", "outcome"}),
+    MetricNames.EXTRACTION_CHARGES_WEIGHTED: frozenset({"lane", "part"}),
 }
 
 

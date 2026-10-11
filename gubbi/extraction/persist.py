@@ -17,6 +17,7 @@ from gubbi_common.audit.targets import TargetKind
 
 from gubbi.audit import record_audit
 from gubbi.constants import EXTRACTION_VERSION
+from gubbi.extraction.charging import SettledAttempt, settle_attempt
 from gubbi.extraction.dedupe import DedupeAction, DedupeCandidate, DedupeDecision, classify
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
@@ -96,13 +97,18 @@ class ExtractionToPersist:
 
 @dataclass(frozen=True)
 class PersistResult:
-    """What a run wrote: the topic, the inserted entries, and the stored entries it linked."""
+    """What a run wrote: the topic, the inserted entries, and the stored entries it linked.
+
+    ``settled`` is the job attempt's charge and follow-up, None when the run
+    completed no job row.
+    """
 
     topic_id: int
     topic_created: bool
     entry_ids: tuple[int, ...]
     linked_entry_ids: tuple[int, ...]
     suppressed: int
+    settled: SettledAttempt | None = None
 
 
 async def ensure_topic(conn: asyncpg.Connection, path: str, title: str) -> tuple[int, bool]:
@@ -139,7 +145,7 @@ async def persist_extraction(
     embedding_service: EmbeddingStore,
     run: ExtractionToPersist,
 ) -> PersistResult:
-    """Write one extraction run and mark its conversation and job complete.
+    """Write one extraction run, mark its conversation and job complete and charge the run.
 
     Candidates are deduped against each other and the user's stored entries of
     the same event day. A candidate repeating a stored entry inserts nothing and
@@ -168,13 +174,16 @@ async def persist_extraction(
     await conv_repo.set_extraction_state(
         conn, run.conversation_id, run.content_hash, EXTRACTION_VERSION
     )
-    await _record_completion(conn, run, topic_created=topic_created, entries_created=len(entry_ids))
+    settled = await _record_completion(
+        conn, run, topic_created=topic_created, entries_created=len(entry_ids)
+    )
     result = PersistResult(
         topic_id=topic_id,
         topic_created=topic_created,
         entry_ids=tuple(entry_ids),
         linked_entry_ids=tuple(linked),
         suppressed=sum(d.action is DedupeAction.SUPPRESS for d in decisions),
+        settled=settled,
     )
     await logger.info(
         "extraction_persisted",
@@ -299,7 +308,8 @@ async def _record_completion(
     *,
     topic_created: bool,
     entries_created: int,
-) -> None:
+) -> SettledAttempt | None:
+    """Audit the run and complete its job; return the job attempt's charge and follow-up."""
     await record_audit(
         conn,
         actor_type="user",
@@ -315,7 +325,7 @@ async def _record_completion(
         },
     )
     if run.job_id is None:
-        return
+        return None
     updated = await extraction_jobs.mark_completed(
         conn,
         run.job_id,
@@ -329,13 +339,15 @@ async def _record_completion(
         llm_calls=run.llm_calls,
         chunks=run.chunks,
     )
-    if updated:
-        await record_audit(
-            conn,
-            action="extraction_job.completed",
-            actor_type="user",
-            actor_id=str(run.user_id),
-            target_kind=TargetKind.EXTRACTION_JOB,
-            target_id=str(run.job_id),
-            metadata={"conversation_id": run.conversation_id, "entries_created": entries_created},
-        )
+    if not updated:
+        return None
+    await record_audit(
+        conn,
+        action="extraction_job.completed",
+        actor_type="user",
+        actor_id=str(run.user_id),
+        target_kind=TargetKind.EXTRACTION_JOB,
+        target_id=str(run.job_id),
+        metadata={"conversation_id": run.conversation_id, "entries_created": entries_created},
+    )
+    return await settle_attempt(conn, run.job_id, run.usage, completed=True)

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import math
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -21,12 +21,12 @@ from gubbi.extraction.llm.provider import LLMRefusalError
 from gubbi.extraction.pipeline import PipelineFailure
 from gubbi.models.conversation import Message
 from gubbi.storage.repositories import entries as entry_repo
-from gubbi.storage.repositories import extraction_queue as queue_repo
 from gubbi.storage.repositories import topics as topic_repo
 from gubbi.tools.constants import MAX_ENTRY_CONTENT_CHARS
 from gubbi.validation import local_today
 from tests.fixtures.extraction_db import (
     SeedMessage,
+    charges_of,
     embedding_service,
     job_ctx,
     seed_conversation,
@@ -343,25 +343,19 @@ async def test_a_live_entry_of_the_same_day_is_linked_and_never_skips_extraction
     assert (live["source_conversation_id"], live["deleted_at"]) == (conv_id, None)
 
 
-async def test_a_rule_skipped_job_adds_no_tokens_to_usage(
+async def test_a_rule_skipped_job_writes_no_charge(
     app_pool: asyncpg.Pool, admin_pool: asyncpg.Pool, cipher: ContentCipher, tenant_a: UUID
 ) -> None:
-    period = date(2026, 10, 1)
     messages = [SeedMessage("user", "ok", _SPOKEN_AT), SeedMessage("assistant", "Sure!")]
     conv_id = await seed_conversation(admin_pool, cipher, tenant_a, messages)
-    job_id = await seed_job(app_pool, tenant_a, conv_id, admitted=False)
-    async with admin_pool.acquire() as conn:
-        await conn.execute("UPDATE extraction_jobs SET filtered_tokens = 900 WHERE id = $1", job_id)
-        await queue_repo.admit(conn, [job_id], period)
+    job_id = await seed_job(app_pool, tenant_a, conv_id)
     provider = ScriptedProvider([])
 
     result = await extract_conversation(
         job_ctx(app_pool, cipher, provider), conv_id, str(tenant_a), str(job_id)
     )
 
-    async with admin_pool.acquire() as conn:
-        usage = await queue_repo.user_period_usage(conn, [tenant_a], period)
     assert result["skipped"] is True
     assert provider.user_contents == []
     assert (await _job_row(admin_pool, job_id))["status"] == "completed"
-    assert usage[tenant_a].period_tokens == 0
+    assert await charges_of(admin_pool, job_id) == []

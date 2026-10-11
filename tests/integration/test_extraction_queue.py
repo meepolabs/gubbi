@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -11,27 +11,22 @@ import asyncpg
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
-from gubbi.extraction.intake import TOKEN_COUNT_VERSION, Lane
+from gubbi.extraction.intake import Lane
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode, is_terminal
-from gubbi.scripts.release_parked_extraction_jobs import release_parked
+from gubbi.scripts.release_held_extraction_jobs import release_held
 from gubbi.storage.repositories import extraction_queue as queue_repo
-from gubbi.storage.repositories.extraction_queue import UserPeriodUsage
 
 if TYPE_CHECKING:
-    from gubbi.crypto.cipher import ContentCipher
     from tests.fixtures.tenants import TenantSeed
 
 pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.integration]
 
-_PERIOD = date(2026, 10, 1)
-_OTHER_PERIOD = date(2026, 9, 1)
 # Relative times are offsets from the database's now() at insert, so a long
 # run never ages a fixture row past a threshold the test compares it with.
 _NOW = timedelta(0)
 _PAST = timedelta(hours=-1)
 _FUTURE = timedelta(days=1)
 _INFINITY = "infinity"
-_ZERO_USAGE = UserPeriodUsage(0, 0, 0, 0, 0, 0)
 
 
 @dataclass(frozen=True)
@@ -42,12 +37,9 @@ class Job:
     lane: str = "live"
     source: str = "chatgpt"
     activity_at: datetime | None = None
-    filtered_tokens: int = 0
     admitted_at: datetime | timedelta | None = None
-    budget_period_start: date | None = None
     created_at: datetime | timedelta = _NOW
     attempts: int = 0
-    token_count_version: int | None = TOKEN_COUNT_VERSION
 
 
 def _at(db_now: datetime, value: datetime | timedelta) -> datetime:
@@ -75,10 +67,8 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             """
             INSERT INTO extraction_jobs
                 (user_id, conversation_id, source, status, run_after, error_code, lane,
-                 activity_at, filtered_tokens, admitted_at, budget_period_start, created_at,
-                 attempts, token_count_version)
-            VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9, $10, $11, $12, $13,
-                    $14)
+                 activity_at, admitted_at, created_at, attempts)
+            VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9, $10, $11)
             RETURNING id
             """,
             seed.user_id,
@@ -91,28 +81,20 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             job.error_code,
             job.lane,
             job.activity_at,
-            job.filtered_tokens,
             None if job.admitted_at is None else _at(db_now, job.admitted_at),
-            job.budget_period_start,
             _at(db_now, job.created_at),
             job.attempts,
-            job.token_count_version,
         )
     return UUID(str(job_id))
 
 
 def _admitted(**fields: Any) -> Job:
-    return Job(admitted_at=_PAST, budget_period_start=_PERIOD, **fields)
+    return Job(admitted_at=_PAST, **fields)
 
 
-async def _usage(pool: asyncpg.Pool, user_id: UUID, period: date) -> UserPeriodUsage:
+async def _runnable_ids(pool: asyncpg.Pool, limit: int = 100, per_user: int = 100) -> list[UUID]:
     async with pool.acquire() as conn:
-        return (await queue_repo.user_period_usage(conn, [user_id], period))[user_id]
-
-
-async def _runnable_ids(pool: asyncpg.Pool, limit: int = 100) -> list[UUID]:
-    async with pool.acquire() as conn:
-        jobs = await queue_repo.select_runnable(conn, limit)
+        jobs = await queue_repo.select_runnable(conn, limit, per_user)
     return [job.job_id for job in jobs]
 
 
@@ -121,138 +103,38 @@ async def _runnable_ids(pool: asyncpg.Pool, limit: int = 100) -> list[UUID]:
 # ---------------------------------------------------------------------------
 
 
-async def test_admit_charges_a_row_only_once(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
-) -> None:
-    job_id = await _insert(clean_rls_db, seeded_a, Job(filtered_tokens=700))
-
-    async with clean_rls_db.acquire() as conn:
-        first = await queue_repo.admit(conn, [job_id], _PERIOD)
-        charged = await conn.fetchrow(
-            "SELECT admitted_at, budget_period_start FROM extraction_jobs WHERE id = $1", job_id
-        )
-        second = await queue_repo.admit(conn, [job_id], _OTHER_PERIOD)
-        after = await conn.fetchrow(
-            "SELECT admitted_at, budget_period_start FROM extraction_jobs WHERE id = $1", job_id
-        )
-
-    assert (first, second) == (1, 0)
-    assert after == charged
-    assert await _usage(clean_rls_db, seeded_a.user_id, _PERIOD) == UserPeriodUsage(
-        1, 700, 0, 0, 0, 0
-    )
-    assert await _usage(clean_rls_db, seeded_a.user_id, _OTHER_PERIOD) == _ZERO_USAGE
-
-
-@pytest.mark.parametrize("status", ["running", "failed", "completed"])
-async def test_admit_leaves_a_row_that_is_not_pending_uncharged(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, status: str
-) -> None:
-    job_id = await _insert(clean_rls_db, seeded_a, Job(status=status, filtered_tokens=700))
-
-    async with clean_rls_db.acquire() as conn:
-        charged = await queue_repo.admit(conn, [job_id], _PERIOD)
-
-    assert charged == 0
-    assert await _usage(clean_rls_db, seeded_a.user_id, _PERIOD) == _ZERO_USAGE
-
-
-async def test_admit_leaves_a_row_without_a_token_count_uncharged(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
-) -> None:
-    job_id = await _insert(clean_rls_db, seeded_a, Job(token_count_version=None))
-
-    async with clean_rls_db.acquire() as conn:
-        charged = await queue_repo.admit(conn, [job_id], _PERIOD)
-        admitted_at = await conn.fetchval(
-            "SELECT admitted_at FROM extraction_jobs WHERE id = $1", job_id
-        )
-
-    assert (charged, admitted_at) == (0, None)
-
-
-async def test_admit_clears_the_defer_reason(
+async def test_admit_marks_a_pending_row_dispatched_and_clears_its_defer_reason(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
     job_id = await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn:
-        await _defer(conn, job_id, "budget")
-        await queue_repo.admit(conn, [job_id], _PERIOD)
-        reason = await conn.fetchval(
-            "SELECT defer_reason FROM extraction_jobs WHERE id = $1", job_id
+        await conn.execute(
+            "UPDATE extraction_jobs SET defer_reason = 'budget' WHERE id = $1", job_id
+        )
+        changed = await queue_repo.admit(conn, [job_id])
+        row = await conn.fetchrow(
+            "SELECT admitted_at IS NOT NULL AS dispatched, defer_reason"
+            " FROM extraction_jobs WHERE id = $1",
+            job_id,
         )
 
-    assert reason is None
+    assert changed == 1
+    assert (row["dispatched"], row["defer_reason"]) == (True, None)
 
 
-# ---------------------------------------------------------------------------
-# usage
-# ---------------------------------------------------------------------------
-
-
-async def test_user_period_usage_counts_only_admitted_rows(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, seeded_b: TenantSeed
+@pytest.mark.parametrize("status", ["running", "failed", "completed"])
+async def test_admit_leaves_a_row_that_is_not_pending_alone(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, status: str
 ) -> None:
-    for job in (
-        _admitted(lane="live", filtered_tokens=10),
-        _admitted(lane="backfill", filtered_tokens=200),
-        Job(
-            admitted_at=_PAST,
-            budget_period_start=_OTHER_PERIOD,
-            lane="backfill",
-            filtered_tokens=3000,
-        ),
-        Job(
-            admitted_at=_PAST, budget_period_start=_OTHER_PERIOD, lane="live", filtered_tokens=40000
-        ),
-        Job(lane="backfill", filtered_tokens=500000),
-        Job(lane="backfill", budget_period_start=_PERIOD, filtered_tokens=8000000),
-        Job(lane="live", filtered_tokens=6000000),
-    ):
-        await _insert(clean_rls_db, seeded_a, job)
-    await _insert(clean_rls_db, seeded_b, _admitted(lane="backfill", filtered_tokens=70000000))
+    job_id = await _insert(clean_rls_db, seeded_a, Job(status=status))
 
     async with clean_rls_db.acquire() as conn:
-        usage = await queue_repo.user_period_usage(
-            conn, [seeded_a.user_id, seeded_b.user_id], _PERIOD
+        changed = await queue_repo.admit(conn, [job_id])
+        admitted_at = await conn.fetchval(
+            "SELECT admitted_at FROM extraction_jobs WHERE id = $1", job_id
         )
 
-    assert usage == {
-        seeded_a.user_id: UserPeriodUsage(
-            period_conversations=2,
-            period_tokens=210,
-            period_backfill_conversations=1,
-            period_backfill_tokens=200,
-            lifetime_backfill_conversations=2,
-            lifetime_backfill_tokens=3200,
-        ),
-        seeded_b.user_id: UserPeriodUsage(1, 70000000, 1, 70000000, 1, 70000000),
-    }
-
-
-async def test_user_period_usage_maps_a_user_without_jobs_to_zero(
-    clean_rls_db: asyncpg.Pool, tenant_a: UUID
-) -> None:
-    assert await _usage(clean_rls_db, tenant_a, _PERIOD) == _ZERO_USAGE
-
-
-async def test_global_period_tokens_sums_admitted_rows_of_the_period(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, seeded_b: TenantSeed
-) -> None:
-    await _insert(clean_rls_db, seeded_a, _admitted(filtered_tokens=1))
-    await _insert(clean_rls_db, seeded_b, _admitted(filtered_tokens=20))
-    await _insert(clean_rls_db, seeded_a, Job(budget_period_start=_PERIOD, filtered_tokens=300))
-    await _insert(
-        clean_rls_db,
-        seeded_b,
-        Job(admitted_at=_PAST, budget_period_start=_OTHER_PERIOD, filtered_tokens=4000),
-    )
-
-    async with clean_rls_db.acquire() as conn:
-        total = await queue_repo.global_period_tokens(conn, _PERIOD)
-        empty = await queue_repo.global_period_tokens(conn, date(2026, 1, 1))
-
-    assert (total, empty) == (21, 0)
+    assert (changed, admitted_at) == (0, None)
 
 
 # ---------------------------------------------------------------------------
@@ -263,10 +145,10 @@ async def test_global_period_tokens_sums_admitted_rows_of_the_period(
 @pytest.mark.parametrize(
     "excluded",
     [
-        pytest.param(Job(run_after=_INFINITY), id="pending-parked"),
+        pytest.param(Job(run_after=_INFINITY), id="pending-held"),
         pytest.param(
             Job(status="failed", error_code="worker_lost", run_after=_INFINITY),
-            id="failed-retryable-parked",
+            id="failed-retryable-held",
         ),
         pytest.param(Job(status="failed", error_code="llm_refused"), id="failed-terminal"),
         pytest.param(
@@ -286,12 +168,7 @@ async def test_global_period_tokens_sums_admitted_rows_of_the_period(
             Job(status="failed", error_code="llm_rate_limited", run_after=_FUTURE),
             id="failed-backoff-not-elapsed",
         ),
-        pytest.param(_admitted(), id="pending-already-admitted"),
-        pytest.param(Job(token_count_version=None), id="pending-without-token-count"),
-        pytest.param(
-            Job(status="failed", error_code="worker_lost", token_count_version=None),
-            id="failed-without-token-count",
-        ),
+        pytest.param(_admitted(), id="pending-already-dispatched"),
         pytest.param(Job(status="running"), id="running"),
         pytest.param(Job(status="completed"), id="completed"),
     ],
@@ -393,7 +270,7 @@ _HELD_FAILURE_CASES = [
 
 
 async def test_release_never_frees_a_failed_row_the_scheduler_will_not_select(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, cipher: ContentCipher
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
     job_ids = {
         case: await _insert(
@@ -404,7 +281,7 @@ async def test_release_never_frees_a_failed_row_the_scheduler_will_not_select(
         for case in _HELD_FAILURE_CASES
     }
 
-    await release_parked(clean_rls_db, cipher)
+    await release_held(clean_rls_db)
 
     selected = set(await _runnable_ids(clean_rls_db, limit=len(job_ids) + 1))
     still_held = set(
@@ -440,6 +317,23 @@ async def test_select_runnable_orders_by_lane_then_newest_activity(
     assert await _runnable_ids(clean_rls_db, limit=2) == expected[:2]
 
 
+async def test_select_runnable_takes_at_most_per_user_rows_of_each_user_before_the_limit(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, seeded_b: TenantSeed
+) -> None:
+    def at(minute: int) -> datetime:
+        return datetime(2026, 10, 1, 12, minute, tzinfo=UTC)
+
+    busy = [
+        await _insert(clean_rls_db, seeded_a, Job(lane="paste", activity_at=at(50 - m)))
+        for m in range(5)
+    ]
+    quiet = await _insert(clean_rls_db, seeded_b, Job(lane="backfill", activity_at=at(0)))
+
+    selected = await _runnable_ids(clean_rls_db, limit=3, per_user=2)
+
+    assert selected == [busy[0], busy[1], quiet]
+
+
 async def test_select_runnable_returns_the_scheduling_fields(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
@@ -447,112 +341,139 @@ async def test_select_runnable_returns_the_scheduling_fields(
     job_id = await _insert(
         clean_rls_db,
         seeded_a,
-        Job(lane="backfill", source="claude", activity_at=activity, filtered_tokens=321),
+        Job(lane="backfill", source="claude", activity_at=activity),
     )
     async with clean_rls_db.acquire() as conn:
         await conn.execute("UPDATE extraction_jobs SET attempts = 2 WHERE id = $1", job_id)
-        (job,) = await queue_repo.select_runnable(conn, 10)
+        (job,) = await queue_repo.select_runnable(conn, 10, 10)
 
     assert job.job_id == job_id
     assert job.user_id == seeded_a.user_id
     assert job.source == "claude"
     assert job.lane is Lane.BACKFILL
     assert job.activity_at == activity
-    assert job.filtered_tokens == 321
     assert job.attempts == 2
     assert job.admitted_at is None
 
 
 # ---------------------------------------------------------------------------
-# defer
+# defer_lane
 # ---------------------------------------------------------------------------
 
 
-_FAR_PERIOD_START = datetime(2999, 1, 1, tzinfo=UTC)
 _HOUR = timedelta(hours=1)
 
 
-async def _defer(conn: asyncpg.Connection, job_id: UUID, reason: str) -> int:
-    return await queue_repo.defer(
-        conn, [job_id], reason, next_period_start=_FAR_PERIOD_START, recheck=_HOUR
+async def _defer_lane(
+    conn: asyncpg.Connection,
+    lane: str = "live",
+    reason: str = "budget",
+    *,
+    user_id: UUID | None,
+    recheck: timedelta = _HOUR,
+) -> int:
+    return await queue_repo.defer_lane(conn, lane, reason, user_id=user_id, recheck=recheck)
+
+
+async def _deferral(pool: asyncpg.Pool, job_id: UUID) -> tuple[str | None, bool]:
+    row = await pool.fetchrow(
+        "SELECT defer_reason, run_after > now() AS held FROM extraction_jobs WHERE id = $1",
+        job_id,
     )
+    assert row is not None
+    return row["defer_reason"], row["held"]
 
 
 @pytest.mark.parametrize("reason", ["budget", "global", "provider"])
-async def test_defer_records_the_reason(
+async def test_defer_lane_records_the_reason(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, reason: str
 ) -> None:
     job_id = await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn:
-        changed = await _defer(conn, job_id, reason)
-        stored = await conn.fetchval(
-            "SELECT defer_reason FROM extraction_jobs WHERE id = $1", job_id
-        )
+        changed = await _defer_lane(conn, reason=reason, user_id=seeded_a.user_id)
 
     assert changed == 1
-    assert stored == reason
+    assert await _deferral(clean_rls_db, job_id) == (reason, True)
+
+
+async def test_defer_lane_defers_only_the_users_runnable_rows_of_that_lane(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, seeded_b: TenantSeed
+) -> None:
+    deferred = [
+        await _insert(clean_rls_db, seeded_a, Job(lane="live")),
+        await _insert(clean_rls_db, seeded_a, Job(lane="live", status="failed")),
+    ]
+    untouched = [
+        await _insert(clean_rls_db, seeded_a, Job(lane="paste")),
+        await _insert(clean_rls_db, seeded_a, _admitted(lane="live")),
+        await _insert(clean_rls_db, seeded_a, Job(lane="live", status="running")),
+        await _insert(clean_rls_db, seeded_a, Job(lane="live", run_after=_INFINITY)),
+        await _insert(
+            clean_rls_db, seeded_a, Job(lane="live", status="failed", error_code="llm_refused")
+        ),
+        await _insert(clean_rls_db, seeded_b, Job(lane="live")),
+    ]
+
+    async with clean_rls_db.acquire() as conn:
+        changed = await _defer_lane(conn, user_id=seeded_a.user_id)
+
+    assert changed == len(deferred)
+    assert [(await _deferral(clean_rls_db, j))[0] for j in deferred] == ["budget"] * 2
+    assert [(await _deferral(clean_rls_db, j))[0] for j in untouched] == [None] * 6
+
+
+async def test_defer_lane_without_a_user_defers_the_lane_for_every_user(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, seeded_b: TenantSeed
+) -> None:
+    jobs = [
+        await _insert(clean_rls_db, seeded_a, Job(lane="backfill")),
+        await _insert(clean_rls_db, seeded_b, Job(lane="backfill")),
+    ]
+    other_lane = await _insert(clean_rls_db, seeded_b, Job(lane="live"))
+
+    async with clean_rls_db.acquire() as conn:
+        changed = await _defer_lane(conn, "backfill", "global", user_id=None)
+
+    assert changed == 2
+    assert [await _deferral(clean_rls_db, j) for j in jobs] == [("global", True)] * 2
+    assert await _deferral(clean_rls_db, other_lane) == (None, False)
 
 
 @pytest.mark.parametrize(
-    ("next_period_start_in", "expected_run_after_in"),
+    ("recheck", "expect_month_start"),
     [
-        pytest.param(timedelta(days=30), _HOUR, id="recheck_first"),
-        pytest.param(timedelta(minutes=10), timedelta(minutes=10), id="period_first"),
+        pytest.param(timedelta(minutes=5), False, id="recheck-first"),
+        pytest.param(timedelta(days=40), True, id="next-month-first"),
     ],
 )
-async def test_defer_holds_the_row_until_the_earlier_of_recheck_and_next_period(
-    clean_rls_db: asyncpg.Pool,
-    seeded_a: TenantSeed,
-    next_period_start_in: timedelta,
-    expected_run_after_in: timedelta,
+async def test_defer_lane_holds_until_the_earlier_of_recheck_and_next_utc_month(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, recheck: timedelta, expect_month_start: bool
 ) -> None:
     job_id = await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn, conn.transaction():
-        db_now: datetime = await conn.fetchval("SELECT now()")
-        await queue_repo.defer(
-            conn,
-            [job_id],
-            "budget",
-            next_period_start=db_now + next_period_start_in,
-            recheck=_HOUR,
-        )
-        run_after = await conn.fetchval(
-            "SELECT run_after - now() FROM extraction_jobs WHERE id = $1", job_id
-        )
-
-    assert run_after == expected_run_after_in
-
-
-@pytest.mark.parametrize(
-    "job",
-    [
-        pytest.param(Job(status="completed"), id="completed"),
-        pytest.param(Job(status="running"), id="running"),
-        pytest.param(_admitted(), id="admitted"),
-    ],
-)
-async def test_defer_leaves_a_row_that_is_not_queued_untouched(
-    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, job: Job
-) -> None:
-    job_id = await _insert(clean_rls_db, seeded_a, job)
-    async with clean_rls_db.acquire() as conn:
-        before = await conn.fetchval("SELECT run_after FROM extraction_jobs WHERE id = $1", job_id)
-        changed = await _defer(conn, job_id, "budget")
-        stored = await conn.fetchrow(
-            "SELECT defer_reason, run_after FROM extraction_jobs WHERE id = $1", job_id
+        await _defer_lane(conn, user_id=seeded_a.user_id, recheck=recheck)
+        row = await conn.fetchrow(
+            """
+            SELECT run_after - now() AS wait,
+                   run_after = (date_trunc('month', now() AT TIME ZONE 'UTC')
+                                + interval '1 month') AT TIME ZONE 'UTC' AS at_month_start
+            FROM extraction_jobs WHERE id = $1
+            """,
+            job_id,
         )
 
-    assert changed == 0
-    assert (stored["defer_reason"], stored["run_after"]) == (None, before)
+    assert row["at_month_start"] is expect_month_start
+    if not expect_month_start:
+        assert row["wait"] == recheck
 
 
-async def test_defer_rejects_an_unknown_reason(
+async def test_defer_lane_rejects_an_unknown_reason(
     clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
-    job_id = await _insert(clean_rls_db, seeded_a, Job())
+    await _insert(clean_rls_db, seeded_a, Job())
     async with clean_rls_db.acquire() as conn:
         with pytest.raises(asyncpg.CheckViolationError):
-            await _defer(conn, job_id, "whim")
+            await _defer_lane(conn, reason="whim", user_id=seeded_a.user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -629,6 +550,28 @@ async def test_inflight_admitted_count_counts_admitted_pending_and_running(
         assert await queue_repo.inflight_admitted_count(conn) == 2
 
 
+async def test_inflight_by_user_counts_each_users_dispatched_pending_and_running(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, seeded_b: TenantSeed
+) -> None:
+    no_jobs = uuid4()
+    for job in (
+        _admitted(),
+        _admitted(status="running"),
+        _admitted(status="completed"),
+        Job(),
+        Job(status="running"),
+    ):
+        await _insert(clean_rls_db, seeded_a, job)
+    await _insert(clean_rls_db, seeded_b, _admitted())
+
+    async with clean_rls_db.acquire() as conn:
+        counts = await queue_repo.inflight_by_user(
+            conn, [seeded_a.user_id, seeded_b.user_id, no_jobs]
+        )
+
+    assert counts == {seeded_a.user_id: 2, seeded_b.user_id: 1, no_jobs: 0}
+
+
 # ---------------------------------------------------------------------------
 # first_upload_at
 # ---------------------------------------------------------------------------
@@ -687,23 +630,3 @@ async def test_first_upload_at_under_rls_sees_only_the_users_own_jobs(
         other = await queue_repo.first_upload_at(conn, seeded_b.user_id, None)
 
     assert (own, own_any, other) == (day(5), day(5), None)
-
-
-async def test_user_period_usage_under_rls_counts_the_users_own_admitted_jobs(
-    clean_rls_db: asyncpg.Pool,
-    app_pool: asyncpg.Pool,
-    seeded_a: TenantSeed,
-    seeded_b: TenantSeed,
-) -> None:
-    await _insert(clean_rls_db, seeded_a, _admitted(filtered_tokens=30))
-    await _insert(clean_rls_db, seeded_b, _admitted(filtered_tokens=70))
-
-    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
-        usage = await queue_repo.user_period_usage(
-            conn, [seeded_a.user_id, seeded_b.user_id], _PERIOD
-        )
-
-    assert usage == {
-        seeded_a.user_id: UserPeriodUsage(1, 30, 0, 0, 0, 0),
-        seeded_b.user_id: _ZERO_USAGE,
-    }

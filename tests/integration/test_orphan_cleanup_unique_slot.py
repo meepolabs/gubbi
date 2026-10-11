@@ -21,7 +21,6 @@ import asyncpg
 import pytest
 
 from gubbi.extraction import orphan_cleanup
-from gubbi.extraction.intake import TOKEN_COUNT_VERSION
 from gubbi.extraction.orphan_cleanup import run_orphan_cleanup
 from tests.fixtures.tenants import TenantSeed
 
@@ -35,7 +34,6 @@ pytestmark = [
 # value and delegates every other sleep to the real implementation.
 _CYCLE_SLEEP_SECONDS = 7
 _real_sleep = asyncio.sleep
-_CHARGED_TOKENS = 1234
 
 
 async def _run_one_cycle(admin_pool: asyncpg.Pool) -> None:
@@ -71,17 +69,15 @@ async def _seed_job(
     at: datetime,
     attempts: int = 1,
 ) -> UUID:
-    """Insert an admitted extraction_jobs row for ``seed``'s conversation, timestamped ``at``."""
+    """Insert a dispatched extraction_jobs row for ``seed``'s conversation, timestamped ``at``."""
     assert seed.conversation_id is not None
     job_id = uuid4()
     await admin_pool.execute(
         """
         INSERT INTO extraction_jobs
             (id, user_id, conversation_id, source, status, period_start,
-             created_at, started_at, attempts, filtered_tokens, token_count_version,
-             admitted_at, budget_period_start)
-        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6, $7, $8, $9, $5,
-                '2026-05-01'::date)
+             created_at, started_at, attempts, admitted_at)
+        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6, $7, $5)
         """,
         job_id,
         seed.user_id,
@@ -90,8 +86,6 @@ async def _seed_job(
         at,
         at if status == "running" else None,
         attempts,
-        _CHARGED_TOKENS,
-        TOKEN_COUNT_VERSION,
     )
     return job_id
 
@@ -114,14 +108,18 @@ async def test_stuck_running_row_is_failed_as_worker_lost_with_a_future_run_afte
 
     row = await admin_pool.fetchrow(
         "SELECT status, error_code, run_after > now() AS deferred,"
-        " run_after < 'infinity' AS retried, filtered_tokens, admitted_at"
+        " run_after < 'infinity' AS retried, admitted_at"
         " FROM extraction_jobs WHERE id = $1",
         job_id,
+    )
+    charges = await admin_pool.fetchval(
+        "SELECT count(*) FROM llm_charges WHERE job_id = $1", job_id
     )
     assert row is not None
     assert (row["status"], row["error_code"]) == ("failed", "worker_lost")
     assert (row["deferred"], row["retried"]) == (True, True)
-    assert (row["filtered_tokens"], row["admitted_at"]) == (_CHARGED_TOKENS, stuck)
+    assert row["admitted_at"] == stuck
+    assert charges == 0
 
 
 async def test_an_old_pending_row_is_left_queued(

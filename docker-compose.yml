@@ -116,12 +116,19 @@ services:
       # Self-host OAuth (leave empty for API-key-only deploys)
       - JOURNAL_SERVER_URL
       - JOURNAL_PASSWORD_HASH
-      # Redis URL for the extraction worker + budget helpers. gubbi requires
+      # Redis URL for the extraction job queue and worker. gubbi requires
       # Redis to boot (startup ping is unconditional). The default points at
       # the bundled `redis` service above; operators who already run Redis
       # elsewhere can override JOURNAL_REDIS_URL in the environment and the
       # explicit value wins.
       - JOURNAL_REDIS_URL=${JOURNAL_REDIS_URL:-redis://redis:6379}
+      # Extraction budgets. Off by default (self-host runs unlimited); a
+      # hosted (Mode 3) deploy refuses to boot with budgets off unless the
+      # unlimited override is set, and the ceiling is required when budgets
+      # are on. Bare passthroughs: unset keeps the defaults.
+      - JOURNAL_LLM_BUDGET_ENABLED
+      - JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING
+      - JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE
       # OpenTelemetry. OTEL_ENABLED=false bypasses the
       # exporter entirely; useful when the Collector isn't deployed yet.
       - OTEL_ENABLED

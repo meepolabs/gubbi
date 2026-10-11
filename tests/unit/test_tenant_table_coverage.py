@@ -28,6 +28,8 @@ _TENANT_TABLES = frozenset(
         "entry_embeddings",
         "users",  # added by migration 0019_rls_users
         "extraction_jobs",  # added by migration 0023_extraction_jobs_relocate; RLS policy extraction_jobs_user_isolation
+        "credit_grants",  # added by migration 0006_llm_wallet; RLS policy credit_grants_user_isolation
+        "llm_charges",  # added by migration 0006_llm_wallet; RLS policy llm_charges_user_isolation
     }
 )
 

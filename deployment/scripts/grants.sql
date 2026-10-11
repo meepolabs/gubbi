@@ -74,6 +74,15 @@ GRANT ALL ON TABLE public.messages          TO journal_admin;
 GRANT ALL ON TABLE public.entry_embeddings  TO journal_admin;
 GRANT ALL ON TABLE public.extraction_jobs   TO journal_admin;
 
+-- credit_grants / llm_charges: the per-user LLM wallet is append-only --
+-- journal_app gets SELECT + INSERT only (gubbi 0006_llm_wallet). Grant
+-- sources (gubbi-cloud onboarding, later payments) INSERT credit_grants
+-- through journal_app under the user's RLS scope.
+GRANT SELECT, INSERT ON TABLE public.credit_grants TO journal_app;
+GRANT SELECT, INSERT ON TABLE public.llm_charges   TO journal_app;
+GRANT ALL ON TABLE public.credit_grants TO journal_admin;
+GRANT ALL ON TABLE public.llm_charges   TO journal_admin;
+
 -- users: narrowed -- journal_app gets SELECT + UPDATE only (no INSERT, no DELETE).
 -- Original chain narrowed in gubbi migration 0019 (rls_users) to enforce that
 -- user rows are written via journal_admin / Hydra subject flow only.

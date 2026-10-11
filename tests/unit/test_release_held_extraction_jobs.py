@@ -1,4 +1,4 @@
-"""Unit tests for the pure parts of ``gubbi.scripts.release_parked_extraction_jobs``."""
+"""Unit tests for the pure parts of ``gubbi.scripts.release_held_extraction_jobs``."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ import json
 
 import pytest
 
-from gubbi.scripts.release_parked_extraction_jobs import (
-    DryRunResult,
+from gubbi.scripts.release_held_extraction_jobs import (
     GroupCount,
     ReleaseResult,
     _build_parser,
@@ -72,32 +71,16 @@ def test_dry_run_log_reports_counts_per_group_and_summary() -> None:
         GroupCount("pending", "none", 5),
     )
 
-    log_dry_run(
-        build_logger(stream),
-        DryRunResult(
-            groups,
-            would_hydrate=3,
-            would_mark_unreadable=2,
-            would_mark_unreadable_parked=1,
-            unreadable_running=4,
-        ),
-    )
+    log_dry_run(build_logger(stream), groups)
 
     lines = _lines(stream)
     assert [(line["event"], line.get("count")) for line in lines] == [
-        ("parked_jobs", 2),
-        ("parked_jobs", 5),
+        ("held_jobs", 2),
+        ("held_jobs", 5),
         ("dry_run_summary", None),
     ]
     summary = lines[-1]
-    assert (
-        summary["parked"],
-        summary["releasable"],
-        summary["terminal"],
-        summary["would_hydrate"],
-        summary["would_mark_unreadable"],
-        summary["unreadable_running"],
-    ) == (7, 4, 2, 3, 2, 4)
+    assert (summary["held"], summary["releasable"], summary["terminal"]) == (7, 5, 2)
 
 
 def test_release_log_reports_released_total_and_held_terminal() -> None:
@@ -105,22 +88,16 @@ def test_release_log_reports_released_total_and_held_terminal() -> None:
     result = ReleaseResult(
         released=(GroupCount("failed", "transient", 3), GroupCount("pending", "none", 1)),
         held_terminal=2,
-        hydrated=3,
-        marked_unreadable=1,
-        unreadable_running=5,
     )
 
     log_release(build_logger(stream), result)
 
     summary = _lines(stream)[-1]
-    assert (
-        summary["event"],
-        summary["released"],
-        summary["held_terminal"],
-        summary["hydrated"],
-        summary["marked_unreadable"],
-        summary["unreadable_running"],
-    ) == ("release_summary", 4, 2, 3, 1, 5)
+    assert (summary["event"], summary["released"], summary["held_terminal"]) == (
+        "release_summary",
+        4,
+        2,
+    )
 
 
 @pytest.mark.parametrize(

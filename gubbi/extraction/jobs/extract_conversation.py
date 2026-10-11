@@ -32,6 +32,7 @@ from opentelemetry import trace
 from gubbi.audit import record_audit
 from gubbi.config import get_settings
 from gubbi.constants import EXTRACTION_JOB_DEADLINE_SECS, EXTRACTION_VERSION
+from gubbi.extraction.charging import record_charge, settle_attempt
 from gubbi.extraction.dedupe import embed_texts
 from gubbi.extraction.failure_metrics import record_job_failures
 from gubbi.extraction.llm.provider import (
@@ -312,15 +313,14 @@ async def _extract(
 # ---------------------------------------------------------------------------
 
 
-async def _complete_without_entries(
-    job: _Job, transcript_hash: str, spend: _Spend, *, filtered_tokens: int | None = None
-) -> None:
+async def _complete_without_entries(job: _Job, transcript_hash: str, spend: _Spend) -> None:
     """Mark the conversation processed and the job completed with nothing recorded.
 
     Uses its own short connection. Records the transcript hash so the same
-    content is not sent to the model again at this extractor version.
-    ``filtered_tokens`` replaces the job's budget charge when given.
+    content is not sent to the model again at this extractor version. The
+    attempt is charged for ``spend`` in the same transaction.
     """
+    settled = None
     async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn:
         await conv_repo.mark_processed(conn, job.conversation_id)
         await conv_repo.set_extraction_state(
@@ -334,15 +334,16 @@ async def _complete_without_entries(
             topics_created=0,
             entries_created=0,
             cents_spent=spend.cents,
-            filtered_tokens=filtered_tokens,
             **_usage_kwargs(spend),
         )
         if updated:
             await _audit_completed_without_entries(conn, job)
+            settled = await settle_attempt(conn, job.job_uuid, spend.usage, completed=True)
+    record_charge(settled)
 
 
 async def _complete_processed_job(conn: asyncpg.Connection, job: _Job) -> None:
-    """Close the job row of a conversation already processed, charging nothing.
+    """Close the job row of a conversation already processed; no model call, so no charge.
 
     The dispatched row would otherwise stay pending and hold a dispatch slot.
     A row this execution cannot claim is left alone.
@@ -350,7 +351,7 @@ async def _complete_processed_job(conn: asyncpg.Connection, job: _Job) -> None:
     if job.job_uuid is None or not await extraction_jobs.mark_running(conn, job.job_uuid):
         return
     if await extraction_jobs.mark_completed(
-        conn, job.job_uuid, topics_created=0, entries_created=0, cents_spent=0, filtered_tokens=0
+        conn, job.job_uuid, topics_created=0, entries_created=0, cents_spent=0
     ):
         await _audit_completed_without_entries(conn, job)
 
@@ -391,11 +392,13 @@ async def _mark_job_failed(
     Called from the outer except block AFTER the SAVEPOINT has already been
     poisoned (rolled back). Must NOT reuse any existing connection or be
     called inside an existing transaction context. ``spend`` covers every
-    model call made before the failure.
+    model call made before the failure; the attempt is charged for it in the
+    same transaction as the failure.
 
     Does NOT re-raise -- callers must re-raise the original exception themselves.
     """
     try:
+        settled = None
         async with user_scoped_connection(pool, user_id=user_uuid) as conn:
             outcome = await extraction_jobs.mark_failed(
                 conn,
@@ -414,8 +417,10 @@ async def _mark_job_failed(
                     target_id=str(job_id),
                     metadata={"error_code": str(error_code), "conversation_id": conversation_id},
                 )
+                settled = await settle_attempt(conn, UUID(job_id), spend.usage, completed=False)
         if outcome is not None:
             record_job_failures(error_code, outcome)
+        record_charge(settled)
     except Exception as exc:
         # Swallow secondary failure -- the original exception is what Arq needs.
         # The job row may remain in 'running' until the orphan sweep fails it.
@@ -541,6 +546,7 @@ async def _persist(
                 )
                 return None
             persisted = await persist_extraction(conn2, job.cipher, ctx["embedding_service"], run)
+    record_charge(persisted.settled)
     return len(persisted.entry_ids)
 
 
@@ -585,9 +591,12 @@ async def extract_conversation(
                         the usage of every model call made before the failure;
                         on cancellation (Arq's timeout) with ``deadline_exceeded``.
 
-    Budget: the job's charge is its filtered token count, set when the
-    scheduler admitted it; a rule skip resets it to zero. Nothing here
-    touches Redis.
+    Budget: each attempt is charged to the user's wallet from the usage the
+    provider reported, in the transaction of its mark_completed or
+    mark_failed; an attempt with no usage (a rule skip, an already processed
+    conversation) is not charged. A completed attempt whose conversation was
+    saved again while it ran queues a follow-up job. Nothing here touches
+    Redis.
 
     Args:
         ctx: Arq worker context (pool, cipher, extraction_service,
@@ -725,9 +734,7 @@ async def _skip_by_rule(job: _Job, loaded: _Loaded) -> bool:
     await job.log.info(
         "extraction_skipped", conversation_id=job.conversation_id, reason=str(skip_reason)
     )
-    await _complete_without_entries(
-        job, content_hash(loaded.messages), _NO_SPEND, filtered_tokens=0
-    )
+    await _complete_without_entries(job, content_hash(loaded.messages), _NO_SPEND)
     return True
 
 

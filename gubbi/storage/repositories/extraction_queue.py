@@ -1,34 +1,32 @@
-"""Repository module for scheduling and admission over extraction_jobs.
+"""Repository module for scheduling and dispatch over extraction_jobs.
 
 The scheduler calls these on a connection from the admin pool (BYPASSRLS) to
 work across tenants, so queries filter on user_id explicitly where a result is
-per user. The per-user reads (``user_period_usage``, ``first_upload_at``) are
-also correct on a user-scoped RLS connection for that user's own id; other
-users then read as having no jobs.
+per user. ``first_upload_at`` is also correct on a user-scoped RLS connection
+for that user's own id; other users then read as having no jobs.
 
-A job is queued while it is ``pending`` with ``admitted_at IS NULL``. Admission
-writes ``admitted_at`` and ``budget_period_start`` exactly once; usage figures
-count admitted rows only. A row whose ``run_after`` is ``'infinity'`` is held
-and is never runnable.
+A job is queued while it is ``pending`` with ``admitted_at IS NULL``.
+Dispatch writes ``admitted_at``; a dispatched job that is pending or running
+is in flight. A row whose ``run_after`` is ``'infinity'`` is held and is never
+runnable. Budgets are not read here: balances live in the wallet tables.
 
 Public surface
 --------------
-user_period_usage       -- per-user period, period-backfill and lifetime-backfill usage
-global_period_tokens    -- filtered tokens admitted in a period, all users
 first_upload_at         -- earliest live/backfill job of a user, optionally per platform
 supersede_failed        -- end failed rows that a newer job of their conversation replaces
-select_runnable         -- lock queued or revivable failed rows whose run_after has passed
+select_runnable         -- lock queued or revivable failed rows whose run_after has passed,
+                           at most a given number per user
 terminal_failure_sql    -- SQL predicate: a failed row the retry policy never runs again
 terminal_failure_args   -- the parameters terminal_failure_sql binds
-admit                   -- charge rows to a period, once per row
+admit                   -- mark pending rows dispatched now
 revive_failed           -- move failed rows back to pending for another run
 fail_enqueue_lost       -- fail a pending row whose enqueue raised, with growing backoff;
                            returns whether the row runs again
-defer                   -- hold rows back with a reason until a recheck time
-stale_admitted_pending  -- admitted rows still pending after a given age
-inflight_admitted_count -- admitted rows that are pending or running
-queue_snapshot          -- runnable depth and age, deferrals and period usage, for metrics
-UserPeriodUsage         -- dataclass returned by user_period_usage
+defer_lane              -- hold back a user's runnable rows of one lane with a reason
+stale_admitted_pending  -- dispatched rows still pending after a given age
+inflight_admitted_count -- dispatched rows that are pending or running
+inflight_by_user        -- the same, per requested user
+queue_snapshot          -- runnable depth and age and deferrals, for metrics
 RunnableJob             -- dataclass returned by select_runnable / stale_admitted_pending
 QueueSnapshot           -- dataclass returned by queue_snapshot
 """
@@ -54,18 +52,17 @@ from gubbi.extraction.retry_policy import (
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Mapping
-    from datetime import date, datetime, timedelta
+    from datetime import datetime, timedelta
 
 __all__: list[str] = [
     "QueueSnapshot",
     "RunnableJob",
-    "UserPeriodUsage",
     "admit",
-    "defer",
+    "defer_lane",
     "fail_enqueue_lost",
     "first_upload_at",
-    "global_period_tokens",
     "inflight_admitted_count",
+    "inflight_by_user",
     "queue_snapshot",
     "revive_failed",
     "select_runnable",
@@ -73,30 +70,7 @@ __all__: list[str] = [
     "supersede_failed",
     "terminal_failure_args",
     "terminal_failure_sql",
-    "user_period_usage",
 ]
-
-
-@dataclass(frozen=True)
-class UserPeriodUsage:
-    """Admitted usage of one user.
-
-    period_conversations / period_tokens : admitted in the requested budget period
-    period_backfill_conversations / period_backfill_tokens : the backfill-lane
-        subset of the period figures
-    lifetime_backfill_conversations / lifetime_backfill_tokens : admitted in the
-        backfill lane, any period
-
-    Field names match the keywords of
-    :func:`gubbi.extraction.admission.user_usage_from_totals` one-to-one.
-    """
-
-    period_conversations: int
-    period_tokens: int
-    period_backfill_conversations: int
-    period_backfill_tokens: int
-    lifetime_backfill_conversations: int
-    lifetime_backfill_tokens: int
 
 
 @dataclass(frozen=True)
@@ -109,7 +83,6 @@ class RunnableJob:
     source: str
     lane: Lane
     activity_at: datetime | None
-    filtered_tokens: int
     attempts: int
     admitted_at: datetime | None
     status: str
@@ -123,7 +96,6 @@ def _to_runnable_job(row: asyncpg.Record) -> RunnableJob:
         source=str(row["source"]),
         lane=Lane(row["lane"]),
         activity_at=row["activity_at"],
-        filtered_tokens=int(row["filtered_tokens"]),
         attempts=int(row["attempts"]),
         admitted_at=row["admitted_at"],
         status=str(row["status"]),
@@ -131,67 +103,8 @@ def _to_runnable_job(row: asyncpg.Record) -> RunnableJob:
 
 
 # ---------------------------------------------------------------------------
-# Usage
+# Upload history
 # ---------------------------------------------------------------------------
-
-
-async def user_period_usage(
-    conn: asyncpg.Connection,
-    user_ids: Collection[UUID],
-    period: date,
-) -> dict[UUID, UserPeriodUsage]:
-    """Return the admitted usage of every requested user; a user with none maps to zeros."""
-    rows = await conn.fetch(
-        """
-        SELECT
-            u.user_id,
-            count(j.id) FILTER (WHERE j.budget_period_start = $2) AS period_conversations,
-            coalesce(sum(j.filtered_tokens) FILTER (WHERE j.budget_period_start = $2), 0)
-                AS period_tokens,
-            count(j.id) FILTER (WHERE j.budget_period_start = $2 AND j.lane = 'backfill')
-                AS period_backfill_conversations,
-            coalesce(
-                sum(j.filtered_tokens)
-                    FILTER (WHERE j.budget_period_start = $2 AND j.lane = 'backfill'),
-                0
-            ) AS period_backfill_tokens,
-            count(j.id) FILTER (WHERE j.lane = 'backfill') AS lifetime_backfill_conversations,
-            coalesce(sum(j.filtered_tokens) FILTER (WHERE j.lane = 'backfill'), 0)
-                AS lifetime_backfill_tokens
-        FROM (SELECT DISTINCT unnest($1::uuid[]) AS user_id) AS u
-        LEFT JOIN extraction_jobs AS j
-               ON j.user_id = u.user_id
-              AND j.admitted_at IS NOT NULL
-        GROUP BY u.user_id
-        """,
-        list(user_ids),
-        period,
-    )
-    return {
-        UUID(str(row["user_id"])): UserPeriodUsage(
-            period_conversations=int(row["period_conversations"]),
-            period_tokens=int(row["period_tokens"]),
-            period_backfill_conversations=int(row["period_backfill_conversations"]),
-            period_backfill_tokens=int(row["period_backfill_tokens"]),
-            lifetime_backfill_conversations=int(row["lifetime_backfill_conversations"]),
-            lifetime_backfill_tokens=int(row["lifetime_backfill_tokens"]),
-        )
-        for row in rows
-    }
-
-
-async def global_period_tokens(conn: asyncpg.Connection, period: date) -> int:
-    """Return the filtered tokens admitted in ``period`` across every user."""
-    total = await conn.fetchval(
-        """
-        SELECT coalesce(sum(filtered_tokens), 0)
-        FROM extraction_jobs
-        WHERE admitted_at IS NOT NULL
-          AND budget_period_start = $1
-        """,
-        period,
-    )
-    return int(total)
 
 
 async def first_upload_at(
@@ -245,6 +158,16 @@ def terminal_failure_args() -> tuple[list[str], list[str], int]:
     return sorted(TERMINAL_CODES), sorted(DETERMINISTIC_CODES), DETERMINISTIC_MAX_ATTEMPTS
 
 
+_JOB_COLUMNS = (
+    "j.id, j.user_id, j.conversation_id, j.source, j.lane, j.activity_at,"
+    " j.attempts, j.admitted_at, j.status"
+)
+
+_QUEUE_ORDER = (
+    "CASE j.lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,"
+    " j.activity_at DESC NULLS LAST, j.created_at, j.id"
+)
+
 _NEWER_JOB_EXISTS = """
 EXISTS (
     SELECT 1
@@ -264,7 +187,6 @@ def _runnable_sql(first_param: int) -> str:
     """
     return f"""
         j.run_after <= now()
-        AND j.token_count_version IS NOT NULL
         AND (
               (j.status = 'pending' AND j.admitted_at IS NULL)
            OR (j.status = 'failed'
@@ -312,21 +234,19 @@ async def supersede_failed(conn: asyncpg.Connection) -> int:
     return int(str(result).rsplit(" ", 1)[-1])
 
 
-async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[RunnableJob]:
-    """Lock and return up to ``limit`` rows the scheduler may admit or dispatch now.
+async def select_runnable(conn: asyncpg.Connection, limit: int, per_user: int) -> list[RunnableJob]:
+    """Lock and return up to ``limit`` rows the scheduler may dispatch now.
 
     Rows are locked ``FOR UPDATE SKIP LOCKED`` until the caller's transaction
     ends, so ingest cannot rewrite a row's queue inputs between this read and
-    its admission; a row another transaction holds is skipped this time.
+    its dispatch; a row another transaction holds is skipped this time.
 
-    Runnable: ``pending`` and not yet admitted, or ``failed`` and not terminal
-    per :func:`terminal_failure_sql` (a missing or unrecognised ``error_code``
-    retries as transient); in both cases ``run_after <= now()`` and a token
-    count is recorded (``token_count_version`` set), so no row is ever charged
-    an unknown size. A failed row the retry policy never runs again is
-    excluded whatever its ``run_after``. An admitted ``pending`` row is
-    already dispatched and is excluded; see :func:`stale_admitted_pending`
-    for lost dispatches.
+    Runnable: ``pending`` and not yet dispatched, or ``failed`` and not
+    terminal per :func:`terminal_failure_sql` (a missing or unrecognised
+    ``error_code`` retries as transient); in both cases ``run_after <=
+    now()``. A failed row the retry policy never runs again is excluded
+    whatever its ``run_after``. A dispatched ``pending`` row is excluded; see
+    :func:`stale_admitted_pending` for lost dispatches.
 
     Only one job per conversation may be active (pending or running), so a
     failed row whose conversation has an active job is excluded, and so is a
@@ -335,24 +255,32 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
     blocked failed rows never fill the batch. A job made active after this
     read is caught by :func:`revive_failed`.
 
+    At most ``per_user`` rows of any one user are returned, taken in the
+    order below and counted before ``limit``, so one user's backlog cannot
+    fill the batch.
+
     Order: lane ``paste``, ``live``, ``backfill``; newest ``activity_at`` first
     within a lane (unknown last); then ``created_at`` and ``id`` so equal rows
     come back in a stable order and ``limit`` never starves a higher lane.
     """
     rows = await conn.fetch(
         f"""
-        SELECT j.id, j.user_id, j.conversation_id, j.source, j.lane, j.activity_at,
-               j.filtered_tokens, j.attempts, j.admitted_at, j.status
+        WITH ranked AS (
+            SELECT j.id,
+                   row_number() OVER (PARTITION BY j.user_id ORDER BY {_QUEUE_ORDER}) AS rank
+            FROM extraction_jobs AS j
+            WHERE {_runnable_sql(3)}
+        )
+        SELECT {_JOB_COLUMNS}
         FROM extraction_jobs AS j
-        WHERE {_runnable_sql(2)}
-        ORDER BY CASE j.lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
-                 j.activity_at DESC NULLS LAST,
-                 j.created_at,
-                 j.id
+        JOIN ranked AS r ON r.id = j.id
+        WHERE r.rank <= $2
+        ORDER BY {_QUEUE_ORDER}
         LIMIT $1
         FOR UPDATE OF j SKIP LOCKED
-        """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
+        """,  # noqa: S608 - the interpolated fragments are fixed SQL; values are bound
         limit,
+        per_user,
         *terminal_failure_args(),
     )
     return [_to_runnable_job(row) for row in rows]
@@ -362,24 +290,23 @@ async def stale_admitted_pending(
     conn: asyncpg.Connection,
     age: timedelta,
 ) -> list[RunnableJob]:
-    """Return admitted rows still ``pending`` after ``age`` since admission, oldest first."""
+    """Return dispatched rows still ``pending`` after ``age`` since dispatch, oldest first."""
     rows = await conn.fetch(
-        """
-        SELECT id, user_id, conversation_id, source, lane, activity_at,
-               filtered_tokens, attempts, admitted_at, status
-        FROM extraction_jobs
-        WHERE status = 'pending'
-          AND admitted_at IS NOT NULL
-          AND admitted_at < now() - $1::interval
-        ORDER BY admitted_at, id
-        """,
+        f"""
+        SELECT {_JOB_COLUMNS}
+        FROM extraction_jobs AS j
+        WHERE j.status = 'pending'
+          AND j.admitted_at IS NOT NULL
+          AND j.admitted_at < now() - $1::interval
+        ORDER BY j.admitted_at, j.id
+        """,  # noqa: S608 - the interpolated column list is fixed SQL; values are bound
         age,
     )
     return [_to_runnable_job(row) for row in rows]
 
 
 async def inflight_admitted_count(conn: asyncpg.Connection) -> int:
-    """Return the number of admitted rows that are ``pending`` or ``running``."""
+    """Return the number of dispatched rows that are ``pending`` or ``running``."""
     count = await conn.fetchval(
         """
         SELECT count(*)
@@ -391,68 +318,86 @@ async def inflight_admitted_count(conn: asyncpg.Connection) -> int:
     return int(count)
 
 
-# ---------------------------------------------------------------------------
-# Admission
-# ---------------------------------------------------------------------------
+async def inflight_by_user(conn: asyncpg.Connection, user_ids: Collection[UUID]) -> dict[UUID, int]:
+    """Return each requested user's dispatched rows that are ``pending`` or ``running``.
 
-
-async def admit(
-    conn: asyncpg.Connection,
-    job_ids: Collection[UUID],
-    period: date,
-) -> int:
-    """Charge each ``pending`` row to ``period`` and clear its defer reason; return rows charged.
-
-    A row without a token count is never charged. A row already admitted is
-    left untouched, so a retried or re-dispatched row is never charged twice
-    and never moves to a later period.
+    A dispatched row not yet started counts. A user with none maps to 0.
     """
+    rows = await conn.fetch(
+        """
+        SELECT user_id, count(*) AS inflight
+        FROM extraction_jobs
+        WHERE admitted_at IS NOT NULL
+          AND status IN ('pending', 'running')
+          AND user_id = ANY($1::uuid[])
+        GROUP BY user_id
+        """,
+        list(user_ids),
+    )
+    counts = {UUID(str(row["user_id"])): int(row["inflight"]) for row in rows}
+    return {user_id: counts.get(user_id, 0) for user_id in user_ids}
+
+
+# ---------------------------------------------------------------------------
+# Dispatch and deferral
+# ---------------------------------------------------------------------------
+
+
+async def admit(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> int:
+    """Mark each ``pending`` row dispatched now and clear its defer reason; return rows changed."""
     result = await conn.execute(
         """
         UPDATE extraction_jobs
         SET admitted_at = now(),
-            budget_period_start = $2,
             defer_reason = NULL
         WHERE id = ANY($1::uuid[])
           AND status = 'pending'
-          AND admitted_at IS NULL
-          AND token_count_version IS NOT NULL
         """,
         list(job_ids),
-        period,
     )
     return int(str(result).rsplit(" ", 1)[-1])
 
 
-async def defer(
+async def defer_lane(
     conn: asyncpg.Connection,
-    job_ids: Collection[UUID],
+    lane: str,
     reason: str,
     *,
-    next_period_start: datetime,
+    user_id: UUID | None,
     recheck: timedelta,
 ) -> int:
-    """Hold rows back with ``reason``; return rows changed.
+    """Hold back every runnable row of ``lane`` with ``reason``; return rows changed.
 
-    Each row's ``run_after`` becomes the earlier of ``next_period_start`` and
-    ``now() + recheck``. Only rows not yet admitted and still ``pending`` or
-    ``failed`` change. ``reason`` must be one the
-    ``extraction_jobs_defer_reason_check`` constraint accepts; any other value
-    raises ``asyncpg.CheckViolationError``.
+    ``user_id`` limits the deferral to one user's rows; None defers the lane
+    for every user. Runnable means what :func:`select_runnable` selects. Each
+    row's ``run_after`` becomes the earlier of the start of the next UTC month
+    and ``now() + recheck``. A row another transaction holds is skipped.
+    ``reason`` must be one the ``extraction_jobs_defer_reason_check``
+    constraint accepts; any other value raises ``asyncpg.CheckViolationError``.
     """
     result = await conn.execute(
-        """
+        f"""
         UPDATE extraction_jobs
         SET defer_reason = $2,
-            run_after = least($3::timestamptz, now() + $4::interval)
-        WHERE id = ANY($1::uuid[])
-          AND status IN ('pending', 'failed')
-          AND admitted_at IS NULL
-        """,
-        list(job_ids),
+            run_after = least(
+                (date_trunc('month', now() AT TIME ZONE 'UTC') + interval '1 month')
+                    AT TIME ZONE 'UTC',
+                now() + $4::interval
+            )
+        WHERE id IN (
+            SELECT j.id
+            FROM extraction_jobs AS j
+            WHERE j.lane = $1
+              AND ($3::uuid IS NULL OR j.user_id = $3::uuid)
+              AND {_runnable_sql(5)}
+            FOR UPDATE OF j SKIP LOCKED
+        )
+        """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
+        lane,
         reason,
-        next_period_start,
+        user_id,
         recheck,
+        *terminal_failure_args(),
     )
     return int(str(result).rsplit(" ", 1)[-1])
 
@@ -463,7 +408,7 @@ async def revive_failed(conn: asyncpg.Connection, job_ids: Collection[UUID]) -> 
     Each row moves in its own savepoint. A row whose conversation gained an
     active job meanwhile (an ingest racing this call) violates the one active
     job per conversation index and stays failed; the caller's transaction is
-    unaffected. The admission charge is untouched.
+    unaffected.
     """
     revived: set[UUID] = set()
     for job_id in job_ids:
@@ -531,45 +476,29 @@ async def fail_enqueue_lost(conn: asyncpg.Connection, job_id: UUID) -> FailureOu
 
 @dataclass(frozen=True)
 class QueueSnapshot:
-    """Queue and budget figures read at one moment.
+    """Queue figures read at one moment.
 
     oldest_runnable_age_seconds : ``now() - run_after`` of the runnable row
         whose ``run_after`` is earliest; 0 when nothing is runnable. A row
         counts from when it became runnable, so a deferral or retry backoff
         that has not yet passed never ages the queue.
     depth_by_lane : runnable rows per lane; a lane with none is absent
-    deferred_by_reason : rows held by admission and not yet due again
-        (``defer_reason`` set, not admitted, ``run_after`` in the future and
-        not held at ``'infinity'``); a reason with none is absent. Disjoint
-        from the runnable rows.
-    period_filtered_tokens : filtered tokens admitted in the period, all users
-    period_provider_tokens : provider-reported usage of the rows charged to the
-        period, keyed ``input``, ``output`` and ``cached``
+    deferred_by_reason : rows held back by admission and not yet due again
+        (``defer_reason`` set, queued or failed, ``run_after`` in the future
+        and not held at ``'infinity'``); a reason with none is absent.
+        Disjoint from the runnable rows.
     """
 
     oldest_runnable_age_seconds: float
     depth_by_lane: Mapping[Lane, int]
     deferred_by_reason: Mapping[str, int]
-    period_filtered_tokens: int
-    period_provider_tokens: Mapping[str, int]
 
 
-_PERIOD_USAGE_SQL = """
-SELECT coalesce(sum(filtered_tokens), 0) AS filtered,
-       coalesce(sum(input_tokens), 0) AS input,
-       coalesce(sum(output_tokens), 0) AS output,
-       coalesce(sum(cached_input_tokens), 0) AS cached
-FROM extraction_jobs
-WHERE admitted_at IS NOT NULL
-  AND budget_period_start = $1
-"""
-
-
-async def queue_snapshot(conn: asyncpg.Connection, period: date) -> QueueSnapshot:
-    """Read the queue and budget figures the scheduler reports each tick.
+async def queue_snapshot(conn: asyncpg.Connection) -> QueueSnapshot:
+    """Read the queue figures the scheduler reports each tick.
 
     Takes no row locks. Runnable means exactly what :func:`select_runnable`
-    selects, without its batch limit.
+    selects, without its batch and per-user limits.
     """
     queue_rows = await conn.fetch(
         f"""
@@ -582,15 +511,13 @@ async def queue_snapshot(conn: asyncpg.Connection, period: date) -> QueueSnapsho
         SELECT 'deferred', defer_reason, count(*), NULL
         FROM extraction_jobs
         WHERE defer_reason IS NOT NULL
-          AND admitted_at IS NULL
-          AND status IN ('pending', 'failed')
+          AND ((status = 'pending' AND admitted_at IS NULL) OR status = 'failed')
           AND run_after > now()
           AND run_after < 'infinity'
         GROUP BY defer_reason
         """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
         *terminal_failure_args(),
     )
-    usage = cast("asyncpg.Record", await conn.fetchrow(_PERIOD_USAGE_SQL, period))
     lanes = [row for row in queue_rows if row["kind"] == "lane"]
     return QueueSnapshot(
         oldest_runnable_age_seconds=max((float(row["oldest_age"]) for row in lanes), default=0.0),
@@ -598,6 +525,4 @@ async def queue_snapshot(conn: asyncpg.Connection, period: date) -> QueueSnapsho
         deferred_by_reason={
             str(row["key"]): int(row["rows"]) for row in queue_rows if row["kind"] == "deferred"
         },
-        period_filtered_tokens=int(usage["filtered"]),
-        period_provider_tokens={kind: int(usage[kind]) for kind in ("input", "output", "cached")},
     )

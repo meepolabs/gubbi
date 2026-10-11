@@ -5,33 +5,37 @@ One tick, serialized across API replicas by a session advisory lock:
 1. End every retryable ``failed`` row that a newer job of its conversation
    replaces, as ``superseded``. Then lock runnable rows: queued ``pending``
    rows and retryable ``failed`` rows whose ``run_after`` has passed, in lane
-   order. A failed row whose conversation already has an active job is left
-   for a later tick, and so is a row with no recorded token count.
-2. Decide admission for the rows not yet charged, against per-user and global
-   limits (everything is admitted while budgets are disabled). A failed row
-   that was charged before runs again without a second decision or charge.
-3. Dispatch at most ``dispatch_bound`` admitted jobs pending or running at
-   once. Only rows dispatched this tick are charged; a row that fits but finds
-   no capacity stays queued and uncharged, so a large backfill waits in
-   Postgres, where later live work still overtakes it. Usage is counted over
-   dispatched rows only, so every row deferred for a limit is a real
-   deferral; it is rechecked at the earlier of the next budget period and
-   ``defer_recheck`` from now. A failed row moves back to ``pending`` before
-   it is dispatched, so the worker claims it as usual.
-4. Re-enqueue admitted rows still ``pending`` after ``stale_after``; a lost
+   order, at most the largest running-job cap per user. A failed row whose conversation
+   already has an active job is left for a later tick.
+2. Resolve each distinct user's wallet limits, then read in three batched
+   queries each user's available balance, each user's jobs in flight and the
+   deployment's weighted usage this month (the balances only while budgets
+   are enabled). Decide every row: the global ceiling share and the user's
+   stop line of its lane's spend rule, then the user's running-job cap and
+   the dispatch capacity (``dispatch_bound`` minus jobs already in flight).
+3. A user stopped by a lane's stop line has every runnable row of that lane
+   deferred in one statement, and a lane stopped by the global ceiling is
+   deferred for every user; both are rechecked at the earlier of the next
+   UTC month and ``defer_recheck`` from now, so a credit grant takes effect
+   within one recheck. A row held back by the running-job cap or capacity
+   stays queued for the next tick. A failed row moves back to ``pending``
+   before it is dispatched, so the worker claims it as usual.
+4. Re-enqueue dispatched rows still ``pending`` after ``stale_after``; a lost
    Arq job is restored. A row whose enqueue raises is failed as
    ``enqueue_lost`` and revived after the retry policy's backoff, which
    grows with each consecutive lost enqueue.
 5. Record the queue and budget gauges from aggregate reads taken after the
-   claim transaction, so they reflect this tick's admissions and deferrals.
+   claim transaction, so they reflect this tick's dispatches and deferrals.
 
-A row that does not fit a limit is deferred with a reason and never refused.
+Nothing is charged here: a job is charged after it runs, from the usage the
+provider reported. A row that does not fit is deferred or left queued, never
+refused.
 """
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any, Final, Protocol
 
 import asyncpg
@@ -39,24 +43,24 @@ import structlog
 from redis.exceptions import RedisError
 
 from gubbi.extraction.admission import (
+    Budget,
     Candidate,
     Decision,
-    UserUsage,
-    budget_period,
+    DeferReason,
+    UserState,
     decide,
-    order_candidates,
-    user_usage_from_totals,
 )
 from gubbi.extraction.failure_metrics import record_job_failures
-from gubbi.extraction.limits import ExtractionLimits, limits_for
 from gubbi.extraction.queue_metrics import record_queue_metrics
 from gubbi.extraction.retry_policy import ErrorCode
+from gubbi.extraction.spend_rules import global_ceiling, limits_for, max_running_cap
 from gubbi.extraction.supervised_loop import run_every
 from gubbi.storage.pg_setup import advisory_unlock, try_advisory_lock
 from gubbi.storage.repositories import extraction_queue as queue_repo
+from gubbi.storage.repositories import wallet as wallet_repo
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Collection, Iterable, Sequence
+    from collections.abc import Sequence
     from uuid import UUID
 
     from gubbi.config import Settings
@@ -126,7 +130,11 @@ class SchedulerConfig:
 
 @dataclass(frozen=True, slots=True)
 class TickResult:
-    """What one tick did; every field is a row count."""
+    """What one tick did; every field is a row count.
+
+    ``admitted`` counts rows dispatched by this tick's decisions, revived
+    failed rows included; ``reenqueued`` counts lost dispatches sent again.
+    """
 
     admitted: int = 0
     superseded: int = 0
@@ -137,13 +145,19 @@ class TickResult:
     enqueue_lost: int = 0
 
 
-type _Decider = Callable[[Iterable[RunnableJob]], list[Decision]]
-
-
 @dataclass(frozen=True, slots=True)
 class _Plan:
     dispatch: tuple[RunnableJob, ...]
-    deferrals: tuple[Decision, ...]
+    deferrals: frozenset[_Deferral]
+
+
+@dataclass(frozen=True, slots=True)
+class _Deferral:
+    """A lane to defer, for one user or (``user_id`` None) for every user."""
+
+    lane: str
+    reason: str
+    user_id: UUID | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -185,12 +199,11 @@ class ExtractionScheduler:
         return result
 
     async def _locked_tick(self, conn: asyncpg.Connection) -> TickResult:
-        period = budget_period(datetime.now(UTC))
         async with conn.transaction():
             superseded = await queue_repo.supersede_failed(conn)
-            plan = await self._plan(conn, period)
-            dispatch = await _claim(conn, plan.dispatch, period)
-            await self._record_deferrals(conn, plan.deferrals, period)
+            plan = await self._plan(conn)
+            dispatch = await _claim(conn, plan.dispatch)
+            deferred = await self._record_deferrals(conn, plan.deferrals)
         dispatched = await self._enqueue_all(dispatch)
         attempted = dispatched.enqueued_ids | dispatched.failed_ids
         stale = [
@@ -206,66 +219,79 @@ class ExtractionScheduler:
             if outcome is not None:
                 lost += 1
                 record_job_failures(ErrorCode.ENQUEUE_LOST, outcome)
-        await self._record_metrics(conn, period)
+        await self._record_metrics(conn)
         return TickResult(
-            admitted=sum(1 for job in dispatch if job.admitted_at is None),
+            admitted=len(dispatch),
             superseded=superseded,
-            deferred=len(plan.deferrals),
+            deferred=deferred,
             enqueued=len(dispatched.enqueued_ids),
             enqueue_failed=len(failed),
             reenqueued=len(redispatched.enqueued_ids),
             enqueue_lost=lost,
         )
 
-    async def _record_metrics(self, conn: asyncpg.Connection, period: date) -> None:
+    async def _record_metrics(self, conn: asyncpg.Connection) -> None:
         """Record the queue gauges; a failed read loses this tick's gauges, not its work."""
         try:
-            await record_queue_metrics(conn, period, budget_enabled=self._config.budget_enabled)
+            await record_queue_metrics(conn, budget_enabled=self._config.budget_enabled)
         except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as exc:
             await logger.warning("extraction_queue_metrics_failed", error_class=type(exc).__name__)
 
-    async def _plan(self, conn: asyncpg.Connection, period: date) -> _Plan:
-        jobs = await queue_repo.select_runnable(conn, self._config.batch_size)
+    async def _plan(self, conn: asyncpg.Connection) -> _Plan:
+        jobs = await queue_repo.select_runnable(conn, self._config.batch_size, max_running_cap())
         if not jobs:
-            return _Plan(dispatch=(), deferrals=())
+            return _Plan(dispatch=(), deferrals=frozenset())
         capacity = self._config.dispatch_bound - await queue_repo.inflight_admitted_count(conn)
-        fresh = [job for job in jobs if job.admitted_at is None]
-        decide_fresh = await self._decider(conn, fresh, period)
-        unplaced: frozenset[UUID] = frozenset()
-        while True:
-            decisions = decide_fresh(job for job in fresh if job.job_id not in unplaced)
-            plan, overflow = _plan_dispatch(jobs, decisions, capacity, unplaced)
-            if not overflow:
-                return plan
-            unplaced |= overflow
+        users = await self._user_states(conn, {job.user_id for job in jobs})
+        budget = await self._budget(conn)
+        decisions = decide(
+            [_candidate(job) for job in jobs], users, budget, capacity=max(capacity, 0)
+        )
+        jobs_by_id = {job.job_id: job for job in jobs}
+        return _Plan(
+            dispatch=tuple(jobs_by_id[d.job_id] for d in decisions if d.admitted),
+            deferrals=frozenset(_deferral(d) for d in decisions if d.defer_reason is not None),
+        )
 
-    async def _decider(
-        self, conn: asyncpg.Connection, fresh: Sequence[RunnableJob], period: date
-    ) -> _Decider:
-        """Return a function deciding a subset of ``fresh`` against the usage read now."""
-        if not fresh or not self._config.budget_enabled:
-            return lambda jobs: decide([_candidate(job) for job in jobs], {}, 0, None)
-        # decide applies one limits set to every candidate; limits_for returns
-        # the same values for every user today.
-        limits = limits_for(fresh[0].user_id)
-        usage = await _usage_by_user(conn, {job.user_id for job in fresh}, period, limits)
-        global_used = await queue_repo.global_period_tokens(conn, period)
-        return lambda jobs: decide([_candidate(job) for job in jobs], usage, global_used, limits)
+    async def _user_states(
+        self, conn: asyncpg.Connection, user_ids: set[UUID]
+    ) -> dict[UUID, UserState]:
+        limits = {user_id: limits_for(user_id) for user_id in user_ids}
+        inflight = await queue_repo.inflight_by_user(conn, user_ids)
+        available = (
+            await wallet_repo.available(
+                conn, {user_id: lim.monthly_amount for user_id, lim in limits.items()}
+            )
+            if self._config.budget_enabled
+            else {}
+        )
+        return {
+            user_id: UserState(
+                limits=lim,
+                available=available.get(user_id, 0),
+                inflight=inflight[user_id],
+            )
+            for user_id, lim in limits.items()
+        }
+
+    async def _budget(self, conn: asyncpg.Connection) -> Budget | None:
+        if not self._config.budget_enabled:
+            return None
+        return Budget(global_used=await wallet_repo.global_used(conn), ceiling=global_ceiling())
 
     async def _record_deferrals(
-        self, conn: asyncpg.Connection, deferrals: Sequence[Decision], period: date
-    ) -> None:
-        by_reason: dict[str, list[UUID]] = {}
-        for decision in deferrals:
-            by_reason.setdefault(str(decision.defer_reason), []).append(decision.job_id)
-        for reason, job_ids in by_reason.items():
-            await queue_repo.defer(
+        self, conn: asyncpg.Connection, deferrals: frozenset[_Deferral]
+    ) -> int:
+        deferred = 0
+        for deferral in sorted(deferrals, key=_deferral_order):
+            deferred += await queue_repo.defer_lane(
                 conn,
-                job_ids,
-                reason,
-                next_period_start=_next_period_start(period),
+                deferral.lane,
+                deferral.reason,
+                user_id=deferral.user_id,
                 recheck=self._config.defer_recheck,
             )
+        return deferred
 
     async def _enqueue_all(self, jobs: Sequence[RunnableJob]) -> _DispatchOutcome:
         enqueued: set[UUID] = set()
@@ -289,61 +315,29 @@ class ExtractionScheduler:
         return _DispatchOutcome(enqueued_ids=frozenset(enqueued), failed_ids=frozenset(failed))
 
 
-def _plan_dispatch(
-    jobs: Sequence[RunnableJob],
-    decisions: Sequence[Decision],
-    capacity: int,
-    unplaced: Collection[UUID],
-) -> tuple[_Plan, frozenset[UUID]]:
-    """Pick the jobs to dispatch and the deferrals to record, in admission order.
-
-    A job charged before (``admitted_at`` set) needs no decision. Dispatch
-    takes admitted jobs until ``capacity`` is reached. ``unplaced`` jobs fit
-    but found no capacity on an earlier pass; they were left out of
-    ``decisions`` and are skipped. Returns the plan and the newly admitted
-    jobs past capacity: the deferrals after them were decided with their
-    usage counted, so the caller decides again without them until none remain.
-    """
-    by_id = {d.job_id: d for d in decisions}
-    jobs_by_id = {job.job_id: job for job in jobs}
-    dispatch: list[RunnableJob] = []
-    deferrals: list[Decision] = []
-    overflow: set[UUID] = set()
-    for candidate in order_candidates(_candidate(job) for job in jobs):
-        if candidate.job_id in unplaced:
-            continue
-        job = jobs_by_id[candidate.job_id]
-        decision = by_id.get(job.job_id, Decision(job.job_id, None))
-        if not decision.admitted:
-            deferrals.append(decision)
-        elif len(dispatch) < capacity:
-            dispatch.append(job)
-        elif job.admitted_at is None:
-            overflow.add(job.job_id)
-    plan = _Plan(dispatch=tuple(dispatch), deferrals=tuple(deferrals))
-    return plan, frozenset(overflow)
-
-
-async def _claim(
-    conn: asyncpg.Connection, jobs: Sequence[RunnableJob], period: date
-) -> list[RunnableJob]:
-    """Charge and revive the planned jobs; return those now admitted and pending.
+async def _claim(conn: asyncpg.Connection, jobs: Sequence[RunnableJob]) -> list[RunnableJob]:
+    """Revive and mark dispatched the planned jobs; return those now dispatched and pending.
 
     A failed job that cannot move back to pending (an ingest gave its
-    conversation an active job meanwhile) is dropped and not charged.
+    conversation an active job meanwhile) is dropped.
     """
     failed = [job.job_id for job in jobs if job.status == "failed"]
     revived = await queue_repo.revive_failed(conn, failed) if failed else set()
     claimed = [job for job in jobs if job.status != "failed" or job.job_id in revived]
-    fresh = [job.job_id for job in claimed if job.admitted_at is None]
-    if fresh:
-        await queue_repo.admit(conn, fresh, period)
+    if claimed:
+        await queue_repo.admit(conn, [job.job_id for job in claimed])
     return claimed
 
 
-def _next_period_start(period: date) -> datetime:
-    following = (period.replace(day=28) + timedelta(days=4)).replace(day=1)
-    return datetime(following.year, following.month, 1, tzinfo=UTC)
+def _deferral(decision: Decision) -> _Deferral:
+    """The lane deferral a deferred decision calls for: per user, or lane-wide for the ceiling."""
+    reason = decision.defer_reason
+    user_id = None if reason is DeferReason.GLOBAL else decision.user_id
+    return _Deferral(lane=decision.lane.value, reason=str(reason), user_id=user_id)
+
+
+def _deferral_order(deferral: _Deferral) -> tuple[str, str, str]:
+    return (deferral.lane, deferral.reason, str(deferral.user_id))
 
 
 def _candidate(job: RunnableJob) -> Candidate:
@@ -352,21 +346,7 @@ def _candidate(job: RunnableJob) -> Candidate:
         user_id=job.user_id,
         lane=job.lane,
         activity_at=job.activity_at,
-        filtered_tokens=job.filtered_tokens,
     )
-
-
-async def _usage_by_user(
-    conn: asyncpg.Connection,
-    user_ids: set[UUID],
-    period: date,
-    limits: ExtractionLimits,
-) -> dict[UUID, UserUsage]:
-    totals = await queue_repo.user_period_usage(conn, user_ids, period)
-    return {
-        user_id: user_usage_from_totals(**asdict(total), limits=limits)
-        for user_id, total in totals.items()
-    }
 
 
 async def _log_tick(result: TickResult) -> None:

@@ -3,8 +3,7 @@
 A row stays in 'running' indefinitely if the Arq worker dies between
 mark_running and the SAVEPOINT commit (OOM, container kill, hard crash).
 The sweep fails such a row as ``worker_lost``, a transient error, with a
-backoff ``run_after`` so the scheduler runs it again. The row keeps its
-admission charge, so the retry is not charged twice.
+backoff ``run_after`` so the scheduler runs it again.
 
 The threshold is EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
 (40 minutes): past the extraction function's own Arq timeout, at which
@@ -91,6 +90,10 @@ async def _sweep_running(admin_pool: asyncpg.Pool) -> int:
         )
         if not stale:
             return 0
+        # No wallet charge is written here: the lost attempt's usage died with
+        # its worker and is deliberately left uncharged. The global ceiling
+        # and the provider's spend cap bound what such attempts can cost; do
+        # not add a charge estimate or a refund to this path.
         await conn.executemany(
             """
             UPDATE extraction_jobs

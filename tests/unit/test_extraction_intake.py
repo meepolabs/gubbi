@@ -1,20 +1,12 @@
-"""Behavior tests for intake classification: lanes, nightly window, token count."""
+"""Behavior tests for intake classification: lanes and the nightly window."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
-from gubbi.extraction.chunking import estimate_tokens
-from gubbi.extraction.intake import (
-    Lane,
-    assign_lane,
-    count_filtered_tokens,
-    next_nightly_window,
-    run_after_for,
-)
+from gubbi.extraction.intake import Lane, assign_lane, next_nightly_window
 
 WINDOW = timedelta(days=7)
 SHORT_WINDOW = timedelta(days=2)
@@ -23,12 +15,6 @@ DAY0 = datetime(2026, 1, 1, 12, tzinfo=UTC)
 
 def _day(n: int) -> datetime:
     return DAY0 + timedelta(days=n)
-
-
-@dataclass(frozen=True)
-class _Msg:
-    role: str
-    content: str
 
 
 @pytest.mark.parametrize(
@@ -195,30 +181,3 @@ def test_next_nightly_window_returns_next_hour_in_utc(now: datetime, expected: d
 def test_next_nightly_window_rejects_invalid_input(now: datetime, hour: int) -> None:
     with pytest.raises(ValueError):
         next_nightly_window(now, hour)
-
-
-def test_count_filtered_tokens_ignores_system_and_tool_turns() -> None:
-    kept = [_Msg("user", "u" * 40), _Msg("assistant", "a" * 25)]
-    messages = [
-        _Msg("system", "s" * 4000),
-        kept[0],
-        _Msg("tool", "t" * 4000),
-        kept[1],
-    ]
-
-    tokens = count_filtered_tokens(messages)
-
-    assert tokens == sum(estimate_tokens(m.content) for m in kept)
-    assert tokens > 0
-
-
-@pytest.mark.parametrize(
-    ("lane", "expected"),
-    [
-        pytest.param(Lane.PASTE, DAY0, id="paste-now"),
-        pytest.param(Lane.BACKFILL, DAY0, id="backfill-now"),
-        pytest.param(Lane.LIVE, datetime(2026, 1, 2, 3, tzinfo=UTC), id="live-next-night"),
-    ],
-)
-def test_run_after_for_defers_only_live_work(lane: Lane, expected: datetime) -> None:
-    assert run_after_for(lane, DAY0, 3) == expected

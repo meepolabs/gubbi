@@ -343,8 +343,8 @@ class LLMConfig(BaseSettings):
     provider: str = Field(default="openai_compatible", validation_alias="JOURNAL_LLM_PROVIDER")
     base_url: str = Field(default="", validation_alias="JOURNAL_LLM_BASE_URL")
     model: str = Field(default="", validation_alias="JOURNAL_LLM_MODEL")
-    # Prices (USD per million tokens) feed the cents estimate charged
-    # against the LLM budget.
+    # Prices (USD per million tokens) feed the cents estimate recorded on each
+    # job row for cost reporting; budgets are counted in weighted tokens.
     input_price_per_mtok: float = Field(
         default=1.00, ge=0, validation_alias="JOURNAL_LLM_INPUT_PRICE_PER_MTOK"
     )
@@ -358,30 +358,36 @@ class LLMConfig(BaseSettings):
     )
     # One small "anything worth recording?" call before extraction.
     extraction_triage: bool = Field(default=False, validation_alias="JOURNAL_EXTRACTION_TRIAGE")
-    # Gates budget delta writes from worker (hosted: True; self-host: False).
+    # Turns on the extraction budget: the scheduler holds work back by each
+    # user's wallet and the global ceiling (hosted: True; self-host: False).
+    # Charges are recorded either way.
     llm_budget_enabled: bool = Field(default=False, validation_alias="JOURNAL_LLM_BUDGET_ENABLED")
     # Lets a hosted (Mode 3) deployment boot with budgets off.
     llm_budget_unlimited_override: bool = Field(
         default=False, validation_alias="JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE"
     )
-    # Per-user allowances, counted in conversations and role-filtered input tokens.
-    monthly_conversation_limit: int = Field(
-        default=200, ge=0, validation_alias="JOURNAL_EXTRACTION_MONTHLY_CONVERSATIONS"
+    # Every budget figure is in weighted tokens: input-token equivalents, see
+    # the three weights below.
+    wallet_monthly_amount: int = Field(
+        default=5_000_000, ge=0, validation_alias="JOURNAL_LLM_WALLET_MONTHLY_AMOUNT"
     )
-    monthly_token_limit: int = Field(
-        default=4_000_000, ge=0, validation_alias="JOURNAL_EXTRACTION_MONTHLY_TOKENS"
+    # Background work stops while a user's available balance is below this.
+    wallet_background_reserve: int = Field(
+        default=1_000_000, ge=0, validation_alias="JOURNAL_LLM_WALLET_BACKGROUND_RESERVE"
     )
-    first_sync_conversation_limit: int = Field(
-        default=500, ge=0, validation_alias="JOURNAL_EXTRACTION_FIRST_SYNC_CONVERSATIONS"
+    running_job_cap: int = Field(
+        default=3, ge=1, validation_alias="JOURNAL_EXTRACTION_RUNNING_JOB_CAP"
     )
-    first_sync_token_limit: int = Field(
-        default=10_000_000, ge=0, validation_alias="JOURNAL_EXTRACTION_FIRST_SYNC_TOKENS"
+    weight_input: float = Field(default=1.0, ge=0, validation_alias="JOURNAL_LLM_WEIGHT_INPUT")
+    weight_cached_input: float = Field(
+        default=0.1, ge=0, validation_alias="JOURNAL_LLM_WEIGHT_CACHED_INPUT"
     )
-    # Deployment-wide monthly input-token ceiling across all users.
+    weight_output: float = Field(default=4.0, ge=0, validation_alias="JOURNAL_LLM_WEIGHT_OUTPUT")
+    # Deployment-wide monthly ceiling across all users, in weighted tokens.
     global_monthly_token_ceiling: int | None = Field(
         default=None, gt=0, validation_alias="JOURNAL_EXTRACTION_GLOBAL_MONTHLY_TOKEN_CEILING"
     )
-    # Fraction of the global ceiling past which backfill work stops being admitted.
+    # Fraction of the global ceiling past which background work stops.
     backfill_stop_ratio: float = Field(
         default=0.8, ge=0, le=1, validation_alias="JOURNAL_EXTRACTION_BACKFILL_STOP_RATIO"
     )
@@ -409,8 +415,8 @@ class LLMConfig(BaseSettings):
         ge=1,
         validation_alias="JOURNAL_EXTRACTION_DISPATCH_BOUND",
     )
-    # Within a budget period admitted usage only grows, so a deferred job is
-    # not looked at again until this many seconds pass or the period ends.
+    # A job held back for budget is looked at again after this many seconds,
+    # or when the next month starts if that comes first.
     extraction_defer_recheck_secs: int = Field(
         default=3600, ge=1, validation_alias="JOURNAL_EXTRACTION_DEFER_RECHECK_SECS"
     )
@@ -702,6 +708,11 @@ class Settings(BaseSettings):
                 "JOURNAL_LLM_BUDGET_ENABLED=true is required when JOURNAL_HYDRA_ADMIN_URL "
                 "is set (multi-tenant hosted). Set JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE=true "
                 "to run hosted extraction without budgets."
+            )
+        if self.auth.hydra_admin_url and not self.llm.llm_budget_enabled:
+            logger.warning(
+                "Hosted extraction is running without budgets: "
+                "JOURNAL_LLM_BUDGET_UNLIMITED_OVERRIDE=true and JOURNAL_LLM_BUDGET_ENABLED=false"
             )
         return self
 

@@ -13,8 +13,9 @@ set -euo pipefail
 # _budget_schema_probe.py).
 #
 # Asserts:
-#   - the 8 gubbi tables exist (audit_log, conversations, entries,
-#     entry_embeddings, extraction_jobs, messages, topics, users)
+#   - the 10 gubbi tables exist (audit_log, conversations, credit_grants,
+#     entries, entry_embeddings, extraction_jobs, llm_charges, messages,
+#     topics, users)
 #   - the vector extension is installed
 #   - 2 audit_log functions (audit_log_immutable, audit_log_admin_no_user_actor)
 #   - 3 audit_log triggers (no_update, no_delete, admin_no_user_actor)
@@ -118,7 +119,9 @@ assert_true() {
 # ---------------------------------------------------------------------------
 # Canonical sets (single source of truth for this script).
 # ---------------------------------------------------------------------------
-GUBBI_TENANT_TABLES=(audit_log conversations entries entry_embeddings extraction_jobs messages topics users)
+GUBBI_TENANT_TABLES=(audit_log conversations credit_grants entries entry_embeddings extraction_jobs llm_charges messages topics users)
+# Append-only per-user wallet tables: journal_app SELECT + INSERT only.
+GUBBI_APPEND_ONLY_TABLES=(credit_grants llm_charges)
 
 # Non-audit gubbi tables, and each role's expected list derived from it
 # INDEPENDENTLY. Defining these at canonical-set scope rather than inside a
@@ -128,7 +131,7 @@ GUBBI_TENANT_TABLES=(audit_log conversations entries entry_embeddings extraction
 # journal_admin grant went unchecked while the report showed no failure for them.
 GUBBI_NON_AUDIT_TABLES=(topics conversations entries messages entry_embeddings extraction_jobs)
 JOURNAL_APP_FULL_CRUD=("${GUBBI_NON_AUDIT_TABLES[@]}")
-JOURNAL_ADMIN_FULL=("${GUBBI_NON_AUDIT_TABLES[@]}" users)
+JOURNAL_ADMIN_FULL=("${GUBBI_NON_AUDIT_TABLES[@]}" "${GUBBI_APPEND_ONLY_TABLES[@]}" users)
 
 # ---------------------------------------------------------------------------
 # Role existence gate.
@@ -222,9 +225,11 @@ declare -a POLICY_PAIRS=(
     "audit_log:audit_log_app_insert_self_only"
     "audit_log:audit_log_app_select_self_only"
     "conversations:tenant_isolation"
+    "credit_grants:credit_grants_user_isolation"
     "entries:tenant_isolation"
     "entry_embeddings:tenant_isolation"
     "extraction_jobs:extraction_jobs_user_isolation"
+    "llm_charges:llm_charges_user_isolation"
     "messages:tenant_isolation"
     "topics:tenant_isolation"
     "users:users_self_read"
@@ -390,7 +395,7 @@ assert_priv() {
 # Helper note on owner-implicit privileges:
 # has_table_privilege() returns true for the table owner regardless of any
 # explicit REVOKE -- ownership grants implicit ALL, and that cannot be
-# revoked. journal_admin OWNS the 8 gubbi tables (per the squashed baseline
+# revoked. journal_admin OWNS the gubbi tables (per the squashed baseline
 # running under JOURNAL_DB_MIGRATION_URL; locked by
 # gubbi-testbench/tests/test_alembic_role_contract.py). So when verifying
 # "journal_admin should NOT have UPDATE/DELETE on audit_log",
@@ -429,6 +434,16 @@ if [[ "${JOURNAL_APP_PRESENT}" == "true" ]]; then
     for t in "${JOURNAL_APP_FULL_CRUD[@]}"; do
         for p in SELECT INSERT UPDATE DELETE; do
             assert_priv journal_app "$t" "$p" t
+        done
+    done
+
+    # Wallet tables: journal_app has SELECT + INSERT only (append-only).
+    for t in "${GUBBI_APPEND_ONLY_TABLES[@]}"; do
+        for p in SELECT INSERT; do
+            assert_priv journal_app "$t" "$p" t
+        done
+        for p in UPDATE DELETE; do
+            assert_priv journal_app "$t" "$p" f
         done
     done
 
@@ -515,6 +530,7 @@ if [[ "${JOURNAL_APP_PRESENT}" == "true" ]]; then
 else
     fail_unverified journal_app \
         "grant tables: journal_app CRUD shape" \
+        "grant wallet tables: journal_app SELECT/INSERT only" \
         "grant users: journal_app SELECT/UPDATE only" \
         "grant audit_log: journal_app INSERT only" \
         "column_grant audit_log: journal_app dedup conflict-target columns" \
@@ -828,7 +844,7 @@ fi
 # Report
 # ---------------------------------------------------------------------------
 if [[ ${PASS} == "true" && ${#FAILURES[@]} -eq 0 ]]; then
-    echo "verify-db-invariants: OK -- 8 gubbi tables, 10 policies, exact audit_log SELECT policy set (effective through PUBLIC + inherited roles), 3 triggers, audit_log dedup column grants, otel_ro role, app + admin superuser/BYPASSRLS posture including reachable-role escalation, alembic_version revocation, default-priv shape all match audited baseline"
+    echo "verify-db-invariants: OK -- 10 gubbi tables, 12 policies, exact audit_log SELECT policy set (effective through PUBLIC + inherited roles), 3 triggers, audit_log dedup column grants, otel_ro role, app + admin superuser/BYPASSRLS posture including reachable-role escalation, alembic_version revocation, default-priv shape all match audited baseline"
     exit 0
 fi
 

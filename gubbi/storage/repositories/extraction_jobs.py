@@ -12,14 +12,18 @@ WITH CHECK clause requires it to match the session variable.
 Public surface
 --------------
 create_pending      -- INSERT a new pending job; raises ExtractionJobAlreadyInFlight on conflict
-refresh_queued      -- rewrite the queue inputs of a pending, not yet admitted job
-mark_running        -- claim an admitted, runnable pending job and count the attempt
+refresh_queued      -- rewrite the queue inputs of a pending, not yet dispatched job
+mark_running        -- claim a dispatched, runnable pending job and count the attempt
 update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
 mark_completed      -- terminal UPDATE to 'completed'; adds this run's usage to the row
 mark_failed         -- UPDATE to 'failed' with the retry policy's run_after; adds this run's usage;
                        returns whether the job runs again
+finished_attempt    -- identity of a job's latest attempt and whether its conversation changed
+                       during it
+create_follow_up    -- queue a new job for a conversation re-saved during a finished run
 get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint)
 ExtractionJobAlreadyInFlight -- raised by create_pending on partial-unique conflict
+FinishedAttempt     -- dataclass returned by finished_attempt
 StatusCounts        -- dataclass returned by get_status_counts
 """
 
@@ -45,8 +49,11 @@ _CREATE_PENDING_ATTEMPTS: Final = 3
 
 __all__: list[str] = [
     "ExtractionJobAlreadyInFlight",
+    "FinishedAttempt",
     "StatusCounts",
+    "create_follow_up",
     "create_pending",
+    "finished_attempt",
     "get_status_counts",
     "mark_completed",
     "mark_failed",
@@ -103,8 +110,6 @@ async def create_pending(
     lane: str | None = None,
     run_after: datetime | None = None,
     activity_at: datetime | None = None,
-    filtered_tokens: int | None = None,
-    token_count_version: int | None = None,
 ) -> UUID:
     """INSERT a new extraction job row with status='pending'.
 
@@ -130,8 +135,6 @@ async def create_pending(
         "lane": lane,
         "run_after": run_after,
         "activity_at": activity_at,
-        "filtered_tokens": filtered_tokens,
-        "token_count_version": token_count_version,
     }
     supplied = {name: value for name, value in optional_columns.items() if value is not None}
     columns = ["user_id", "conversation_id", "source", *supplied]
@@ -207,23 +210,18 @@ async def refresh_queued(
     lane: str,
     run_after: datetime,
     activity_at: datetime,
-    filtered_tokens: int,
-    token_count_version: int,
 ) -> bool:
-    """Replace the queue inputs of a job that is still pending and not yet admitted.
+    """Replace the queue inputs of a job that is still pending and not yet dispatched.
 
-    Returns True when the row was rewritten. An admitted, running or finished
-    job is left unchanged and False is returned: admission has already charged
-    its token count against a budget period.
+    Returns True when the row was rewritten. A dispatched, running or
+    finished job is left unchanged and False is returned.
     """
     result = await conn.execute(
         """
         UPDATE extraction_jobs
         SET lane = $2,
             run_after = $3,
-            activity_at = $4,
-            filtered_tokens = $5,
-            token_count_version = $6
+            activity_at = $4
         WHERE id = $1
           AND status = 'pending'
           AND admitted_at IS NULL
@@ -232,8 +230,6 @@ async def refresh_queued(
         lane,
         run_after,
         activity_at,
-        filtered_tokens,
-        token_count_version,
     )
     return str(result) == "UPDATE 1"
 
@@ -246,16 +242,15 @@ async def refresh_queued(
 async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> bool:
     """Claim a job for this execution: move it from 'pending' to 'running'.
 
-    Only a row the scheduler admitted and whose ``run_after`` has passed is
+    Only a row the scheduler dispatched and whose ``run_after`` has passed is
     claimed. Returns False, changing nothing, for any other row: one not yet
-    admitted, failed (the scheduler moves a retryable failed row back to
+    dispatched, failed (the scheduler moves a retryable failed row back to
     pending before it dispatches it again), backed off, running, completed
     or not visible. A delayed or duplicate delivery of a job is therefore a
     no-op. The row is locked before its status is read, so of concurrent
     claims exactly one succeeds. Every claim counts one attempt, resets
     started_at and dispatch_failures and clears the previous run's
-    error_code; the admission
-    charge is kept, so a retried row is never charged again.
+    error_code.
     """
     claimed = await conn.fetchval(
         """
@@ -342,15 +337,12 @@ async def mark_completed(
     reasoning_tokens: int = 0,
     llm_calls: int = 0,
     chunks: int = 0,
-    filtered_tokens: int | None = None,
 ) -> bool:
     """Transition job to 'completed' and record final counters + timestamp.
 
     ``cents_spent`` and the usage counters are this run's totals over every
     model call, failed attempts included; they are ADDED to the row's
     counters, so a job revived after a failed run keeps that run's usage.
-    ``filtered_tokens``, when given, replaces the row's budget charge; None
-    keeps it.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'. This makes the function safe
@@ -369,7 +361,6 @@ async def mark_completed(
             reasoning_tokens = reasoning_tokens + $8,
             llm_calls = llm_calls + $9,
             chunks = chunks + $10,
-            filtered_tokens = coalesce($11::integer, filtered_tokens),
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')
@@ -384,7 +375,6 @@ async def mark_completed(
         reasoning_tokens,
         llm_calls,
         chunks,
-        filtered_tokens,
     )
     return str(result) == "UPDATE 1"
 
@@ -475,6 +465,85 @@ def _run_after_text(code: ErrorCode, attempts: int, now: datetime) -> str:
     """
     retry_at = next_run_after(code, max(attempts, 1), now)
     return "infinity" if retry_at is None else retry_at.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# finished_attempt / create_follow_up
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class FinishedAttempt:
+    """The latest attempt of a job, read in the transaction that ends it.
+
+    attempt            : the row's ``attempts``, the number of this attempt
+    resaved_during_run : the conversation was saved again after this attempt
+                         started, so the run may have read older content
+    """
+
+    job_id: UUID
+    user_id: UUID
+    conversation_id: int
+    source: str
+    lane: str
+    attempt: int
+    activity_at: datetime | None
+    resaved_during_run: bool
+
+
+async def finished_attempt(conn: asyncpg.Connection, job_id: UUID) -> FinishedAttempt | None:
+    """Return the latest attempt of ``job_id``; None when the row is not visible."""
+    row = await conn.fetchrow(
+        """
+        SELECT j.user_id, j.conversation_id, j.source, j.lane, j.attempts, j.activity_at,
+               coalesce(c.updated_at > j.started_at, false) AS resaved_during_run
+        FROM extraction_jobs AS j
+        LEFT JOIN conversations AS c ON c.id = j.conversation_id
+        WHERE j.id = $1
+        """,
+        job_id,
+    )
+    if row is None:
+        return None
+    return FinishedAttempt(
+        job_id=job_id,
+        user_id=UUID(str(row["user_id"])),
+        conversation_id=int(row["conversation_id"]),
+        source=str(row["source"]),
+        lane=str(row["lane"]),
+        attempt=int(row["attempts"]),
+        activity_at=row["activity_at"],
+        resaved_during_run=bool(row["resaved_during_run"]),
+    )
+
+
+async def create_follow_up(
+    conn: asyncpg.Connection, attempt: FinishedAttempt, run_after: datetime
+) -> UUID | None:
+    """Queue a new pending job for the conversation of a run that read stale content.
+
+    Must run inside the caller's transaction, after the finished job left the
+    active statuses. The conversation's ``processed_at`` is cleared so the new
+    job extracts it again; content unchanged since the last extraction is
+    then skipped by its content hash. Returns the new job id, or None when
+    another job of the conversation is already active.
+    """
+    await conn.execute(
+        "UPDATE conversations SET processed_at = NULL WHERE id = $1",
+        attempt.conversation_id,
+    )
+    try:
+        return await create_pending(
+            conn,
+            attempt.user_id,
+            attempt.conversation_id,
+            attempt.source,
+            lane=attempt.lane,
+            run_after=run_after,
+            activity_at=attempt.activity_at,
+        )
+    except ExtractionJobAlreadyInFlight:
+        return None
 
 
 # ---------------------------------------------------------------------------

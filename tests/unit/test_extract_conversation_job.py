@@ -207,8 +207,8 @@ async def test_already_processed_conversation_completes_its_job_without_work() -
         topics_created=0,
         entries_created=0,
         cents_spent=0,
-        filtered_tokens=0,
     )
+    mocks.settle_attempt.assert_not_awaited()
     assert len(tracker.conns) == 1
 
 
@@ -301,6 +301,9 @@ async def test_persistence_failure_marks_the_job_failed_on_a_fresh_connection() 
     assert mocks.mark_failed.await_args.args[0] is tracker.conns[2]
     assert mocks.mark_failed.await_args.kwargs["error_code"] == "internal_error"
     assert mocks.mark_failed.await_args.kwargs["input_tokens"] == CALL_USAGE.input
+    settle = mocks.settle_attempt.await_args
+    assert settle.args == (tracker.conns[2], _JOB_UUID, CALL_USAGE)
+    assert settle.kwargs == {"completed": False}
     audit = mocks.record_audit.await_args.kwargs
     assert audit["action"] == "extraction_job.failed"
     assert audit["actor_type"] == "user"
@@ -445,9 +448,7 @@ class TestClassifyError:
 # ---------------------------------------------------------------------------
 
 
-def _assert_completed_empty(
-    mocks: Any, *, cents: int, llm_calls: int, filtered_tokens: int | None
-) -> None:
+def _assert_completed_empty(mocks: Any, *, cents: int, llm_calls: int) -> None:
     mocks.persist.assert_not_awaited()
     mocks.mark_processed.assert_awaited_once()
     kwargs = mocks.mark_completed.await_args.kwargs
@@ -455,7 +456,9 @@ def _assert_completed_empty(
     assert kwargs["entries_created"] == 0
     assert kwargs["cents_spent"] == cents
     assert kwargs["llm_calls"] == llm_calls
-    assert kwargs["filtered_tokens"] == filtered_tokens
+    settle = mocks.settle_attempt.await_args
+    assert settle.args[1:] == (_JOB_UUID, CALL_USAGE if llm_calls else LLMUsage())
+    assert settle.kwargs == {"completed": True}
     audit = mocks.record_audit.await_args.kwargs
     assert audit["action"] == "extraction_job.completed"
     assert audit["metadata"] == {"conversation_id": CONVERSATION_ID, "entries_created": 0}
@@ -470,7 +473,7 @@ async def test_no_entries_completes_the_job_with_zero_entries_and_records_the_ha
 
     assert result["skipped"] is True
     assert result["entries_created"] == 0
-    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1, filtered_tokens=None)
+    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1)
     expected_hash = content_hash(keep_conversation_roles(transcript()))
     mocks.set_extraction_state.assert_awaited_once_with(
         tracker.conns[1], CONVERSATION_ID, expected_hash, EXTRACTION_VERSION
@@ -485,7 +488,7 @@ async def test_an_unusable_topic_completes_the_job_with_zero_entries() -> None:
         result = await _run(make_ctx(ScriptedProvider([chunk_output(topic="../../etc")])))
 
     assert result["topic_path"] is None
-    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1, filtered_tokens=None)
+    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1)
 
 
 async def test_every_chunk_triaged_out_completes_with_zero_entries(
@@ -497,7 +500,7 @@ async def test_every_chunk_triaged_out_completes_with_zero_entries(
     with patched_job(tracker) as mocks:
         await _run(make_ctx(ScriptedProvider([{"worth_recording": False}])))
 
-    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1, filtered_tokens=None)
+    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1)
 
 
 # ---------------------------------------------------------------------------
@@ -526,7 +529,7 @@ async def test_a_rule_skip_completes_the_job_without_a_model_call(
 
     assert result["skipped"] is True
     assert provider.user_contents == []
-    _assert_completed_empty(mocks, cents=0, llm_calls=0, filtered_tokens=0)
+    _assert_completed_empty(mocks, cents=0, llm_calls=0)
 
 
 async def test_unchanged_content_at_this_version_is_not_extracted_again() -> None:
@@ -540,7 +543,7 @@ async def test_unchanged_content_at_this_version_is_not_extracted_again() -> Non
         await _run(make_ctx(provider))
 
     assert provider.user_contents == []
-    _assert_completed_empty(mocks, cents=0, llm_calls=0, filtered_tokens=0)
+    _assert_completed_empty(mocks, cents=0, llm_calls=0)
 
 
 async def test_unchanged_content_at_an_older_version_is_extracted_again() -> None:

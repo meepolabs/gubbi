@@ -51,10 +51,7 @@ EXPECTED_COLUMNS: dict[str, ColumnSpec] = {
     "attempts": ColumnSpec("integer", "NO", "0"),
     "dispatch_failures": ColumnSpec("integer", "NO", "0"),
     "activity_at": ColumnSpec(_TIMESTAMPTZ, "YES", None),
-    "filtered_tokens": ColumnSpec("integer", "NO", "0"),
-    "token_count_version": ColumnSpec("smallint", "YES", None),
     "admitted_at": ColumnSpec(_TIMESTAMPTZ, "YES", None),
-    "budget_period_start": ColumnSpec("date", "YES", None),
 }
 
 EXPECTED_CONSTRAINTS: dict[str, str] = {
@@ -64,9 +61,6 @@ EXPECTED_CONSTRAINTS: dict[str, str] = {
     "extraction_jobs_defer_reason_check": (
         "CHECK ((defer_reason = ANY (ARRAY['budget'::text, 'global'::text, 'provider'::text])))"
     ),
-    "extraction_jobs_admitted_counted_check": (
-        "CHECK (((admitted_at IS NULL) OR (token_count_version IS NOT NULL)))"
-    ),
 }
 
 EXPECTED_INDEXES: dict[str, str] = {
@@ -75,18 +69,9 @@ EXPECTED_INDEXES: dict[str, str] = {
         " USING btree (status, run_after)"
         " WHERE (status = ANY (ARRAY['pending'::text, 'failed'::text]))"
     ),
-    "idx_extraction_jobs_user_period_admitted": (
-        "CREATE INDEX idx_extraction_jobs_user_period_admitted ON public.extraction_jobs"
-        " USING btree (user_id, budget_period_start) WHERE (admitted_at IS NOT NULL)"
-    ),
-    "idx_extraction_jobs_period_admitted": (
-        "CREATE INDEX idx_extraction_jobs_period_admitted ON public.extraction_jobs"
-        " USING btree (budget_period_start) INCLUDE (filtered_tokens)"
-        " WHERE (admitted_at IS NOT NULL)"
-    ),
     "idx_extraction_jobs_admitted_inflight": (
         "CREATE INDEX idx_extraction_jobs_admitted_inflight ON public.extraction_jobs"
-        " USING btree (status, admitted_at) WHERE ((admitted_at IS NOT NULL)"
+        " USING btree (status, admitted_at) INCLUDE (user_id) WHERE ((admitted_at IS NOT NULL)"
         " AND (status = ANY (ARRAY['pending'::text, 'running'::text])))"
     ),
 }
@@ -357,7 +342,7 @@ def test_upgrade_leaves_other_jobs_runnable_from_the_upgrade(
 
 
 @pytest.mark.parametrize("status", [job.status for job in LEGACY_JOBS])
-def test_pre_existing_jobs_read_the_backfill_lane_and_no_charge(
+def test_pre_existing_jobs_read_the_backfill_lane_undispatched(
     round_trip: RoundTrip, status: str
 ) -> None:
     job = dict(round_trip.legacy_jobs[status])
@@ -372,10 +357,7 @@ def test_pre_existing_jobs_read_the_backfill_lane_and_no_charge(
         "attempts": 0,
         "dispatch_failures": 0,
         "activity_at": None,
-        "filtered_tokens": 0,
-        "token_count_version": None,
         "admitted_at": None,
-        "budget_period_start": None,
     }
 
 
@@ -434,37 +416,6 @@ async def test_insert_with_a_known_value_is_accepted(
 
     assert inserted is not None
     assert (inserted["lane"], inserted["defer_reason"]) == (lane, defer_reason)
-
-
-@pytest.mark.parametrize(
-    "admit_sql",
-    [
-        pytest.param(
-            "INSERT INTO extraction_jobs (user_id, conversation_id, source, status, admitted_at) "
-            "VALUES ($1, $2, 'other', 'pending', now())",
-            id="insert-admitted",
-        ),
-        pytest.param(
-            "UPDATE extraction_jobs SET admitted_at = now(), token_count_version = NULL "
-            "WHERE user_id = $1 AND conversation_id = $2",
-            id="update-admitted",
-        ),
-    ],
-)
-@pytest.mark.asyncio(loop_scope="session")
-async def test_an_admitted_row_without_a_token_count_is_rejected(
-    round_trip: RoundTrip, admit_sql: str
-) -> None:
-    async with _rolled_back_tenant(round_trip.dsn) as (conn, user_id, conversation_id):
-        await conn.execute(
-            "INSERT INTO extraction_jobs "
-            "(user_id, conversation_id, source, status, token_count_version) "
-            "VALUES ($1, $2, 'claude', 'pending', 1)",
-            user_id,
-            conversation_id,
-        )
-        with pytest.raises(asyncpg.CheckViolationError):
-            await conn.execute(admit_sql, user_id, conversation_id)
 
 
 @pytest.mark.asyncio(loop_scope="session")

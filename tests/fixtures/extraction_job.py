@@ -165,6 +165,7 @@ class JobMocks:
     mark_failed: AsyncMock
     persist: AsyncMock
     record_audit: AsyncMock
+    settle_attempt: AsyncMock
 
 
 def make_ctx(provider: ScriptedProvider) -> dict[str, Any]:
@@ -238,7 +239,9 @@ def patched_job(
             mark_failed=enter(f"{jobs}.mark_failed", return_value=FailureOutcome.RETRY),
             persist=AsyncMock(return_value=persisted),
             record_audit=AsyncMock(),
+            settle_attempt=AsyncMock(return_value=None),
         )
         stack.enter_context(patch.object(job_module, "persist_extraction", mocks.persist))
         stack.enter_context(patch.object(job_module, "record_audit", mocks.record_audit))
+        stack.enter_context(patch.object(job_module, "settle_attempt", mocks.settle_attempt))
         yield mocks

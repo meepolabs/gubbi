@@ -158,12 +158,12 @@ _GAUGES: tuple[tuple[str, str, str], ...] = (
     ),
     (
         MetricNames.EXTRACTION_BUDGET_GLOBAL_USED_RATIO,
-        "Filtered tokens admitted this budget period over the global ceiling",
+        "Weighted tokens charged this month over the global ceiling",
         "1",
     ),
     (
         MetricNames.EXTRACTION_PROVIDER_TOKENS_MONTH,
-        "Provider-reported tokens of the extraction jobs charged to this budget period",
+        "Provider-reported tokens of the charges written this month",
         "1",
     ),
 )
@@ -177,6 +177,10 @@ _COUNTERS: tuple[tuple[str, str], ...] = (
     (
         MetricNames.EXTRACTION_JOBS_FAILED,
         "Extraction job failures written, by retry class and whether the job runs again",
+    ),
+    (
+        MetricNames.EXTRACTION_CHARGES_WEIGHTED,
+        "Weighted tokens charged to user wallets, by lane and paying balance",
     ),
 )
 

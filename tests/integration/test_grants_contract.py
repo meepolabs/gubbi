@@ -6,8 +6,9 @@ match the audited end-state captured in
 ``deployment/scripts/baseline_schema.sql`` and
 ``deployment/scripts/grants.sql``.
 
-Coverage: gubbi tables only (audit_log, conversations, entries,
-entry_embeddings, extraction_jobs, messages, topics, users) plus the
+Coverage: gubbi tables only (audit_log, conversations, credit_grants,
+entries, entry_embeddings, extraction_jobs, llm_charges, messages, topics,
+users) plus the
 otel_ro role posture. Cloud-side tables (tenants, subscriptions,
 llm_budgets, outbox_events, stripe_events) are covered by gubbi-cloud's
 lifespan probes -- this test does not assume they exist (gubbi-cloud's
@@ -59,6 +60,13 @@ for _tbl in _FULL_CRUD_TABLES:
 # only a wider grant is held)
 for _tbl in _FULL_CRUD_TABLES:
     for _priv in _CRUD:
+        EXPECTED_GRANTS[("journal_admin", _tbl, _priv)] = True
+
+# credit_grants / llm_charges: append-only per-user wallet (gubbi 0006) --
+# journal_app gets SELECT + INSERT only.
+for _tbl in ("credit_grants", "llm_charges"):
+    for _priv in _CRUD:
+        EXPECTED_GRANTS[("journal_app", _tbl, _priv)] = _priv in ("SELECT", "INSERT")
         EXPECTED_GRANTS[("journal_admin", _tbl, _priv)] = True
 
 # users: narrowed -- journal_app gets SELECT + UPDATE only (gubbi 0019

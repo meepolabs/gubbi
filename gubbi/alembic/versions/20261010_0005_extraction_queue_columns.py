@@ -1,16 +1,11 @@
-"""Add scheduling and admission-charge columns to extraction_jobs.
+"""Add scheduling columns to extraction_jobs.
 
-Scheduling: ``lane`` (``backfill`` | ``live`` | ``paste``), ``run_after`` (the
-earliest time the job may run), ``defer_reason`` (NULL, or why admission held
-the job back: ``budget`` | ``global`` | ``provider``), ``attempts`` (worker
-runs started), ``dispatch_failures`` (consecutive failed hand-offs to the
-worker queue since the last worker claim) and ``activity_at`` (the
-conversation's latest message time).
-
-Admission charge, written once when the job is admitted: ``filtered_tokens``,
-``token_count_version``, ``admitted_at`` and ``budget_period_start``. A check
-constraint rejects an admitted row without a ``token_count_version``, so no job
-is charged before its tokens are counted.
+``lane`` (``backfill`` | ``live`` | ``paste``), ``run_after`` (the earliest
+time the job may run), ``defer_reason`` (NULL, or why admission held the job
+back: ``budget`` | ``global`` | ``provider``), ``attempts`` (worker runs
+started), ``dispatch_failures`` (consecutive failed hand-offs to the worker
+queue since the last worker claim), ``activity_at`` (the conversation's latest
+message time) and ``admitted_at`` (when the scheduler last dispatched the job).
 
 ``period_start`` gains a column default of the first day of the current UTC
 month, so an INSERT may omit it.
@@ -19,13 +14,11 @@ Existing rows read ``lane = 'backfill'``. Rows still ``pending`` or ``failed``
 get ``run_after = 'infinity'``: they are held until released explicitly, so
 applying this revision never puts a backlog of old jobs back in the queue.
 
-Four partial indexes: runnable selection over ``(status, run_after)`` for
-pending and failed rows, per-user period usage over
-``(user_id, budget_period_start)`` for admitted rows, the global period sum
-over ``(budget_period_start) INCLUDE (filtered_tokens)`` for admitted rows, so
-the sum is answered from the index alone, and ``(status, admitted_at)`` for
-admitted rows that are pending or running, which the scheduler counts against
-its dispatch bound and scans for lost dispatches.
+Two partial indexes: runnable selection over ``(status, run_after)`` for
+pending and failed rows, and ``(status, admitted_at) INCLUDE (user_id)`` for
+dispatched rows that are pending or running, which the scheduler counts
+against its dispatch bound and, per user, against each user's running-job
+cap, and scans for lost dispatches.
 
 The table already carries FORCE ROW LEVEL SECURITY and table-level grants to
 journal_app and journal_admin, so the new columns inherit both; no policy or
@@ -58,12 +51,7 @@ ALTER TABLE public.extraction_jobs
     ADD COLUMN attempts integer DEFAULT 0 NOT NULL,
     ADD COLUMN dispatch_failures integer DEFAULT 0 NOT NULL,
     ADD COLUMN activity_at timestamp with time zone,
-    ADD COLUMN filtered_tokens integer DEFAULT 0 NOT NULL,
-    ADD COLUMN token_count_version smallint,
     ADD COLUMN admitted_at timestamp with time zone,
-    ADD COLUMN budget_period_start date,
-    ADD CONSTRAINT extraction_jobs_admitted_counted_check
-        CHECK (admitted_at IS NULL OR token_count_version IS NOT NULL),
     ALTER COLUMN period_start SET DEFAULT (date_trunc('month', now() AT TIME ZONE 'UTC'))::date
 """
 
@@ -75,32 +63,20 @@ _CREATE_INDEXES = (
     "CREATE INDEX idx_extraction_jobs_runnable "
     "ON public.extraction_jobs USING btree (status, run_after) "
     "WHERE (status IN ('pending', 'failed'))",
-    "CREATE INDEX idx_extraction_jobs_user_period_admitted "
-    "ON public.extraction_jobs USING btree (user_id, budget_period_start) "
-    "WHERE (admitted_at IS NOT NULL)",
-    "CREATE INDEX idx_extraction_jobs_period_admitted "
-    "ON public.extraction_jobs USING btree (budget_period_start) INCLUDE (filtered_tokens) "
-    "WHERE (admitted_at IS NOT NULL)",
     "CREATE INDEX idx_extraction_jobs_admitted_inflight "
-    "ON public.extraction_jobs USING btree (status, admitted_at) "
+    "ON public.extraction_jobs USING btree (status, admitted_at) INCLUDE (user_id) "
     "WHERE (admitted_at IS NOT NULL AND status IN ('pending', 'running'))",
 )
 
 _DROP_INDEXES = (
     "DROP INDEX public.idx_extraction_jobs_admitted_inflight",
-    "DROP INDEX public.idx_extraction_jobs_period_admitted",
-    "DROP INDEX public.idx_extraction_jobs_user_period_admitted",
     "DROP INDEX public.idx_extraction_jobs_runnable",
 )
 
 _DROP_COLUMNS = """
 ALTER TABLE public.extraction_jobs
     ALTER COLUMN period_start DROP DEFAULT,
-    DROP CONSTRAINT extraction_jobs_admitted_counted_check,
-    DROP COLUMN budget_period_start,
     DROP COLUMN admitted_at,
-    DROP COLUMN token_count_version,
-    DROP COLUMN filtered_tokens,
     DROP COLUMN activity_at,
     DROP COLUMN dispatch_failures,
     DROP COLUMN attempts,
