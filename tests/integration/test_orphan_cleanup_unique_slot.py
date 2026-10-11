@@ -1,12 +1,11 @@
-"""Integration test: orphan cleanup sweeps stale rows and frees the unique slot.
+"""Integration test: the orphan sweep fails stuck running rows for a retry.
 
 Seeds extraction_jobs rows for a real tenant conversation, runs exactly one
 cleanup cycle against the database, then verifies:
-  1. A stale pending row flips to status='failed' with error_code='enqueue_lost'.
-  2. The partial unique index holds the (user_id, conversation_id, source) slot
-     while the stale row is pending, and frees it once the sweep has run.
-  3. A stuck running row flips to 'failed'/worker_lost with a zero-cost refund.
-  4. A recent running row is left untouched.
+  1. A stuck running row flips to 'failed'/worker_lost with a future run_after,
+     keeping its admission charge.
+  2. A recent running row is left untouched.
+  3. A pending row, however old, is queued work and is left untouched.
 """
 
 from __future__ import annotations
@@ -15,7 +14,7 @@ import asyncio
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import asyncpg
@@ -34,11 +33,11 @@ pytestmark = [
 # shared asyncio module, so the fake only intercepts calls carrying this
 # value and delegates every other sleep to the real implementation.
 _CYCLE_SLEEP_SECONDS = 7
-_PENDING_THRESHOLD_MINUTES = 30
 _real_sleep = asyncio.sleep
+_CHARGED_TOKENS = 1234
 
 
-async def _run_one_cycle(admin_pool: asyncpg.Pool, *, budget_helper: Any = None) -> None:
+async def _run_one_cycle(admin_pool: asyncpg.Pool) -> None:
     """Run exactly one sweep: the first loop sleep returns, the second parks until cancel."""
     body_done = asyncio.Event()
     cycle_sleeps = 0
@@ -55,12 +54,7 @@ async def _run_one_cycle(admin_pool: asyncpg.Pool, *, budget_helper: Any = None)
 
     with patch("gubbi.extraction.orphan_cleanup.asyncio.sleep", side_effect=_fake_sleep):
         task = asyncio.create_task(
-            run_orphan_cleanup(
-                admin_pool,
-                threshold_minutes=_PENDING_THRESHOLD_MINUTES,
-                sleep_seconds=_CYCLE_SLEEP_SECONDS,
-                budget_helper=budget_helper,
-            )
+            run_orphan_cleanup(admin_pool, sleep_seconds=_CYCLE_SLEEP_SECONDS)
         )
         await asyncio.wait_for(body_done.wait(), timeout=10)
         task.cancel()
@@ -74,16 +68,19 @@ async def _seed_job(
     *,
     status: str,
     at: datetime,
+    attempts: int = 1,
 ) -> UUID:
-    """Insert an extraction_jobs row for ``seed``'s conversation, timestamped ``at``."""
+    """Insert an admitted extraction_jobs row for ``seed``'s conversation, timestamped ``at``."""
     assert seed.conversation_id is not None
     job_id = uuid4()
     await admin_pool.execute(
         """
         INSERT INTO extraction_jobs
             (id, user_id, conversation_id, source, status, period_start,
-             created_at, started_at)
-        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6)
+             created_at, started_at, attempts, filtered_tokens, admitted_at,
+             budget_period_start)
+        VALUES ($1, $2, $3, 'test', $4, '2026-05-01'::date, $5, $6, $7, $8, $5,
+                '2026-05-01'::date)
         """,
         job_id,
         seed.user_id,
@@ -91,6 +88,8 @@ async def _seed_job(
         status,
         at,
         at if status == "running" else None,
+        attempts,
+        _CHARGED_TOKENS,
     )
     return job_id
 
@@ -103,48 +102,35 @@ async def _job_state(admin_pool: asyncpg.Pool, job_id: UUID) -> tuple[str, str |
     return row["status"], row["error_code"]
 
 
-async def test_stale_pending_row_flipped_to_failed(
+async def test_stuck_running_row_is_failed_as_worker_lost_with_a_future_run_after(
     admin_pool: asyncpg.Pool, seeded_a: TenantSeed
 ) -> None:
-    """A pending row older than the threshold becomes failed/enqueue_lost."""
-    stale = datetime.now(UTC) - timedelta(minutes=_PENDING_THRESHOLD_MINUTES + 5)
-    job_id = await _seed_job(admin_pool, seeded_a, status="pending", at=stale)
-
-    await _run_one_cycle(admin_pool)
-
-    assert await _job_state(admin_pool, job_id) == ("failed", "enqueue_lost")
-
-
-async def test_unique_slot_freed_after_cleanup(
-    admin_pool: asyncpg.Pool, seeded_a: TenantSeed
-) -> None:
-    """The stale pending row blocks a second pending row until the sweep fails it."""
-    stale = datetime.now(UTC) - timedelta(minutes=_PENDING_THRESHOLD_MINUTES + 5)
-    await _seed_job(admin_pool, seeded_a, status="pending", at=stale)
-    with pytest.raises(asyncpg.UniqueViolationError):
-        await _seed_job(admin_pool, seeded_a, status="pending", at=datetime.now(UTC))
-
-    await _run_one_cycle(admin_pool)
-
-    new_job_id = await _seed_job(admin_pool, seeded_a, status="pending", at=datetime.now(UTC))
-    assert await _job_state(admin_pool, new_job_id) == ("pending", None)
-
-
-async def test_stuck_running_row_flipped_to_worker_lost(
-    admin_pool: asyncpg.Pool, seeded_a: TenantSeed
-) -> None:
-    """A running row past the running-sweep threshold becomes failed/worker_lost and is refunded."""
     stuck = datetime.now(UTC) - timedelta(seconds=orphan_cleanup._RUNNING_THRESHOLD_SECS + 300)
     job_id = await _seed_job(admin_pool, seeded_a, status="running", at=stuck)
-    helper = MagicMock()
-    helper.record_actual_cost = AsyncMock()
 
-    await _run_one_cycle(admin_pool, budget_helper=helper)
+    await _run_one_cycle(admin_pool)
 
-    assert await _job_state(admin_pool, job_id) == ("failed", "worker_lost")
-    helper.record_actual_cost.assert_awaited_once()
-    assert helper.record_actual_cost.await_args.kwargs["user_id"] == seeded_a.user_id
-    assert helper.record_actual_cost.await_args.kwargs["actual_cents"] == 0
+    row = await admin_pool.fetchrow(
+        "SELECT status, error_code, run_after > now() AS deferred,"
+        " run_after < 'infinity' AS retried, filtered_tokens, admitted_at"
+        " FROM extraction_jobs WHERE id = $1",
+        job_id,
+    )
+    assert row is not None
+    assert (row["status"], row["error_code"]) == ("failed", "worker_lost")
+    assert (row["deferred"], row["retried"]) == (True, True)
+    assert (row["filtered_tokens"], row["admitted_at"]) == (_CHARGED_TOKENS, stuck)
+
+
+async def test_an_old_pending_row_is_left_queued(
+    admin_pool: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    old = datetime.now(UTC) - timedelta(days=2)
+    job_id = await _seed_job(admin_pool, seeded_a, status="pending", at=old, attempts=0)
+
+    await _run_one_cycle(admin_pool)
+
+    assert await _job_state(admin_pool, job_id) == ("pending", None)
 
 
 async def test_recent_running_row_untouched(admin_pool: asyncpg.Pool, seeded_a: TenantSeed) -> None:

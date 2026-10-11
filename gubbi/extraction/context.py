@@ -7,7 +7,6 @@ if TYPE_CHECKING:
     import threading
 
     import asyncpg
-    from gubbi_common.budget import BudgetHelper
     from redis.asyncio import ConnectionPool as RedisConnectionPool
     from redis.asyncio import Redis as RedisClient
 
@@ -25,5 +24,4 @@ class ExtractionContext(TypedDict):
     redis_pool: RedisConnectionPool
     health_thread: NotRequired[threading.Thread]
     job_id: NotRequired[str]
-    budget_helper: NotRequired[BudgetHelper]
     cancel_cleanups: NotRequired[set[asyncio.Task[None]]]

@@ -13,10 +13,10 @@ Public surface
 --------------
 create_pending      -- INSERT a new pending job; raises ExtractionJobAlreadyInFlight on conflict
 refresh_queued      -- rewrite the queue inputs of a pending, not yet admitted job
-mark_running        -- claim a job for a run; returns the status it was claimed from
+mark_running        -- claim a job for a run and count the attempt; returns the prior status
 update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
 mark_completed      -- terminal UPDATE to 'completed'; adds this run's usage to the row
-mark_failed         -- terminal UPDATE to 'failed'; adds this run's usage to the row
+mark_failed         -- UPDATE to 'failed' with the retry policy's run_after; adds this run's usage
 get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint)
 ExtractionJobAlreadyInFlight -- raised by create_pending on partial-unique conflict
 StatusCounts        -- dataclass returned by get_status_counts
@@ -31,6 +31,8 @@ from uuid import UUID
 
 import asyncpg
 
+from gubbi.extraction.retry_policy import ErrorCode, next_run_after
+
 if TYPE_CHECKING:
     from datetime import date, datetime
 
@@ -41,7 +43,6 @@ __all__: list[str] = [
     "ExtractionJobAlreadyInFlight",
     "StatusCounts",
     "create_pending",
-    "get_period_start",
     "get_status_counts",
     "mark_completed",
     "mark_failed",
@@ -237,30 +238,6 @@ async def refresh_queued(
 
 
 # ---------------------------------------------------------------------------
-# get_period_start
-# ---------------------------------------------------------------------------
-
-
-async def get_period_start(
-    conn: asyncpg.Connection,
-    job_id: UUID,
-) -> date | None:
-    """Fetch the period_start date stored on an extraction_jobs row.
-
-    Returns None if no row matches (e.g. job not yet visible under RLS,
-    or job_id is invalid). The caller should fall back to
-    current_period_start() when None is returned.
-    """
-    row = await conn.fetchrow(
-        "SELECT period_start FROM extraction_jobs WHERE id = $1",
-        job_id,
-    )
-    if row is None:
-        return None
-    return cast("date", row["period_start"])
-
-
-# ---------------------------------------------------------------------------
 # mark_running
 # ---------------------------------------------------------------------------
 
@@ -271,15 +248,18 @@ async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> ClaimedFrom | 
     Returns the status the row was claimed from, or None, changing nothing,
     when the row is completed, already running, or not visible: another
     execution owns or finished the job. The row is locked before its status
-    is read, so of concurrent claims exactly one succeeds. Reviving a failed
-    row (a retry) resets started_at and clears the stale error_code.
+    is read, so of concurrent claims exactly one succeeds. Every claim counts
+    one attempt. Reviving a failed row (a retry) resets started_at and clears
+    the stale error_code; its admission charge is kept, so a revived row is
+    never charged again.
     """
     claimed_from = await conn.fetchval(
         """
         UPDATE extraction_jobs AS job
         SET status = 'running',
             started_at = now(),
-            error_code = NULL
+            error_code = NULL,
+            attempts = job.attempts + 1
         FROM (SELECT id, status FROM extraction_jobs WHERE id = $1 FOR UPDATE) AS prior
         WHERE job.id = prior.id
           AND prior.status IN ('pending', 'failed')
@@ -350,12 +330,15 @@ async def mark_completed(
     reasoning_tokens: int = 0,
     llm_calls: int = 0,
     chunks: int = 0,
+    filtered_tokens: int | None = None,
 ) -> bool:
     """Transition job to 'completed' and record final counters + timestamp.
 
     ``cents_spent`` and the usage counters are this run's totals over every
     model call, failed attempts included; they are ADDED to the row's
     counters, so a job revived after a failed run keeps that run's usage.
+    ``filtered_tokens``, when given, replaces the row's budget charge; None
+    keeps it.
 
     WHERE clause guards against overwriting a terminal state -- no-op if
     status is already 'completed' or 'failed'. This makes the function safe
@@ -374,6 +357,7 @@ async def mark_completed(
             reasoning_tokens = reasoning_tokens + $8,
             llm_calls = llm_calls + $9,
             chunks = chunks + $10,
+            filtered_tokens = coalesce($11::integer, filtered_tokens),
             completed_at = now()
         WHERE id = $1
           AND status NOT IN ('completed', 'failed')
@@ -388,6 +372,7 @@ async def mark_completed(
         reasoning_tokens,
         llm_calls,
         chunks,
+        filtered_tokens,
     )
     return str(result) == "UPDATE 1"
 
@@ -401,7 +386,7 @@ async def mark_failed(
     conn: asyncpg.Connection,
     job_id: UUID,
     *,
-    error_code: str,
+    error_code: ErrorCode,
     cents_spent: int = 0,
     input_tokens: int = 0,
     output_tokens: int = 0,
@@ -410,42 +395,70 @@ async def mark_failed(
     llm_calls: int = 0,
     chunks: int = 0,
 ) -> bool:
-    """Transition job to 'failed' and record the error_code.
+    """Transition job to 'failed', record the error_code and when it may run again.
 
-    ``cents_spent`` and the usage counters are this run's totals over every
-    model call made before the failure, failed attempts included; they are
-    ADDED to the row's counters, as in :func:`mark_completed`.
+    ``run_after`` comes from :func:`retry_policy.next_run_after` over the
+    row's ``attempts``; a failure the policy never retries is held at
+    ``'infinity'``. ``cents_spent`` and the usage counters are this run's
+    totals over every model call made before the failure, failed attempts
+    included; they are ADDED to the row's counters, as in :func:`mark_completed`.
 
-    WHERE clause guards against overwriting a terminal state -- no-op if
-    status is already 'completed' or 'failed'.
+    No-op, returning False, if the row is already 'completed' or 'failed' or
+    is not visible. Runs in a savepoint so the row lock taken to read
+    ``attempts`` is held until the UPDATE.
     """
-    result = await conn.execute(
-        """
-        UPDATE extraction_jobs
-        SET status = 'failed',
-            error_code = $2,
-            cents_spent = cents_spent + $3,
-            input_tokens = input_tokens + $4,
-            output_tokens = output_tokens + $5,
-            cached_input_tokens = cached_input_tokens + $6,
-            reasoning_tokens = reasoning_tokens + $7,
-            llm_calls = llm_calls + $8,
-            chunks = chunks + $9,
-            completed_at = now()
-        WHERE id = $1
-          AND status NOT IN ('completed', 'failed')
-        """,
-        job_id,
-        error_code,
-        cents_spent,
-        input_tokens,
-        output_tokens,
-        cached_input_tokens,
-        reasoning_tokens,
-        llm_calls,
-        chunks,
-    )
+    async with conn.transaction():
+        row = await conn.fetchrow(
+            """
+            SELECT attempts, clock_timestamp() AS db_now
+            FROM extraction_jobs
+            WHERE id = $1
+              AND status NOT IN ('completed', 'failed')
+            FOR UPDATE
+            """,
+            job_id,
+        )
+        if row is None:
+            return False
+        run_after = _run_after_text(error_code, int(row["attempts"]), row["db_now"])
+        result = await conn.execute(
+            """
+            UPDATE extraction_jobs
+            SET status = 'failed',
+                error_code = $2,
+                run_after = $3::text::timestamptz,
+                cents_spent = cents_spent + $4,
+                input_tokens = input_tokens + $5,
+                output_tokens = output_tokens + $6,
+                cached_input_tokens = cached_input_tokens + $7,
+                reasoning_tokens = reasoning_tokens + $8,
+                llm_calls = llm_calls + $9,
+                chunks = chunks + $10,
+                completed_at = now()
+            WHERE id = $1
+            """,
+            job_id,
+            error_code.value,
+            run_after,
+            cents_spent,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            reasoning_tokens,
+            llm_calls,
+            chunks,
+        )
     return str(result) == "UPDATE 1"
+
+
+def _run_after_text(code: ErrorCode, attempts: int, now: datetime) -> str:
+    """``run_after`` for a failure as timestamptz text; ``'infinity'`` when never retried.
+
+    The policy counts from the first run, so a row failed before any claim
+    is treated as on its first attempt.
+    """
+    retry_at = next_run_after(code, max(attempts, 1), now)
+    return "infinity" if retry_at is None else retry_at.isoformat()
 
 
 # ---------------------------------------------------------------------------

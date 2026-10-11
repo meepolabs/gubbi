@@ -393,17 +393,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         app.state.arq_pool = arq_pool
         app_ctx.arq_pool = arq_pool
 
-        # Orphan cleanup cron: marks stale pending extraction_jobs rows as failed.
+        # Orphan cleanup cron: fails extraction_jobs rows stuck in 'running'.
         # Requires admin_pool (BYPASSRLS) for cross-tenant sweep; skipped when no
         # admin pool is configured (single-tenant dev fallback).
         app.state.background_tasks = set()
         if admin_pool is not None:
-            cron_task = asyncio.create_task(
-                run_orphan_cleanup(
-                    admin_pool,
-                    threshold_minutes=settings.llm.orphan_cleanup_threshold_minutes,
-                ),
-            )
+            cron_task = asyncio.create_task(run_orphan_cleanup(admin_pool))
             app.state.background_tasks.add(cron_task)
 
         # Mode 3 (hosted) disables the shared static API key path -- operators

@@ -14,7 +14,7 @@ content. Four markers:
   - ``FAKE_LLM_FAIL`` -- raises :class:`LLMTransientError`. The
     extraction retry loop classifies this as transient, retries, and
     eventually fails the job after the retry budget is exhausted.
-    Exercises the pre-charge refund path in
+    Exercises the failed-job path in
     ``extraction/jobs/extract_conversation.py``.
   - ``FAKE_LLM_FAIL_PERMANENT`` -- raises :class:`LLMPermanentError`,
     skipping retries and going straight to the permanent-failure
@@ -39,10 +39,10 @@ of call order or worker concurrency. State-free / safe under ARQ
 ``max_jobs=10``.
 
 Cost estimates use the default per-million-token prices of the real
-provider settings ($1/MTok input, $5/MTok output) so the budget pre-charge
-math matches what an OpenAICompatibleProvider at default pricing would
-report -- a regression in ``BudgetHelper`` accounting surfaces the same way
-under either provider.
+provider settings ($1/MTok input, $5/MTok output) so the cost recorded on
+a job row matches what an OpenAICompatibleProvider at default pricing would
+report -- a regression in cost accounting surfaces the same way under
+either provider.
 """
 
 from __future__ import annotations
@@ -71,8 +71,8 @@ _DEFAULT_MODEL = "fake-haiku-1"
 
 # Canned token counts -- chosen to match a typical Haiku 4.5 categorize
 # call (~100 input prompt tokens + ~50 output schema response tokens).
-# Determinism is the contract: the budget pre-charge / refund math
-# below depends on these being constant per call.
+# Determinism is the contract: the cost math below depends on these
+# being constant per call.
 _CANNED_INPUT_TOKENS = 100
 _CANNED_OUTPUT_TOKENS = 50
 _CANNED_USAGE = LLMUsage(input=_CANNED_INPUT_TOKENS, output=_CANNED_OUTPUT_TOKENS)
@@ -137,10 +137,9 @@ class FakeLLMProvider(LLMProvider):
         )
 
     def estimate_cost_cents(self, input_tokens: int, output_tokens: int) -> float:
-        """Price at the default per-Mtok settings for deterministic budget math."""
+        """Price at the default per-Mtok settings for deterministic cost math."""
         # ``round`` to 6 decimals matches the production rounding
-        # convention. Determinism is the invariant the pre-charge /
-        # refund test depends on.
+        # convention.
         cents = (
             input_tokens / 1_000_000 * _INPUT_PRICE_PER_MILLION * 100
             + output_tokens / 1_000_000 * _OUTPUT_PRICE_PER_MILLION * 100

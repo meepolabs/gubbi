@@ -390,10 +390,6 @@ class LLMConfig(BaseSettings):
     onboarding_window_days: int = Field(
         default=7, ge=0, validation_alias="JOURNAL_EXTRACTION_ONBOARDING_WINDOW_DAYS"
     )
-    # Stale pending-job sweep window.
-    orphan_cleanup_threshold_minutes: int = Field(
-        default=30, validation_alias="JOURNAL_ORPHAN_CLEANUP_THRESHOLD_MINUTES"
-    )
 
     @field_validator("base_url")
     @classmethod

@@ -9,7 +9,10 @@ from typing import TYPE_CHECKING, Any
 import pytest
 from gubbi_common.db.user_scoped import user_scoped_connection
 
+from gubbi.extraction import orphan_cleanup
+from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.storage.repositories import extraction_jobs as jobs_repo
+from gubbi.storage.repositories import extraction_queue as queue_repo
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -61,9 +64,9 @@ async def _fail(
     conn: asyncpg.Connection, job_id: UUID, usage: dict[str, int], cents: int | None = None
 ) -> bool:
     if cents is None:
-        return await jobs_repo.mark_failed(conn, job_id, error_code="llm_refused", **usage)
+        return await jobs_repo.mark_failed(conn, job_id, error_code=ErrorCode.LLM_REFUSED, **usage)
     return await jobs_repo.mark_failed(
-        conn, job_id, error_code="llm_refused", cents_spent=cents, **usage
+        conn, job_id, error_code=ErrorCode.LLM_REFUSED, cents_spent=cents, **usage
     )
 
 
@@ -156,3 +159,36 @@ async def test_a_retried_job_totals_the_usage_of_every_run(
     assert row["status"] == expected_status
     assert row["cents_spent"] == _CENTS * 11
     assert _usage_of(row) == {column: value * 11 for column, value in _USAGE.items()}
+
+
+async def test_reviving_a_failed_admitted_job_leaves_usage_unchanged(
+    app_pool: asyncpg.Pool, admin_pool: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    """Admission charges once across a failed run, a swept run and the final run."""
+    period = date(2026, 10, 1)
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        job_id = await _create_job(conn, seeded_a)
+    async with admin_pool.acquire() as conn:
+        await conn.execute("UPDATE extraction_jobs SET filtered_tokens = 900 WHERE id = $1", job_id)
+        await queue_repo.admit(conn, [job_id], period)
+        admitted = await queue_repo.user_period_usage(conn, [seeded_a.user_id], period)
+
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        await jobs_repo.mark_running(conn, job_id)
+        await _fail(conn, job_id, _USAGE, _CENTS)
+        assert await jobs_repo.mark_running(conn, job_id) == "failed"
+    async with admin_pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE extraction_jobs SET started_at = now() - interval '1 day' WHERE id = $1",
+            job_id,
+        )
+    assert await orphan_cleanup._sweep_running(admin_pool) == 1
+    async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
+        assert await jobs_repo.mark_running(conn, job_id) == "failed"
+        await _complete(conn, job_id, _USAGE, _CENTS)
+    async with admin_pool.acquire() as conn:
+        assert await queue_repo.admit(conn, [job_id], period) == 0
+        after = await queue_repo.user_period_usage(conn, [seeded_a.user_id], period)
+
+    assert admitted[seeded_a.user_id].period_tokens == 900
+    assert after == admitted

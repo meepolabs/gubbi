@@ -19,7 +19,6 @@ from arq.connections import RedisSettings
 from arq.worker import func
 from gubbi_common.bootstrap import StartupProbe, StartupRunner
 from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
-from gubbi_common.budget import PRE_CHARGE_LUA, BudgetHelper
 
 from gubbi.bootstrap import ReplicaCountWarnProbe
 from gubbi.config import Settings, get_settings
@@ -64,8 +63,8 @@ _sync_log = logging.getLogger(__name__)
 # helper (or by monkeypatching this name directly).
 _WORKER_TELEMETRY_CONFIGURED: bool = False
 
-# How long shutdown waits for cancelled jobs' budget and job-state cleanups
-# before cancelling them; they need the Redis client and the PG pool open.
+# How long shutdown waits for cancelled jobs' job-state cleanups before
+# cancelling them; they need the PG pool open.
 _CANCEL_CLEANUP_DRAIN_SECS: Final = 5.0
 # How long shutdown then waits for the cancelled cleanups to unwind; a cleanup
 # that swallows the cancellation is left behind so the clients still close.
@@ -320,7 +319,7 @@ async def startup(ctx: ExtractionContext) -> None:
         # worker hits the same encrypted INSERT path as the HTTP API via
         # ``extract_conversation``). RedisPingProbe enforces Redis
         # liveness at boot -- the worker depends on Redis for arq job
-        # poll, BudgetHelper pre_charge, and audit fail-open.
+        # poll and audit fail-open.
         # ReplicaCountWarnProbe(role="worker") flags the single-worker
         # deploy-policy violation and increments the alertable
         # ``gateway.replica_count_warning`` counter. Mode for PgLogProbe
@@ -355,18 +354,6 @@ async def startup(ctx: ExtractionContext) -> None:
         extraction_service = ExtractionService(llm_provider)
         ctx["extraction_service"] = extraction_service
         ctx["embedding_service"] = EmbeddingService()
-
-        # BudgetHelper -- worker invokes only record_actual_cost, but we
-        # register the Lua script anyway (cheapest option; no API split).
-        if settings.llm.llm_budget_enabled:
-            pre_charge_script = redis_client.register_script(PRE_CHARGE_LUA)
-            ctx["budget_helper"] = BudgetHelper(
-                redis=redis_client,  # type: ignore[arg-type]  # duck-typed Protocol vs aioredis.Redis
-                pre_charge_script=pre_charge_script,
-            )
-            await logger.info("Extraction worker BudgetHelper ready")
-        else:
-            await logger.info("Extraction worker BudgetHelper disabled (budget_enabled=False)")
 
         await logger.info("Extraction worker Redis client ready")
     except BaseException:
@@ -414,8 +401,8 @@ async def _drain_cancel_cleanups(ctx: ExtractionContext) -> None:
 async def shutdown(ctx: ExtractionContext) -> None:
     """Arq worker shutdown hook: drain cancellation cleanups, then close PG and Redis.
 
-    Cleanups of cancelled jobs still settle budgets through Redis and write
-    job state through the PG pool, so they are waited for (bounded) first.
+    Cleanups of cancelled jobs still write job state through the PG pool,
+    so they are waited for (bounded) first.
     Reverse-lifecycle order matches the startup-fail teardown above
     (redis_client.aclose -> redis_pool.aclose -> pool.close): close
     last-opened first so a Redis hiccup during shutdown cannot leak

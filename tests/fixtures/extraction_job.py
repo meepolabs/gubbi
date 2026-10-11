@@ -14,7 +14,7 @@ import asyncio
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import ExitStack, asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -29,7 +29,6 @@ USER_ID = "00000000-0000-0000-0000-0000000000a1"
 JOB_ID = "11111111-2222-3333-4444-555555555555"
 CONVERSATION_ID = 4242
 PLATFORM = "chatgpt"
-PERIOD = date(2026, 5, 1)
 CALL_USAGE = LLMUsage(input=1000, output=200, cached_input=300, reasoning=50)
 # ScriptedProvider prices one token at a hundredth of a cent.
 CALL_CENTS = (CALL_USAGE.input + CALL_USAGE.output) // 100
@@ -161,25 +160,21 @@ class JobMocks:
     mark_processed: AsyncMock
     set_extraction_state: AsyncMock
     mark_running: AsyncMock
-    get_period_start: AsyncMock
     mark_completed: AsyncMock
     mark_failed: AsyncMock
     persist: AsyncMock
     record_audit: AsyncMock
 
 
-def make_ctx(provider: ScriptedProvider, budget_helper: Any = None) -> dict[str, Any]:
-    """Arq context around ``provider``; ``budget_helper`` is set only when given."""
-    ctx: dict[str, Any] = {
+def make_ctx(provider: ScriptedProvider) -> dict[str, Any]:
+    """Arq context around ``provider``."""
+    return {
         "pool": MagicMock(),
         "cipher": MagicMock(),
         "extraction_service": ExtractionService(provider),
         "embedding_service": FakeEncoder(),
         "redis": AsyncMock(),
     }
-    if budget_helper is not None:
-        ctx["budget_helper"] = budget_helper
-    return ctx
 
 
 def extraction_state(
@@ -201,7 +196,6 @@ def patched_job(
     *,
     messages: list[Message] | None = None,
     state: ExtractionState | None = None,
-    period_start: date | None = PERIOD,
     persisted_entries: int = 1,
 ) -> Iterator[JobMocks]:
     """Patch the job's database edge; yields the mocks for assertions."""
@@ -239,7 +233,6 @@ def patched_job(
             mark_processed=enter(f"{conv}.mark_processed"),
             set_extraction_state=enter(f"{conv}.set_extraction_state", return_value=True),
             mark_running=enter(f"{jobs}.mark_running", return_value="pending"),
-            get_period_start=enter(f"{jobs}.get_period_start", return_value=period_start),
             mark_completed=enter(f"{jobs}.mark_completed", return_value=True),
             mark_failed=enter(f"{jobs}.mark_failed", return_value=True),
             persist=AsyncMock(return_value=persisted),

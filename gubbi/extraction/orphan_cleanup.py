@@ -1,39 +1,34 @@
-"""Orphan-pending extraction_jobs cleanup cron.
+"""Stuck-running extraction_jobs sweep.
 
-Periodically marks stuck rows as failed:
+A row stays in 'running' indefinitely if the Arq worker dies between
+mark_running and the SAVEPOINT commit (OOM, container kill, hard crash).
+The sweep fails such a row as ``worker_lost``, a transient error, with a
+backoff ``run_after`` so the scheduler runs it again. The row keeps its
+admission charge, so the retry is not charged twice.
 
-  pending sweep  -- error_code='enqueue_lost'
-    A row gets stuck if ingest INSERTs it but the subsequent Arq enqueue
-    fails (rare; Redis blip, broker outage). Without cleanup the partial
-    unique index holds the slot and prevents user retries.
+The threshold is EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
+(40 minutes): past the extraction function's own Arq timeout, at which
+Arq cancels the job, so a live long-running job is never swept.
 
-  running sweep  -- error_code='worker_lost'
-    A row stays in 'running' indefinitely if the Arq worker dies between
-    mark_running and the SAVEPOINT commit (OOM, container kill, hard crash).
-    The threshold is EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
-    (40 minutes): past the extraction function's own Arq timeout, at which
-    Arq cancels the job, so a live long-running job is never swept. Each
-    swept row also triggers a best-effort budget refund so the user does not
-    lose budget the worker never spent.
-
-Cadence: every {sleep_seconds} seconds. Threshold: {threshold_minutes} minutes
-(config-tunable via llm.orphan_cleanup_threshold_minutes for the pending
-sweep; the running-sweep threshold is fixed, derived from the extraction
-job timeout).
+Pending rows are never swept: a pending row is queued work the scheduler
+owns, however long it waits for its lane or budget.
 """
 
 from __future__ import annotations
 
 import asyncio
 import functools
-from typing import Any
+from typing import TYPE_CHECKING
 
 import asyncpg
 import structlog
-from gubbi_common.budget import PRE_CHARGE_CENTS
 from opentelemetry.metrics import Counter, get_meter
 
 from gubbi.constants import ARQ_JOB_TIMEOUT_SECS, EXTRACTION_JOB_TIMEOUT_SECS
+from gubbi.extraction.retry_policy import ErrorCode, next_run_after
+
+if TYPE_CHECKING:
+    from datetime import datetime
 
 __all__: list[str] = ["run_orphan_cleanup"]
 
@@ -44,13 +39,12 @@ logger = structlog.get_logger(__name__)
 def _get_orphan_cleanup_swept_counter() -> Counter:
     """Lazily create the orphan-cleanup swept counter against the live meter.
 
-    The previous module-scope ``_meter.create_counter``
-    bound at import time, well before ``configure_otel`` ran during the
-    FastAPI lifespan -- so the counter held a NoOp instrument and silently
-    discarded every ``.add(...)``. Deferring creation to first call (and
-    re-priming via ``rebind_metrics_after_configure``) ensures the counter
-    binds to the SDK provider configured at lifespan time. Mirrors the
-    canonical pattern in ``gubbi.telemetry.metrics.initialize_metrics``.
+    A module-scope ``create_counter`` would bind at import time, before
+    ``configure_otel`` runs during the FastAPI lifespan, to a NoOp
+    instrument that discards every ``.add(...)``. Deferring creation to
+    first call (and re-priming via ``rebind_metrics_after_configure``)
+    binds the counter to the SDK provider configured at lifespan time.
+    Mirrors the canonical pattern in ``gubbi.telemetry.metrics.initialize_metrics``.
     """
     return get_meter("gubbi").create_counter(
         name="extraction_jobs.orphan_cleanup_swept_total",
@@ -67,45 +61,53 @@ def _get_orphan_cleanup_swept_counter() -> Counter:
 _RUNNING_THRESHOLD_SECS: int = EXTRACTION_JOB_TIMEOUT_SECS + ARQ_JOB_TIMEOUT_SECS
 
 
-async def _refund_swept_row(
-    helper: Any,
-    user_id: Any,
-    period_start: Any,
-    log: structlog.stdlib.AsyncBoundLogger,
-) -> None:
-    """Best-effort pre-charge refund for a sweep-flipped row.
+def _retry_at(attempts: int, now: datetime) -> str:
+    retry_at = next_run_after(ErrorCode.WORKER_LOST, max(attempts, 1), now)
+    return "infinity" if retry_at is None else retry_at.isoformat()
 
-    Failure (Redis blip, helper missing key) is logged and swallowed -- the
-    row update is the durable record of the worker_lost outcome; refund is a
-    convenience layer.
+
+async def _sweep_running(admin_pool: asyncpg.Pool) -> int:
+    """Fail every row running past the threshold as worker_lost; return rows swept.
+
+    The stale rows are locked before they are read, so a row is never failed
+    after another transaction moved it on.
     """
-    try:
-        await helper.record_actual_cost(
-            user_id=user_id,
-            period_start=period_start,
-            actual_cents=0,
-            estimated_cents=PRE_CHARGE_CENTS,
+    async with admin_pool.acquire() as conn, conn.transaction():
+        stale = await conn.fetch(
+            """
+            SELECT id, attempts, clock_timestamp() AS db_now
+            FROM extraction_jobs
+            WHERE status = 'running'
+              AND started_at < now() - ($1 * interval '1 second')
+            FOR UPDATE SKIP LOCKED
+            """,
+            _RUNNING_THRESHOLD_SECS,
         )
-    except Exception:  # broad: redis errors come in many shapes
-        await log.warning(
-            "orphan_cleanup_refund_failed",
-            user_id=str(user_id),
-            period_start=str(period_start),
-            exc_info=True,
+        if not stale:
+            return 0
+        await conn.executemany(
+            """
+            UPDATE extraction_jobs
+            SET status = 'failed',
+                error_code = $2,
+                run_after = $3::text::timestamptz,
+                completed_at = now()
+            WHERE id = $1
+            """,
+            [
+                (
+                    row["id"],
+                    ErrorCode.WORKER_LOST.value,
+                    _retry_at(int(row["attempts"]), row["db_now"]),
+                )
+                for row in stale
+            ],
         )
+    return len(stale)
 
 
-async def run_orphan_cleanup(
-    admin_pool: asyncpg.Pool,
-    *,
-    threshold_minutes: int = 30,
-    sleep_seconds: int = 300,
-    budget_helper: Any = None,
-) -> None:
-    """Forever-loop cron: marks stale pending rows failed, then stale running rows failed.
-
-    pending  -> error_code='enqueue_lost' (threshold_minutes)
-    running  -> error_code='worker_lost'  (_RUNNING_THRESHOLD_SECS, refund per row)
+async def run_orphan_cleanup(admin_pool: asyncpg.Pool, *, sleep_seconds: int = 300) -> None:
+    """Forever-loop cron: every ``sleep_seconds``, fail rows stuck in 'running'.
 
     Uses admin_pool (BYPASSRLS) so the sweep is cross-tenant.
     Runs until the task is cancelled (e.g. lifespan teardown).
@@ -114,76 +116,16 @@ async def run_orphan_cleanup(
     while True:
         await asyncio.sleep(sleep_seconds)
         try:
-            # ---- pending sweep (enqueue_lost) -------------------------------
-            pending_rows = await admin_pool.fetch(
-                """
-                UPDATE extraction_jobs
-                SET status = 'failed',
-                    error_code = 'enqueue_lost',
-                    completed_at = now()
-                WHERE status = 'pending'
-                  AND created_at < now() - ($1 * interval '1 minute')
-                RETURNING id, user_id, period_start
-                """,
-                threshold_minutes,
-            )
-            swept_pending = len(pending_rows)
-            if swept_pending > 0:
-                await log.info("orphan_cleanup_swept", swept=swept_pending, state="pending")
-                _get_orphan_cleanup_swept_counter().add(
-                    swept_pending, attributes={"result": "swept", "state": "pending"}
-                )
-                # Best-effort refund per swept row -- logged + swallowed on failure.
-                # Mirrors the running-sweep refund loop below: a row stuck in
-                # pending got a successful pre-charge debit at ingest but the
-                # arq enqueue never reached the worker, so the cents were
-                # never spent. Refund returns PRE_CHARGE_CENTS to the user's
-                # bucket using the same period_start ingest debited.
-                if budget_helper is not None:
-                    for row in pending_rows:
-                        await _refund_swept_row(
-                            budget_helper,
-                            row["user_id"],
-                            row["period_start"],
-                            log,
-                        )
-            else:
-                _get_orphan_cleanup_swept_counter().add(
-                    1, attributes={"result": "none", "state": "pending"}
-                )
-
-            # ---- running sweep (worker_lost) --------------------------------
-            running_rows = await admin_pool.fetch(
-                """
-                UPDATE extraction_jobs
-                SET status = 'failed',
-                    error_code = 'worker_lost',
-                    completed_at = now()
-                WHERE status = 'running'
-                  AND started_at < now() - ($1 * interval '1 second')
-                RETURNING id, user_id, period_start
-                """,
-                _RUNNING_THRESHOLD_SECS,
-            )
-            swept_running = len(running_rows)
-            if swept_running > 0:
-                await log.info("orphan_cleanup_swept", swept=swept_running, state="running")
-                _get_orphan_cleanup_swept_counter().add(
-                    swept_running, attributes={"result": "swept", "state": "running"}
-                )
-                # Best-effort refund per swept row -- logged + swallowed on failure.
-                if budget_helper is not None:
-                    for row in running_rows:
-                        await _refund_swept_row(
-                            budget_helper,
-                            row["user_id"],
-                            row["period_start"],
-                            log,
-                        )
-            else:
-                _get_orphan_cleanup_swept_counter().add(
-                    1, attributes={"result": "none", "state": "running"}
-                )
+            swept = await _sweep_running(admin_pool)
         except (asyncpg.PostgresError, OSError):
             await log.warning("orphan_cleanup_failed", exc_info=True)
             continue
+        if swept > 0:
+            await log.info("orphan_cleanup_swept", swept=swept, state="running")
+            _get_orphan_cleanup_swept_counter().add(
+                swept, attributes={"result": "swept", "state": "running"}
+            )
+        else:
+            _get_orphan_cleanup_swept_counter().add(
+                1, attributes={"result": "none", "state": "running"}
+            )

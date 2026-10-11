@@ -20,6 +20,7 @@ import pytest
 import pytest_asyncio
 from gubbi_common.db.user_scoped import user_scoped_connection
 
+from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode
 from gubbi.storage.repositories.extraction_jobs import (
     ExtractionJobAlreadyInFlight,
     StatusCounts,
@@ -164,7 +165,7 @@ async def test_create_pending_after_terminal_succeeds(
         first_id = await create_pending(
             conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
         )
-        await mark_failed(conn, first_id, error_code="test_error")
+        await mark_failed(conn, first_id, error_code=ErrorCode.INTERNAL_ERROR)
 
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
         second_id = await create_pending(
@@ -477,7 +478,7 @@ async def test_mark_running_retries_failed_job_and_clears_error_code(
         job_id = await create_pending(
             conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
         )
-        await mark_failed(conn, job_id, error_code="llm_provider_error")
+        await mark_failed(conn, job_id, error_code=ErrorCode.LLM_PROVIDER_ERROR)
         claimed_from = await mark_running(conn, job_id)
 
     assert claimed_from == "failed"
@@ -599,7 +600,7 @@ async def test_mark_failed_noop_when_already_completed(
             conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
         )
         await mark_completed(conn, job_id, topics_created=1, entries_created=3, cents_spent=5)
-        updated = await mark_failed(conn, job_id, error_code="late_failure")
+        updated = await mark_failed(conn, job_id, error_code=ErrorCode.INTERNAL_ERROR)
 
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
@@ -660,7 +661,7 @@ async def test_get_status_counts_buckets(
         failed_id = await create_pending(
             conn, user_a, conversation_id, "zip_upload", period_start=date(2026, 5, 1)
         )
-        await mark_failed(conn, failed_id, error_code="test_fail")
+        await mark_failed(conn, failed_id, error_code=ErrorCode.INTERNAL_ERROR)
 
         counts = await get_status_counts(conn)
 
@@ -710,3 +711,79 @@ async def test_create_pending_raises_already_in_flight_for_existing_pending_row(
             )
 
     assert exc_info.value.existing_job_id == first_id
+
+
+# ---------------------------------------------------------------------------
+# Tests: attempts and retry scheduling
+# ---------------------------------------------------------------------------
+
+
+async def _job_retry_state(admin_pool: asyncpg.Pool, job_id: UUID) -> asyncpg.Record:
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT attempts, error_code, run_after = 'infinity' AS held,"
+            " run_after > now() AS deferred FROM extraction_jobs WHERE id = $1",
+            job_id,
+        )
+    assert row is not None
+    return row
+
+
+async def test_every_claim_counts_one_attempt(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+        await mark_running(conn, job_id)
+        await mark_failed(conn, job_id, error_code=ErrorCode.LLM_PROVIDER_ERROR)
+        await mark_running(conn, job_id)
+        await mark_running(conn, job_id)
+
+    assert (await _job_retry_state(admin_pool, job_id))["attempts"] == 2
+
+
+@pytest.mark.parametrize(
+    ("code", "held", "deferred"),
+    [
+        pytest.param(ErrorCode.LLM_REFUSED, True, True, id="terminal-held"),
+        pytest.param(ErrorCode.LLM_RATE_LIMITED, False, True, id="transient-backoff"),
+    ],
+)
+async def test_mark_failed_schedules_the_next_run_by_error_class(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+    code: ErrorCode,
+    held: bool,
+    deferred: bool,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+        await mark_running(conn, job_id)
+        await mark_failed(conn, job_id, error_code=code)
+
+    row = await _job_retry_state(admin_pool, job_id)
+    assert (row["error_code"], row["held"], row["deferred"]) == (code.value, held, deferred)
+
+
+async def test_mark_failed_holds_a_deterministic_failure_after_its_last_attempt(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+        for _ in range(DETERMINISTIC_MAX_ATTEMPTS):
+            await mark_running(conn, job_id)
+            await mark_failed(conn, job_id, error_code=ErrorCode.LLM_SCHEMA)
+
+    row = await _job_retry_state(admin_pool, job_id)
+    assert (row["attempts"], row["held"]) == (DETERMINISTIC_MAX_ATTEMPTS, True)

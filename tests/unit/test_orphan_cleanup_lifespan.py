@@ -61,7 +61,7 @@ def _with_admin_pool(handles: dict[str, Any]) -> MagicMock:
 async def test_cron_task_runs_against_admin_pool_during_lifespan(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """With an admin pool, one live cron task is registered and gets the configured threshold."""
+    """With an admin pool, one live cron task is registered against it."""
     _drop_optional_env(monkeypatch)
     handles = _patch_lifespan_dependencies(monkeypatch)
     admin_pool = _with_admin_pool(handles)
@@ -73,12 +73,7 @@ async def test_cron_task_runs_against_admin_pool_during_lifespan(
         tasks = list(app.state.background_tasks)
         assert len(tasks) == 1
         assert not tasks[0].done()
-        assert seen["calls"] == [
-            (
-                admin_pool,
-                {"threshold_minutes": get_settings().llm.orphan_cleanup_threshold_minutes},
-            )
-        ]
+        assert seen["calls"] == [(admin_pool, {})]
 
 
 async def test_cron_task_cancelled_on_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:

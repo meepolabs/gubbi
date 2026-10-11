@@ -26,10 +26,8 @@ from uuid import UUID, uuid4
 
 import structlog
 from gubbi_common.audit.targets import TargetKind
-from gubbi_common.budget import PRE_CHARGE_CENTS, current_period_start
 from gubbi_common.db.user_scoped import user_scoped_connection
 from opentelemetry import trace
-from opentelemetry.metrics import Counter, get_meter
 
 from gubbi.audit import record_audit
 from gubbi.config import get_settings
@@ -55,6 +53,7 @@ from gubbi.extraction.pipeline import (
     PipelineSpend,
     run_pipeline,
 )
+from gubbi.extraction.retry_policy import ErrorCode
 from gubbi.extraction.skips import content_hash, evaluate_skip
 from gubbi.models.conversation import keep_conversation_roles
 from gubbi.storage.exceptions import ConversationNotFoundError
@@ -85,33 +84,9 @@ __all__: list[str] = ["extract_conversation"]
 logger = structlog.get_logger(__name__)
 
 
-# Counter incremented when the worker fails BEFORE the period_start lookup
-# completes. In that window we cannot guarantee the runtime period equals the
-# bucket the pre-charge debited (a period boundary may have been crossed since
-# ingest), so the refund is skipped. Manual reconcile signal.
-@functools.lru_cache(maxsize=1)
-def _get_extraction_refund_skipped_counter() -> Counter:
-    """Lazily create the refund-skipped counter against the live meter.
-
-    Creating the counter at module scope would bind it to the NoOp meter that
-    exists before ``configure_otel`` runs, silently discarding every
-    ``.add(...)``. Deferring creation to first call (and re-priming via
-    ``rebind_metrics_after_configure``) binds it to the configured provider.
-    Mirrors the canonical pattern in ``gubbi.telemetry.metrics.initialize_metrics``.
-    """
-    return get_meter("gubbi").create_counter(
-        name="extraction.refund_skipped_total",
-        description=(
-            "Pre-charge refund skipped because the worker failed before the "
-            "pre-charge period was known; partitioned by reason."
-        ),
-        unit="1",
-    )
-
-
 # Arq enforces its job timeout by cancelling the task, so a cancelled job is
 # recorded as having run out of time.
-_CANCELLED_ERROR_CODE: Final = "deadline_exceeded"
+_CANCELLED_ERROR_CODE: Final = ErrorCode.DEADLINE_EXCEEDED
 # Arq waits for a cancelled job to finish, so the cancellation cleanup is kept
 # short and bounded.
 _CANCEL_CLEANUP_TIMEOUT_SECS: Final = 10.0
@@ -127,17 +102,12 @@ _DETACHED_CLEANUPS: set[asyncio.Task[None]] = set()
 
 @dataclass(frozen=True)
 class _Spend:
-    """Token usage and estimated cost of every model call the job made.
-
-    ``unmetered_calls`` counts calls whose usage the upstream never reported
-    (timed out); their cost is missing from ``usage`` and ``cents``.
-    """
+    """Token usage and estimated cost of every model call the job made."""
 
     usage: LLMUsage
     llm_calls: int
     chunks: int
     cents: int
-    unmetered_calls: int = 0
 
 
 _NO_SPEND = _Spend(usage=LLMUsage(), llm_calls=0, chunks=0, cents=0)
@@ -145,14 +115,13 @@ _NO_SPEND = _Spend(usage=LLMUsage(), llm_calls=0, chunks=0, cents=0)
 
 @dataclass
 class _Ledger:
-    """What one job attempt has spent so far and whether its budget is settled.
+    """What one job attempt has spent so far.
 
     ``spend`` is replaced after every model call, so a cancellation at any
-    point settles and records the calls already made.
+    point records the calls already made.
     """
 
     spend: _Spend = _NO_SPEND
-    settled: bool = False
 
 
 @dataclass(frozen=True)
@@ -167,19 +136,6 @@ class _Job:
     extraction_attempt_id: str
     log: structlog.stdlib.AsyncBoundLogger
     ledger: _Ledger
-
-
-@dataclass(frozen=True)
-class _Bucket:
-    """Budget period the pre-charge was debited to; ``known`` gates every refund.
-
-    ``pre_charged_cents`` is what is still pre-charged for this job: zero
-    once an earlier run of it settled, so a revived run charges its full cost.
-    """
-
-    period_start: date
-    known: bool
-    pre_charged_cents: int = PRE_CHARGE_CENTS
 
 
 @dataclass(frozen=True)
@@ -218,17 +174,17 @@ def _result(
 # ---------------------------------------------------------------------------
 
 
-_ERROR_CODES: tuple[tuple[type[Exception], str], ...] = (
-    (PipelineDeadlineError, "deadline_exceeded"),
-    (LLMRefusalError, "llm_refused"),
-    (LLMTruncatedError, "llm_truncated"),
-    (LLMSchemaError, "llm_schema"),
-    (LLMRateLimitError, "llm_rate_limited"),
-    (LLMProviderError, "llm_provider_error"),
+_ERROR_CODES: tuple[tuple[type[Exception], ErrorCode], ...] = (
+    (PipelineDeadlineError, ErrorCode.DEADLINE_EXCEEDED),
+    (LLMRefusalError, ErrorCode.LLM_REFUSED),
+    (LLMTruncatedError, ErrorCode.LLM_TRUNCATED),
+    (LLMSchemaError, ErrorCode.LLM_SCHEMA),
+    (LLMRateLimitError, ErrorCode.LLM_RATE_LIMITED),
+    (LLMProviderError, ErrorCode.LLM_PROVIDER_ERROR),
 )
 
 
-def _classify_error(exc: BaseException) -> str:
+def _classify_error(exc: BaseException) -> ErrorCode:
     """Map an exception to the short error_code stored on the failed job row.
 
     A :class:`PipelineFailure` is classified by its cause. Uses the
@@ -238,7 +194,7 @@ def _classify_error(exc: BaseException) -> str:
     for error_class, code in _ERROR_CODES:
         if isinstance(cause, error_class):
             return code
-    return "internal_error"
+    return ErrorCode.INTERNAL_ERROR
 
 
 # ---------------------------------------------------------------------------
@@ -264,34 +220,22 @@ async def _check_idempotent(
     return False
 
 
-async def _start_job(conn: asyncpg.Connection, job: _Job, fallback: _Bucket) -> _Bucket | None:
-    """Claim the job row and return the bucket its pre-charge used; None when not claimed.
+async def _claim_job(conn: asyncpg.Connection, job: _Job) -> bool:
+    """Claim the job row; False when another execution of the same job owns or finished it.
 
-    An unclaimed row is owned or already finished by another execution of
-    the same job, and that execution (or the orphan sweep) settles the
-    pre-charge, so this one neither calls the model nor touches the budget.
-    A revived failed row was settled when it failed, so nothing is still
-    pre-charged for it. A job row whose period cannot be read leaves the
-    bucket unknown, so a later refund is skipped rather than landing in the
-    wrong period.
+    A job without a row is always claimed. An unclaimed row is left alone,
+    so this execution makes no model call.
     """
     if job.job_uuid is None:
-        return fallback
-    claimed_from = await extraction_jobs.mark_running(conn, job.job_uuid)
-    if claimed_from is None:
-        await job.log.info(
-            "extraction_job_not_claimed",
-            conversation_id=job.conversation_id,
-            job_id=str(job.job_uuid),
-        )
-        return None
-    pre_charged = 0 if claimed_from == "failed" else PRE_CHARGE_CENTS
-    period_start = await extraction_jobs.get_period_start(conn, job.job_uuid)
-    if period_start is None:
-        return _Bucket(
-            period_start=fallback.period_start, known=False, pre_charged_cents=pre_charged
-        )
-    return _Bucket(period_start=period_start, known=True, pre_charged_cents=pre_charged)
+        return True
+    if await extraction_jobs.mark_running(conn, job.job_uuid) is not None:
+        return True
+    await job.log.info(
+        "extraction_job_not_claimed",
+        conversation_id=job.conversation_id,
+        job_id=str(job.job_uuid),
+    )
+    return False
 
 
 async def _load_conversation(conn: asyncpg.Connection, job: _Job) -> _Loaded:
@@ -330,7 +274,6 @@ def _spend_of(ctx: ExtractionContext, spend: PipelineSpend | PipelineOutcome) ->
         llm_calls=spend.llm_calls,
         chunks=spend.chunks,
         cents=ctx["extraction_service"].estimate_cost_cents(spend.usage),
-        unmetered_calls=spend.unmetered_calls,
     )
 
 
@@ -368,11 +311,14 @@ async def _extract(
 # ---------------------------------------------------------------------------
 
 
-async def _complete_without_entries(job: _Job, transcript_hash: str, spend: _Spend) -> None:
+async def _complete_without_entries(
+    job: _Job, transcript_hash: str, spend: _Spend, *, filtered_tokens: int | None = None
+) -> None:
     """Mark the conversation processed and the job completed with nothing recorded.
 
     Uses its own short connection. Records the transcript hash so the same
     content is not sent to the model again at this extractor version.
+    ``filtered_tokens`` replaces the job's budget charge when given.
     """
     async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn:
         await conv_repo.mark_processed(conn, job.conversation_id)
@@ -387,6 +333,7 @@ async def _complete_without_entries(job: _Job, transcript_hash: str, spend: _Spe
             topics_created=0,
             entries_created=0,
             cents_spent=spend.cents,
+            filtered_tokens=filtered_tokens,
             **_usage_kwargs(spend),
         )
         if updated:
@@ -417,7 +364,7 @@ async def _mark_job_failed(
     user_uuid: UUID,
     job_id: str,
     conversation_id: int,
-    error_code: str,
+    error_code: ErrorCode,
     spend: _Spend = _NO_SPEND,
 ) -> None:
     """Open a fresh user_scoped_connection to write the failed terminal state.
@@ -446,7 +393,7 @@ async def _mark_job_failed(
                     actor_id=str(user_uuid),
                     target_kind=TargetKind.EXTRACTION_JOB,
                     target_id=str(job_id),
-                    metadata={"error_code": error_code, "conversation_id": conversation_id},
+                    metadata={"error_code": str(error_code), "conversation_id": conversation_id},
                 )
     except Exception as exc:
         # Swallow secondary failure -- the original exception is what Arq needs.
@@ -460,61 +407,13 @@ async def _mark_job_failed(
             user_id=str(user_uuid),
             job_id=job_id,
             conversation_id=conversation_id,
-            error_code=error_code,
+            error_code=str(error_code),
             **safe_error_fields(exc),
         )
 
 
-def _charge_cents(spend: _Spend, bucket: _Bucket) -> int:
-    """Cents to settle for ``spend``: never below the pre-charge when a call went unmetered.
-
-    A timed-out call reports no usage although the upstream may have billed
-    it in full, so its cost is unknown and the pre-charge is kept as a floor.
-    """
-    if spend.unmetered_calls:
-        return max(spend.cents, bucket.pre_charged_cents)
-    return spend.cents
-
-
-async def _settle_budget(
-    ctx: ExtractionContext, job: _Job, bucket: _Bucket, spend: _Spend, event: str
-) -> None:
-    """Reconcile the ingest pre-charge against ``spend`` once per job attempt; best-effort.
-
-    Skipped (with a metric) when the pre-charge bucket is unknown: refunding
-    into the wrong period is worse than not refunding.
-    """
-    helper = ctx.get("budget_helper")
-    if helper is None or job.ledger.settled:
-        return
-    # Marked before any await: a cancellation can land after the increment
-    # inside ``record_actual_cost``, and settling again would apply it twice.
-    job.ledger.settled = True
-    if not bucket.known:
-        await logger.warning(
-            "extraction.refund_skipped_unknown_period",
-            user_id=str(job.user_uuid),
-            conversation_id=job.conversation_id,
-            job_id=str(job.job_uuid),
-        )
-        _get_extraction_refund_skipped_counter().add(1, attributes={"reason": "unknown_period"})
-        return
-    try:
-        await helper.record_actual_cost(
-            user_id=job.user_uuid,
-            period_start=bucket.period_start,
-            actual_cents=_charge_cents(spend, bucket),
-            estimated_cents=bucket.pre_charged_cents,
-        )
-    except Exception:  # broad: redis errors come in many shapes
-        await job.log.warning(event, exc_info=True)
-
-
-async def _settle_and_mark_failed(
-    ctx: ExtractionContext, job: _Job, bucket: _Bucket, spend: _Spend, error_code: str
-) -> None:
-    """Settle the pre-charge against ``spend``, then write the failed job state."""
-    await _settle_budget(ctx, job, bucket, spend, "budget_refund_failed")
+async def _fail_job(job: _Job, error_code: ErrorCode) -> None:
+    """Write the failed job state with the spend so far; nothing to write without a job row."""
     if job.job_uuid is not None:
         await _mark_job_failed(
             job.pool,
@@ -522,21 +421,19 @@ async def _settle_and_mark_failed(
             str(job.job_uuid),
             job.conversation_id,
             error_code,
-            spend,
+            job.ledger.spend,
         )
 
 
-async def _fail_cancelled(ctx: ExtractionContext, job: _Job, bucket: _Bucket) -> None:
-    """Settle and fail a cancelled job, bounded so the cancellation is not held up.
+async def _fail_cancelled(ctx: ExtractionContext, job: _Job) -> None:
+    """Fail a cancelled job, bounded so the cancellation is not held up.
 
     The cleanup is shielded: a second cancellation stops the wait, not the
     cleanup, which stays in the context's ``cancel_cleanups`` registry until
     it finishes so worker shutdown can wait for it. One that outlasts the
     bound is cancelled and left to the orphan sweep.
     """
-    cleanup = asyncio.create_task(
-        _settle_and_mark_failed(ctx, job, bucket, job.ledger.spend, _CANCELLED_ERROR_CODE)
-    )
+    cleanup = asyncio.create_task(_fail_job(job, _CANCELLED_ERROR_CODE))
     registry = ctx.get("cancel_cleanups", _DETACHED_CLEANUPS)
     registry.add(cleanup)
     cleanup.add_done_callback(registry.discard)
@@ -665,8 +562,9 @@ async def extract_conversation(
                         the usage of every model call made before the failure;
                         on cancellation (Arq's timeout) with ``deadline_exceeded``.
 
-    Budget: the ingest pre-charge is settled against the estimated cost of
-    every model call the job made, whatever the outcome.
+    Budget: the job's charge is its filtered token count, set when the
+    scheduler admitted it; a rule skip resets it to zero. Nothing here
+    touches Redis.
 
     Args:
         ctx: Arq worker context (pool, cipher, extraction_service,
@@ -704,7 +602,7 @@ async def extract_conversation(
     span_name = SpanNames.EXTRACTION_JOB
     span_start_ns = time.monotonic_ns()
     success = True
-    failure_reason: str | None = None
+    failure_reason: ErrorCode | None = None
 
     with trace.get_tracer(_TRACER_NAME).start_as_current_span(
         span_name,
@@ -744,37 +642,31 @@ async def extract_conversation(
                 "latency_ms": round(latency_ms, 2),
             }
             if failure_reason is not None:
-                final_attrs["failure_reason"] = failure_reason
+                final_attrs["failure_reason"] = failure_reason.value
             safe_set_attributes(span_name, job_span, final_attrs)
 
 
 async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str) -> dict[str, Any]:
     started = time.monotonic()
-    # Until the job row's period is read, the runtime period is only a guess at
-    # the bucket ingest pre-charged, so a refund is allowed only without a job row.
-    bucket = _Bucket(period_start=current_period_start(), known=job.job_uuid is None)
     try:
         async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn1:
             if await _check_idempotent(conn1, job.conversation_id, user_id, job.log):
                 return _result(None, 0, _NO_SPEND, skipped=True)
-            claimed = await _start_job(conn1, job, bucket)
-            if claimed is None:
+            if not await _claim_job(conn1, job):
                 return _result(None, 0, _NO_SPEND, skipped=True)
-            bucket = claimed
             loaded = await _load_conversation(conn1, job)
         # conn1 released here -- pool slot returned before any LLM call.
-        if await _skip_by_rule(ctx, job, loaded, bucket):
+        if await _skip_by_rule(job, loaded):
             return _result(None, 0, _NO_SPEND, skipped=True)
         extracted = await _extract(ctx, job, loaded, started)
-        result = await _record(ctx, job, loaded, extracted, bucket)
+        result = await _record(ctx, job, loaded, extracted)
     except asyncio.CancelledError:
-        await _fail_cancelled(ctx, job, bucket)
+        await _fail_cancelled(ctx, job)
         raise
     except Exception as exc:
-        # The SAVEPOINT (if any) is already rolled back. Settle first, then
-        # write the failed state on a FRESH connection; the two side effects
-        # are independent so neither blocks the other.
-        await _settle_and_mark_failed(ctx, job, bucket, job.ledger.spend, _classify_error(exc))
+        # The SAVEPOINT (if any) is already rolled back; the failed state is
+        # written on a FRESH connection.
+        await _fail_job(job, _classify_error(exc))
         raise
     if not result["skipped"]:
         await _publish_progress(
@@ -796,10 +688,8 @@ async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str)
     return result
 
 
-async def _skip_by_rule(
-    ctx: ExtractionContext, job: _Job, loaded: _Loaded, bucket: _Bucket
-) -> bool:
-    """Complete the job without a model call when a rule says there is nothing to extract."""
+async def _skip_by_rule(job: _Job, loaded: _Loaded) -> bool:
+    """Complete the job, charging nothing, when a rule says there is nothing to extract."""
     skip_reason = evaluate_skip(
         loaded.messages,
         loaded.state.source,
@@ -811,13 +701,14 @@ async def _skip_by_rule(
     await job.log.info(
         "extraction_skipped", conversation_id=job.conversation_id, reason=str(skip_reason)
     )
-    await _complete_without_entries(job, content_hash(loaded.messages), _NO_SPEND)
-    await _settle_budget(ctx, job, bucket, _NO_SPEND, "budget_refund_failed")
+    await _complete_without_entries(
+        job, content_hash(loaded.messages), _NO_SPEND, filtered_tokens=0
+    )
     return True
 
 
 async def _record(
-    ctx: ExtractionContext, job: _Job, loaded: _Loaded, extracted: _Extracted, bucket: _Bucket
+    ctx: ExtractionContext, job: _Job, loaded: _Loaded, extracted: _Extracted
 ) -> dict[str, Any]:
     """Persist what the pipeline found, or complete the job with nothing to record."""
     spent = extracted.spend
@@ -836,7 +727,6 @@ async def _record(
             topic_usable=topic_path is not None,
         )
         await _complete_without_entries(job, content_hash(loaded.messages), spent)
-        await _settle_budget(ctx, job, bucket, spent, "budget_refund_failed")
         return _result(None, 0, spent, skipped=True)
     extracted = replace(extracted, outcome=replace(extracted.outcome, candidates=candidates))
     embeddings = await embed_texts(
@@ -844,8 +734,5 @@ async def _record(
     )
     entries_created = await _persist(ctx, job, loaded, extracted, topic_path, embeddings)
     if entries_created is None:
-        await _settle_budget(ctx, job, bucket, spent, "budget_delta_failed")
         return _result(None, 0, spent, skipped=True)
-    # Best-effort and after commit: a Redis failure never rolls back the run.
-    await _settle_budget(ctx, job, bucket, spent, "budget_delta_failed")
     return _result(topic_path, entries_created, spent, skipped=False)

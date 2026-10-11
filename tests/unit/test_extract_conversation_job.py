@@ -255,7 +255,6 @@ async def test_without_a_job_row_no_lifecycle_update_runs() -> None:
         await _run(make_ctx(ScriptedProvider([chunk_output()])), job_id="unknown")
 
     mocks.mark_running.assert_not_awaited()
-    mocks.get_period_start.assert_not_awaited()
     assert mocks.persist.await_args.args[3].job_id is None
 
 
@@ -424,7 +423,9 @@ class TestClassifyError:
 # ---------------------------------------------------------------------------
 
 
-def _assert_completed_empty(mocks: Any, *, cents: int, llm_calls: int) -> None:
+def _assert_completed_empty(
+    mocks: Any, *, cents: int, llm_calls: int, filtered_tokens: int | None
+) -> None:
     mocks.persist.assert_not_awaited()
     mocks.mark_processed.assert_awaited_once()
     kwargs = mocks.mark_completed.await_args.kwargs
@@ -432,6 +433,7 @@ def _assert_completed_empty(mocks: Any, *, cents: int, llm_calls: int) -> None:
     assert kwargs["entries_created"] == 0
     assert kwargs["cents_spent"] == cents
     assert kwargs["llm_calls"] == llm_calls
+    assert kwargs["filtered_tokens"] == filtered_tokens
     audit = mocks.record_audit.await_args.kwargs
     assert audit["action"] == "extraction_job.completed"
     assert audit["metadata"] == {"conversation_id": CONVERSATION_ID, "entries_created": 0}
@@ -446,7 +448,7 @@ async def test_no_entries_completes_the_job_with_zero_entries_and_records_the_ha
 
     assert result["skipped"] is True
     assert result["entries_created"] == 0
-    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1)
+    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1, filtered_tokens=None)
     expected_hash = content_hash(keep_conversation_roles(transcript()))
     mocks.set_extraction_state.assert_awaited_once_with(
         tracker.conns[1], CONVERSATION_ID, expected_hash, EXTRACTION_VERSION
@@ -461,7 +463,7 @@ async def test_an_unusable_topic_completes_the_job_with_zero_entries() -> None:
         result = await _run(make_ctx(ScriptedProvider([chunk_output(topic="../../etc")])))
 
     assert result["topic_path"] is None
-    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1)
+    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1, filtered_tokens=None)
 
 
 async def test_every_chunk_triaged_out_completes_with_zero_entries(
@@ -473,7 +475,7 @@ async def test_every_chunk_triaged_out_completes_with_zero_entries(
     with patched_job(tracker) as mocks:
         await _run(make_ctx(ScriptedProvider([{"worth_recording": False}])))
 
-    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1)
+    _assert_completed_empty(mocks, cents=CALL_CENTS, llm_calls=1, filtered_tokens=None)
 
 
 # ---------------------------------------------------------------------------
@@ -502,7 +504,7 @@ async def test_a_rule_skip_completes_the_job_without_a_model_call(
 
     assert result["skipped"] is True
     assert provider.user_contents == []
-    _assert_completed_empty(mocks, cents=0, llm_calls=0)
+    _assert_completed_empty(mocks, cents=0, llm_calls=0, filtered_tokens=0)
 
 
 async def test_unchanged_content_at_this_version_is_not_extracted_again() -> None:
@@ -516,7 +518,7 @@ async def test_unchanged_content_at_this_version_is_not_extracted_again() -> Non
         await _run(make_ctx(provider))
 
     assert provider.user_contents == []
-    _assert_completed_empty(mocks, cents=0, llm_calls=0)
+    _assert_completed_empty(mocks, cents=0, llm_calls=0, filtered_tokens=0)
 
 
 async def test_unchanged_content_at_an_older_version_is_extracted_again() -> None:

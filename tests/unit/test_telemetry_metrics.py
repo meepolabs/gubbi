@@ -76,14 +76,10 @@ def _restore_otel_globals() -> Iterator[None]:
         # ``cache_clear()`` here AND in the rebind hook. Drift between
         # the two means tests will leak state across the suite OR
         # production will leak state across lifespan re-runs.
-        from gubbi.extraction.jobs.extract_conversation import (
-            _get_extraction_refund_skipped_counter,
-        )
         from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
         from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
 
         _get_orphan_cleanup_swept_counter.cache_clear()
-        _get_extraction_refund_skipped_counter.cache_clear()
         _get_llm_retry_counter.cache_clear()
 
 
@@ -519,8 +515,7 @@ def test_validate_metric_attrs_empty_input() -> None:
 # audit/MCP/replica counters but had NOT been propagated to:
 #
 #   1. extraction_jobs.orphan_cleanup_swept_total
-#   2. extraction.refund_skipped_total
-#   3. llm.retry_count_total
+#   2. llm.retry_count_total
 #
 # Each test below pins the contract: after ``configure_otel`` runs (modeled
 # here by a ``_set_provider`` swap + ``rebind_metrics_after_configure``
@@ -602,46 +597,6 @@ def test_orphan_cleanup_swept_counter_rebinds_to_real_provider() -> None:
     # no need for a manual try/finally here.
 
 
-def test_extraction_refund_skipped_counter_rebinds_to_real_provider() -> None:
-    """``extraction.refund_skipped_total`` lands in real reader after rebind.
-
-    Protects the refund-path observability for the worker. Without
-    this, a refund-skipped event during a worker crash would be invisible
-    at HyperDX even though the structured WARNING fires.
-    """
-    from gubbi.extraction.jobs.extract_conversation import (
-        _get_extraction_refund_skipped_counter,
-    )
-    from gubbi.telemetry import rebind_metrics_after_configure
-
-    _set_provider(NoOpMeterProvider())
-    _get_extraction_refund_skipped_counter.cache_clear()
-    _get_extraction_refund_skipped_counter().add(1, attributes={"reason": "unknown_period"})
-    sealed = _get_extraction_refund_skipped_counter()
-    assert type(sealed).__name__.startswith("NoOp"), (
-        "precondition: factory must be sealed against NoOp"
-    )
-
-    reader = InMemoryMetricReader()
-    real_provider = MeterProvider(metric_readers=[reader])
-    _set_provider(real_provider)
-
-    rebind_metrics_after_configure()
-
-    _get_extraction_refund_skipped_counter().add(1, attributes={"reason": "unknown_period"})
-    found, total = _walk_counter_total(reader, "extraction.refund_skipped_total")
-
-    assert found, (
-        "extraction.refund_skipped_total not found in exported metrics -- "
-        "factory still bound to NoOp; rebind hook is not wiring this counter"
-    )
-    assert total == 1, f"expected counter sum == 1 after rebind+add, got {total}"
-    rebound = _get_extraction_refund_skipped_counter()
-    assert isinstance(rebound, Counter)
-    assert not type(rebound).__name__.startswith("NoOp")
-    # Cleanup runs in the autouse ``_restore_otel_globals`` fixture.
-
-
 def test_llm_retry_counter_rebinds_to_real_provider() -> None:
     """``llm.retry_count_total`` lands in a real reader after rebind."""
     from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
@@ -688,15 +643,9 @@ def test_orphan_counter_modules_have_no_module_scope_counter_names() -> None:
     Add new entries here when adding a new orphan-counter factory.
     """
     from gubbi.extraction import orphan_cleanup
-    from gubbi.extraction.jobs import extract_conversation
 
     assert not hasattr(orphan_cleanup, "ORPHAN_CLEANUP_SWEPT"), (
         "orphan_cleanup.ORPHAN_CLEANUP_SWEPT was re-introduced as a "
         "module-scope counter; it must live behind "
         "_get_orphan_cleanup_swept_counter() so the rebind hook can re-prime it"
-    )
-    assert not hasattr(extract_conversation, "EXTRACTION_REFUND_SKIPPED"), (
-        "extract_conversation.EXTRACTION_REFUND_SKIPPED was re-introduced as a "
-        "module-scope counter; it must live behind "
-        "_get_extraction_refund_skipped_counter()"
     )
