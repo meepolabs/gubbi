@@ -349,7 +349,7 @@ async def test_a_rule_skipped_job_adds_no_tokens_to_usage(
     period = date(2026, 10, 1)
     messages = [SeedMessage("user", "ok", _SPOKEN_AT), SeedMessage("assistant", "Sure!")]
     conv_id = await seed_conversation(admin_pool, cipher, tenant_a, messages)
-    job_id = await seed_job(app_pool, tenant_a, conv_id)
+    job_id = await seed_job(app_pool, tenant_a, conv_id, admitted=False)
     async with admin_pool.acquire() as conn:
         await conn.execute("UPDATE extraction_jobs SET filtered_tokens = 900 WHERE id = $1", job_id)
         await queue_repo.admit(conn, [job_id], period)

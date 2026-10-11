@@ -457,5 +457,11 @@ class WorkerSettings:
     on_shutdown = shutdown
     max_jobs = EXTRACTION_WORKER_MAX_JOBS
     job_timeout = ARQ_JOB_TIMEOUT_SECS
-    keep_result = 86400
+    # The scheduler owns every retry and Postgres alone gates execution: a
+    # kept result would make the scheduler's re-enqueue of the same job id a
+    # silent no-op, and an Arq retry (a second try, or a re-run after a
+    # cancellation) would run a job before its backoff in the database.
+    keep_result = 0
+    max_tries = 1
+    retry_jobs = False
     poll_delay = 0.5

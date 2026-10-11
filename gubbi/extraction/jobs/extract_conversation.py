@@ -228,7 +228,7 @@ async def _claim_job(conn: asyncpg.Connection, job: _Job) -> bool:
     """
     if job.job_uuid is None:
         return True
-    if await extraction_jobs.mark_running(conn, job.job_uuid) is not None:
+    if await extraction_jobs.mark_running(conn, job.job_uuid):
         return True
     await job.log.info(
         "extraction_job_not_claimed",
@@ -337,15 +337,33 @@ async def _complete_without_entries(
             **_usage_kwargs(spend),
         )
         if updated:
-            await record_audit(
-                conn,
-                action="extraction_job.completed",
-                actor_type="user",
-                actor_id=str(job.user_uuid),
-                target_kind=TargetKind.EXTRACTION_JOB,
-                target_id=str(job.job_uuid),
-                metadata={"conversation_id": job.conversation_id, "entries_created": 0},
-            )
+            await _audit_completed_without_entries(conn, job)
+
+
+async def _complete_processed_job(conn: asyncpg.Connection, job: _Job) -> None:
+    """Close the job row of a conversation already processed, charging nothing.
+
+    The dispatched row would otherwise stay pending and hold a dispatch slot.
+    A row this execution cannot claim is left alone.
+    """
+    if job.job_uuid is None or not await extraction_jobs.mark_running(conn, job.job_uuid):
+        return
+    if await extraction_jobs.mark_completed(
+        conn, job.job_uuid, topics_created=0, entries_created=0, cents_spent=0, filtered_tokens=0
+    ):
+        await _audit_completed_without_entries(conn, job)
+
+
+async def _audit_completed_without_entries(conn: asyncpg.Connection, job: _Job) -> None:
+    await record_audit(
+        conn,
+        action="extraction_job.completed",
+        actor_type="user",
+        actor_id=str(job.user_uuid),
+        target_kind=TargetKind.EXTRACTION_JOB,
+        target_id=str(job.job_uuid),
+        metadata={"conversation_id": job.conversation_id, "entries_created": 0},
+    )
 
 
 def _usage_kwargs(spend: _Spend) -> dict[str, int]:
@@ -553,9 +571,11 @@ async def extract_conversation(
     recording completes with ``entries_created=0`` and creates no topic.
 
     Lifecycle UPDATEs:
-      mark_running   -- Phase 1, after the idempotency check passes. A row it
-                        cannot claim belongs to another execution of the job,
-                        so this one returns without a model call.
+      mark_running   -- Phase 1, after the idempotency check. A row it cannot
+                        claim is not admitted, backed off, or owned or finished
+                        by another execution, so this one returns without a
+                        model call. A conversation already processed has its
+                        row claimed and completed at once, charging nothing.
       mark_completed -- inside the Phase 3 SAVEPOINT, or on a short dedicated
                         connection when nothing is recorded.
       mark_failed    -- on a FRESH connection in the outer except block, with
@@ -651,6 +671,7 @@ async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str)
     try:
         async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn1:
             if await _check_idempotent(conn1, job.conversation_id, user_id, job.log):
+                await _complete_processed_job(conn1, job)
                 return _result(None, 0, _NO_SPEND, skipped=True)
             if not await _claim_job(conn1, job):
                 return _result(None, 0, _NO_SPEND, skipped=True)

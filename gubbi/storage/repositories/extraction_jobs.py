@@ -13,20 +13,19 @@ Public surface
 --------------
 create_pending      -- INSERT a new pending job; raises ExtractionJobAlreadyInFlight on conflict
 refresh_queued      -- rewrite the queue inputs of a pending, not yet admitted job
-mark_running        -- claim a job for a run and count the attempt; returns the prior status
+mark_running        -- claim an admitted, runnable pending job and count the attempt
 update_progress     -- monotonic UPDATE of topics/entries counters (worker stub)
 mark_completed      -- terminal UPDATE to 'completed'; adds this run's usage to the row
 mark_failed         -- UPDATE to 'failed' with the retry policy's run_after; adds this run's usage
 get_status_counts   -- aggregate SELECT returning StatusCounts (for /me endpoint)
 ExtractionJobAlreadyInFlight -- raised by create_pending on partial-unique conflict
 StatusCounts        -- dataclass returned by get_status_counts
-ClaimedFrom         -- status mark_running claimed a job from
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final, Literal, cast
+from typing import TYPE_CHECKING, Final
 from uuid import UUID
 
 import asyncpg
@@ -39,7 +38,6 @@ if TYPE_CHECKING:
 _CREATE_PENDING_ATTEMPTS: Final = 3
 
 __all__: list[str] = [
-    "ClaimedFrom",
     "ExtractionJobAlreadyInFlight",
     "StatusCounts",
     "create_pending",
@@ -50,9 +48,6 @@ __all__: list[str] = [
     "refresh_queued",
     "update_progress",
 ]
-
-
-ClaimedFrom = Literal["pending", "failed"]
 
 
 class ExtractionJobAlreadyInFlight(Exception):
@@ -242,32 +237,41 @@ async def refresh_queued(
 # ---------------------------------------------------------------------------
 
 
-async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> ClaimedFrom | None:
-    """Claim a job for this execution: move it from 'pending' or 'failed' to 'running'.
+async def mark_running(conn: asyncpg.Connection, job_id: UUID) -> bool:
+    """Claim a job for this execution: move it from 'pending' to 'running'.
 
-    Returns the status the row was claimed from, or None, changing nothing,
-    when the row is completed, already running, or not visible: another
-    execution owns or finished the job. The row is locked before its status
-    is read, so of concurrent claims exactly one succeeds. Every claim counts
-    one attempt. Reviving a failed row (a retry) resets started_at and clears
-    the stale error_code; its admission charge is kept, so a revived row is
-    never charged again.
+    Only a row the scheduler admitted and whose ``run_after`` has passed is
+    claimed. Returns False, changing nothing, for any other row: one not yet
+    admitted, failed (the scheduler moves a retryable failed row back to
+    pending before it dispatches it again), backed off, running, completed
+    or not visible. A delayed or duplicate delivery of a job is therefore a
+    no-op. The row is locked before its status is read, so of concurrent
+    claims exactly one succeeds. Every claim counts one attempt, resets
+    started_at and clears the previous run's error_code; the admission
+    charge is kept, so a retried row is never charged again.
     """
-    claimed_from = await conn.fetchval(
+    claimed = await conn.fetchval(
         """
         UPDATE extraction_jobs AS job
         SET status = 'running',
             started_at = now(),
             error_code = NULL,
             attempts = job.attempts + 1
-        FROM (SELECT id, status FROM extraction_jobs WHERE id = $1 FOR UPDATE) AS prior
+        FROM (
+            SELECT id, status, admitted_at, run_after
+            FROM extraction_jobs
+            WHERE id = $1
+            FOR UPDATE
+        ) AS prior
         WHERE job.id = prior.id
-          AND prior.status IN ('pending', 'failed')
-        RETURNING prior.status
+          AND prior.status = 'pending'
+          AND prior.admitted_at IS NOT NULL
+          AND prior.run_after <= now()
+        RETURNING true
         """,
         job_id,
     )
-    return cast("ClaimedFrom | None", claimed_from)
+    return bool(claimed)
 
 
 # ---------------------------------------------------------------------------

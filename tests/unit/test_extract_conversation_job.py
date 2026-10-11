@@ -189,7 +189,7 @@ async def test_progress_publish_failure_does_not_fail_the_job() -> None:
 # ---------------------------------------------------------------------------
 
 
-async def test_already_processed_conversation_is_skipped_before_any_work() -> None:
+async def test_already_processed_conversation_completes_its_job_without_work() -> None:
     tracker = ConnectionTracker()
     provider = ScriptedProvider([])
 
@@ -199,8 +199,30 @@ async def test_already_processed_conversation_is_skipped_before_any_work() -> No
 
     assert result["skipped"] is True
     assert provider.user_contents == []
-    mocks.mark_running.assert_not_awaited()
     mocks.read_conversation.assert_not_awaited()
+    mocks.mark_running.assert_awaited_once_with(tracker.conns[0], _JOB_UUID)
+    mocks.mark_completed.assert_awaited_once_with(
+        tracker.conns[0],
+        _JOB_UUID,
+        topics_created=0,
+        entries_created=0,
+        cents_spent=0,
+        filtered_tokens=0,
+    )
+    assert len(tracker.conns) == 1
+
+
+async def test_already_processed_conversation_leaves_an_unclaimable_job_alone() -> None:
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker) as mocks:
+        mocks.get_processed_at.return_value = "2026-05-01T00:00:00Z"
+        mocks.mark_running.return_value = False
+        result = await _run(make_ctx(ScriptedProvider([])))
+
+    assert result["skipped"] is True
+    mocks.mark_completed.assert_not_awaited()
+    mocks.record_audit.assert_not_awaited()
 
 
 async def test_mark_running_follows_the_idempotency_check() -> None:
@@ -236,7 +258,7 @@ async def test_a_job_row_another_execution_owns_is_left_alone() -> None:
     provider = ScriptedProvider([chunk_output()])
 
     with patched_job(tracker) as mocks:
-        mocks.mark_running.return_value = None
+        mocks.mark_running.return_value = False
         result = await _run(make_ctx(provider))
 
     assert result["skipped"] is True

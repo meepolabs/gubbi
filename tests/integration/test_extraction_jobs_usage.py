@@ -47,6 +47,14 @@ async def _create_job(conn: asyncpg.Connection, seed: TenantSeed) -> UUID:
     )
 
 
+async def _revive(conn: asyncpg.Connection, job_id: UUID) -> None:
+    """Move a failed row back to pending with its backoff elapsed, as the scheduler does."""
+    assert await queue_repo.revive_failed(conn, [job_id]) == {job_id}
+    await conn.execute(
+        "UPDATE extraction_jobs SET run_after = now() - interval '1 minute' WHERE id = $1", job_id
+    )
+
+
 def _usage_of(row: asyncpg.Record | None) -> dict[str, int]:
     assert row is not None
     return {column: row[column] for column in _USAGE}
@@ -145,10 +153,12 @@ async def test_a_retried_job_totals_the_usage_of_every_run(
     second_run = {column: value * 10 for column, value in _USAGE.items()}
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         job_id = await _create_job(conn, seeded_a)
+        await queue_repo.admit(conn, [job_id], date(2026, 10, 1))
         fresh = await conn.fetchrow(_USAGE_SQL, job_id)
         await jobs_repo.mark_running(conn, job_id)
         await _fail(conn, job_id, _USAGE, _CENTS)
-        assert await jobs_repo.mark_running(conn, job_id) == "failed"
+        await _revive(conn, job_id)
+        assert await jobs_repo.mark_running(conn, job_id)
         await write_terminal(conn, job_id, second_run, _CENTS * 10)
         row = await conn.fetchrow(_USAGE_SQL, job_id)
 
@@ -176,7 +186,8 @@ async def test_reviving_a_failed_admitted_job_leaves_usage_unchanged(
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
         await jobs_repo.mark_running(conn, job_id)
         await _fail(conn, job_id, _USAGE, _CENTS)
-        assert await jobs_repo.mark_running(conn, job_id) == "failed"
+        await _revive(conn, job_id)
+        assert await jobs_repo.mark_running(conn, job_id)
     async with admin_pool.acquire() as conn:
         await conn.execute(
             "UPDATE extraction_jobs SET started_at = now() - interval '1 day' WHERE id = $1",
@@ -184,7 +195,8 @@ async def test_reviving_a_failed_admitted_job_leaves_usage_unchanged(
         )
     assert await orphan_cleanup._sweep_running(admin_pool) == 1
     async with user_scoped_connection(app_pool, user_id=seeded_a.user_id) as conn:
-        assert await jobs_repo.mark_running(conn, job_id) == "failed"
+        await _revive(conn, job_id)
+        assert await jobs_repo.mark_running(conn, job_id)
         await _complete(conn, job_id, _USAGE, _CENTS)
     async with admin_pool.acquire() as conn:
         assert await queue_repo.admit(conn, [job_id], period) == 0

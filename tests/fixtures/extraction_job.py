@@ -232,7 +232,7 @@ def patched_job(
             list_topics=enter("gubbi.storage.repositories.topics.list_all", return_value=([], 0)),
             mark_processed=enter(f"{conv}.mark_processed"),
             set_extraction_state=enter(f"{conv}.set_extraction_state", return_value=True),
-            mark_running=enter(f"{jobs}.mark_running", return_value="pending"),
+            mark_running=enter(f"{jobs}.mark_running", return_value=True),
             mark_completed=enter(f"{jobs}.mark_completed", return_value=True),
             mark_failed=enter(f"{jobs}.mark_failed", return_value=True),
             persist=AsyncMock(return_value=persisted),

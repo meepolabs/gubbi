@@ -31,11 +31,13 @@ from gubbi.storage.repositories.extraction_jobs import (
     mark_running,
     refresh_queued,
 )
+from gubbi.storage.repositories.extraction_queue import admit, revive_failed
 
 pytestmark = pytest.mark.asyncio(loop_scope="session")
 
 _USER_A = UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
 _USER_B = UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb")
+_PERIOD = date(2026, 5, 1)
 
 
 # ---------------------------------------------------------------------------
@@ -440,78 +442,127 @@ async def test_refresh_queued_leaves_admitted_or_running_job_unchanged(
 # ---------------------------------------------------------------------------
 
 
-async def test_mark_running_claims_a_pending_job_once(
+async def _create_admitted(
+    conn: asyncpg.Connection, user_id: UUID, conversation_id: int, source: str = "chatgpt"
+) -> UUID:
+    job_id = await create_pending(conn, user_id, conversation_id, source)
+    await admit(conn, [job_id], _PERIOD)
+    return job_id
+
+
+async def _revive(conn: asyncpg.Connection, job_id: UUID) -> None:
+    """Move a failed row back to pending with its backoff elapsed, as the scheduler does."""
+    assert await revive_failed(conn, [job_id]) == {job_id}
+    await conn.execute(
+        "UPDATE extraction_jobs SET run_after = now() - interval '1 minute' WHERE id = $1", job_id
+    )
+
+
+async def _claim_state(admin_pool: asyncpg.Pool, job_id: UUID) -> tuple[str, int]:
+    async with admin_pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT status, attempts FROM extraction_jobs WHERE id = $1", job_id
+        )
+    assert row is not None
+    return row["status"], row["attempts"]
+
+
+async def test_mark_running_claims_an_admitted_pending_job_once(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],
     conversation_id: int,
 ) -> None:
-    """The first claim reports the pending status; a second claim reports nothing."""
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(
-            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
-        )
+        job_id = await _create_admitted(conn, user_a, conversation_id)
         first = await mark_running(conn, job_id)
         second = await mark_running(conn, job_id)
 
-    assert (first, second) == ("pending", None)
-
-    async with admin_pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT status FROM extraction_jobs WHERE id = $1",
-            job_id,
-        )
-    assert row is not None
-    assert row["status"] == "running"
+    assert (first, second) == (True, False)
+    assert await _claim_state(admin_pool, job_id) == ("running", 1)
 
 
-async def test_mark_running_retries_failed_job_and_clears_error_code(
+async def _unadmitted(conn: asyncpg.Connection, user_id: UUID, conversation_id: int) -> UUID:
+    return await create_pending(conn, user_id, conversation_id, "chatgpt")
+
+
+async def _failed_past_backoff(
+    conn: asyncpg.Connection, user_id: UUID, conversation_id: int
+) -> UUID:
+    job_id = await _create_admitted(conn, user_id, conversation_id)
+    await mark_running(conn, job_id)
+    await mark_failed(conn, job_id, error_code=ErrorCode.LLM_PROVIDER_ERROR)
+    await conn.execute(
+        "UPDATE extraction_jobs SET run_after = now() - interval '1 minute' WHERE id = $1", job_id
+    )
+    return job_id
+
+
+async def _backed_off(conn: asyncpg.Connection, user_id: UUID, conversation_id: int) -> UUID:
+    job_id = await _create_admitted(conn, user_id, conversation_id)
+    await conn.execute(
+        "UPDATE extraction_jobs SET run_after = now() + interval '1 hour' WHERE id = $1", job_id
+    )
+    return job_id
+
+
+async def _completed(conn: asyncpg.Connection, user_id: UUID, conversation_id: int) -> UUID:
+    job_id = await _create_admitted(conn, user_id, conversation_id)
+    await mark_completed(conn, job_id, topics_created=0, entries_created=0, cents_spent=0)
+    return job_id
+
+
+@pytest.mark.parametrize(
+    "make_job",
+    [
+        pytest.param(_unadmitted, id="pending-not-admitted"),
+        pytest.param(_failed_past_backoff, id="failed"),
+        pytest.param(_backed_off, id="run-after-in-the-future"),
+        pytest.param(_completed, id="completed"),
+    ],
+)
+async def test_mark_running_does_not_claim_a_row_the_scheduler_has_not_released(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+    make_job: Callable[[asyncpg.Connection, UUID, int], Awaitable[UUID]],
+) -> None:
+    """Each row fails exactly one claim condition; a delivery of it changes nothing."""
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await make_job(conn, user_a, conversation_id)
+    before = await _claim_state(admin_pool, job_id)
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        claimed = await mark_running(conn, job_id)
+
+    assert claimed is False
+    assert await _claim_state(admin_pool, job_id) == before
+
+
+async def test_mark_running_claims_a_revived_retry_and_clears_error_code(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,
     rls_users: tuple[UUID, UUID],
     conversation_id: int,
 ) -> None:
-    """mark_running revives failed rows for Arq retries."""
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(
-            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
-        )
+        job_id = await _create_admitted(conn, user_a, conversation_id)
+        await mark_running(conn, job_id)
         await mark_failed(conn, job_id, error_code=ErrorCode.LLM_PROVIDER_ERROR)
-        claimed_from = await mark_running(conn, job_id)
-
-    assert claimed_from == "failed"
+        await _revive(conn, job_id)
+        claimed = await mark_running(conn, job_id)
 
     async with admin_pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT status, error_code, started_at FROM extraction_jobs WHERE id = $1",
-            job_id,
+            "SELECT status, error_code, attempts FROM extraction_jobs WHERE id = $1", job_id
         )
+    assert claimed is True
     assert row is not None
-    assert row["status"] == "running"
-    assert row["error_code"] is None
-    assert row["started_at"] is not None
-
-
-async def test_mark_running_does_not_claim_a_completed_job(
-    app_pool: asyncpg.Pool,
-    admin_pool: asyncpg.Pool,
-    rls_users: tuple[UUID, UUID],
-    conversation_id: int,
-) -> None:
-    user_a, _ = rls_users
-    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(
-            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
-        )
-        await mark_completed(conn, job_id, topics_created=0, entries_created=0, cents_spent=0)
-        claimed_from = await mark_running(conn, job_id)
-
-    async with admin_pool.acquire() as conn:
-        status = await conn.fetchval("SELECT status FROM extraction_jobs WHERE id = $1", job_id)
-    assert claimed_from is None
-    assert status == "completed"
+    assert (row["status"], row["error_code"], row["attempts"]) == ("running", None, 2)
 
 
 async def test_a_claim_waiting_on_an_uncommitted_claim_does_not_also_claim(
@@ -523,11 +574,9 @@ async def test_a_claim_waiting_on_an_uncommitted_claim_does_not_also_claim(
     """The second claim blocks on the first's row lock, then sees 'running' and backs off."""
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(
-            conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
-        )
+        job_id = await _create_admitted(conn, user_a, conversation_id)
 
-    async def _second_claim() -> str | None:
+    async def _second_claim() -> bool:
         async with user_scoped_connection(app_pool, user_id=user_a) as conn:
             return await mark_running(conn, job_id)
 
@@ -537,7 +586,7 @@ async def test_a_claim_waiting_on_an_uncommitted_claim_does_not_also_claim(
         await _wait_until_blocked_on_a_lock(admin_pool)
     second_claim = await second
 
-    assert (first_claim, second_claim) == ("pending", None)
+    assert (first_claim, second_claim) == (True, False)
 
 
 async def _wait_until_blocked_on_a_lock(admin_pool: asyncpg.Pool) -> None:
@@ -646,10 +695,8 @@ async def test_get_status_counts_buckets(
             conn, user_a, conversation_id, "chatgpt", period_start=date(2026, 5, 1)
         )
         running_conv_id = conversation_id  # reuse for running (different source)
-        running_id = await create_pending(
-            conn, user_a, running_conv_id, "claude", period_start=date(2026, 5, 1)
-        )
-        await mark_running(conn, running_id)
+        running_id = await _create_admitted(conn, user_a, running_conv_id, "claude")
+        assert await mark_running(conn, running_id)
 
         # Need separate conversations for completed and failed to avoid partial-unique clash.
         # Use mark_failed on the running one (simplest path without extra convs).
@@ -737,9 +784,10 @@ async def test_every_claim_counts_one_attempt(
 ) -> None:
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+        job_id = await _create_admitted(conn, user_a, conversation_id)
         await mark_running(conn, job_id)
         await mark_failed(conn, job_id, error_code=ErrorCode.LLM_PROVIDER_ERROR)
+        await _revive(conn, job_id)
         await mark_running(conn, job_id)
         await mark_running(conn, job_id)
 
@@ -764,8 +812,8 @@ async def test_mark_failed_schedules_the_next_run_by_error_class(
 ) -> None:
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
-        await mark_running(conn, job_id)
+        job_id = await _create_admitted(conn, user_a, conversation_id)
+        assert await mark_running(conn, job_id)
         await mark_failed(conn, job_id, error_code=code)
 
     row = await _job_retry_state(admin_pool, job_id)
@@ -780,9 +828,11 @@ async def test_mark_failed_holds_a_deterministic_failure_after_its_last_attempt(
 ) -> None:
     user_a, _ = rls_users
     async with user_scoped_connection(app_pool, user_id=user_a) as conn:
-        job_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
-        for _ in range(DETERMINISTIC_MAX_ATTEMPTS):
-            await mark_running(conn, job_id)
+        job_id = await _create_admitted(conn, user_a, conversation_id)
+        for attempt in range(DETERMINISTIC_MAX_ATTEMPTS):
+            if attempt:
+                await _revive(conn, job_id)
+            assert await mark_running(conn, job_id)
             await mark_failed(conn, job_id, error_code=ErrorCode.LLM_SCHEMA)
 
     row = await _job_retry_state(admin_pool, job_id)
