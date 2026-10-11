@@ -10,7 +10,9 @@ Run:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
+from typing import Any, cast
 from uuid import UUID
 
 import asyncpg
@@ -241,6 +243,76 @@ async def test_create_pending_omitted_fields_take_column_defaults(
         "filtered_tokens": 0,
         "token_count_version": None,
     }
+
+
+class _LookupHookConnection:
+    """Delegates to a real connection; runs ``on_lookup`` before each in-flight lookup.
+
+    ``on_lookup`` returns whether the lookup should report no active row.
+    """
+
+    def __init__(self, conn: asyncpg.Connection, on_lookup: Callable[[], Awaitable[bool]]) -> None:
+        self._conn = conn
+        self._on_lookup = on_lookup
+        self.inserts = 0
+
+    def transaction(self) -> Any:
+        return self._conn.transaction()
+
+    async def fetchrow(self, query: str, *args: object) -> asyncpg.Record | None:
+        if query.lstrip().startswith("INSERT"):
+            self.inserts += 1
+        elif await self._on_lookup():
+            return None
+        return await self._conn.fetchrow(query, *args)
+
+
+async def test_create_pending_retries_when_the_conflicting_job_finished_mid_recovery(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        first_id = await create_pending(conn, user_a, conversation_id, "chatgpt")
+
+    async def finish_first_job() -> bool:
+        await admin_pool.execute(
+            "UPDATE extraction_jobs SET status = 'completed' WHERE id = $1", first_id
+        )
+        return False
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        hooked = _LookupHookConnection(conn, finish_first_job)
+        second_id = await create_pending(
+            cast("asyncpg.Connection", hooked), user_a, conversation_id, "chatgpt"
+        )
+
+    assert second_id != first_id
+    assert hooked.inserts == 2
+
+
+async def test_create_pending_gives_up_when_no_active_row_is_ever_found(
+    app_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+) -> None:
+    user_a, _ = rls_users
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        await create_pending(conn, user_a, conversation_id, "chatgpt")
+
+    async def report_no_active_row() -> bool:
+        return True
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        hooked = _LookupHookConnection(conn, report_no_active_row)
+        with pytest.raises(RuntimeError, match="no active row found after 3 attempts"):
+            await create_pending(
+                cast("asyncpg.Connection", hooked), user_a, conversation_id, "chatgpt"
+            )
+
+    assert hooked.inserts == 3
 
 
 # ---------------------------------------------------------------------------

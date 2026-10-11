@@ -4,10 +4,11 @@ A held ("parked") job is a pending or failed row the scheduler never picks
 up. The queue-columns migration holds every unfinished row present at
 upgrade, and a failure with no retry left is held the same way.
 
-``--dry-run`` reports held-row counts by status and error class inside a
-read-only transaction. ``--release`` makes every held row runnable now,
-except failed rows whose error code is terminal (never retried); completed
-and running rows are never touched. Releasing twice is a no-op.
+``--dry-run`` reports held-row counts by status, error class and whether
+the retry policy treats the row as terminal, inside a read-only transaction.
+``--release`` makes every held row runnable now, except terminal failed rows
+(a terminal error code, or a deterministic one past its attempt limit);
+completed and running rows are never touched. Releasing twice is a no-op.
 
 Output is one JSON log line per count group on stderr, counts only.
 
@@ -27,70 +28,81 @@ import os
 import sys
 from collections import Counter
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Final, TextIO
+from typing import TYPE_CHECKING, Final, Protocol, TextIO
 
 import structlog
 from pydantic import ValidationError
 
-from gubbi.extraction.retry_policy import ErrorCode, RetryClass, retry_class
+from gubbi.extraction.retry_policy import ErrorCode, retry_class
 from gubbi.storage.pg_setup import init_pool
+from gubbi.storage.repositories.extraction_queue import (
+    terminal_failure_args,
+    terminal_failure_sql,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     import asyncpg
 
 NO_ERROR: Final = "none"
 UNKNOWN_ERROR: Final = "unknown"
 
-TERMINAL_ERROR_CODES: Final[tuple[str, ...]] = tuple(
-    sorted(code.value for code in ErrorCode if retry_class(code) is RetryClass.TERMINAL)
-)
+_TERMINAL_FAILURE: Final = f"(status = 'failed' AND {terminal_failure_sql(1)})"
 
-_COUNT_PARKED_SQL: Final = """
-SELECT status, error_code, count(*) AS n
+_COUNT_PARKED_SQL: Final = f"""
+SELECT status, error_code, {_TERMINAL_FAILURE} AS terminal, count(*) AS n
 FROM extraction_jobs
 WHERE run_after = 'infinity' AND status IN ('pending', 'failed')
-GROUP BY status, error_code
-"""
+GROUP BY 1, 2, 3
+"""  # noqa: S608 - fixed SQL fragments; values are bound
 
-# ``error_code IS NOT NULL`` keeps the predicate two-valued: a NULL code would
-# otherwise make NOT (...) NULL and silently exclude the row from release.
-_RELEASE_SQL: Final = """
+_RELEASE_SQL: Final = f"""
 WITH released AS (
     UPDATE extraction_jobs
     SET run_after = now()
     WHERE run_after = 'infinity'
       AND status IN ('pending', 'failed')
-      AND NOT (status = 'failed' AND error_code IS NOT NULL AND error_code = ANY($1::text[]))
+      AND NOT {_TERMINAL_FAILURE}
     RETURNING status, error_code
 )
-SELECT status, error_code, count(*) AS n
+SELECT status, error_code, false AS terminal, count(*) AS n
 FROM released
 GROUP BY status, error_code
-"""
+"""  # noqa: S608 - fixed SQL fragments; values are bound
 
-_COUNT_HELD_TERMINAL_SQL: Final = """
+_COUNT_HELD_TERMINAL_SQL: Final = f"""
 SELECT count(*)
 FROM extraction_jobs
 WHERE run_after = 'infinity'
-  AND status = 'failed'
-  AND error_code = ANY($1::text[])
-"""
+  AND {_TERMINAL_FAILURE}
+"""  # noqa: S608 - fixed SQL fragments; values are bound
+
+
+class EventLogger(Protocol):
+    """The logging calls this script makes."""
+
+    def info(self, event: str, **fields: object) -> object:
+        """Log ``event`` at info level."""
+        ...
+
+    def error(self, event: str, **fields: object) -> object:
+        """Log ``event`` at error level."""
+        ...
 
 
 @dataclass(frozen=True)
 class GroupCount:
-    """Number of rows sharing one status and error class."""
+    """Number of rows sharing one status, error class and terminal verdict.
+
+    ``terminal`` rows are failed rows the retry policy never runs again;
+    release leaves them held.
+    """
 
     status: str
     error_class: str
     count: int
-
-    @property
-    def is_terminal(self) -> bool:
-        """Whether release leaves these rows held."""
-        return self.status == "failed" and self.error_class == RetryClass.TERMINAL.value
+    terminal: bool = False
 
 
 @dataclass(frozen=True)
@@ -111,36 +123,43 @@ def error_class_of(error_code: str | None) -> str:
         return UNKNOWN_ERROR
 
 
-def group_counts(rows: Iterable[asyncpg.Record | dict[str, Any]]) -> tuple[GroupCount, ...]:
-    """Fold ``(status, error_code, n)`` rows into counts per status and error class."""
-    totals: Counter[tuple[str, str]] = Counter()
+def group_counts(rows: Iterable[Mapping[str, object]]) -> tuple[GroupCount, ...]:
+    """Fold ``(status, error_code, terminal, n)`` rows into counts per group."""
+    totals: Counter[tuple[str, str, bool]] = Counter()
     for row in rows:
-        totals[(str(row["status"]), error_class_of(row["error_code"]))] += int(row["n"])
+        error_code, terminal, n = row["error_code"], row["terminal"], row["n"]
+        if not (
+            (error_code is None or isinstance(error_code, str))
+            and isinstance(terminal, bool)
+            and isinstance(n, int)
+        ):
+            raise TypeError(f"unexpected count row types: {sorted(row)}")
+        totals[(str(row["status"]), error_class_of(error_code), terminal)] += n
     return tuple(
-        GroupCount(status=status, error_class=error_class, count=count)
-        for (status, error_class), count in sorted(totals.items())
+        GroupCount(status=status, error_class=error_class, count=count, terminal=terminal)
+        for (status, error_class, terminal), count in sorted(totals.items())
     )
 
 
 async def count_parked(pool: asyncpg.Pool) -> tuple[GroupCount, ...]:
     """Count held rows by status and error class without writing anything."""
     async with pool.acquire() as conn, conn.transaction(readonly=True):
-        rows = await conn.fetch(_COUNT_PARKED_SQL)
+        rows = await conn.fetch(_COUNT_PARKED_SQL, *terminal_failure_args())
     return group_counts(rows)
 
 
 async def release_parked(pool: asyncpg.Pool) -> ReleaseResult:
     """Make every non-terminal held row runnable now."""
-    terminal_codes = list(TERMINAL_ERROR_CODES)
+    args = terminal_failure_args()
     async with pool.acquire() as conn, conn.transaction():
-        rows = await conn.fetch(_RELEASE_SQL, terminal_codes)
-        held_terminal = await conn.fetchval(_COUNT_HELD_TERMINAL_SQL, terminal_codes)
+        rows = await conn.fetch(_RELEASE_SQL, *args)
+        held_terminal = await conn.fetchval(_COUNT_HELD_TERMINAL_SQL, *args)
     return ReleaseResult(released=group_counts(rows), held_terminal=int(held_terminal or 0))
 
 
-def build_logger(stream: TextIO) -> Any:
+def build_logger(stream: TextIO) -> EventLogger:
     """Return a JSON-lines structlog logger on ``stream``, independent of global config."""
-    return structlog.wrap_logger(
+    logger: EventLogger = structlog.wrap_logger(
         structlog.PrintLogger(stream),
         processors=[
             structlog.processors.add_log_level,
@@ -149,20 +168,25 @@ def build_logger(stream: TextIO) -> Any:
         ],
         wrapper_class=structlog.BoundLogger,
     )
+    return logger
 
 
-def log_dry_run(log: Any, groups: Sequence[GroupCount]) -> None:
+def log_dry_run(log: EventLogger, groups: Sequence[GroupCount]) -> None:
     """Emit one line per held group, then a summary."""
     for group in groups:
         log.info(
-            "parked_jobs", status=group.status, error_class=group.error_class, count=group.count
+            "parked_jobs",
+            status=group.status,
+            error_class=group.error_class,
+            terminal=group.terminal,
+            count=group.count,
         )
-    terminal = sum(group.count for group in groups if group.is_terminal)
+    terminal = sum(group.count for group in groups if group.terminal)
     parked = sum(group.count for group in groups)
     log.info("dry_run_summary", parked=parked, releasable=parked - terminal, terminal=terminal)
 
 
-def log_release(log: Any, result: ReleaseResult) -> None:
+def log_release(log: EventLogger, result: ReleaseResult) -> None:
     """Emit one line per released group, then a summary."""
     for group in result.released:
         log.info(
@@ -210,7 +234,7 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-async def _run(dsn: str, *, release: bool, log: Any) -> None:
+async def _run(dsn: str, *, release: bool, log: EventLogger) -> None:
     pool = await init_pool(dsn, min_size=1, max_size=1)
     try:
         if release:

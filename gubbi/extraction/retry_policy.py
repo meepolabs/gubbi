@@ -48,6 +48,15 @@ RETRY_CLASSES: Final[Mapping[ErrorCode, RetryClass]] = MappingProxyType(
     }
 )
 
+
+def _codes_of(cls: RetryClass) -> frozenset[str]:
+    return frozenset(code.value for code, c in RETRY_CLASSES.items() if c is cls)
+
+
+TERMINAL_CODES: Final[frozenset[str]] = _codes_of(RetryClass.TERMINAL)
+DETERMINISTIC_CODES: Final[frozenset[str]] = _codes_of(RetryClass.DETERMINISTIC)
+TRANSIENT_CODES: Final[frozenset[str]] = _codes_of(RetryClass.TRANSIENT)
+
 TRANSIENT_BASE_DELAY: Final = timedelta(seconds=60)
 TRANSIENT_MAX_DELAY: Final = timedelta(hours=6)
 DETERMINISTIC_DELAY: Final = timedelta(hours=6)
@@ -61,6 +70,23 @@ _MAX_BACKOFF_EXPONENT: Final = 30
 def retry_class(code: ErrorCode) -> RetryClass:
     """Return the retry class of ``code``."""
     return RETRY_CLASSES[code]
+
+
+def is_terminal(code: str | None, attempts: int) -> bool:
+    """Return whether a job that failed with ``code`` after ``attempts`` runs never runs again.
+
+    A missing or unrecognised ``code`` is not terminal: this policy has no
+    rule for it, so it neither retries nor permanently retires the row.
+    """
+    if code is None:
+        return False
+    try:
+        cls = retry_class(ErrorCode(code))
+    except ValueError:
+        return False
+    if cls is RetryClass.TERMINAL:
+        return True
+    return cls is RetryClass.DETERMINISTIC and attempts >= DETERMINISTIC_MAX_ATTEMPTS
 
 
 def next_run_after(

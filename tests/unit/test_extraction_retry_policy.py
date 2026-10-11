@@ -18,6 +18,7 @@ from gubbi.extraction.retry_policy import (
     TRANSIENT_MAX_DELAY,
     ErrorCode,
     RetryClass,
+    is_terminal,
     next_run_after,
     retry_class,
 )
@@ -132,3 +133,41 @@ def test_rejects_attempts_below_one() -> None:
 def test_rejects_naive_now() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         next_run_after(ErrorCode.WORKER_LOST, 1, datetime(2026, 10, 10, 12, 0))
+
+
+@pytest.mark.parametrize(
+    ("code", "attempts", "expected"),
+    [
+        pytest.param("llm_refused", 1, True, id="terminal-first-attempt"),
+        pytest.param("llm_schema", DETERMINISTIC_MAX_ATTEMPTS - 1, False, id="deterministic-below"),
+        pytest.param("llm_schema", DETERMINISTIC_MAX_ATTEMPTS, True, id="deterministic-at-max"),
+        pytest.param(
+            "internal_error", DETERMINISTIC_MAX_ATTEMPTS + 4, True, id="deterministic-past"
+        ),
+        pytest.param("worker_lost", 100, False, id="transient-many-attempts"),
+        pytest.param(None, 100, False, id="no-code"),
+        pytest.param("legacy_code", 100, False, id="unknown-code"),
+    ],
+)
+def test_is_terminal_matches_terminal_class_or_exhausted_deterministic(
+    code: str | None, attempts: int, expected: bool
+) -> None:
+    assert is_terminal(code, attempts) is expected
+
+
+@pytest.mark.parametrize("code", list(ErrorCode), ids=str)
+def test_is_terminal_agrees_with_next_run_after(code: ErrorCode) -> None:
+    for attempts in range(1, DETERMINISTIC_MAX_ATTEMPTS + 3):
+        assert is_terminal(code, attempts) is (next_run_after(code, attempts, NOW) is None)
+
+
+def test_code_sets_partition_the_error_codes() -> None:
+    sets = (
+        retry_policy.TERMINAL_CODES,
+        retry_policy.DETERMINISTIC_CODES,
+        retry_policy.TRANSIENT_CODES,
+    )
+
+    assert sum(len(codes) for codes in sets) == len(ErrorCode)
+    assert set().union(*sets) == {code.value for code in ErrorCode}
+    assert {"llm_refused"} == retry_policy.TERMINAL_CODES

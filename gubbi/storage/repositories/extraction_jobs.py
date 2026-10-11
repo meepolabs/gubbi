@@ -25,13 +25,15 @@ ClaimedFrom         -- status mark_running claimed a job from
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Final, Literal, cast
 from uuid import UUID
 
 import asyncpg
 
 if TYPE_CHECKING:
     from datetime import date, datetime
+
+_CREATE_PENDING_ATTEMPTS: Final = 3
 
 __all__: list[str] = [
     "ClaimedFrom",
@@ -114,7 +116,9 @@ async def create_pending(
     (migration 0023) enforces this at the database level; we catch the
     UniqueViolationError and surface it as the typed exception. The INSERT
     runs in a savepoint so the lookup of the existing job still works when
-    the caller holds an open transaction.
+    the caller holds an open transaction. When the conflicting job finished
+    before the lookup found it, the INSERT is retried in a fresh savepoint,
+    up to ``_CREATE_PENDING_ATTEMPTS`` times in total, then RuntimeError.
     """
     optional_columns = {
         "period_start": period_start,
@@ -132,19 +136,25 @@ async def create_pending(
         f"INSERT INTO extraction_jobs ({', '.join(columns)}, status) "  # noqa: S608 - fixed column names
         f"VALUES ({placeholders}, 'pending') RETURNING id"
     )
-    try:
-        async with conn.transaction():
-            row = await conn.fetchrow(insert_sql, *values)
-    except asyncpg.UniqueViolationError:
-        existing_id = await _find_in_flight_job(conn, user_id, conversation_id, source)
-        raise ExtractionJobAlreadyInFlight(existing_id) from None
-
-    if row is None:
-        raise RuntimeError(
-            f"INSERT INTO extraction_jobs returned no row for "
-            f"user_id={user_id} conversation_id={conversation_id} source={source!r}"
-        )
-    return UUID(str(row["id"]))
+    for _ in range(_CREATE_PENDING_ATTEMPTS):
+        try:
+            async with conn.transaction():
+                row = await conn.fetchrow(insert_sql, *values)
+        except asyncpg.UniqueViolationError:
+            existing_id = await _find_in_flight_job(conn, user_id, conversation_id, source)
+            if existing_id is not None:
+                raise ExtractionJobAlreadyInFlight(existing_id) from None
+            continue
+        if row is None:
+            raise RuntimeError(
+                f"INSERT INTO extraction_jobs returned no row for "
+                f"user_id={user_id} conversation_id={conversation_id} source={source!r}"
+            )
+        return UUID(str(row["id"]))
+    raise RuntimeError(
+        f"Conflict on (user_id={user_id}, conversation_id={conversation_id}, source={source}) "
+        f"but no active row found after {_CREATE_PENDING_ATTEMPTS} attempts"
+    )
 
 
 async def _find_in_flight_job(
@@ -152,8 +162,12 @@ async def _find_in_flight_job(
     user_id: UUID,
     conversation_id: int,
     source: str,
-) -> UUID:
-    """Return the id of the active job that made create_pending's INSERT conflict."""
+) -> UUID | None:
+    """Return the id of the active job that made create_pending's INSERT conflict.
+
+    None when no active row exists any more: the conflicting job finished
+    between the violation and this lookup.
+    """
     existing_row = await conn.fetchrow(
         """
         SELECT id
@@ -169,11 +183,7 @@ async def _find_in_flight_job(
         source,
     )
     if existing_row is None:
-        raise RuntimeError(
-            "Conflict on "
-            f"(user_id={user_id}, conversation_id={conversation_id}, source={source}) "
-            "but no existing row found"
-        )
+        return None
     return UUID(str(existing_row["id"]))
 
 

@@ -10,6 +10,8 @@ from uuid import UUID, uuid4
 import asyncpg
 import pytest
 
+from gubbi.extraction.intake import Lane
+from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode, is_terminal
 from gubbi.storage.repositories import extraction_queue as queue_repo
 from gubbi.storage.repositories.extraction_queue import UserPeriodUsage
 
@@ -20,7 +22,6 @@ pytestmark = [pytest.mark.asyncio(loop_scope="session"), pytest.mark.integration
 
 _PERIOD = date(2026, 10, 1)
 _OTHER_PERIOD = date(2026, 9, 1)
-_RETRYABLE = ("llm_rate_limited", "worker_lost")
 _NOW = datetime.now(UTC)
 _PAST = _NOW - timedelta(hours=1)
 _FUTURE = _NOW + timedelta(days=1)
@@ -40,6 +41,7 @@ class Job:
     admitted_at: datetime | None = None
     budget_period_start: date | None = None
     created_at: datetime = _NOW
+    attempts: int = 0
 
 
 async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
@@ -62,8 +64,9 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             """
             INSERT INTO extraction_jobs
                 (user_id, conversation_id, source, status, run_after, error_code, lane,
-                 activity_at, filtered_tokens, admitted_at, budget_period_start, created_at)
-            VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9, $10, $11, $12)
+                 activity_at, filtered_tokens, admitted_at, budget_period_start, created_at,
+                 attempts)
+            VALUES ($1, $2, $3, $4, $5::text::timestamptz, $6, $7, $8, $9, $10, $11, $12, $13)
             RETURNING id
             """,
             seed.user_id,
@@ -78,6 +81,7 @@ async def _insert(pool: asyncpg.Pool, seed: TenantSeed, job: Job) -> UUID:
             job.admitted_at,
             job.budget_period_start,
             job.created_at,
+            job.attempts,
         )
     return UUID(str(job_id))
 
@@ -93,7 +97,7 @@ async def _usage(pool: asyncpg.Pool, user_id: UUID, period: date) -> UserPeriodU
 
 async def _runnable_ids(pool: asyncpg.Pool, limit: int = 100) -> list[UUID]:
     async with pool.acquire() as conn:
-        jobs = await queue_repo.select_runnable(conn, limit, _RETRYABLE)
+        jobs = await queue_repo.select_runnable(conn, limit)
     return [job.job_id for job in jobs]
 
 
@@ -224,6 +228,19 @@ async def test_global_period_tokens_sums_admitted_rows_of_the_period(
         ),
         pytest.param(Job(status="failed", error_code="llm_refused"), id="failed-terminal"),
         pytest.param(Job(status="failed", error_code=None), id="failed-without-code"),
+        pytest.param(Job(status="failed", error_code="legacy_code"), id="failed-unknown-code"),
+        pytest.param(
+            Job(status="failed", error_code="llm_schema", attempts=DETERMINISTIC_MAX_ATTEMPTS),
+            id="failed-deterministic-exhausted",
+        ),
+        pytest.param(
+            Job(
+                status="failed",
+                error_code="internal_error",
+                attempts=DETERMINISTIC_MAX_ATTEMPTS + 2,
+            ),
+            id="failed-deterministic-past-max",
+        ),
         pytest.param(Job(run_after=_FUTURE), id="pending-not-due"),
         pytest.param(
             Job(status="failed", error_code="llm_rate_limited", run_after=_FUTURE),
@@ -244,6 +261,50 @@ async def test_select_runnable_excludes_rows_that_may_not_run(
     await _insert(clean_rls_db, seeded_a, excluded)
 
     assert set(await _runnable_ids(clean_rls_db)) == {pending, retryable}
+
+
+async def test_select_runnable_retries_a_deterministic_failure_below_its_limit(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    below = await _insert(
+        clean_rls_db,
+        seeded_a,
+        Job(status="failed", error_code="llm_schema", attempts=DETERMINISTIC_MAX_ATTEMPTS - 1),
+    )
+
+    assert await _runnable_ids(clean_rls_db) == [below]
+
+
+# ---------------------------------------------------------------------------
+# terminal_failure_sql
+# ---------------------------------------------------------------------------
+
+_PREDICATE_CASES = [
+    (code, attempts)
+    for code in [*(member.value for member in ErrorCode), "legacy_code", None]
+    for attempts in range(DETERMINISTIC_MAX_ATTEMPTS + 2)
+]
+
+
+async def test_terminal_failure_sql_agrees_with_is_terminal(clean_rls_db: asyncpg.Pool) -> None:
+    codes = [code for code, _ in _PREDICATE_CASES]
+    attempts = [n for _, n in _PREDICATE_CASES]
+    async with clean_rls_db.acquire() as conn:
+        rows = await conn.fetch(
+            f"""
+            SELECT ord, {queue_repo.terminal_failure_sql(3)} AS terminal
+            FROM unnest($1::text[], $2::int[]) WITH ORDINALITY AS t(error_code, attempts, ord)
+            ORDER BY ord
+            """,  # noqa: S608 - fixed predicate; values are bound
+            codes,
+            attempts,
+            *queue_repo.terminal_failure_args(),
+        )
+
+    from_sql = [row["terminal"] for row in rows]
+    assert from_sql == [is_terminal(code, n) for code, n in _PREDICATE_CASES]
+    assert any(from_sql)
+    assert not all(from_sql)
 
 
 async def test_select_runnable_orders_by_lane_then_newest_activity(
@@ -274,12 +335,12 @@ async def test_select_runnable_returns_the_scheduling_fields(
     )
     async with clean_rls_db.acquire() as conn:
         await conn.execute("UPDATE extraction_jobs SET attempts = 2 WHERE id = $1", job_id)
-        (job,) = await queue_repo.select_runnable(conn, 10, _RETRYABLE)
+        (job,) = await queue_repo.select_runnable(conn, 10)
 
     assert job.job_id == job_id
     assert job.user_id == seeded_a.user_id
     assert job.source == "claude"
-    assert job.lane == "backfill"
+    assert job.lane is Lane.BACKFILL
     assert job.activity_at == activity
     assert job.filtered_tokens == 321
     assert job.attempts == 2

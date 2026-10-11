@@ -11,6 +11,7 @@ from uuid import UUID
 import asyncpg
 import pytest
 
+from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS
 from gubbi.scripts import release_parked_extraction_jobs as release_script
 from gubbi.scripts.release_parked_extraction_jobs import (
     GroupCount,
@@ -30,6 +31,7 @@ class PlantedJob:
     status: str
     error_code: str | None
     parked: bool
+    attempts: int = 0
 
 
 _PLANTED: tuple[PlantedJob, ...] = (
@@ -39,6 +41,13 @@ _PLANTED: tuple[PlantedJob, ...] = (
     PlantedJob("failed_without_code_held", "failed", None, parked=True),
     PlantedJob("failed_unknown_code_held", "failed", "legacy_code", parked=True),
     PlantedJob("failed_refused_held", "failed", "llm_refused", parked=True),
+    PlantedJob(
+        "failed_deterministic_exhausted_held",
+        "failed",
+        "llm_schema",
+        parked=True,
+        attempts=DETERMINISTIC_MAX_ATTEMPTS,
+    ),
     PlantedJob("completed_held", "completed", None, parked=True),
     PlantedJob("running_held", "running", None, parked=True),
     PlantedJob("pending_scheduled", "pending", None, parked=False),
@@ -62,10 +71,11 @@ async def _plant_jobs(admin_pool: asyncpg.Pool, user_id: UUID) -> dict[str, UUID
             job_ids[job.label] = await conn.fetchval(
                 """
                 INSERT INTO extraction_jobs
-                    (user_id, conversation_id, source, status, error_code, run_after)
+                    (user_id, conversation_id, source, status, error_code, run_after, attempts)
                 VALUES ($1, $2, $3, $4, $5,
                         CASE WHEN $6 THEN 'infinity'::timestamptz
-                             ELSE now() + interval '1 day' END)
+                             ELSE now() + interval '1 day' END,
+                        $7)
                 RETURNING id
                 """,
                 user_id,
@@ -74,6 +84,7 @@ async def _plant_jobs(admin_pool: asyncpg.Pool, user_id: UUID) -> dict[str, UUID
                 job.status,
                 job.error_code,
                 job.parked,
+                job.attempts,
             )
     return job_ids
 
@@ -102,8 +113,9 @@ async def test_dry_run_counts_held_rows_by_status_and_error_class_without_writin
 
     assert set(groups) == {
         GroupCount("failed", "deterministic", 1),
+        GroupCount("failed", "deterministic", 1, terminal=True),
         GroupCount("failed", "none", 1),
-        GroupCount("failed", "terminal", 1),
+        GroupCount("failed", "terminal", 1, terminal=True),
         GroupCount("failed", "transient", 1),
         GroupCount("failed", "unknown", 1),
         GroupCount("pending", "none", 1),
@@ -122,7 +134,9 @@ async def test_dry_run_query_runs_in_a_read_only_transaction(
         release_script,
         "_COUNT_PARKED_SQL",
         "UPDATE extraction_jobs SET run_after = now() "
-        "WHERE run_after = 'infinity' RETURNING status, error_code, 1 AS n",
+        "WHERE run_after = 'infinity' AND $1::text[] IS NOT NULL "
+        "AND $2::text[] IS NOT NULL AND $3::int IS NOT NULL "
+        "RETURNING status, error_code, false AS terminal, 1 AS n",
     )
 
     with pytest.raises(asyncpg.exceptions.ReadOnlySQLTransactionError):
@@ -145,8 +159,9 @@ async def test_release_frees_held_rows_except_terminal_failures(
     assert changed == _RELEASABLE
     assert all(after[label][1] != "infinity" for label in _RELEASABLE)
     assert after["failed_refused_held"][1] == "infinity"
+    assert after["failed_deterministic_exhausted_held"][1] == "infinity"
     assert sum(group.count for group in result.released) == len(_RELEASABLE)
-    assert result.held_terminal == 1
+    assert result.held_terminal == 2
 
 
 async def test_second_release_is_a_no_op(
@@ -160,5 +175,5 @@ async def test_second_release_is_a_no_op(
     second = await release_parked(admin_pool)
 
     assert second.released == ()
-    assert second.held_terminal == 1
+    assert second.held_terminal == 2
     assert await _snapshot(admin_pool, job_ids) == after_first

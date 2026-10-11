@@ -15,6 +15,8 @@ user_period_usage       -- per-user period, period-backfill and lifetime-backfil
 global_period_tokens    -- filtered tokens admitted in a period, all users
 first_upload_at         -- earliest live/backfill job of a user, optionally per platform
 select_runnable         -- queued or retryable-failed rows whose run_after has passed
+terminal_failure_sql    -- SQL predicate: a failed row the retry policy never runs again
+terminal_failure_args   -- the parameters terminal_failure_sql binds
 admit                   -- charge rows to a period, once per row
 defer                   -- record why a queued row was held back
 stale_admitted_pending  -- admitted rows still pending after a given age
@@ -28,6 +30,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 from uuid import UUID
+
+from gubbi.extraction.intake import Lane
+from gubbi.extraction.retry_policy import (
+    DETERMINISTIC_CODES,
+    DETERMINISTIC_MAX_ATTEMPTS,
+    TERMINAL_CODES,
+    TRANSIENT_CODES,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Collection
@@ -45,6 +55,8 @@ __all__: list[str] = [
     "inflight_admitted_count",
     "select_runnable",
     "stale_admitted_pending",
+    "terminal_failure_args",
+    "terminal_failure_sql",
     "user_period_usage",
 ]
 
@@ -79,7 +91,7 @@ class RunnableJob:
     user_id: UUID
     conversation_id: int
     source: str
-    lane: str
+    lane: Lane
     activity_at: datetime | None
     filtered_tokens: int
     attempts: int
@@ -92,7 +104,7 @@ def _to_runnable_job(row: asyncpg.Record) -> RunnableJob:
         user_id=UUID(str(row["user_id"])),
         conversation_id=int(row["conversation_id"]),
         source=str(row["source"]),
-        lane=str(row["lane"]),
+        lane=Lane(row["lane"]),
         activity_at=row["activity_at"],
         filtered_tokens=int(row["filtered_tokens"]),
         attempts=int(row["attempts"]),
@@ -193,40 +205,61 @@ async def first_upload_at(
 # ---------------------------------------------------------------------------
 
 
-async def select_runnable(
-    conn: asyncpg.Connection,
-    limit: int,
-    retryable_codes: Collection[str],
-) -> list[RunnableJob]:
+def terminal_failure_sql(first_param: int) -> str:
+    """Return a two-valued SQL predicate over ``error_code`` and ``attempts``.
+
+    True exactly when :func:`gubbi.extraction.retry_policy.is_terminal` is: a
+    terminal code, or a deterministic code at or past its attempt limit. It
+    binds :func:`terminal_failure_args` at ``$first_param`` onward.
+    """
+    terminal, deterministic, max_attempts = first_param, first_param + 1, first_param + 2
+    return (
+        f"coalesce(error_code = ANY(${terminal}::text[])"
+        f" OR (error_code = ANY(${deterministic}::text[]) AND attempts >= ${max_attempts}),"
+        " false)"
+    )
+
+
+def terminal_failure_args() -> tuple[list[str], list[str], int]:
+    """Return the parameters :func:`terminal_failure_sql` binds, in order."""
+    return sorted(TERMINAL_CODES), sorted(DETERMINISTIC_CODES), DETERMINISTIC_MAX_ATTEMPTS
+
+
+async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[RunnableJob]:
     """Return up to ``limit`` rows the scheduler may admit or dispatch now.
 
-    Runnable: ``pending`` and not yet admitted, or ``failed`` with an
-    ``error_code`` in ``retryable_codes``; in both cases ``run_after <= now()``.
-    An admitted ``pending`` row is already dispatched and is excluded; see
-    :func:`stale_admitted_pending` for lost dispatches.
+    Runnable: ``pending`` and not yet admitted, or ``failed`` with a transient
+    ``error_code`` or a deterministic one below its attempt limit; in both
+    cases ``run_after <= now()``. A failed row the retry policy never runs
+    again is excluded whatever its ``run_after``. An admitted ``pending`` row
+    is already dispatched and is excluded; see :func:`stale_admitted_pending`
+    for lost dispatches.
 
     Order: lane ``paste``, ``live``, ``backfill``; newest ``activity_at`` first
     within a lane (unknown last); then ``created_at`` and ``id`` so equal rows
     come back in a stable order and ``limit`` never starves a higher lane.
     """
     rows = await conn.fetch(
-        """
+        f"""
         SELECT id, user_id, conversation_id, source, lane, activity_at,
                filtered_tokens, attempts, admitted_at
         FROM extraction_jobs
         WHERE run_after <= now()
           AND (
                 (status = 'pending' AND admitted_at IS NULL)
-             OR (status = 'failed' AND error_code = ANY($2::text[]))
+             OR (status = 'failed'
+                 AND error_code = ANY($2::text[])
+                 AND NOT {terminal_failure_sql(3)})
           )
         ORDER BY CASE lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
                  activity_at DESC NULLS LAST,
                  created_at,
                  id
         LIMIT $1
-        """,
+        """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
         limit,
-        list(retryable_codes),
+        sorted(TRANSIENT_CODES | DETERMINISTIC_CODES),
+        *terminal_failure_args(),
     )
     return [_to_runnable_job(row) for row in rows]
 
