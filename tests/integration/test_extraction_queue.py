@@ -12,6 +12,7 @@ import pytest
 
 from gubbi.extraction.intake import Lane
 from gubbi.extraction.retry_policy import DETERMINISTIC_MAX_ATTEMPTS, ErrorCode, is_terminal
+from gubbi.scripts.release_parked_extraction_jobs import release_parked
 from gubbi.storage.repositories import extraction_queue as queue_repo
 from gubbi.storage.repositories.extraction_queue import UserPeriodUsage
 
@@ -227,8 +228,6 @@ async def test_global_period_tokens_sums_admitted_rows_of_the_period(
             id="failed-retryable-parked",
         ),
         pytest.param(Job(status="failed", error_code="llm_refused"), id="failed-terminal"),
-        pytest.param(Job(status="failed", error_code=None), id="failed-without-code"),
-        pytest.param(Job(status="failed", error_code="legacy_code"), id="failed-unknown-code"),
         pytest.param(
             Job(status="failed", error_code="llm_schema", attempts=DETERMINISTIC_MAX_ATTEMPTS),
             id="failed-deterministic-exhausted",
@@ -275,6 +274,22 @@ async def test_select_runnable_retries_a_deterministic_failure_below_its_limit(
     assert await _runnable_ids(clean_rls_db) == [below]
 
 
+@pytest.mark.parametrize(
+    "error_code",
+    [pytest.param(None, id="without-code"), pytest.param("legacy_code", id="unknown-code")],
+)
+async def test_select_runnable_retries_an_unclassified_failure(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed, error_code: str | None
+) -> None:
+    unclassified = await _insert(
+        clean_rls_db,
+        seeded_a,
+        Job(status="failed", error_code=error_code, attempts=DETERMINISTIC_MAX_ATTEMPTS + 1),
+    )
+
+    assert await _runnable_ids(clean_rls_db) == [unclassified]
+
+
 # ---------------------------------------------------------------------------
 # terminal_failure_sql
 # ---------------------------------------------------------------------------
@@ -305,6 +320,44 @@ async def test_terminal_failure_sql_agrees_with_is_terminal(clean_rls_db: asyncp
     assert from_sql == [is_terminal(code, n) for code, n in _PREDICATE_CASES]
     assert any(from_sql)
     assert not all(from_sql)
+
+
+_HELD_FAILURE_CASES = [
+    (code, attempts)
+    for code in [*(member.value for member in ErrorCode), None, "legacy_unknown_code"]
+    for attempts in range(1, DETERMINISTIC_MAX_ATTEMPTS + 2)
+]
+
+
+async def test_release_never_frees_a_failed_row_the_scheduler_will_not_select(
+    clean_rls_db: asyncpg.Pool, seeded_a: TenantSeed
+) -> None:
+    job_ids = {
+        case: await _insert(
+            clean_rls_db,
+            seeded_a,
+            Job(status="failed", error_code=case[0], attempts=case[1], run_after=_INFINITY),
+        )
+        for case in _HELD_FAILURE_CASES
+    }
+
+    await release_parked(clean_rls_db)
+
+    selected = set(await _runnable_ids(clean_rls_db, limit=len(job_ids) + 1))
+    still_held = set(
+        await clean_rls_db.fetchval(
+            "SELECT array_agg(id) FROM extraction_jobs WHERE run_after = 'infinity'"
+        )
+        or []
+    )
+    outcome = {
+        case: ("selected" if job_id in selected else "held" if job_id in still_held else "lost")
+        for case, job_id in job_ids.items()
+    }
+    assert outcome == {
+        case: "held" if is_terminal(*case) else "selected" for case in _HELD_FAILURE_CASES
+    }
+    assert set(outcome.values()) == {"held", "selected"}
 
 
 async def test_select_runnable_orders_by_lane_then_newest_activity(

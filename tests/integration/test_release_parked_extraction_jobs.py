@@ -114,10 +114,9 @@ async def test_dry_run_counts_held_rows_by_status_and_error_class_without_writin
     assert set(groups) == {
         GroupCount("failed", "deterministic", 1),
         GroupCount("failed", "deterministic", 1, terminal=True),
-        GroupCount("failed", "none", 1),
         GroupCount("failed", "terminal", 1, terminal=True),
         GroupCount("failed", "transient", 1),
-        GroupCount("failed", "unknown", 1),
+        GroupCount("failed", "unclassified", 2),
         GroupCount("pending", "none", 1),
     }
     assert await _snapshot(admin_pool, job_ids) == before

@@ -75,8 +75,8 @@ def retry_class(code: ErrorCode) -> RetryClass:
 def is_terminal(code: str | None, attempts: int) -> bool:
     """Return whether a job that failed with ``code`` after ``attempts`` runs never runs again.
 
-    A missing or unrecognised ``code`` is not terminal: this policy has no
-    rule for it, so it neither retries nor permanently retires the row.
+    A missing or unrecognised ``code`` is treated as transient, so never
+    terminal: the row runs again and its next failure records a known code.
     """
     if code is None:
         return False

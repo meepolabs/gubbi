@@ -8,7 +8,9 @@ upgrade, and a failure with no retry left is held the same way.
 the retry policy treats the row as terminal, inside a read-only transaction.
 ``--release`` makes every held row runnable now, except terminal failed rows
 (a terminal error code, or a deterministic one past its attempt limit);
-completed and running rows are never touched. Releasing twice is a no-op.
+completed and running rows are never touched. A failed row with no or an
+unrecognised error code is counted as ``unclassified`` and released: it retries
+as a transient failure. Releasing twice is a no-op.
 
 Output is one JSON log line per count group on stderr, counts only.
 
@@ -46,7 +48,7 @@ if TYPE_CHECKING:
     import asyncpg
 
 NO_ERROR: Final = "none"
-UNKNOWN_ERROR: Final = "unknown"
+UNCLASSIFIED_ERROR: Final = "unclassified"
 
 _TERMINAL_FAILURE: Final = f"(status = 'failed' AND {terminal_failure_sql(1)})"
 
@@ -113,14 +115,18 @@ class ReleaseResult:
     held_terminal: int
 
 
-def error_class_of(error_code: str | None) -> str:
-    """Return the retry class name of ``error_code``, or a marker for none / unknown."""
+def error_class_of(status: str, error_code: str | None) -> str:
+    """Return the retry class name of ``error_code``.
+
+    A row that is not ``failed`` and has no code maps to ``none``; any other
+    missing or unrecognised code maps to ``unclassified``.
+    """
     if error_code is None:
-        return NO_ERROR
+        return NO_ERROR if status != "failed" else UNCLASSIFIED_ERROR
     try:
         return retry_class(ErrorCode(error_code)).value
     except ValueError:
-        return UNKNOWN_ERROR
+        return UNCLASSIFIED_ERROR
 
 
 def group_counts(rows: Iterable[Mapping[str, object]]) -> tuple[GroupCount, ...]:
@@ -134,7 +140,8 @@ def group_counts(rows: Iterable[Mapping[str, object]]) -> tuple[GroupCount, ...]
             and isinstance(n, int)
         ):
             raise TypeError(f"unexpected count row types: {sorted(row)}")
-        totals[(str(row["status"]), error_class_of(error_code), terminal)] += n
+        status = str(row["status"])
+        totals[(status, error_class_of(status, error_code), terminal)] += n
     return tuple(
         GroupCount(status=status, error_class=error_class, count=count, terminal=terminal)
         for (status, error_class, terminal), count in sorted(totals.items())

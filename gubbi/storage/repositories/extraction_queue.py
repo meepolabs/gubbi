@@ -36,7 +36,6 @@ from gubbi.extraction.retry_policy import (
     DETERMINISTIC_CODES,
     DETERMINISTIC_MAX_ATTEMPTS,
     TERMINAL_CODES,
-    TRANSIENT_CODES,
 )
 
 if TYPE_CHECKING:
@@ -209,7 +208,9 @@ def terminal_failure_sql(first_param: int) -> str:
     """Return a two-valued SQL predicate over ``error_code`` and ``attempts``.
 
     True exactly when :func:`gubbi.extraction.retry_policy.is_terminal` is: a
-    terminal code, or a deterministic code at or past its attempt limit. It
+    terminal code, or a deterministic code at or past its attempt limit; a NULL
+    or unrecognised code is never terminal. Every query that decides whether a
+    failed row may run again uses this one predicate. It
     binds :func:`terminal_failure_args` at ``$first_param`` onward.
     """
     terminal, deterministic, max_attempts = first_param, first_param + 1, first_param + 2
@@ -228,12 +229,12 @@ def terminal_failure_args() -> tuple[list[str], list[str], int]:
 async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[RunnableJob]:
     """Return up to ``limit`` rows the scheduler may admit or dispatch now.
 
-    Runnable: ``pending`` and not yet admitted, or ``failed`` with a transient
-    ``error_code`` or a deterministic one below its attempt limit; in both
-    cases ``run_after <= now()``. A failed row the retry policy never runs
-    again is excluded whatever its ``run_after``. An admitted ``pending`` row
-    is already dispatched and is excluded; see :func:`stale_admitted_pending`
-    for lost dispatches.
+    Runnable: ``pending`` and not yet admitted, or ``failed`` and not terminal
+    per :func:`terminal_failure_sql` (a missing or unrecognised ``error_code``
+    retries as transient); in both cases ``run_after <= now()``. A failed row
+    the retry policy never runs again is excluded whatever its ``run_after``.
+    An admitted ``pending`` row is already dispatched and is excluded; see
+    :func:`stale_admitted_pending` for lost dispatches.
 
     Order: lane ``paste``, ``live``, ``backfill``; newest ``activity_at`` first
     within a lane (unknown last); then ``created_at`` and ``id`` so equal rows
@@ -247,9 +248,7 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
         WHERE run_after <= now()
           AND (
                 (status = 'pending' AND admitted_at IS NULL)
-             OR (status = 'failed'
-                 AND error_code = ANY($2::text[])
-                 AND NOT {terminal_failure_sql(3)})
+             OR (status = 'failed' AND NOT {terminal_failure_sql(2)})
           )
         ORDER BY CASE lane WHEN 'paste' THEN 0 WHEN 'live' THEN 1 ELSE 2 END,
                  activity_at DESC NULLS LAST,
@@ -258,7 +257,6 @@ async def select_runnable(conn: asyncpg.Connection, limit: int) -> list[Runnable
         LIMIT $1
         """,  # noqa: S608 - the interpolated predicate is fixed SQL; values are bound
         limit,
-        sorted(TRANSIENT_CODES | DETERMINISTIC_CODES),
         *terminal_failure_args(),
     )
     return [_to_runnable_job(row) for row in rows]

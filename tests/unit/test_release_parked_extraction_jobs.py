@@ -20,17 +20,20 @@ from gubbi.scripts.release_parked_extraction_jobs import (
 
 
 @pytest.mark.parametrize(
-    ("error_code", "expected"),
+    ("status", "error_code", "expected"),
     [
-        pytest.param(None, "none", id="no-code"),
-        pytest.param("llm_rate_limited", "transient", id="transient"),
-        pytest.param("llm_schema", "deterministic", id="deterministic"),
-        pytest.param("llm_refused", "terminal", id="terminal"),
-        pytest.param("legacy_code", "unknown", id="unrecognised"),
+        pytest.param("pending", None, "none", id="pending-no-code"),
+        pytest.param("failed", "llm_rate_limited", "transient", id="transient"),
+        pytest.param("failed", "llm_schema", "deterministic", id="deterministic"),
+        pytest.param("failed", "llm_refused", "terminal", id="terminal"),
+        pytest.param("failed", None, "unclassified", id="failed-no-code"),
+        pytest.param("failed", "legacy_code", "unclassified", id="unrecognised"),
     ],
 )
-def test_error_class_of_maps_codes_to_retry_classes(error_code: str | None, expected: str) -> None:
-    assert error_class_of(error_code) == expected
+def test_error_class_of_maps_codes_to_retry_classes(
+    status: str, error_code: str | None, expected: str
+) -> None:
+    assert error_class_of(status, error_code) == expected
 
 
 def test_group_counts_sums_codes_sharing_an_error_class_and_verdict() -> None:
