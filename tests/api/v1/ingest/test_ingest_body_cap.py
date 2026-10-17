@@ -94,12 +94,33 @@ async def test_declared_length_over_cap_is_413_without_reading_the_body() -> Non
     assert exchange.receive_calls == 0
 
 
-async def test_oversize_request_without_credentials_is_413_not_401() -> None:
+async def test_chunked_body_without_credentials_is_401_before_any_read() -> None:
+    chunks = [b" " * MIB] * (INGEST_MAX_BODY_BYTES // MIB) + [b"x"]
+    exchange = _Exchange(chunks, {})
+
+    await exchange.run(_app())
+
+    assert exchange.status == 401
+    assert exchange.receive_calls == 0
+    assert json.loads(exchange.body) == {"detail": "Missing X-Auth-User-Id header"}
+
+
+async def test_oversize_declared_length_without_credentials_is_401_without_reading() -> None:
     exchange = _Exchange([b"{}"], {"content-length": str(INGEST_MAX_BODY_BYTES + 1)})
 
     await exchange.run(_app())
 
-    assert exchange.status == 413
+    assert exchange.status == 401
+    assert exchange.receive_calls == 0
+
+
+async def test_valid_body_with_credentials_passes_the_route_and_reaches_validation() -> None:
+    exchange = _Exchange([b'{"conversations": "not-a-list"}'], headers())
+
+    await exchange.run(_app())
+
+    assert exchange.status == 422
+    assert exchange.receive_calls >= 1
 
 
 @pytest.mark.parametrize("declare_length", [True, False], ids=["content-length", "chunked"])

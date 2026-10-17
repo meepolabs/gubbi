@@ -22,7 +22,6 @@ import structlog
 from arq import create_pool as arq_create_pool
 from arq.connections import RedisSettings as ArqRedisSettings
 from fastapi import FastAPI, Request, Response, status
-from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from gubbi_common.auth.prm import build_prm_metadata_url
@@ -31,6 +30,7 @@ from gubbi_common.bootstrap.probes import PgLogProbe, RedisPingProbe
 from redis.exceptions import RedisError
 from starlette.types import ASGIApp  # noqa: TC002 (used in runtime variable annotation)
 
+from gubbi.api.validation_errors import request_validation_handler
 from gubbi.app_context import AppContext
 from gubbi.app_state import get_optional_app_ctx, get_optional_redis_client
 from gubbi.auth.hydra import HydraIntrospector, InMemoryHydraCache
@@ -106,7 +106,6 @@ __all__: list[str] = [
     "lifespan",
     "main",
     "mcp_health",
-    "request_validation_handler",
     "server",
 ]
 
@@ -598,31 +597,6 @@ async def database_unavailable_handler(
         status_code=503,
         content={"detail": "database temporarily unavailable"},
         headers={"Retry-After": "5"},
-    )
-
-
-def _utf8_safe(value: Any) -> Any:
-    if isinstance(value, str):
-        return value.encode("utf-8", "surrogatepass").decode("utf-8", "replace")
-    if isinstance(value, list):
-        return [_utf8_safe(item) for item in value]
-    if isinstance(value, dict):
-        return {_utf8_safe(key): _utf8_safe(item) for key, item in value.items()}
-    return value
-
-
-async def request_validation_handler(
-    request: Request,
-    exc: RequestValidationError,
-) -> JSONResponse:
-    """Return FastAPI's default 422 body with every string made UTF-8 encodable.
-
-    The default body echoes the rejected input; a lone surrogate in it makes
-    the response itself unencodable, which would surface as a 500.
-    """
-    return JSONResponse(
-        status_code=422,
-        content={"detail": _utf8_safe(jsonable_encoder(exc.errors()))},
     )
 
 
