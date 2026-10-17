@@ -42,9 +42,9 @@ def pinned_transport() -> httpx2.AsyncHTTPTransport:
 def _system_trust_context() -> ssl.SSLContext:
     """A verifying TLS context over OpenSSL's compiled-in CA locations.
 
-    ``ssl.create_default_context()`` and truststore both resolve those
-    locations through ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` first, so the
-    compiled-in paths are passed explicitly instead.
+    Built directly rather than with ``ssl.create_default_context()``: that
+    resolves CA locations through ``SSL_CERT_FILE`` / ``SSL_CERT_DIR`` and
+    opens the file named by ``SSLKEYLOGFILE`` to log session secrets.
     """
     paths = ssl.get_default_verify_paths()
     cafile = paths.openssl_cafile if os.path.isfile(paths.openssl_cafile) else None
@@ -54,7 +54,10 @@ def _system_trust_context() -> ssl.SSLContext:
             "no system CA certificates found at "
             f"{paths.openssl_cafile} or {paths.openssl_capath}; install the CA bundle"
         )
-    return ssl.create_default_context(cafile=cafile, capath=capath)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_verify_locations(cafile=cafile, capath=capath)
+    return context
 
 
 def _keepalive_options() -> list[tuple[int, int, int]]:
