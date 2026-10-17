@@ -18,6 +18,7 @@ from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
 from gubbi.constants import LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_SECS
+from gubbi.extraction.llm.http_transport import pinned_transport
 from gubbi.extraction.llm.model_provider import PydanticAIModelProvider
 from gubbi.extraction.llm.provider import LLMUsage
 
@@ -80,7 +81,7 @@ class OpenAICompatibleProvider(PydanticAIModelProvider):
             api_key=bearer_key,
             max_retries=0,
             timeout=timeout,
-            http_client=http_client or DefaultAsyncHttpxClient(follow_redirects=False),
+            http_client=http_client or _default_http_client(),
             default_headers=_pinned_headers(bearer_key),
         )
         super().__init__(
@@ -118,3 +119,10 @@ def _pinned_headers(api_key: str) -> dict[str, str]:
         "OpenAI-Organization": absent,
         "OpenAI-Project": absent,
     }
+
+
+def _default_http_client() -> httpx2.AsyncClient:
+    """The SDK's default client, minus redirects and anything read from the environment."""
+    return DefaultAsyncHttpxClient(
+        follow_redirects=False, trust_env=False, transport=pinned_transport()
+    )

@@ -87,6 +87,8 @@ docker compose exec gubbi python -m gubbi.oauth.crypto 'your-password'
 
 The Arq extraction worker (`arq gubbi.extraction.worker.WorkerSettings`) turns saved conversations into entries. It calls any OpenAI-compatible chat-completions endpoint (the default provider) or the Anthropic Messages API (`JOURNAL_LLM_PROVIDER=anthropic`). With the default provider it refuses to start when `JOURNAL_LLM_BASE_URL` or `JOURNAL_LLM_MODEL` is unset; with `anthropic`, when `JOURNAL_LLM_API_KEY` or `JOURNAL_LLM_MODEL` is unset. The HTTP server does not use these variables, but it shares the settings model, so a `JOURNAL_LLM_BASE_URL` that fails the scheme rule below refuses startup of every process that loads it.
 
+LLM requests are configured by the `JOURNAL_LLM_*` variables only. The worker refuses to start when the selected provider's SDK header variable (`OPENAI_CUSTOM_HEADERS`, or `ANTHROPIC_CUSTOM_HEADERS` with `anthropic`) is set, and its LLM calls ignore `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` and `SSL_CERT_FILE` / `SSL_CERT_DIR`: they connect directly and trust the system CA store.
+
 | Variable | Required | Description | Example |
 |----------|----------|-------------|---------|
 | `JOURNAL_LLM_PROVIDER` | no | `openai_compatible` (default), `anthropic` (Anthropic Messages API, with native structured output, cache-aware usage and refusal reporting), or `fake` (in-process stub for tests; never calls a model). | `openai_compatible` |

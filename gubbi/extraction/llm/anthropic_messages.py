@@ -25,6 +25,7 @@ from pydantic_ai.profiles.anthropic import AnthropicModelProfile
 from pydantic_ai.providers.anthropic import AnthropicProvider as PydanticAIAnthropicProvider
 
 from gubbi.constants import LLM_MAX_OUTPUT_TOKENS, LLM_REQUEST_TIMEOUT_SECS
+from gubbi.extraction.llm.http_transport import pinned_transport
 from gubbi.extraction.llm.model_provider import PydanticAIModelProvider
 from gubbi.extraction.llm.provider import LLMUsage
 
@@ -88,7 +89,7 @@ class AnthropicProvider(PydanticAIModelProvider):
             base_url=base_url or _DEFAULT_BASE_URL,
             max_retries=0,
             timeout=timeout,
-            http_client=http_client or DefaultAsyncHttpxClient(follow_redirects=False),
+            http_client=http_client or _default_http_client(),
             default_headers=_pinned_auth_headers(api_key),
         )
         chat_model = AnthropicModel(
@@ -133,3 +134,10 @@ def _pinned_auth_headers(api_key: str) -> dict[str, str]:
     # The SDK types ``default_headers`` as ``str`` values but removes a
     # header whose value is ``omit``.
     return {"X-Api-Key": api_key, "Authorization": cast("str", omit)}
+
+
+def _default_http_client() -> httpx2.AsyncClient:
+    """The SDK's default client, minus redirects and anything read from the environment."""
+    return DefaultAsyncHttpxClient(
+        follow_redirects=False, trust_env=False, transport=pinned_transport()
+    )

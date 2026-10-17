@@ -14,8 +14,10 @@ import email.utils
 import json
 import logging
 import pathlib
+import ssl
 import time
 import traceback
+import warnings
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -40,6 +42,7 @@ from gubbi.extraction.llm.provider import (
     LLMTruncatedError,
     LLMUsage,
 )
+from tests.fixtures.llm_http import ENV_CA_NAME, ca_subjects, deeply_nested_json, write_env_ca
 from tests.fixtures.log_capture import LogCapture
 
 _FIXTURES = json.loads(
@@ -169,6 +172,21 @@ def _default_client_provider(
         sleep=sleep,
         clock=sleep.clock,
     )
+
+
+def _record_handling_transport(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record which transport instance handles each request; a proxy mount is a different one."""
+    handled_by: list[object] = []
+    handle = httpx2.AsyncHTTPTransport.handle_async_request
+
+    async def recording(
+        self: httpx2.AsyncHTTPTransport, request: httpx2.Request
+    ) -> httpx2.Response:
+        handled_by.append(self)
+        return await handle(self, request)
+
+    monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", recording)
+    return handled_by
 
 
 def _stop_body() -> dict[str, Any]:
@@ -594,16 +612,22 @@ async def test_api_key_is_optional_and_passed_through_when_set(
 
 
 @pytest.mark.parametrize(
-    ("api_key", "expected_authorization"),
+    ("api_key", "expected_authorization", "custom_headers"),
     [
-        pytest.param("", "Bearer unused", id="empty-key"),
-        pytest.param("real-key", "Bearer real-key", id="set-key"),
+        pytest.param("", "Bearer unused", "Authorization: Bearer FROM_ENV", id="empty-key"),
+        pytest.param("real-key", "Bearer real-key", "Authorization: Bearer FROM_ENV", id="set-key"),
+        pytest.param(
+            "real-key",
+            "Bearer real-key",
+            "AUTHORIZATION: Bearer FROM_ENV\nopenai-ORGANIZATION: FROM_ENV",
+            id="mixed-casing",
+        ),
     ],
 )
 async def test_headers_from_the_environment_never_reach_the_request(
-    monkeypatch: pytest.MonkeyPatch, api_key: str, expected_authorization: str
+    monkeypatch: pytest.MonkeyPatch, api_key: str, expected_authorization: str, custom_headers: str
 ) -> None:
-    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer FROM_ENV")
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", custom_headers)
     monkeypatch.setenv("OPENAI_ORG_ID", "FROM_ENV")
     monkeypatch.setenv("OPENAI_PROJECT_ID", "FROM_ENV")
     recorder = _Recorder(_json_response(_stop_body()))
@@ -615,14 +639,23 @@ async def test_headers_from_the_environment_never_reach_the_request(
     assert "openai-project" not in recorder.headers[0]
 
 
+@pytest.mark.parametrize(
+    ("status", "location"),
+    [
+        pytest.param(status, "https://elsewhere.example.test/v1", id=f"{status}-other-host")
+        for status in (301, 302, 303, 307, 308)
+    ]
+    + [pytest.param(307, "https://llm.example.test/elsewhere", id="307-same-host-other-path")],
+)
 async def test_redirect_is_not_followed_and_fails_permanently(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, status: int, location: str
 ) -> None:
     configured_host = "llm.example.test"
+    configured_url = f"https://{configured_host}/v1/chat/completions"
 
     def respond(request: httpx2.Request) -> httpx2.Response:
-        if request.url.host == configured_host:
-            return httpx2.Response(307, headers={"Location": "https://elsewhere.example.test/v1"})
+        if str(request.url) == configured_url:
+            return httpx2.Response(status, headers={"Location": location})
         return httpx2.Response(200, json=_stop_body())
 
     recorder = _Recorder(respond)
@@ -632,7 +665,28 @@ async def test_redirect_is_not_followed_and_fails_permanently(
         await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
 
     assert type(excinfo.value) is LLMPermanentError
-    assert [httpx2.URL(url).host for url in recorder.urls] == [configured_host]
+    assert recorder.urls == [configured_url]
+
+
+async def test_default_client_ignores_proxy_and_ca_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.example.test:3128")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(write_env_ca(tmp_path)))
+    recorder = _Recorder(_json_response(_stop_body()))
+    provider = _default_client_provider(monkeypatch, recorder, "https://llm.example.test/v1")
+    handled_by = _record_handling_transport(monkeypatch)
+    http_client = provider._chat_model.client._client
+
+    await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert ca_subjects(ssl.create_default_context()) == {ENV_CA_NAME}
+    assert http_client._mounts == {}
+    assert ENV_CA_NAME not in ca_subjects(http_client._transport._pool._ssl_context)
+    assert handled_by == [http_client._transport]
+    assert recorder.urls == ["https://llm.example.test/v1/chat/completions"]
 
 
 @pytest.fixture
@@ -836,3 +890,55 @@ async def test_upstream_body_never_reaches_the_raised_error_or_its_traceback(
     assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__context__ is None
+
+
+def _empty_choices_body() -> dict[str, Any]:
+    body = _stop_body()
+    body["choices"] = []
+    body["id"] = _OUTPUT_SENTINEL
+    return body
+
+
+def _list_content_body() -> dict[str, Any]:
+    body = _stop_body()
+    body["choices"][0]["message"]["content"] = [_OUTPUT_SENTINEL]
+    return body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(json.dumps(_empty_choices_body()), id="empty-choices"),
+        pytest.param(json.dumps(_list_content_body()), id="non-string-content"),
+        pytest.param(deeply_nested_json(_OUTPUT_SENTINEL), id="deeply-nested-json"),
+    ],
+)
+async def test_unmappable_success_body_is_transient_and_kept_out_of_the_error(body: str) -> None:
+    def respond(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, content=body.encode(), headers={"content-type": "application/json"}
+        )
+
+    recorder = _Recorder(respond)
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
+
+
+async def test_wrongly_typed_content_emits_no_warning_quoting_the_body() -> None:
+    recorder = _Recorder(_json_response(_list_content_body()))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        provider = _provider(recorder)
+        with pytest.raises(LLMTransientError):
+            await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert recorder.requests
+    assert not [w for w in caught if _OUTPUT_SENTINEL in str(w.message)]

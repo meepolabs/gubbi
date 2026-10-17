@@ -24,6 +24,7 @@ import functools
 import json
 import random
 import time
+import warnings
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, ClassVar
 
@@ -84,6 +85,7 @@ _RETRYABLE_STATUS_CODES = frozenset({408})
 _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_FLOOR = 500
 _RETRY_AFTER_HEADER = "retry-after"
+_MALFORMED_RESPONSE = "upstream returned a malformed response"
 
 
 @functools.lru_cache(maxsize=1)
@@ -149,6 +151,7 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         self._input_price_per_mtok = input_price_per_mtok
         self._output_price_per_mtok = output_price_per_mtok
         self._max_output_tokens = max_output_tokens
+        _silence_serializer_warnings()
 
     @abc.abstractmethod
     def _map_usage(self, usage: RequestUsage) -> LLMUsage:
@@ -239,10 +242,11 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
             translated = LLMTimeoutError("upstream request timed out")
         except (ModelAPIError, UnexpectedModelBehavior) as exc:
             translated = _translate_error(exc, self._timeout_errors, self._status_errors)
-        except (ValueError, AttributeError, TypeError):
-            # An unparseable 2xx body escapes the SDK and PydanticAI as one of
-            # these; the decode error's ``doc`` holds the whole body.
-            translated = LLMTransientError("upstream returned a malformed response")
+        except Exception:
+            # A 2xx body the SDK or PydanticAI cannot map escapes as whatever
+            # their parsing hits (a decode error whose ``doc`` holds the whole
+            # body, an assertion, an index or recursion error).
+            translated = LLMTransientError(_MALFORMED_RESPONSE)
         else:
             return await self._to_response(response, output_schema)
         # Raised outside the except block so the upstream exception, whose
@@ -296,6 +300,22 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
             cached_input_tokens=usage.cached_input,
             reasoning_tokens=usage.reasoning,
         )
+
+
+def _silence_serializer_warnings() -> None:
+    """Keep pydantic serializer warnings, which quote the offending value, off stderr.
+
+    PydanticAI serializes SDK response models; when the upstream sent a field
+    of the wrong type, pydantic warns with an ``input_value=`` excerpt of the
+    response body. A process-wide filter, since ``catch_warnings`` around a
+    request is not safe across concurrent requests.
+    """
+    warnings.filterwarnings(
+        "ignore",
+        message="Pydantic serializer warnings",
+        category=UserWarning,
+        module="pydantic.main",
+    )
 
 
 def _retry_delay(attempt: int, retry_after: float | None) -> float | None:
@@ -382,7 +402,11 @@ def _request_parameters(output_schema: Mapping[str, Any] | None) -> ModelRequest
 def _extract_content(
     response: ModelResponse, usage: LLMUsage, *, structured: bool
 ) -> str | dict[str, Any]:
-    text = "".join(part.content for part in response.parts if isinstance(part, TextPart))
+    texts = [part.content for part in response.parts if isinstance(part, TextPart)]
+    # Typed ``str`` but not checked when PydanticAI maps the upstream body.
+    if not all(isinstance(text, str) for text in texts):
+        raise LLMTransientError(_MALFORMED_RESPONSE, usage=usage)
+    text = "".join(texts)
     if not structured:
         return text
     try:
@@ -428,4 +452,4 @@ def _translate_error(
         if isinstance(cause, status_errors):
             return LLMPermanentError(f"upstream returned HTTP {getattr(cause, 'status_code', '?')}")
         return LLMTransientError("upstream connection failed")
-    return LLMTransientError("upstream returned a malformed response")
+    return LLMTransientError(_MALFORMED_RESPONSE)

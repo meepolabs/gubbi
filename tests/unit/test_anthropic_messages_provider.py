@@ -14,6 +14,7 @@ import copy
 import json
 import logging
 import pathlib
+import ssl
 import traceback
 from collections.abc import Callable, Iterator
 from typing import Any
@@ -37,6 +38,7 @@ from gubbi.extraction.llm.provider import (
     LLMTruncatedError,
     LLMUsage,
 )
+from tests.fixtures.llm_http import ENV_CA_NAME, ca_subjects, deeply_nested_json, write_env_ca
 from tests.fixtures.log_capture import LogCapture
 
 _FIXTURES = json.loads(
@@ -153,6 +155,26 @@ def _default_client_provider(
         sleep=sleep,
         clock=sleep.clock,
     )
+
+
+def _host_and_path(url: str) -> tuple[str, str]:
+    parsed = httpx2.URL(url)
+    return parsed.host, parsed.path
+
+
+def _record_handling_transport(monkeypatch: pytest.MonkeyPatch) -> list[object]:
+    """Record which transport instance handles each request; a proxy mount is a different one."""
+    handled_by: list[object] = []
+    handle = httpx2.AsyncHTTPTransport.handle_async_request
+
+    async def recording(
+        self: httpx2.AsyncHTTPTransport, request: httpx2.Request
+    ) -> httpx2.Response:
+        handled_by.append(self)
+        return await handle(self, request)
+
+    monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", recording)
+    return handled_by
 
 
 def _end_turn_body() -> dict[str, Any]:
@@ -299,10 +321,17 @@ async def test_requests_go_to_the_configured_or_default_base_url(
     assert recorder.urls[0].startswith(expected_prefix)
 
 
+@pytest.mark.parametrize(
+    "custom_headers",
+    [
+        pytest.param("X-Api-Key: FROM_ENV\nAuthorization: Bearer X", id="canonical-casing"),
+        pytest.param("x-API-key: FROM_ENV\nAUTHORIZATION: Bearer X", id="mixed-casing"),
+    ],
+)
 async def test_custom_headers_from_the_environment_cannot_replace_the_configured_key(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, custom_headers: str
 ) -> None:
-    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Api-Key: FROM_ENV\nAuthorization: Bearer X")
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
     recorder = _Recorder(_json_response(_end_turn_body()))
 
     await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
@@ -311,14 +340,23 @@ async def test_custom_headers_from_the_environment_cannot_replace_the_configured
     assert recorder.authorizations == [None]
 
 
+@pytest.mark.parametrize(
+    ("status", "location"),
+    [
+        pytest.param(status, "https://elsewhere.example.test/v1", id=f"{status}-other-host")
+        for status in (301, 302, 303, 307, 308)
+    ]
+    + [pytest.param(307, "https://llm.example.test/elsewhere", id="307-same-host-other-path")],
+)
 async def test_redirect_is_not_followed_and_fails_permanently(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, status: int, location: str
 ) -> None:
     configured_host = "llm.example.test"
+    configured_path = "/v1/messages"
 
     def respond(request: httpx2.Request) -> httpx2.Response:
-        if request.url.host == configured_host:
-            return httpx2.Response(307, headers={"Location": "https://elsewhere.example.test/v1"})
+        if request.url.path == configured_path:
+            return httpx2.Response(status, headers={"Location": location})
         return httpx2.Response(200, json=_end_turn_body())
 
     recorder = _Recorder(respond)
@@ -328,7 +366,28 @@ async def test_redirect_is_not_followed_and_fails_permanently(
         await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
 
     assert type(excinfo.value) is LLMPermanentError
-    assert [httpx2.URL(url).host for url in recorder.urls] == [configured_host]
+    assert [_host_and_path(url) for url in recorder.urls] == [(configured_host, configured_path)]
+
+
+async def test_default_client_ignores_proxy_and_ca_environment(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"):
+        monkeypatch.setenv(name, "http://proxy.example.test:3128")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.setenv("SSL_CERT_FILE", str(write_env_ca(tmp_path)))
+    recorder = _Recorder(_json_response(_end_turn_body()))
+    provider = _default_client_provider(monkeypatch, recorder, "https://llm.example.test")
+    handled_by = _record_handling_transport(monkeypatch)
+    http_client = provider._chat_model.client._client
+
+    await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert ca_subjects(ssl.create_default_context()) == {ENV_CA_NAME}
+    assert http_client._mounts == {}
+    assert ENV_CA_NAME not in ca_subjects(http_client._transport._pool._ssl_context)
+    assert handled_by == [http_client._transport]
+    assert [_host_and_path(url) for url in recorder.urls] == [("llm.example.test", "/v1/messages")]
 
 
 @pytest.fixture
@@ -603,6 +662,46 @@ async def test_malformed_success_body_is_transient_and_kept_out_of_the_error(
     assert excinfo.value.__context__ is None
     assert _OUTPUT_SENTINEL not in str(excinfo.value)
     assert _OUTPUT_SENTINEL not in repr(excinfo.value.args)
+
+
+def _string_content_body() -> dict[str, Any]:
+    body = _end_turn_body()
+    body["content"] = _OUTPUT_SENTINEL
+    return body
+
+
+def _null_text_body() -> dict[str, Any]:
+    body = _end_turn_body()
+    for block in body["content"]:
+        if block["type"] == "text":
+            block["text"] = None
+    return body
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(json.dumps(_string_content_body()), id="string-content"),
+        pytest.param(json.dumps(_null_text_body()), id="null-text"),
+        pytest.param(deeply_nested_json(_OUTPUT_SENTINEL), id="deeply-nested-json"),
+    ],
+)
+async def test_unmappable_success_body_is_transient_and_kept_out_of_the_error(body: str) -> None:
+    def respond(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, content=body.encode(), headers={"content-type": "application/json"}
+        )
+
+    recorder = _Recorder(respond)
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
 
 
 def test_estimate_cost_uses_configured_prices() -> None:
