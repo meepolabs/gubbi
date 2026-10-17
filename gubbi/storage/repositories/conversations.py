@@ -14,7 +14,7 @@ from datetime import date as date_cls
 from datetime import datetime as datetime_cls
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, NamedTuple
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import structlog
 
@@ -43,7 +43,6 @@ __all__: list[str] = [
     "SaveConversationResult",
     "count_conversations",
     "delete_superseded_json_archive",
-    "exists_by_platform_id",
     "get_conversation",
     "get_extraction_state",
     "get_processed_at",
@@ -57,7 +56,6 @@ __all__: list[str] = [
     "read_conversation_by_id_paginated",
     "save_conversation",
     "set_extraction_state",
-    "set_platform_metadata",
     "upsert_linked_entry",
 ]
 
@@ -831,38 +829,6 @@ async def get_title_summary(
             "Conversation title/summary decrypted to None; schema invariant violated"
         )
     return title, summary
-
-
-async def exists_by_platform_id(
-    conn: asyncpg.Connection,
-    user_id: UUID,
-    platform: str,
-    platform_id: str,
-) -> bool:
-    """Return True iff a conversation row matches (user_id, platform, platform_id)."""
-    return bool(
-        await conn.fetchval(
-            "SELECT 1 FROM conversations WHERE user_id = $1 AND platform = $2 AND platform_id = $3",
-            user_id,
-            platform,
-            platform_id,
-        )
-    )
-
-
-async def set_platform_metadata(
-    conn: asyncpg.Connection,
-    conversation_id: int,
-    platform: str,
-    platform_id: str,
-) -> None:
-    """Set the platform + platform_id columns on a conversations row."""
-    await conn.execute(
-        "UPDATE conversations SET platform = $1, platform_id = $2 WHERE id = $3",
-        platform,
-        platform_id,
-        conversation_id,
-    )
 
 
 async def get_processed_at(

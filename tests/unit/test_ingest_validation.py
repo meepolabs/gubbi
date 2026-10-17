@@ -207,3 +207,57 @@ class TestMessagePayload:
         payload = {"role": "user"}
         with pytest.raises(ValidationError):
             MessagePayload.model_validate(payload)
+
+
+class TestSourceIdentifiers:
+    """message_id and platform_id: 1-512 code points, no unpaired surrogates."""
+
+    def test_message_id_is_optional(self) -> None:
+        model = MessagePayload.model_validate({"role": "user", "content": "Hi"})
+        assert model.message_id is None
+
+    @pytest.mark.parametrize(
+        "message_id",
+        [
+            pytest.param("m", id="one_char"),
+            pytest.param("m" * 512, id="max_ascii"),
+            pytest.param("\U0001f600" * 512, id="max_astral_code_points"),
+        ],
+    )
+    def test_message_id_accepted(self, message_id: str) -> None:
+        model = MessagePayload.model_validate(
+            {"role": "user", "content": "Hi", "message_id": message_id}
+        )
+        assert model.message_id is not None
+
+    @pytest.mark.parametrize(
+        "message_id",
+        [
+            pytest.param("", id="empty"),
+            pytest.param("m" * 513, id="too_long"),
+            pytest.param("a\ud800b", id="lone_high_surrogate"),
+            pytest.param("\udfff", id="lone_low_surrogate"),
+        ],
+    )
+    def test_message_id_rejected(self, message_id: str) -> None:
+        with pytest.raises(ValidationError):
+            MessagePayload.model_validate(
+                {"role": "user", "content": "Hi", "message_id": message_id}
+            )
+
+    @pytest.mark.parametrize(
+        ("platform_id", "accepted"),
+        [
+            pytest.param("conv-1", True, id="plain"),
+            pytest.param("p" * 512, True, id="max"),
+            pytest.param("p" * 513, False, id="too_long"),
+            pytest.param("conv\udc00", False, id="lone_surrogate"),
+        ],
+    )
+    def test_platform_id_bounds(self, platform_id: str, accepted: bool) -> None:
+        payload = make_valid_conv(platform_id=platform_id)
+        if accepted:
+            assert ConversationPayload.model_validate(payload).platform_id == platform_id
+        else:
+            with pytest.raises(ValidationError):
+                ConversationPayload.model_validate(payload)

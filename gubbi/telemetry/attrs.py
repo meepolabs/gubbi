@@ -103,6 +103,8 @@ class MetricNames:
     # LLM calls of finished job attempts whose usage the upstream never
     # reported (timed out), so their cost is missing from the charge; by lane.
     EXTRACTION_LLM_UNMETERED_CALLS: Final[str] = "extraction.llm.unmetered_calls_total"
+    # Synced messages written by ingest whose text was cut to the length limit.
+    INGEST_MESSAGES_TRUNCATED: Final[str] = "ingest.messages.truncated_total"
 
 
 # Attribute keys each allowlisted metric may carry; any other key is dropped.
@@ -117,6 +119,7 @@ GUBBI_METRIC_ALLOWLIST: Mapping[str, frozenset[str]] = {
     MetricNames.EXTRACTION_JOBS_FAILED: frozenset({"error_class", "outcome"}),
     MetricNames.EXTRACTION_CHARGES_WEIGHTED: frozenset({"lane", "part"}),
     MetricNames.EXTRACTION_LLM_UNMETERED_CALLS: frozenset({"lane"}),
+    MetricNames.INGEST_MESSAGES_TRUNCATED: frozenset(),
 }
 
 

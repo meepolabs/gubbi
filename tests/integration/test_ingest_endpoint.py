@@ -1,7 +1,7 @@
 """Integration test for the conversation ingest endpoint.
 
 Tests the full flow: send a batch via HTTP, verify it was saved, then
-verify dedupe skips a re-send of the same payload.
+verify an identical re-send is skipped.
 """
 
 from __future__ import annotations
@@ -147,7 +147,7 @@ class TestIngestEndpoint:
         assert data.conversations_skipped_dedupe == 0
 
     async def test_dedupe_skips_duplicates(self, client: AsyncClient) -> None:
-        """Re-sending the same payload should skip via dedupe."""
+        """Re-sending the same payload adds no message and is skipped."""
         conv = _build_conv_payload("conv-dedup-001", title="Dedup test")
         payload = {
             "source": "extension_claude",
@@ -208,6 +208,35 @@ class TestIngestEndpoint:
             assert row["platform"] == "claude"
             assert row["platform_id"] == "conv-readback-001"
             assert row["id"] is not None
+
+    async def test_message_ids_are_stored_with_their_messages(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        conv = _build_conv_payload("conv-ids-001", platform="claude")
+        for i, message in enumerate(conv["messages"]):
+            message["message_id"] = f"src-{i}"
+
+        resp = await client.post(
+            ENDPOINT,
+            json={"source": "extension_claude", "conversations": [conv]},
+            headers={"X-Auth-User-Id": str(TEST_USER_ID)},
+        )
+
+        assert resp.status_code == 200, resp.text
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT m.position, m.source_message_id FROM messages m"
+                " JOIN conversations c ON c.id = m.conversation_id"
+                " WHERE c.platform = $1 AND c.platform_id = $2 ORDER BY m.position",
+                "claude",
+                "conv-ids-001",
+            )
+        assert [(r["position"], r["source_message_id"]) for r in rows] == [
+            (0, "src-0"),
+            (1, "src-1"),
+        ]
 
     async def test_unauthenticated_request_rejected(self, client: AsyncClient) -> None:
         """Request without auth header should return 401."""

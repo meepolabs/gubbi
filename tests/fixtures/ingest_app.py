@@ -31,12 +31,22 @@ def build_conv(
     title: str = "Test conversation",
     msg_count: int = 2,
     message_times: list[datetime] | None = None,
+    *,
+    with_ids: bool = False,
 ) -> dict[str, Any]:
+    """A conversation of ``msg_count`` alternating turns ``Message 0``, ``Message 1``, ...
+
+    ``with_ids`` gives message ``i`` the source id ``{platform_id}-m{i}``, so a
+    re-send with a larger ``msg_count`` repeats the earlier ids.
+    """
     now = datetime.now(UTC)
     messages: list[dict[str, Any]] = [
         {"role": "user" if i % 2 == 0 else "assistant", "content": f"Message {i}"}
         for i in range(msg_count)
     ]
+    if with_ids:
+        for i, message in enumerate(messages):
+            message["message_id"] = f"{platform_id}-m{i}"
     for message, stamp in zip(messages, message_times or [], strict=False):
         message["timestamp"] = stamp.isoformat()
     return {

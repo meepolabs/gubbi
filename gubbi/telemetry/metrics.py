@@ -187,6 +187,10 @@ _COUNTERS: tuple[tuple[str, str], ...] = (
         MetricNames.EXTRACTION_LLM_UNMETERED_CALLS,
         "LLM calls of finished extraction attempts with no reported usage, by lane",
     ),
+    (
+        MetricNames.INGEST_MESSAGES_TRUNCATED,
+        "Synced messages written by ingest whose text was cut to the length limit",
+    ),
 )
 
 

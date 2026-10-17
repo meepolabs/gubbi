@@ -1,10 +1,11 @@
 """REST API: POST /api/v1/ingest/conversations.
 
 Accepts normalized conversation batches from the browser extension.
-Transforms, dedupes, saves to the conversations table, and records one
-pending extraction job per saved conversation with its scheduling lane and run
-time. No LLM calls and no job dispatch: the extraction scheduler admits and
-runs queued jobs.
+Merges each conversation into stored history by its platform id (and each
+message by its source message id), and records a pending extraction job for
+every conversation that is new or gained messages, with its scheduling lane
+and run time. No LLM calls and no job dispatch: the extraction scheduler
+admits and runs queued jobs.
 """
 
 from __future__ import annotations
@@ -21,7 +22,6 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Annotated, Literal
 from uuid import UUID  # noqa: TC003
 
-import asyncpg
 import structlog
 from fastapi import APIRouter, Depends, Request
 from gubbi_common.audit.targets import TargetKind
@@ -37,22 +37,32 @@ from gubbi.config import get_settings
 from gubbi.crypto.guard import require_cipher
 from gubbi.extraction.intake import assign_lane
 from gubbi.extraction.spend_rules import limits_for, run_after_for
-from gubbi.models.conversation import Message, keep_conversation_roles
+from gubbi.models.conversation import keep_conversation_roles
 from gubbi.storage.connection import safe_acquire
 from gubbi.storage.exceptions import TopicNotFoundError
-from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import extraction_jobs, extraction_queue
 from gubbi.storage.repositories import wallet as wallet_repo
 from gubbi.storage.repositories.extraction_jobs import ExtractionJobAlreadyInFlight
+from gubbi.storage.repositories.synced_conversations import (
+    MergeResult,
+    SyncedConversation,
+    SyncedMessage,
+    merge_synced_conversation,
+)
 from gubbi.storage.repositories.topics import TopicAlreadyExists
 from gubbi.storage.repositories.topics import create as create_topic
 from gubbi.storage.repositories.topics import get_id as get_topic_id
+from gubbi.telemetry.attrs import MetricNames
+from gubbi.telemetry.metrics import record_counter
 from gubbi.validation import validate_title
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
 
+    import asyncpg
+
     from gubbi.app_context import AppContext
+    from gubbi.crypto.cipher import ContentCipher
 
 __all__: list[str] = [
     "DEFAULT_INBOX_TOPIC",
@@ -73,19 +83,26 @@ MAX_CONVERSATIONS_PER_REQUEST = 50
 DEFAULT_INBOX_TOPIC = "inbox"
 
 
+# Length-constrained strings are checked as Unicode by pydantic-core, which
+# refuses unpaired surrogates (string_unicode). Identifiers are stored and
+# compared verbatim, so they rely on that instead of being repaired like text.
+_SourceId = Annotated[str, Field(min_length=1, max_length=512)]
+
+
 class MessagePayload(BaseModel):
     """A single message in a conversation payload."""
 
     role: Literal["user", "assistant", "system"]
     content: str
     timestamp: IngestTimestamp | None = None
+    message_id: _SourceId | None = None
 
 
 class ConversationPayload(BaseModel):
     """A single conversation payload from the ingest request."""
 
     platform: Literal["chatgpt", "claude"]
-    platform_id: str = Field(min_length=1, max_length=512)
+    platform_id: _SourceId
     title: str = ""
     created_at: IngestTimestamp
     updated_at: IngestTimestamp | None = None
@@ -104,9 +121,13 @@ class IngestConversationRequest(BaseModel):
 class IngestConversationResponse(BaseModel):
     """Response with per-batch save + extraction-queue counters.
 
-    conversations_saved        -- rows committed to ``conversations``.
-    conversations_skipped_dedupe -- rows skipped because the user already had
-                                  this (platform, platform_id) pair.
+    conversations_saved        -- conversations stored for the first time or
+                                  extended with new messages.
+    conversations_skipped_dedupe -- conversations that gained no message: an
+                                  identical re-send, a re-send that only
+                                  edited stored messages, or one whose
+                                  messages could not be matched to the stored
+                                  thread (nothing written).
     extractions_enqueued       -- saves with a queued extraction job: a job
                                   created by this request, or an earlier one
                                   for the same conversation still in flight.
@@ -257,6 +278,63 @@ async def _set_user_rls_local(conn: asyncpg.Connection, user_id: UUID) -> None:
     )
 
 
+@dataclass(slots=True)
+class _Tally:
+    """Per-request counters for the response and the request log."""
+
+    saved: int = 0
+    skipped_dedupe: int = 0
+    skipped_error: int = 0
+    messages_truncated: int = 0
+
+
+def _synced_conversation(
+    conv: ConversationPayload, kept: Iterable[MessagePayload]
+) -> SyncedConversation:
+    """The payload as the merge reads it, filed under the inbox with a non-empty title."""
+    try:
+        title = validate_title(conv.title)
+    except ValueError:
+        title = validate_title(f"Conversation {conv.created_at.isoformat()}")
+    return SyncedConversation(
+        platform=conv.platform,
+        platform_id=conv.platform_id,
+        title=title,
+        topic=DEFAULT_INBOX_TOPIC,
+        created_at=conv.created_at,
+        messages=tuple(
+            SyncedMessage(
+                role=msg.role,
+                content=msg.content,
+                timestamp=msg.timestamp,
+                message_id=msg.message_id,
+            )
+            for msg in kept
+        ),
+    )
+
+
+async def _merge_and_queue(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    user_id: UUID,
+    synced: SyncedConversation,
+    fields: _QueueFields,
+) -> MergeResult:
+    """Merge one conversation and queue its extraction when it gained messages.
+
+    The merge, the job and the job's audit row commit together or not at all.
+    """
+    async with conn.transaction():
+        await _set_user_rls_local(conn, user_id)
+        result = await merge_synced_conversation(conn, cipher, synced)
+        if result.created or result.has_new_messages:
+            if result.conversation_id is None:
+                raise RuntimeError("a merge that wrote messages returned no conversation id")
+            await _queue_extraction(conn, user_id, result.conversation_id, synced.platform, fields)
+    return result
+
+
 @router.post("/conversations", response_model=IngestConversationResponse)
 async def ingest_conversations(
     request: Request,
@@ -265,12 +343,17 @@ async def ingest_conversations(
 ) -> IngestConversationResponse:
     """Ingest normalized conversation batches from browser extension clients.
 
-    Each conversation is deduped by (user_id, platform, platform_id), saved
-    under the default "inbox" topic, and gets a pending extraction job. The
-    job carries its scheduling lane, when it may first run and the latest
-    message time (never later than now); nothing is enqueued or charged here
-    -- the extraction scheduler admits queued jobs against the budget, and a
-    job is charged after it runs.
+    Each conversation is identified by (user_id, platform, platform_id) and
+    merged into the stored thread under the default "inbox" topic: a new
+    thread is stored whole, a known one gains the messages it does not hold
+    yet, and stored messages whose text changed are rewritten in place. A
+    conversation that is new or gained messages gets a pending extraction
+    job; one that gained nothing (an identical re-send, edits only, or
+    messages that do not match the stored thread) counts as skipped. The job
+    carries its scheduling lane, when it may first run and the latest message
+    time (never later than now); nothing is enqueued or charged here -- the
+    extraction scheduler admits queued jobs against the budget, and a job is
+    charged after it runs.
 
     Lanes: a paste request is ``paste`` and runs now. A synced conversation
     is ``backfill`` (runs now) when it predates the user's first upload from
@@ -286,12 +369,10 @@ async def ingest_conversations(
       inside that transaction. ``SET LOCAL`` is transaction-scoped, so the
       GUC unwinds at COMMIT/ROLLBACK and the connection cannot return to
       the pool carrying a session-level GUC for the prior user.
-    - The dedupe pre-check is its own transaction. The conversation save,
-      its platform metadata, its extraction job and the job's audit row
+    - A conversation's merge, its extraction job and the job's audit row
       share ONE transaction: if any of them fails, nothing is stored, the
       conversation counts as extractions_skipped_error and the request
-      continues (HTTP 200). A re-send of it is then accepted, since no row
-      carries its platform id.
+      continues (HTTP 200). A re-send of it is then merged afresh.
     - An existing in-flight job for the conversation is reused. While it is
       pending and not yet dispatched, its lane, run time and activity are
       refreshed from this upload; only a newly created job is audited as
@@ -304,12 +385,7 @@ async def ingest_conversations(
 
     now = datetime.now(UTC)
     llm_settings = get_settings().llm
-
-    conversations_saved = 0
-    conversations_skipped_dedupe = 0
-    extractions_enqueued = 0
-    extractions_skipped_error = 0
-    superseded_json_paths: list[str] = []
+    tally = _Tally()
 
     async with safe_acquire(app_ctx.pool) as conn:
         # Ensure inbox topic exists -- own transaction, GUC set with SET LOCAL.
@@ -334,15 +410,7 @@ async def ingest_conversations(
 
         for conv in body.conversations:
             kept_payloads = keep_conversation_roles(conv.messages)
-            messages = [
-                Message(
-                    role=msg.role,
-                    content=msg.content,
-                    timestamp=msg.timestamp.isoformat() if msg.timestamp else None,
-                )
-                for msg in kept_payloads
-            ]
-            if not messages:
+            if not kept_payloads:
                 await log.info(
                     "ingest_conversation_empty_after_role_filter",
                     platform=conv.platform,
@@ -350,33 +418,6 @@ async def ingest_conversations(
                     message_count=len(conv.messages),
                 )
                 continue
-
-            # Dedupe pre-check in its own transaction so the SET LOCAL
-            # GUC is properly transaction-scoped (and unwinds before the
-            # connection is reused). The pre-check requires RLS to be
-            # active to function correctly: without the GUC, the FORCE
-            # ROW LEVEL SECURITY policy on conversations would filter all
-            # rows and the read would falsely report "not exists",
-            # leading to redundant TXN 1 inserts that the UNIQUE
-            # constraint would then catch as dedupe-races. Setting the
-            # GUC inside this short transaction restores the fast path.
-            async with conn.transaction():
-                await _set_user_rls_local(conn, user_id)
-                existing = await conv_repo.exists_by_platform_id(
-                    conn,
-                    user_id,
-                    conv.platform,
-                    conv.platform_id,
-                )
-            if existing:
-                conversations_skipped_dedupe += 1
-                continue
-
-            # Build a valid non-empty title (save_conversation requires it)
-            try:
-                title = validate_title(conv.title)
-            except ValueError:
-                title = validate_title(f"Conversation {conv.created_at.isoformat()}")
 
             activity_at = _activity_at(conv, kept_payloads, now)
             lane = assign_lane(
@@ -394,38 +435,15 @@ async def ingest_conversations(
             )
 
             try:
-                async with conn.transaction():
-                    await _set_user_rls_local(conn, user_id)
-                    save_result = await conv_repo.save_conversation(
-                        conn,
-                        cipher,
-                        conversations_json_dir=app_ctx.settings.conversations_json_dir,
-                        topic=DEFAULT_INBOX_TOPIC,
-                        title=title,
-                        messages=messages,
-                        summary="",
-                        source=conv.platform,
-                        date=conv.created_at.date().isoformat(),
-                    )
-                    await conv_repo.set_platform_metadata(
-                        conn,
-                        save_result.conversation_id,
-                        conv.platform,
-                        conv.platform_id,
-                    )
-                    await _queue_extraction(
-                        conn, user_id, save_result.conversation_id, conv.platform, queue_fields
-                    )
-            except asyncpg.UniqueViolationError:
-                await log.warning(
-                    "Dedupe race: platform_id already exists, treating as skip",
-                    platform=conv.platform,
-                    platform_id=conv.platform_id,
+                result = await _merge_and_queue(
+                    conn,
+                    cipher,
+                    user_id,
+                    _synced_conversation(conv, kept_payloads),
+                    queue_fields,
                 )
-                conversations_skipped_dedupe += 1
-                continue
             except Exception:
-                extractions_skipped_error += 1
+                tally.skipped_error += 1
                 await log.warning(
                     "ingest_conversation_save_failed",
                     user_id=str(user_id),
@@ -435,23 +453,34 @@ async def ingest_conversations(
                 )
                 continue
 
-            conversations_saved += 1
-            extractions_enqueued += 1
-            if save_result.superseded_json_path is not None:
-                superseded_json_paths.append(save_result.superseded_json_path)
+            tally.messages_truncated += result.truncated
+            if result.created or result.has_new_messages:
+                tally.saved += 1
+            else:
+                tally.skipped_dedupe += 1
+            if result.legacy_identity_conflict:
+                await log.warning("ingest_legacy_identity_conflict", platform=conv.platform)
 
         budget_exhausted = llm_settings.llm_budget_enabled and await _budget_exhausted(
             conn, user_id
         )
 
-    for path in superseded_json_paths:
-        conv_repo.delete_superseded_json_archive(app_ctx.settings.conversations_json_dir, path)
+    if tally.messages_truncated:
+        record_counter(MetricNames.INGEST_MESSAGES_TRUNCATED, amount=tally.messages_truncated)
+    await log.info(
+        "ingest_request_completed",
+        source=body.source,
+        conversations_saved=tally.saved,
+        conversations_skipped_dedupe=tally.skipped_dedupe,
+        extractions_skipped_error=tally.skipped_error,
+        messages_truncated=tally.messages_truncated,
+    )
 
     return IngestConversationResponse(
-        conversations_saved=conversations_saved,
-        conversations_skipped_dedupe=conversations_skipped_dedupe,
-        extractions_enqueued=extractions_enqueued,
+        conversations_saved=tally.saved,
+        conversations_skipped_dedupe=tally.skipped_dedupe,
+        extractions_enqueued=tally.saved,
         extractions_skipped_budget=0,
-        extractions_skipped_error=extractions_skipped_error,
+        extractions_skipped_error=tally.skipped_error,
         budget_exhausted=budget_exhausted,
     )

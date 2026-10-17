@@ -5,7 +5,7 @@ Verifies that POST /api/v1/ingest/conversations:
     its lane, run_after and activity_at (never later than the server's now)
   - Never enqueues an Arq job (the scheduler dispatches) and never refuses work
   - Assigns lanes from the user's uploads recorded before the request
-  - Skipped-by-dedup conversations produce no row
+  - A re-send that adds no message produces no row
   - An audit row is written for each created job, none for a reused one
   - A conversation and its job are stored together or not at all, each
     conversation independently of the others in its request
@@ -304,7 +304,7 @@ class TestIngestQueuesExtraction:
         client: AsyncClient,
         pool: asyncpg.Pool,
     ) -> None:
-        """Conversations skipped by dedup produce no extraction_jobs row."""
+        """An identical re-send is skipped and produces no extraction_jobs row."""
         conv = build_conv("enq-dedup-001", title="Dedup enqueue test")
         await post(client, "extension_chatgpt", conv)
 
@@ -343,12 +343,7 @@ class TestIngestQueuesExtraction:
         client: AsyncClient,
         pool: asyncpg.Pool,
     ) -> None:
-        """A re-saved conversation whose job is still pending keeps that one job.
-
-        The second upload carries a new platform_id, so the platform-level dedupe
-        lets it through; the same title upserts the same conversation row, and
-        the job INSERT conflicts with the pending job inside the ingest transaction.
-        """
+        """A thread re-sent with new messages while its job is pending keeps that one job."""
         await post(
             client, "extension_chatgpt", build_conv("enq-resave-001", title="Resave pending job")
         )
@@ -358,7 +353,9 @@ class TestIngestQueuesExtraction:
             )
 
         data = await post(
-            client, "extension_chatgpt", build_conv("enq-resave-002", title="Resave pending job")
+            client,
+            "extension_chatgpt",
+            build_conv("enq-resave-001", title="Resave pending job", msg_count=4),
         )
 
         assert data["conversations_saved"] == 1
@@ -370,6 +367,7 @@ class TestIngestQueuesExtraction:
             )
         assert len(first_ids) == 1
         assert job_ids == first_ids
+        assert await counts_for(pool, "enq-resave-001") == (1, 1)
 
     async def test_job_insert_failure_stores_nothing_and_counts_failed_save(
         self,
@@ -461,12 +459,14 @@ class TestIngestQueuesExtraction:
         before = await job_for(pool, "grow-001")
 
         fresh = datetime.now(UTC) - timedelta(minutes=1)
-        await post(
+        data = await post(
             client,
             "extension_chatgpt",
-            build_conv("grow-002", title="Growing", msg_count=6, message_times=[fresh]),
+            build_conv("grow-001", title="Growing", msg_count=6, message_times=[fresh]),
         )
 
+        assert (data["conversations_saved"], data["extractions_enqueued"]) == (1, 1)
+        assert await counts_for(pool, "grow-001") == (1, 2)
         after = await job_by_id(pool, before["id"])
         assert (before["lane"], after["lane"]) == ("backfill", "live")
         assert after["run_after"] > before["run_after"]
@@ -486,10 +486,11 @@ class TestIngestQueuesExtraction:
         data = await post(
             client,
             "extension_chatgpt",
-            build_conv("adm-002", title="Admitted", msg_count=6, message_times=[fresh]),
+            build_conv("adm-001", title="Admitted", msg_count=6, message_times=[fresh]),
         )
 
-        assert data["extractions_enqueued"] == 1
+        assert (data["conversations_saved"], data["extractions_enqueued"]) == (1, 1)
+        assert await counts_for(pool, "adm-001") == (1, 1)
         assert dict(await job_by_id(pool, before["id"])) == dict(before)
 
     async def test_reused_job_is_not_audited_as_created(
@@ -501,8 +502,12 @@ class TestIngestQueuesExtraction:
         await post(client, "extension_chatgpt", build_conv("reuse-001", title="Reuse audit"))
         job = await job_for(pool, "reuse-001")
 
-        await post(client, "extension_chatgpt", build_conv("reuse-002", title="Reuse audit"))
+        data = await post(
+            client, "extension_chatgpt", build_conv("reuse-001", title="Reuse audit", msg_count=4)
+        )
 
+        assert (data["conversations_saved"], data["extractions_enqueued"]) == (1, 1)
+        assert await counts_for(pool, "reuse-001") == (1, 1)
         async with pool.acquire() as conn:
             created = await conn.fetchval(
                 "SELECT COUNT(*) FROM audit_log"
