@@ -582,6 +582,83 @@ async def test_worker_startup_fails_fast_when_anthropic_config_missing(
     get_settings.cache_clear()
 
 
+_CUSTOM_HEADER_ENV_VARS = ("OPENAI_CUSTOM_HEADERS", "ANTHROPIC_CUSTOM_HEADERS")
+
+
+def _configure_provider_env(monkeypatch: pytest.MonkeyPatch, provider: str) -> None:
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", provider)
+    monkeypatch.setenv("JOURNAL_LLM_API_KEY", "stub-key")
+    for name in _CUSTOM_HEADER_ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provider", "env_var"),
+    [
+        pytest.param("openai_compatible", "OPENAI_CUSTOM_HEADERS", id="openai-compatible"),
+        pytest.param("anthropic", "ANTHROPIC_CUSTOM_HEADERS", id="anthropic"),
+    ],
+)
+async def test_worker_startup_refuses_sdk_custom_header_env(
+    monkeypatch: pytest.MonkeyPatch, provider: str, env_var: str
+) -> None:
+    """The SDK would add these headers to every LLM request, so startup refuses them."""
+    handles = _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    _configure_provider_env(monkeypatch, provider)
+    monkeypatch.setenv(env_var, "X-Extra: from-env")
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ValueError, match=f"^{env_var} is set") as excinfo:
+        await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    assert "from-env" not in str(excinfo.value)
+    worker_module.init_pool.assert_not_called()  # type: ignore[attr-defined]
+    handles["pool"].close.assert_not_called()
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provider", "other_env_var", "value"),
+    [
+        pytest.param("openai_compatible", "ANTHROPIC_CUSTOM_HEADERS", "X: y", id="openai-other"),
+        pytest.param("anthropic", "OPENAI_CUSTOM_HEADERS", "X: y", id="anthropic-other"),
+        pytest.param("openai_compatible", "OPENAI_CUSTOM_HEADERS", " ", id="openai-blank"),
+        pytest.param("anthropic", "ANTHROPIC_CUSTOM_HEADERS", "", id="anthropic-empty"),
+    ],
+)
+async def test_worker_startup_builds_provider_without_its_custom_header_env(
+    monkeypatch: pytest.MonkeyPatch, provider: str, other_env_var: str, value: str
+) -> None:
+    """Only a non-blank value of the selected SDK's own variable refuses startup."""
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    _configure_provider_env(monkeypatch, provider)
+    monkeypatch.setenv(other_env_var, value)
+    service_cls = create_autospec(ExtractionService, spec_set=True)
+    monkeypatch.setattr(worker_module, "ExtractionService", service_cls)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    service_cls.assert_called_once()
+
+    get_settings.cache_clear()
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize(
     ("provider_env", "missing_env"),

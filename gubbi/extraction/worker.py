@@ -89,6 +89,18 @@ def _reset_worker_telemetry_guard() -> None:
     _WORKER_TELEMETRY_CONFIGURED = False
 
 
+def _refuse_sdk_custom_headers(env_var: str) -> None:
+    """Refuse to start when the LLM SDK would add headers from ``env_var`` to every request.
+
+    Headers on LLM requests come from ``JOURNAL_LLM_*`` settings only.
+    """
+    if os.environ.get(env_var, "").strip():
+        raise ValueError(
+            f"{env_var} is set; the extraction worker does not send extra LLM request "
+            "headers from the environment. Unset it."
+        )
+
+
 # Registry mapping ``JOURNAL_LLM_PROVIDER`` env values to provider
 # factories. Each factory takes the resolved Settings and returns an
 # LLMProvider implementation. Open/closed: append a new (name, factory)
@@ -113,6 +125,7 @@ def _build_openai_compatible_provider(settings: Settings) -> LLMProvider:
         raise ValueError(
             f"JOURNAL_LLM_PROVIDER=openai_compatible requires {', '.join(missing)} to be set"
         )
+    _refuse_sdk_custom_headers("OPENAI_CUSTOM_HEADERS")
     return OpenAICompatibleProvider(
         base_url=llm.base_url,
         api_key=llm.api_key,
@@ -135,6 +148,7 @@ def _build_anthropic_provider(settings: Settings) -> LLMProvider:
     ]
     if missing:
         raise ValueError(f"JOURNAL_LLM_PROVIDER=anthropic requires {', '.join(missing)} to be set")
+    _refuse_sdk_custom_headers("ANTHROPIC_CUSTOM_HEADERS")
     return AnthropicProvider(
         api_key=llm.api_key,
         model=llm.model,
