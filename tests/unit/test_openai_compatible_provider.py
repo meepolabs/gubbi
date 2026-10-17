@@ -27,6 +27,7 @@ import pytest
 from openai._utils import _logs as openai_logs
 
 from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
+from gubbi.extraction import chunk_extraction
 from gubbi.extraction.llm import model_provider
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.llm.provider import (
@@ -58,6 +59,9 @@ _SCHEMA: dict[str, Any] = {
 _MESSAGES: list[LLMMessage] = [{"role": "user", "content": "I bought a car today."}]
 _REFUSAL_TEXT = "REFUSAL-SENTINEL I cannot help with that"
 _OUTPUT_SENTINEL = "OUTPUT-SENTINEL"
+
+_EXTRACTION_SCHEMAS = [name for name in chunk_extraction.__all__ if name.endswith("_SCHEMA")]
+assert _EXTRACTION_SCHEMAS, "no extraction schemas exported by chunk_extraction"
 
 
 class _Recorder:
@@ -294,6 +298,22 @@ async def test_request_carries_strict_json_schema_in_one_http_call() -> None:
     assert response_format["type"] == "json_schema"
     assert response_format["json_schema"]["strict"] is True
     assert response_format["json_schema"]["schema"] == _SCHEMA
+
+
+@pytest.mark.parametrize("schema_name", _EXTRACTION_SCHEMAS)
+async def test_every_extraction_schema_is_sent_as_strict_response_format(
+    schema_name: str,
+) -> None:
+    schema = getattr(chunk_extraction, schema_name)
+    recorder = _Recorder(_json_response(_stop_body()))
+
+    await _provider(recorder).complete(_MESSAGES, "system prompt", schema)
+
+    assert len(recorder.requests) == 1
+    response_format = recorder.requests[0]["response_format"]
+    assert response_format["type"] == "json_schema"
+    assert response_format["json_schema"]["strict"] is True
+    assert response_format["json_schema"]["schema"] == json.loads(json.dumps(schema))
 
 
 async def test_request_sends_system_prompt_messages_and_token_cap() -> None:

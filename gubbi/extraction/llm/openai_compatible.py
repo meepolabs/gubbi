@@ -76,17 +76,19 @@ class OpenAICompatibleProvider(PydanticAIModelProvider):
     ) -> None:
         logging.getLogger(_SDK_LOGGER).setLevel(logging.WARNING)
         bearer_key = api_key or _PLACEHOLDER_API_KEY
+        http_client = http_client or _default_http_client()
         client = AsyncOpenAI(
             base_url=base_url,
             api_key=bearer_key,
             max_retries=0,
             timeout=timeout,
-            http_client=http_client or _default_http_client(),
+            http_client=http_client,
             default_headers=_pinned_headers(bearer_key),
         )
         super().__init__(
             model=model,
             chat_model=OpenAIChatModel(model, provider=OpenAIProvider(openai_client=client)),
+            http_client=http_client,
             input_price_per_mtok=input_price_per_mtok,
             output_price_per_mtok=output_price_per_mtok,
             max_output_tokens=max_output_tokens,

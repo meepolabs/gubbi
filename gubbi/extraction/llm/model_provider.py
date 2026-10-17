@@ -9,6 +9,10 @@ A concrete provider supplies the PydanticAI model, the timeout exception its
 SDK raises, and how the upstream's usage block maps onto :class:`LLMUsage`;
 everything else lives here.
 
+A failure raised before the request reached the HTTP client (building the
+schema or the settings) is a local defect, raised as permanent; the same
+failure after the request was sent is an unmappable upstream body, retried.
+
 Translated errors never chain the PydanticAI or SDK exception they replace:
 those carry upstream error bodies and response validation input, which can
 echo conversation text into tracebacks.
@@ -18,6 +22,7 @@ from __future__ import annotations
 
 import abc
 import asyncio
+import contextvars
 import dataclasses
 import email.utils
 import functools
@@ -69,6 +74,7 @@ from gubbi.extraction.llm.provider import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping
 
+    import httpx2
     from pydantic_ai.models import Model
     from pydantic_ai.settings import ModelSettings
     from pydantic_ai.usage import RequestUsage
@@ -86,6 +92,23 @@ _RATE_LIMIT_STATUS = 429
 _SERVER_ERROR_FLOOR = 500
 _RETRY_AFTER_HEADER = "retry-after"
 _MALFORMED_RESPONSE = "upstream returned a malformed response"
+_REQUEST_NOT_BUILT = "request could not be built"
+
+
+@dataclasses.dataclass
+class _AttemptState:
+    sent: bool = False
+
+
+_current_attempt: contextvars.ContextVar[_AttemptState | None] = contextvars.ContextVar(
+    "llm_current_attempt", default=None
+)
+
+
+async def _mark_request_sent(_request: httpx2.Request) -> None:
+    state = _current_attempt.get()
+    if state is not None:
+        state.sent = True
 
 
 @functools.lru_cache(maxsize=1)
@@ -138,6 +161,7 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         *,
         model: str,
         chat_model: Model,
+        http_client: httpx2.AsyncClient,
         input_price_per_mtok: float,
         output_price_per_mtok: float,
         max_output_tokens: int = LLM_MAX_OUTPUT_TOKENS,
@@ -152,6 +176,9 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         self._output_price_per_mtok = output_price_per_mtok
         self._max_output_tokens = max_output_tokens
         _silence_serializer_warnings()
+        request_hooks = http_client.event_hooks["request"]
+        if _mark_request_sent not in request_hooks:
+            request_hooks.append(_mark_request_sent)
 
     @abc.abstractmethod
     def _map_usage(self, usage: RequestUsage) -> LLMUsage:
@@ -228,8 +255,10 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         time_limit: float | None,
     ) -> LLMResponse:
         translated: LLMProviderError
-        settings = self._model_settings()
+        state = _AttemptState()
+        token = _current_attempt.set(state)
         try:
+            settings = self._model_settings()
             async with asyncio.timeout(time_limit):
                 response = await model_request(
                     self._chat_model,
@@ -242,17 +271,30 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
             translated = LLMTimeoutError("upstream request timed out")
         except (ModelAPIError, UnexpectedModelBehavior) as exc:
             translated = _translate_error(exc, self._timeout_errors, self._status_errors)
-        except Exception:
-            # A 2xx body the SDK or PydanticAI cannot map escapes as whatever
-            # their parsing hits (a decode error whose ``doc`` holds the whole
-            # body, an assertion, an index or recursion error).
-            translated = LLMTransientError(_MALFORMED_RESPONSE)
+        except Exception as exc:
+            # Only the class name is logged: the exception's message and args
+            # can quote the request or the upstream body.
+            translated = await self._translate_unexpected(type(exc).__qualname__, sent=state.sent)
         else:
             return await self._to_response(response, output_schema)
+        finally:
+            _current_attempt.reset(token)
         # Raised outside the except block so the upstream exception, whose
         # text can quote request content, is neither chained nor attached
         # as context.
         raise translated
+
+    async def _translate_unexpected(self, error_class: str, *, sent: bool) -> LLMProviderError:
+        if not sent:
+            await logger.error(
+                "llm_request_build_failed", model=self._model, error_class=error_class
+            )
+            return LLMPermanentError(_REQUEST_NOT_BUILT)
+        # A 2xx body the SDK or PydanticAI cannot map escapes as whatever
+        # their parsing hits (a decode error whose ``doc`` holds the whole
+        # body, an assertion, an index or recursion error).
+        await logger.warning("llm_response_malformed", model=self._model, error_class=error_class)
+        return LLMTransientError(_MALFORMED_RESPONSE)
 
     async def _to_response(
         self, response: ModelResponse, output_schema: Mapping[str, Any] | None

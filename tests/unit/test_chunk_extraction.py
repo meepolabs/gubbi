@@ -87,11 +87,11 @@ def test_schema_every_object_is_closed_and_requires_all_properties(
         assert sorted(node["required"]) == sorted(node["properties"])
 
 
-def test_schema_declares_nullable_entry_fields_as_null_unions() -> None:
+def test_schema_declares_nullable_entry_fields_as_any_of_with_null() -> None:
     entry_props = CHUNK_EXTRACTION_SCHEMA["properties"]["entries"]["items"]["properties"]
 
-    assert entry_props["event_date"]["type"] == ["string", "null"]
-    assert entry_props["source_message_index"]["type"] == ["integer", "null"]
+    assert entry_props["event_date"] == {"anyOf": [{"type": "string"}, {"type": "null"}]}
+    assert entry_props["source_message_index"] == {"anyOf": [{"type": "integer"}, {"type": "null"}]}
 
 
 @pytest.mark.parametrize(

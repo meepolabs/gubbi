@@ -7,10 +7,12 @@ the modes alike. The triage schema answers whether a chunk holds anything
 worth recording.
 
 The JSON schema is written in strict form (every property required,
-``additionalProperties: false``, nullables as type unions with ``null``)
-because strict structured-output modes reject anything looser. The model
-output is validated with pydantic; a failure raises :class:`LLMSchemaError`
-carrying the call's usage and naming only schema locations, never values.
+``additionalProperties: false``) because strict structured-output modes
+reject anything looser. Nullables are ``anyOf`` a type and ``null``: the
+Anthropic SDK's strict-schema transform rejects the ``type``-array form.
+The model output is validated with pydantic; a failure raises
+:class:`LLMSchemaError` carrying the call's usage and naming only schema
+locations, never values.
 """
 
 from __future__ import annotations
@@ -47,8 +49,8 @@ _ENTRY_SCHEMA: Final[Mapping[str, Any]] = {
         "content": {"type": "string"},
         "why": {"type": "string"},
         "tags": {"type": "array", "items": {"type": "string"}},
-        "event_date": {"type": ["string", "null"]},
-        "source_message_index": {"type": ["integer", "null"]},
+        "event_date": {"anyOf": [{"type": "string"}, {"type": "null"}]},
+        "source_message_index": {"anyOf": [{"type": "integer"}, {"type": "null"}]},
     },
     "required": ["content", "why", "tags", "event_date", "source_message_index"],
     "additionalProperties": False,

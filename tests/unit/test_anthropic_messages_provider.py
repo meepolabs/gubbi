@@ -26,6 +26,7 @@ from anthropic._utils import _logs as anthropic_logs
 from anthropic.types.beta import BetaMessage
 
 from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
+from gubbi.extraction import chunk_extraction
 from gubbi.extraction.llm.anthropic_messages import AnthropicEffort, AnthropicProvider
 from gubbi.extraction.llm.provider import (
     LLMMessage,
@@ -55,6 +56,9 @@ _SCHEMA: dict[str, Any] = {
 _MESSAGES: list[LLMMessage] = [{"role": "user", "content": "I bought a car today."}]
 _REFUSAL_TEXT = "REFUSAL-SENTINEL I cannot help with that"
 _OUTPUT_SENTINEL = "OUTPUT-SENTINEL"
+
+_EXTRACTION_SCHEMAS = [name for name in chunk_extraction.__all__ if name.endswith("_SCHEMA")]
+assert _EXTRACTION_SCHEMAS, "no extraction schemas exported by chunk_extraction"
 
 
 class _Recorder:
@@ -239,6 +243,19 @@ async def test_structured_request_sends_json_schema_output_config_in_one_http_ca
     assert output_format["schema"]["additionalProperties"] is False
     assert "tools" not in recorder.requests[0]
     assert "tool_choice" not in recorder.requests[0]
+
+
+@pytest.mark.parametrize("schema_name", _EXTRACTION_SCHEMAS)
+async def test_every_extraction_schema_is_sent_as_output_config_format(schema_name: str) -> None:
+    schema = getattr(chunk_extraction, schema_name)
+    recorder = _Recorder(_json_response(_end_turn_body()))
+
+    await _provider(recorder).complete(_MESSAGES, "system prompt", schema)
+
+    assert len(recorder.requests) == 1
+    output_format = recorder.requests[0]["output_config"]["format"]
+    assert output_format["type"] == "json_schema"
+    assert output_format["schema"] == json.loads(json.dumps(schema))
 
 
 async def test_request_sends_model_system_prompt_messages_token_cap_and_key() -> None:
@@ -636,14 +653,14 @@ async def test_upstream_body_never_reaches_the_raised_error_or_its_traceback(
 
 
 @pytest.mark.parametrize(
-    "content_type",
+    ("content_type", "error_class"),
     [
-        pytest.param(None, id="untyped-body"),
-        pytest.param("application/json", id="json-typed-body"),
+        pytest.param(None, "AttributeError", id="untyped-body"),
+        pytest.param("application/json", "JSONDecodeError", id="json-typed-body"),
     ],
 )
 async def test_malformed_success_body_is_transient_and_kept_out_of_the_error(
-    content_type: str | None,
+    content_type: str | None, error_class: str, log_capture: LogCapture
 ) -> None:
     headers = {"content-type": content_type} if content_type else None
 
@@ -663,6 +680,58 @@ async def test_malformed_success_body_is_transient_and_kept_out_of_the_error(
     assert excinfo.value.__context__ is None
     assert _OUTPUT_SENTINEL not in str(excinfo.value)
     assert _OUTPUT_SENTINEL not in repr(excinfo.value.args)
+    malformed = [json.loads(line) for line in log_capture.lines if "llm_response_malformed" in line]
+    assert [line["error_class"] for line in malformed] == [error_class] * LLM_MAX_ATTEMPTS
+    assert "llm_request_build_failed" not in log_capture.text
+    assert _OUTPUT_SENTINEL not in log_capture.text
+
+
+def _schema_with_entry(field: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {"field": field},
+        "required": ["field"],
+        "additionalProperties": False,
+    }
+
+
+@pytest.mark.parametrize(
+    ("schema", "error_class", "error_text"),
+    [
+        pytest.param(
+            _schema_with_entry({"type": ["string", "null"]}),
+            "AssertionError",
+            "unreachable",
+            id="type-array",
+        ),
+        pytest.param(
+            _schema_with_entry({"description": "untyped"}),
+            "ValueError",
+            "Schema must have",
+            id="untyped-node",
+        ),
+    ],
+)
+async def test_request_build_failure_is_permanent_after_one_attempt_and_logs_its_class(
+    schema: dict[str, Any], error_class: str, error_text: str, log_capture: LogCapture
+) -> None:
+    recorder = _Recorder(_json_response(_end_turn_body()))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", schema)
+
+    assert type(excinfo.value) is LLMPermanentError
+    assert excinfo.value.attempts == 1
+    assert recorder.requests == []
+    assert sleep.delays == []
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    build_failures = [
+        json.loads(line) for line in log_capture.lines if "llm_request_build_failed" in line
+    ]
+    assert [line["error_class"] for line in build_failures] == [error_class]
+    assert error_text not in log_capture.text
 
 
 def _string_content_body() -> dict[str, Any]:
@@ -688,7 +757,9 @@ def _null_text_body() -> dict[str, Any]:
         pytest.param(deeply_nested_json(_OUTPUT_SENTINEL), id="deeply-nested-json"),
     ],
 )
-async def test_unmappable_success_body_is_transient_and_kept_out_of_the_error(body: str) -> None:
+async def test_unmappable_success_body_is_transient_and_kept_out_of_the_error(
+    body: str, log_capture: LogCapture
+) -> None:
     def respond(_request: httpx2.Request) -> httpx2.Response:
         return httpx2.Response(
             200, content=body.encode(), headers={"content-type": "application/json"}
@@ -704,6 +775,8 @@ async def test_unmappable_success_body_is_transient_and_kept_out_of_the_error(bo
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__context__ is None
     assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
+    assert "llm_request_build_failed" not in log_capture.text
+    assert _OUTPUT_SENTINEL not in log_capture.text
 
 
 def _string_web_search_result_body() -> dict[str, Any]:

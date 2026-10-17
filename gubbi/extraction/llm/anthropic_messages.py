@@ -84,12 +84,13 @@ class AnthropicProvider(PydanticAIModelProvider):
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         logging.getLogger(_SDK_LOGGER).setLevel(logging.WARNING)
+        http_client = http_client or _default_http_client()
         client = AsyncAnthropic(
             api_key=api_key,
             base_url=base_url or _DEFAULT_BASE_URL,
             max_retries=0,
             timeout=timeout,
-            http_client=http_client or _default_http_client(),
+            http_client=http_client,
             default_headers=_pinned_auth_headers(api_key),
         )
         chat_model = AnthropicModel(
@@ -100,6 +101,7 @@ class AnthropicProvider(PydanticAIModelProvider):
         super().__init__(
             model=model,
             chat_model=chat_model,
+            http_client=http_client,
             input_price_per_mtok=input_price_per_mtok,
             output_price_per_mtok=output_price_per_mtok,
             max_output_tokens=max_output_tokens,
