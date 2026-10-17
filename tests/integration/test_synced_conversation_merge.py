@@ -461,6 +461,47 @@ async def test_append_never_moves_updated_at_backwards(
     assert topic_updated >= ahead
 
 
+async def test_append_touches_the_topic_the_thread_was_moved_to_not_the_inbox(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    tenant_a: UUID,
+    seeded: int,
+) -> None:
+    past = datetime.now(UTC) - timedelta(days=1)
+    async with admin_pool.acquire() as conn:
+        moved_to = await conn.fetchval(
+            "INSERT INTO topics (path, title, user_id, created_at, updated_at)"
+            " VALUES ('trips/lisbon', 'Lisbon', $1, $2, $2) RETURNING id",
+            tenant_a,
+            past,
+        )
+        await conn.execute("UPDATE conversations SET topic_id = $1 WHERE id = $2", moved_to, seeded)
+        inbox = await conn.fetchval(
+            "UPDATE topics SET updated_at = $1 WHERE user_id = $2 AND path = $3 RETURNING id",
+            past,
+            tenant_a,
+            INBOX,
+        )
+
+    result = await _merge(
+        app_pool, cipher, tenant_a, _conv([_msg("hello one", "k1"), _msg("later", "n1")])
+    )
+
+    async with admin_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, updated_at FROM topics WHERE id = ANY($1::int[])", [moved_to, inbox]
+        )
+        topic_of_thread = await conn.fetchval(
+            "SELECT topic_id FROM conversations WHERE id = $1", seeded
+        )
+    updated = {r["id"]: r["updated_at"] for r in rows}
+    assert result.has_new_messages
+    assert topic_of_thread == moved_to
+    assert updated[moved_to] > past
+    assert updated[inbox] == past
+
+
 async def test_over_limit_message_is_stored_cut_and_its_replay_is_a_noop(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,

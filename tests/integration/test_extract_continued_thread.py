@@ -15,6 +15,7 @@ from unittest.mock import patch
 import pytest
 import structlog
 
+from gubbi.api.v1.ingest import _merge_and_queue, _QueueFields
 from gubbi.constants import EXTRACTION_VERSION
 from gubbi.extraction import charging
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
@@ -22,6 +23,7 @@ from gubbi.extraction.llm.fake_provider import FakeLLMProvider
 from gubbi.extraction.llm.provider import LLMPermanentError
 from gubbi.extraction.pipeline import PipelineFailure
 from gubbi.extraction.slice_run import WatermarkMovedError
+from gubbi.storage.repositories.synced_conversations import SyncedConversation, SyncedMessage
 from tests.fixtures.extraction_db import SeedMessage, job_ctx, seed_conversation, seed_job
 from tests.fixtures.extraction_job import ScriptedProvider, chunk_output, entry
 
@@ -71,7 +73,7 @@ async def _seed(
         conv_id,
         watermark,
     )
-    return conv_id, await seed_job(app_pool, user, conv_id)
+    return conv_id, await seed_job(app_pool, user, conv_id, source=_PLATFORM)
 
 
 async def _run(
@@ -120,23 +122,41 @@ async def _jobs_of(admin_pool: asyncpg.Pool, conv_id: int) -> list[asyncpg.Recor
     )
 
 
-async def _append_message(
-    admin_pool: asyncpg.Pool, cipher: ContentCipher, user: UUID, conv_id: int, text: str
+async def _ingest_append(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    user: UUID,
+    conv_id: int,
+    contents: Sequence[str],
 ) -> None:
-    """Store one more user message at the next position, as a merge append does."""
-    ciphertext, nonce = cipher.encrypt(text)
-    await admin_pool.execute(
-        """
-        INSERT INTO messages
-            (conversation_id, user_id, role, timestamp, position,
-             content_encrypted, content_nonce, search_vector)
-        SELECT $1, $2, 'user', now(), max(position) + 1, $3, $4, to_tsvector('english', 'x')
-        FROM messages WHERE conversation_id = $1
-        """,
+    """Re-send the thread with ``contents`` through the ingest merge-and-queue step."""
+    row = await admin_pool.fetchrow(
+        "SELECT c.platform, c.platform_id, t.path FROM conversations c"
+        " JOIN topics t ON t.id = c.topic_id WHERE c.id = $1",
         conv_id,
-        user,
-        ciphertext,
-        nonce,
+    )
+    assert row is not None
+    synced = SyncedConversation(
+        platform=row["platform"],
+        platform_id=row["platform_id"],
+        title="Seeded conversation",
+        topic=row["path"],
+        created_at=_FIRST_DAY,
+        messages=tuple(SyncedMessage(role="user", content=text) for text in contents),
+    )
+    now = datetime.now(UTC)
+    fields = _QueueFields(lane="backfill", run_after=now, activity_at=now)
+    async with app_pool.acquire() as conn:
+        result = await _merge_and_queue(conn, cipher, user, synced, fields)
+    assert result.appended == 1
+
+
+async def _max_position(admin_pool: asyncpg.Pool, conv_id: int) -> int:
+    return int(
+        await admin_pool.fetchval(
+            "SELECT max(position) FROM messages WHERE conversation_id = $1", conv_id
+        )
     )
 
 
@@ -326,10 +346,13 @@ async def test_exactly_one_follow_up_when_messages_arrive_during_the_run(
     appended: bool,
     expected_follow_ups: int,
 ) -> None:
-    conv_id, job_id = await _seed(admin_pool, app_pool, cipher, tenant_a, _daily(_plain(6)), 3)
+    contents = _plain(6)
+    conv_id, job_id = await _seed(admin_pool, app_pool, cipher, tenant_a, _daily(contents), 3)
 
     async def append() -> None:
-        await _append_message(admin_pool, cipher, tenant_a, conv_id, "I also rented a car.")
+        await _ingest_append(
+            app_pool, admin_pool, cipher, tenant_a, conv_id, [*contents, "I also rented a car."]
+        )
 
     provider = _DuringCall(
         [chunk_output(_TOPIC, [entry("Booked flights", source=5)])], append if appended else None
@@ -342,6 +365,7 @@ async def test_exactly_one_follow_up_when_messages_arrive_during_the_run(
     assert await _job_status(admin_pool, job_id) == ("completed", None)
     assert [j["status"] for j in follow_ups] == ["pending"] * expected_follow_ups
     assert await _watermark(admin_pool, conv_id) == 5
+    assert await _max_position(admin_pool, conv_id) == (6 if appended else 5)
 
 
 # -- nothing new above the watermark ---------------------------------------------

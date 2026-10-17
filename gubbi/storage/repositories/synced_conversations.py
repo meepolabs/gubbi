@@ -148,7 +148,7 @@ async def _merge_once(
     title = validate_title(conversation.title)
     topic_id = await get_topic_id(conn, conversation.topic)
     created = await _insert_conversation(conn, cipher, topic_id, title, conversation, now)
-    conv_id, participants = await _lock_conversation(conn, conversation)
+    conv_id, stored_topic_id, participants = await _lock_conversation(conn, conversation)
     stored = await _load_stored(conn, conv_id)
 
     if created:
@@ -166,7 +166,7 @@ async def _merge_once(
     await _insert_messages(conn, cipher, conv_id, next_position, plan.appends)
     if plan.appends:
         roles = sorted({*participants, *(m.role for m in plan.appends)})
-        await _mark_appended(conn, conv_id, topic_id, len(stored) + len(plan.appends), roles)
+        await _mark_appended(conn, conv_id, stored_topic_id, len(stored) + len(plan.appends), roles)
     if created:
         entry_date = conversation.created_at.astimezone(UTC).date().isoformat()
         await upsert_linked_entry(conn, cipher, topic_id, conv_id, title, "", entry_date, now)
@@ -281,10 +281,10 @@ async def _insert_conversation(
 
 async def _lock_conversation(
     conn: asyncpg.Connection, conversation: SyncedConversation
-) -> tuple[int, list[str]]:
+) -> tuple[int, int, list[str]]:
     row = await conn.fetchrow(
         """
-        SELECT id, participants FROM conversations
+        SELECT id, topic_id, participants FROM conversations
         WHERE user_id = (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid)
           AND platform = $1 AND platform_id = $2
         FOR UPDATE
@@ -294,7 +294,7 @@ async def _lock_conversation(
     )
     if row is None:
         raise RuntimeError("synced conversation row missing after insert")
-    return int(row["id"]), list(row["participants"] or [])
+    return int(row["id"]), int(row["topic_id"]), list(row["participants"] or [])
 
 
 async def _load_stored(conn: asyncpg.Connection, conv_id: int) -> list[_Stored]:

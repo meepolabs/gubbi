@@ -31,6 +31,7 @@ pytestmark = [pytest.mark.integration]
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 _DATABASE_PREFIX = "journal_queue_cols_"
+_REVISION = "0005_extraction_queue_columns"
 _PREVIOUS_REVISION = "0004_extraction_tracking_columns"
 
 
@@ -283,10 +284,11 @@ async def _scratch_database() -> AsyncIterator[str]:
 
 @pytest_asyncio.fixture(scope="module", loop_scope="session")
 async def round_trip() -> AsyncIterator[RoundTrip]:
-    """Upgrade a fresh database to head, step back one revision, and upgrade again.
+    """Upgrade a fresh database to head, step back past this revision, and re-apply it.
 
     Jobs planted at the previous revision, one per status, show what the
-    re-applied revision does to pre-existing rows.
+    re-applied revision does to pre-existing rows. The re-apply stops at this
+    revision: a later one refuses to run while a job is running.
     """
     async with _scratch_database() as dsn:
         await _alembic_off_the_loop(dsn, "upgrade", "head")
@@ -295,7 +297,7 @@ async def round_trip() -> AsyncIterator[RoundTrip]:
         after_downgrade = await _snapshot(dsn)
         job_ids = await _plant_legacy_jobs(dsn)
         upgraded_at = datetime.now(UTC)
-        await _alembic_off_the_loop(dsn, "upgrade", "head")
+        await _alembic_off_the_loop(dsn, "upgrade", _REVISION)
         yield RoundTrip(
             dsn=dsn,
             after_first_upgrade=after_first_upgrade,

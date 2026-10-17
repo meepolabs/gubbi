@@ -324,6 +324,67 @@ async def test_downgrade_refuses_two_same_title_synced_threads_in_one_topic() ->
     assert schema == _AT_HEAD, "a refused downgrade must roll back every step"
 
 
+async def _insert_job(
+    conn: asyncpg.Connection, user_id: UUID, conversation_id: int, status: str
+) -> UUID:
+    job_id = await conn.fetchval(
+        "INSERT INTO extraction_jobs (user_id, conversation_id, source, status, period_start)"
+        " VALUES ($1, $2, 'extension_claude', $3, current_date) RETURNING id",
+        user_id,
+        conversation_id,
+        status,
+    )
+    return UUID(str(job_id))
+
+
+async def _version(dsn: str) -> str:
+    conn = await asyncpg.connect(dsn, timeout=5)
+    try:
+        return str(await conn.fetchval("SELECT version_num FROM alembic_version"))
+    finally:
+        await conn.close()
+
+
+@pytest.mark.asyncio(loop_scope="session")
+async def test_upgrade_refuses_while_an_extraction_job_is_running_and_succeeds_after() -> None:
+    async with _scratch_database() as dsn:
+        await _alembic_off_the_loop(dsn, "upgrade", _PREVIOUS_REVISION)
+        conn = await asyncpg.connect(dsn, timeout=5)
+        try:
+            user_id, topic_id = await _insert_user_topic(conn, "running")
+            conversation_id = await _insert_conversation(
+                conn, user_id, topic_id, slug="busy", processed=True
+            )
+            await _insert_messages(conn, user_id, conversation_id, [0, 1])
+            await _insert_job(conn, user_id, conversation_id, "completed")
+            running = await _insert_job(conn, user_id, conversation_id, "running")
+        finally:
+            await conn.close()
+
+        refused = await asyncio.to_thread(_run_alembic, dsn, "upgrade", "head")
+        version_after_refusal = await _version(dsn)
+        schema_after_refusal = await _snapshot(dsn)
+
+        conn = await asyncpg.connect(dsn, timeout=5)
+        try:
+            await conn.execute(
+                "UPDATE extraction_jobs SET status = 'failed' WHERE id = $1", running
+            )
+        finally:
+            await conn.close()
+        accepted = await asyncio.to_thread(_run_alembic, dsn, "upgrade", "head")
+        watermarks = await _read_watermarks(dsn, [conversation_id])
+        schema_after_upgrade = await _snapshot(dsn)
+
+    assert refused.returncode != 0, "upgrade must refuse while a job is running"
+    assert "1 extraction job(s) are running" in refused.stderr
+    assert version_after_refusal == _PREVIOUS_REVISION
+    assert schema_after_refusal == _AT_PREVIOUS
+    assert accepted.returncode == 0, accepted.stderr
+    assert schema_after_upgrade == _AT_HEAD
+    assert watermarks == {conversation_id: 1}
+
+
 async def _admin_user_topic(admin_pool: asyncpg.Pool, user_id: UUID, path: str) -> int:
     async with admin_pool.acquire() as conn:
         topic_id = await conn.fetchval(

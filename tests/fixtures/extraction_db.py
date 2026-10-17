@@ -109,6 +109,7 @@ async def seed_job(
     period_start: date = date(2026, 5, 1),
     *,
     admitted: bool = True,
+    source: str = "extension_chatgpt",
 ) -> UUID:
     """Insert a pending extraction job for the conversation, under the user's RLS scope.
 
@@ -122,7 +123,7 @@ async def seed_job(
             conn,
             user_id,
             conversation_id,
-            "extension_chatgpt",
+            source,
             period_start=period_start,
         )
         if admitted:

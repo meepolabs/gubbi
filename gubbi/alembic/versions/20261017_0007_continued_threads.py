@@ -15,6 +15,15 @@ extracted. It is backfilled to ``max(messages.position)`` for every
 conversation with ``processed_at`` set, so an extracted thread that later
 grows is not extracted again from the start; every other row stays NULL.
 
+The backfill is only correct when no extraction run is in flight: a run of the
+previous version that completes after it sets ``processed_at`` without a
+watermark, so the thread's next append would be extracted again from the
+start. Required deploy order: stop the extraction workers and the extraction
+scheduler, let running jobs finish (or mark them failed), run this migration,
+then start the new version. The upgrade enforces the middle step: it takes a
+SHARE lock on ``extraction_jobs``, which holds off any job claim until it
+commits, and refuses to run while any job has status ``running``.
+
 messages: ``source_message_id`` is the id the source platform gave a message,
 NULL when it sent none. The partial unique index
 ``idx_messages_conversation_source_id`` on ``(conversation_id,
@@ -38,6 +47,7 @@ rather than recording the revision over an incompatible object; the downgrade
 likewise drops only what it expects to find.
 """
 
+import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
@@ -45,6 +55,16 @@ revision = "0007_continued_threads"
 down_revision = "0006_llm_wallet"
 branch_labels = None
 depends_on = None
+
+_LOCK_JOBS = "LOCK TABLE public.extraction_jobs IN SHARE MODE"
+
+_COUNT_RUNNING_JOBS = "SELECT count(*) FROM public.extraction_jobs WHERE status = 'running'"
+
+_RUNNING_JOBS_MESSAGE = (
+    "{count} extraction job(s) are running. Stop the extraction workers and the "
+    "extraction scheduler, let running jobs finish or mark them failed, then run "
+    "this migration again before starting the new version."
+)
 
 _CREATE_TITLE_INDEX = (
     "CREATE UNIQUE INDEX conversations_topic_id_slug_mcp_key "
@@ -95,8 +115,16 @@ WHERE c.id = m.conversation_id
 """
 
 
+def _refuse_running_jobs() -> None:
+    op.execute(_LOCK_JOBS)
+    running = op.get_bind().execute(sa.text(_COUNT_RUNNING_JOBS)).scalar_one()
+    if running:
+        raise RuntimeError(_RUNNING_JOBS_MESSAGE.format(count=running))
+
+
 def upgrade() -> None:
     """Re-key conversation titles, add the source-id and watermark columns, backfill."""
+    _refuse_running_jobs()
     op.execute(_CREATE_TITLE_INDEX)
     op.execute(_DROP_TITLE_CONSTRAINT)
     op.execute(_ADD_CONVERSATIONS_COLUMN)

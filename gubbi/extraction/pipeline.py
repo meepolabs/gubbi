@@ -239,7 +239,8 @@ async def run_pipeline(
 
     The first ``context_count`` messages are context already extracted: every
     extract call is told so, and a candidate whose ``source_message_index``
-    falls among them is dropped (a candidate with no index is kept).
+    falls among them is dropped, as is a candidate with no index whenever
+    ``context_count`` is above zero.
     ``prior_entries`` are entries recorded earlier from the same conversation,
     oldest first; they are shown to every extract call ahead of the run's own
     candidates.
@@ -473,7 +474,10 @@ def _prior_text(run: _Run, progress: _Progress) -> str:
 
 
 def _in_context_tail(run: _Run, source_message_index: int | None) -> bool:
-    return source_message_index is not None and source_message_index < run.context_count
+    # An unattributed candidate cannot be shown to come from the new messages.
+    if run.context_count <= 0:
+        return False
+    return source_message_index is None or source_message_index < run.context_count
 
 
 def _candidates(run: _Run, extraction: ChunkExtraction) -> tuple[ExtractedCandidate, ...]:
