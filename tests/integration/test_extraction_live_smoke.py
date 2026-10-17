@@ -24,9 +24,10 @@ import os
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import TypeAdapter
 
 from gubbi.constants import LLM_MAX_OUTPUT_TOKENS
 from gubbi.extraction.dedupe import normalize_text
@@ -103,7 +104,7 @@ def _provider() -> LLMProvider:
             input_price_per_mtok=1.0,
             output_price_per_mtok=5.0,
             base_url=os.environ.get("JOURNAL_LLM_BASE_URL", ""),
-            effort=cast("AnthropicEffort", effort) if effort else None,
+            effort=TypeAdapter(AnthropicEffort).validate_python(effort) if effort else None,
             max_output_tokens=LLM_MAX_OUTPUT_TOKENS,
         )
     return OpenAICompatibleProvider(

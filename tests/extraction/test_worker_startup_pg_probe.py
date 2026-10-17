@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, create_autospec
 
 import pytest
 import structlog
@@ -37,6 +37,8 @@ from gubbi_common.bootstrap.probes import PgLogProbe
 
 from gubbi.bootstrap.probes.replica_count import ReplicaCountWarnProbe
 from gubbi.extraction import worker as worker_module
+from gubbi.extraction.llm.anthropic_messages import AnthropicProvider
+from gubbi.extraction.service import ExtractionService
 
 # Stub app-pool max size returned by ``pool.get_max_size()``. The replica
 # probe reads the LIVE pool max via ``get_max_size()`` (not a constant), so
@@ -523,10 +525,10 @@ async def test_worker_startup_builds_anthropic_provider_from_settings(
         monkeypatch.delenv("JOURNAL_LLM_EFFORT", raising=False)
     else:
         monkeypatch.setenv("JOURNAL_LLM_EFFORT", effort_env)
-    built_provider = MagicMock()
-    provider_cls = MagicMock(return_value=built_provider)
+    provider_cls = create_autospec(AnthropicProvider, spec_set=True)
+    built_provider = provider_cls.return_value
     monkeypatch.setattr(worker_module, "AnthropicProvider", provider_cls)
-    service_cls = MagicMock(return_value=MagicMock())
+    service_cls = create_autospec(ExtractionService, spec_set=True)
     monkeypatch.setattr(worker_module, "ExtractionService", service_cls)
 
     from gubbi.config import get_settings
