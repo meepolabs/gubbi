@@ -44,9 +44,9 @@ class TopicAlreadyExists(ValueError):
 class TopicMergeConflict(ValueError):
     """Raised when moving entries/conversations would violate a uniqueness rule.
 
-    Conversations carry a ``UNIQUE (topic_id, slug)`` constraint, so moving a
-    conversation into a destination topic that already holds one with the same
-    slug collides. Surface a typed error the router maps to a 409 rather than
+    Conversations without a ``platform_id`` are unique on ``(topic_id, slug)``,
+    so moving one into a destination topic that already holds another with the
+    same slug collides. Surface a typed error the router maps to a 409 rather than
     leaking a raw integrity error.
     """
 
@@ -242,8 +242,8 @@ async def _reassign_rows(
 
     Keeps the entry/conversation reassignment SQL in the topics module by
     design -- it is a topic-lifecycle operation, not an entry/conversation one.
-    A ``UNIQUE (topic_id, slug)`` collision on conversations surfaces as
-    ``TopicMergeConflict``.
+    A ``(topic_id, slug)`` collision between conversations without a
+    ``platform_id`` surfaces as ``TopicMergeConflict``.
     """
     moved_conversations = 0
     try:

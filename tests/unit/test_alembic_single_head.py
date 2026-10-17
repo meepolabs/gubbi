@@ -1,8 +1,7 @@
 """Regression guard against future alembic forks.
 
 The chain was squashed on 2026-05-24 into a single mechanically-derived
-baseline (``0001_squashed_baseline``); the prior 0001-0031 chain lives
-under ``gubbi/alembic/_archive/`` and is not loaded by alembic.
+baseline (``0001_squashed_baseline``).
 
 This test asserts the chain stays single-headed and pinned to the
 current head. If a future migration is added off the wrong parent (or
@@ -26,7 +25,7 @@ from alembic.script import ScriptDirectory
 pytestmark = pytest.mark.unit
 
 
-_EXPECTED_HEAD = "0006_llm_wallet"
+_EXPECTED_HEAD = "0007_continued_threads"
 
 
 def _alembic_config() -> Config:

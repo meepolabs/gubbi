@@ -2,8 +2,8 @@
 
 The migration DSN resolves via a fallback chain that prefers an explicit
 admin/migration role over the runtime app role. We do not use SQLAlchemy
-model reflection (autogenerate) because our schema source of truth is
-the raw SQL file at gubbi/storage/schema.sql.
+model reflection (autogenerate) because the schema is defined by the raw
+SQL migrations under gubbi/alembic/versions/.
 """
 
 import logging

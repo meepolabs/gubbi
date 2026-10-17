@@ -244,6 +244,9 @@ async def save_conversation(
 ) -> SaveConversationResult:
     """Save a conversation. Idempotent -- same topic+title overwrites.
 
+    Only conversations without a ``platform_id`` are matched by title; a
+    synced conversation with the same title in the topic is never overwritten.
+
     Transaction contract: the caller MUST wrap any multi-statement
     write method in ``conn.transaction()``. Multi-statement methods
     assert ``conn.is_in_transaction()`` at entry and raise
@@ -287,7 +290,8 @@ async def save_conversation(
     # Pre-check: validate topic exists early and get canonical_created + json_path for re-saves.
     topic_id = await get_topic_id(conn, topic)
     existing_row = await conn.fetchrow(
-        "SELECT created_at, json_path FROM conversations WHERE topic_id = $1 AND slug = $2",
+        "SELECT created_at, json_path FROM conversations"
+        " WHERE topic_id = $1 AND slug = $2 AND platform_id IS NULL",
         topic_id,
         slug,
     )
@@ -415,7 +419,7 @@ async def _upsert_conversation_record(
             (SELECT NULLIF(current_setting('app.current_user_id', true), '')::uuid),
             $11, $12, $13, to_tsvector('english', $14)
         )
-        ON CONFLICT (topic_id, slug) DO UPDATE
+        ON CONFLICT (topic_id, slug) WHERE platform_id IS NULL DO UPDATE
             SET source        = excluded.source,
                 title_encrypted = excluded.title_encrypted,
                 title_nonce   = excluded.title_nonce,
@@ -627,6 +631,9 @@ async def get_conversation(
 ) -> tuple[ConversationMeta, list[Message]]:
     """Read a conversation by topic + title slug.
 
+    Only conversations without a ``platform_id`` are addressable by title;
+    synced conversations are not, since several may share one title.
+
     Returns (ConversationMeta, messages). Raises ConversationNotFoundError if not found.
     """
     transaction_required = "conversations.get_conversation: caller must wrap in conn.transaction()"
@@ -642,7 +649,7 @@ async def get_conversation(
                c.created_at, c.updated_at, t.path AS topic
         FROM conversations c
         JOIN topics t ON t.id = c.topic_id
-        WHERE t.path = $1 AND c.slug = $2
+        WHERE t.path = $1 AND c.slug = $2 AND c.platform_id IS NULL
         """,
         topic,
         slug,

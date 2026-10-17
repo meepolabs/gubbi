@@ -21,9 +21,6 @@
 -- (CREATEROLE plus pg_monitor admin) that the migration role
 -- (journal_admin per JOURNAL_DB_MIGRATION_URL) does not hold; init.sh
 -- handles them as the superuser instead.
---
--- The old chain (0001-0031) lives at _archive/ for dev-DB forward
--- migration; it is not loaded by alembic.
 
 SET default_tablespace = '';
 SET default_table_access_method = heap;
