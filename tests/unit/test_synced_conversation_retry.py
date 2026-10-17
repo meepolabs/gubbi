@@ -66,3 +66,17 @@ async def test_a_second_unique_violation_propagates() -> None:
         await merge_synced_conversation(conn, MagicMock(spec=ContentCipher), _CONV)
 
     assert attempt.await_count == 2
+
+
+async def test_a_call_outside_a_transaction_is_refused_before_any_work() -> None:
+    conn = _conn()
+    conn.is_in_transaction.return_value = False
+    attempt = AsyncMock(return_value=_OK)
+
+    with (
+        patch.object(module, "_merge_once", attempt),
+        pytest.raises(RuntimeError, match="transaction"),
+    ):
+        await merge_synced_conversation(conn, MagicMock(spec=ContentCipher), _CONV)
+
+    assert attempt.await_count == 0

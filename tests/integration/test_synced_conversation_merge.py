@@ -7,7 +7,7 @@ back through ``admin_pool`` so assertions see the raw columns.
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -198,6 +198,31 @@ async def test_changed_text_is_replaced_in_place_without_reextraction(
     assert after_conv["processed_at"] == before_conv["processed_at"] is not None
 
 
+async def test_several_changed_texts_each_land_on_their_own_message(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    tenant_a: UUID,
+    seeded: int,
+) -> None:
+    payload = [_msg("aardvark burrow", "k1"), _msg("zebra crossing", "k2")]
+
+    result = await _merge(app_pool, cipher, tenant_a, _conv(payload))
+
+    assert (result.appended, result.replaced) == (0, 2)
+    rows = await _messages(admin_pool, seeded)
+    assert _texts(cipher, rows) == ["aardvark burrow", "zebra crossing"]
+    async with admin_pool.acquire() as conn:
+        for word, owner in (("aardvark", "k1"), ("zebra", "k2")):
+            hits = await conn.fetch(
+                "SELECT source_message_id FROM messages WHERE conversation_id = $1"
+                " AND search_vector @@ plainto_tsquery('english', $2)",
+                seeded,
+                word,
+            )
+            assert [h["source_message_id"] for h in hits] == [owner], word
+
+
 async def test_stored_messages_missing_from_payload_are_kept(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,
@@ -340,6 +365,11 @@ async def test_idless_payload_diverging_from_stored_text_writes_nothing(
             [_msg("hello one"), _msg("hello two"), _msg("no ids at all")],
             id="idless-payload-on-id-thread",
         ),
+        pytest.param(
+            "new",
+            [_msg("first", "f1"), _msg("no id here")],
+            id="mixed-payload-on-new-thread",
+        ),
     ],
 )
 async def test_payload_whose_identity_cannot_be_matched_writes_nothing(
@@ -351,18 +381,27 @@ async def test_payload_whose_identity_cannot_be_matched_writes_nothing(
     payload: list[SyncedMessage],
 ) -> None:
     await _make_inbox(app_pool, tenant_a)
-    stored = (
-        [_msg("hello one", "k1"), _msg("hello two", "k2")]
-        if thread == "ids"
-        else [_msg("alpha"), _msg("bravo"), _msg("charlie")]
-    )
-    conv_id = (await _merge(app_pool, cipher, tenant_a, _conv(stored))).conversation_id
+    stored = {
+        "ids": [_msg("hello one", "k1"), _msg("hello two", "k2")],
+        "idless": [_msg("alpha"), _msg("bravo"), _msg("charlie")],
+        "new": [],
+    }[thread]
+    if stored:
+        await _merge(app_pool, cipher, tenant_a, _conv(stored))
 
     result = await _merge(app_pool, cipher, tenant_a, _conv(payload))
 
     assert result.legacy_identity_conflict
     assert (result.appended, result.replaced) == (0, 0)
-    assert len(await _messages(admin_pool, conv_id)) == len(stored)
+    async with admin_pool.acquire() as conn:
+        conv_ids = await conn.fetch(
+            "SELECT id FROM conversations WHERE user_id = $1 AND platform_id = $2",
+            tenant_a,
+            "thread-1",
+        )
+    assert len(conv_ids) == (1 if stored else 0)
+    if stored:
+        assert len(await _messages(admin_pool, int(conv_ids[0]["id"]))) == len(stored)
 
 
 async def test_append_marks_the_thread_for_extraction(
@@ -391,6 +430,35 @@ async def test_append_marks_the_thread_for_extraction(
             "SELECT participants FROM conversations WHERE id = $1", seeded
         )
     assert sorted(participants) == ["assistant", "user"]
+
+
+async def test_append_never_moves_updated_at_backwards(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    cipher: ContentCipher,
+    tenant_a: UUID,
+    seeded: int,
+) -> None:
+    ahead = datetime.now(UTC) + timedelta(days=1)
+    async with admin_pool.acquire() as conn:
+        await conn.execute("UPDATE conversations SET updated_at = $1 WHERE id = $2", ahead, seeded)
+        topic_id = await conn.fetchval(
+            "UPDATE topics SET updated_at = $1 WHERE user_id = $2 AND path = $3 RETURNING id",
+            ahead,
+            tenant_a,
+            INBOX,
+        )
+    assert topic_id is not None
+
+    result = await _merge(
+        app_pool, cipher, tenant_a, _conv([_msg("hello one", "k1"), _msg("later", "n1")])
+    )
+
+    assert result.has_new_messages
+    assert (await _conversation(admin_pool, seeded))["updated_at"] >= ahead
+    async with admin_pool.acquire() as conn:
+        topic_updated = await conn.fetchval("SELECT updated_at FROM topics WHERE id = $1", topic_id)
+    assert topic_updated >= ahead
 
 
 async def test_over_limit_message_is_stored_cut_and_its_replay_is_a_noop(

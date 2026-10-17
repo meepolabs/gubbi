@@ -63,10 +63,11 @@ class MergeResult:
     ``truncated`` counts written messages (appended or replaced) whose text was
     cut to the length limit. ``duplicate_ids`` counts payload messages dropped
     because an earlier message in the same payload carried the same id. When
-    ``legacy_identity_conflict`` is set, nothing was written.
+    ``legacy_identity_conflict`` is set, nothing was written, and
+    ``conversation_id`` is None if the payload mixed id and id-less messages.
     """
 
-    conversation_id: int
+    conversation_id: int | None
     created: bool
     appended: int
     replaced: int
@@ -117,11 +118,13 @@ async def merge_synced_conversation(
     writer rolls back only this merge; it is retried once from a fresh read,
     and a second violation propagates.
     """
-    transaction_required = "merge_synced_conversation: caller must wrap in conn.transaction()"
-    assert conn.is_in_transaction(), transaction_required  # noqa: S101
+    if not conn.is_in_transaction():
+        raise RuntimeError("merge_synced_conversation: caller must wrap in conn.transaction()")
     if not conversation.messages:
         raise ValueError("a synced conversation needs at least one message")
     incoming = tuple(_prepare(m) for m in conversation.messages)
+    if len({m.message_id is None for m in incoming}) > 1:
+        return MergeResult(None, False, 0, 0, 0, 0, legacy_identity_conflict=True)
     try:
         async with conn.transaction():
             return await _merge_once(conn, cipher, conversation, incoming)
@@ -150,23 +153,20 @@ async def _merge_once(
 
     if created:
         plan = _plan_new(incoming)
-    elif all(m.message_id is not None for m in incoming):
+    elif incoming[0].message_id is not None:
         plan = _plan_by_id(cipher, incoming, stored)
-    elif all(m.message_id is None for m in incoming):
-        plan = _plan_by_prefix(cipher, incoming, stored)
     else:
-        plan = _Plan(conflict=True)
+        plan = _plan_by_prefix(cipher, incoming, stored)
 
     if plan.conflict:
         return MergeResult(conv_id, created, 0, 0, 0, 0, legacy_identity_conflict=True)
 
-    for row_id, message in plan.replacements:
-        await _replace_text(conn, cipher, row_id, message.text)
+    await _replace_texts(conn, cipher, plan.replacements)
     next_position = max((s.position for s in stored), default=-1) + 1
     await _insert_messages(conn, cipher, conv_id, next_position, plan.appends)
     if plan.appends:
         roles = sorted({*participants, *(m.role for m in plan.appends)})
-        await _mark_appended(conn, conv_id, topic_id, len(stored) + len(plan.appends), roles, now)
+        await _mark_appended(conn, conv_id, topic_id, len(stored) + len(plan.appends), roles)
     if created:
         entry_date = conversation.created_at.astimezone(UTC).date().isoformat()
         await upsert_linked_entry(conn, cipher, topic_id, conv_id, title, "", entry_date, now)
@@ -315,17 +315,27 @@ async def _load_stored(conn: asyncpg.Connection, conv_id: int) -> list[_Stored]:
     ]
 
 
-async def _replace_text(
-    conn: asyncpg.Connection, cipher: ContentCipher, row_id: int, text: str
+async def _replace_texts(
+    conn: asyncpg.Connection,
+    cipher: ContentCipher,
+    replacements: Sequence[tuple[int, _Incoming]],
 ) -> None:
-    content_ct, content_nonce = cipher.encrypt(text)
+    if not replacements:
+        return
+    sealed = [cipher.encrypt(message.text) for _, message in replacements]
     await conn.execute(
-        "UPDATE messages SET content_encrypted = $1, content_nonce = $2,"
-        " search_vector = to_tsvector('english', $3) WHERE id = $4",
-        content_ct,
-        content_nonce,
-        text,
-        row_id,
+        """
+        UPDATE messages AS m
+        SET content_encrypted = r.ct, content_nonce = r.nonce,
+            search_vector = to_tsvector('english', r.body)
+        FROM unnest($1::integer[], $2::bytea[], $3::bytea[], $4::text[])
+            AS r(row_id, ct, nonce, body)
+        WHERE m.id = r.row_id
+        """,
+        [row_id for row_id, _ in replacements],
+        [ct for ct, _ in sealed],
+        [nonce for _, nonce in sealed],
+        [message.text for _, message in replacements],
     )
 
 
@@ -373,14 +383,17 @@ async def _mark_appended(
     topic_id: int,
     message_count: int,
     participants: list[str],
-    now: datetime,
 ) -> None:
+    # Read the clock after the row lock so a writer that waited never goes back.
     await conn.execute(
         "UPDATE conversations SET message_count = $1, participants = $2,"
-        " updated_at = $3, processed_at = NULL WHERE id = $4",
+        " updated_at = GREATEST(updated_at, clock_timestamp()), processed_at = NULL"
+        " WHERE id = $3",
         message_count,
         participants,
-        now,
         conv_id,
     )
-    await conn.execute("UPDATE topics SET updated_at = $1 WHERE id = $2", now, topic_id)
+    await conn.execute(
+        "UPDATE topics SET updated_at = GREATEST(updated_at, clock_timestamp()) WHERE id = $1",
+        topic_id,
+    )
