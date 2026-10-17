@@ -29,6 +29,7 @@ from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
+from gubbi.api.v1.ingest_time import IngestTimestamp  # noqa: TC001 (Pydantic field type)
 from gubbi.app_state import require_app_ctx
 from gubbi.audit.sql import record_audit
 from gubbi.config import get_settings
@@ -76,7 +77,7 @@ class MessagePayload(BaseModel):
 
     role: Literal["user", "assistant", "system"]
     content: str
-    timestamp: datetime | None = None
+    timestamp: IngestTimestamp | None = None
 
 
 class ConversationPayload(BaseModel):
@@ -85,8 +86,8 @@ class ConversationPayload(BaseModel):
     platform: Literal["chatgpt", "claude"]
     platform_id: str = Field(min_length=1, max_length=512)
     title: str = ""
-    created_at: datetime
-    updated_at: datetime | None = None
+    created_at: IngestTimestamp
+    updated_at: IngestTimestamp | None = None
     messages: Annotated[list[MessagePayload], Field(min_length=1)]
 
 
@@ -164,10 +165,6 @@ async def _read_prior_uploads(
     return _PriorUploads(any_platform=any_platform, by_platform=by_platform)
 
 
-def _as_utc(value: datetime) -> datetime:
-    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-
-
 def _activity_at(
     conv: ConversationPayload, kept: Iterable[MessagePayload], now: datetime
 ) -> datetime:
@@ -176,8 +173,8 @@ def _activity_at(
     Never later than ``now``: a client clock ahead of the server cannot push a
     conversation ahead of others in its lane.
     """
-    stamps = [_as_utc(msg.timestamp) for msg in kept if msg.timestamp is not None]
-    return min(max(stamps, default=_as_utc(conv.updated_at or conv.created_at)), now)
+    stamps = [msg.timestamp for msg in kept if msg.timestamp is not None]
+    return min(max(stamps, default=conv.updated_at or conv.created_at), now)
 
 
 @dataclass(frozen=True, slots=True)

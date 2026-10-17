@@ -166,6 +166,19 @@ class TestIngestQueuesExtraction:
         job = await job_for(pool, "naive-001")
         assert job["activity_at"] == datetime(2026, 3, 1, 17, tzinfo=UTC)
 
+    async def test_offset_message_times_are_stored_as_the_same_utc_instant(
+        self,
+        client: AsyncClient,
+        pool: asyncpg.Pool,
+    ) -> None:
+        conv = build_conv("offset-001", title="Offset stamps")
+        conv["messages"][0]["timestamp"] = "2026-03-01T17:00:00+05:30"
+
+        await post(client, "extension_chatgpt", conv)
+
+        job = await job_for(pool, "offset-001")
+        assert job["activity_at"] == datetime(2026, 3, 1, 11, 30, tzinfo=UTC)
+
     async def test_paste_is_queued_to_run_now(
         self,
         client: AsyncClient,
