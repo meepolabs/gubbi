@@ -31,6 +31,7 @@ from gubbi.crypto.cipher import ContentCipher, load_master_keys_from_env
 from gubbi.extraction.health import app as health_app
 from gubbi.extraction.heartbeat import WORKER_HEARTBEAT_TASK_NAME, run_worker_heartbeat
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
+from gubbi.extraction.llm.anthropic_messages import AnthropicProvider
 from gubbi.extraction.llm.fake_provider import FakeLLMProvider
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.service import ExtractionService
@@ -121,8 +122,32 @@ def _build_openai_compatible_provider(settings: Settings) -> LLMProvider:
     )
 
 
+def _build_anthropic_provider(settings: Settings) -> LLMProvider:
+    """Build the Anthropic Messages provider, refusing to start without a key and model."""
+    llm = settings.llm
+    missing = [
+        name
+        for name, value in (
+            ("JOURNAL_LLM_API_KEY", llm.api_key),
+            ("JOURNAL_LLM_MODEL", llm.model),
+        )
+        if not value.strip()
+    ]
+    if missing:
+        raise ValueError(f"JOURNAL_LLM_PROVIDER=anthropic requires {', '.join(missing)} to be set")
+    return AnthropicProvider(
+        api_key=llm.api_key,
+        model=llm.model,
+        input_price_per_mtok=llm.input_price_per_mtok,
+        output_price_per_mtok=llm.output_price_per_mtok,
+        base_url=llm.base_url,
+        effort=llm.effort or None,
+    )
+
+
 _PROVIDER_FACTORIES: dict[str, Callable[[Settings], LLMProvider]] = {
     "openai_compatible": _build_openai_compatible_provider,
+    "anthropic": _build_anthropic_provider,
     "fake": lambda _s: FakeLLMProvider(),
 }
 

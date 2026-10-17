@@ -61,6 +61,36 @@ files = [
 ]
 
 [[package]]
+name = "anthropic"
+version = "1.11.0"
+description = "The official Python library for the anthropic API"
+optional = false
+python-versions = ">=3.10"
+groups = ["main"]
+files = [
+    {file = "anthropic-1.11.0-py3-none-any.whl", hash = "sha256:52f97b2c485cca7ac66058374f5073a3febb7e6849b16989c145d602a3efee21"},
+    {file = "anthropic-1.11.0.tar.gz", hash = "sha256:3906fabac7ad7b5b46c6186040398fc7826885c77ce34e4dd7849de16fc8d0f8"},
+]
+
+[package.dependencies]
+anyio = ">=4.1.0,<5"
+docstring-parser = ">=0.15,<1"
+httpx2 = ">=2.0.0,<3"
+jiter = ">=0.4.0,<1"
+pydantic = ">=1.10.0,<3"
+sniffio = ">=1,<2"
+typing-extensions = ">=4.14,<5"
+
+[package.extras]
+aiohttp = ["aiohttp (>=3.10.0,<4)"]
+aws = ["boto3 (>=1.28.57,<2)", "botocore (>=1.31.57,<2)"]
+bedrock = ["boto3 (>=1.28.57,<2)", "botocore (>=1.31.57,<2)"]
+google-cloud = ["google-auth[requests] (>=2,<3)"]
+mcp = ["mcp (>=1.0,<3) ; python_version >= \"3.10\""]
+vertex = ["google-auth[requests] (>=2,<3)"]
+webhooks = ["standardwebhooks (>=1.0.1,<2)"]
+
+[[package]]
 name = "anyio"
 version = "4.15.1"
 description = "High-level concurrency and networking framework on top of asyncio or Trio"
@@ -771,6 +801,23 @@ files = [
     {file = "distlib-0.4.0-py2.py3-none-any.whl", hash = "sha256:9659f7d87e46584a30b5780e43ac7a2143098441670ff0a49d5f9034c54a6c16"},
     {file = "distlib-0.4.0.tar.gz", hash = "sha256:feec40075be03a04501a973d81f633735b4b69f98b05450592310c0f401a4e0d"},
 ]
+
+[[package]]
+name = "docstring-parser"
+version = "0.18.0"
+description = "Parse Python docstrings in reST, Google and Numpydoc format"
+optional = false
+python-versions = ">=3.8"
+groups = ["main"]
+files = [
+    {file = "docstring_parser-0.18.0-py3-none-any.whl", hash = "sha256:b3fcbed555c47d8479be0796ef7e19c2670d428d72e96da63f3a40122860374b"},
+    {file = "docstring_parser-0.18.0.tar.gz", hash = "sha256:292510982205c12b1248696f44959db3cdd1740237a968ea1e2e7a900eeb2015"},
+]
+
+[package.extras]
+dev = ["pre-commit (>=2.16.0) ; python_version >= \"3.9\"", "pydoctor (>=25.4.0)", "pytest"]
+docs = ["pydoctor (>=25.4.0)"]
+test = ["pytest"]
 
 [[package]]
 name = "fastapi"
@@ -2768,6 +2815,7 @@ files = [
 ]
 
 [package.dependencies]
+anthropic = {version = ">=1.8.0", optional = true, markers = "extra == \"anthropic\""}
 anyio = ">=4.7.0"
 genai-prices = ">=0.1.9"
 griffelib = ">=2.0"
@@ -4255,4 +4303,4 @@ type = ["pytest-mypy"]
 [metadata]
 lock-version = "2.1"
 python-versions = "~3.12"
-content-hash = "fe98babbc640c0d293aa181bd0e6505d2b47c88493963ff046013ea60412b6aa"
+content-hash = "125a2e7de40d38d239ee763330322f1db09d6c4e8f4fd7f773223d63e4641d09"

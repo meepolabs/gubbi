@@ -14,6 +14,7 @@ _LLM_ENV_VARS = (
     "JOURNAL_LLM_BASE_URL",
     "JOURNAL_LLM_MODEL",
     "JOURNAL_LLM_API_KEY",
+    "JOURNAL_LLM_EFFORT",
     "JOURNAL_LLM_INPUT_PRICE_PER_MTOK",
     "JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK",
     "JOURNAL_EXTRACTION_MODE",
@@ -36,6 +37,7 @@ def test_defaults_select_openai_compatible_single_call_without_triage(
 
     assert config.provider == "openai_compatible"
     assert config.base_url == ""
+    assert config.effort == ""
     assert config.input_price_per_mtok == 1.00
     assert config.output_price_per_mtok == 5.00
     assert config.extraction_mode == "single"
@@ -47,6 +49,9 @@ def test_defaults_select_openai_compatible_single_call_without_triage(
     ("env_var", "raw", "field", "expected"),
     [
         ("JOURNAL_LLM_PROVIDER", "fake", "provider", "fake"),
+        ("JOURNAL_LLM_PROVIDER", "anthropic", "provider", "anthropic"),
+        ("JOURNAL_LLM_EFFORT", "low", "effort", "low"),
+        ("JOURNAL_LLM_EFFORT", "max", "effort", "max"),
         (
             "JOURNAL_LLM_BASE_URL",
             "https://llm.example.test/v1",
@@ -78,6 +83,8 @@ def test_env_var_overrides_field(
     ("env_var", "raw"),
     [
         ("JOURNAL_EXTRACTION_MODE", "three_call"),
+        ("JOURNAL_LLM_EFFORT", "extreme"),
+        ("JOURNAL_LLM_EFFORT", "LOW"),
         ("JOURNAL_LLM_INPUT_PRICE_PER_MTOK", "-1"),
         ("JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK", "-0.01"),
     ],
@@ -155,3 +162,24 @@ def test_base_url_unchecked_for_fake_provider(
     clean_llm_env.setenv("JOURNAL_LLM_BASE_URL", "http://llm.example.test/v1")
 
     assert LLMConfig().base_url == "http://llm.example.test/v1"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("url", "accepted"),
+    [
+        pytest.param("https://llm.example.test", True, id="https-accepted"),
+        pytest.param("http://llm.example.test", False, id="http-public-rejected"),
+    ],
+)
+def test_base_url_checked_for_anthropic_provider(
+    clean_llm_env: pytest.MonkeyPatch, url: str, accepted: bool
+) -> None:
+    clean_llm_env.setenv("JOURNAL_LLM_PROVIDER", "anthropic")
+    clean_llm_env.setenv("JOURNAL_LLM_BASE_URL", url)
+
+    if accepted:
+        assert LLMConfig().base_url == url
+    else:
+        with pytest.raises(ValidationError, match="JOURNAL_LLM_BASE_URL"):
+            LLMConfig()

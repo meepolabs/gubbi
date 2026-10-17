@@ -421,8 +421,11 @@ async def test_worker_startup_raises_for_unknown_provider(
     get_settings.cache_clear()
 
     ctx: dict[str, Any] = {}
-    with pytest.raises(ValueError, match="Unknown JOURNAL_LLM_PROVIDER"):
+    with pytest.raises(ValueError, match="Unknown JOURNAL_LLM_PROVIDER") as excinfo:
         await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    assert "'anthropic'" in str(excinfo.value)
+    assert "'openai_compatible'" in str(excinfo.value)
 
     get_settings.cache_clear()
 
@@ -486,6 +489,89 @@ async def test_worker_startup_fails_fast_when_openai_compatible_config_missing(
 
     ctx: dict[str, Any] = {}
     with pytest.raises(ValueError, match=missing_env):
+        await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    worker_module.init_pool.assert_not_called()  # type: ignore[attr-defined]
+    handles["pool"].close.assert_not_called()
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("effort_env", "expected_effort"),
+    [
+        pytest.param(None, None, id="effort-unset"),
+        pytest.param("low", "low", id="effort-low"),
+    ],
+)
+async def test_worker_startup_builds_anthropic_provider_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    effort_env: str | None,
+    expected_effort: str | None,
+) -> None:
+    """``JOURNAL_LLM_PROVIDER=anthropic`` builds the Messages provider from the settings."""
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", "anthropic")
+    _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    monkeypatch.delenv("JOURNAL_LLM_BASE_URL")
+    monkeypatch.setenv("JOURNAL_LLM_API_KEY", "stub-key")
+    monkeypatch.setenv("JOURNAL_LLM_INPUT_PRICE_PER_MTOK", "0.1")
+    monkeypatch.setenv("JOURNAL_LLM_OUTPUT_PRICE_PER_MTOK", "0.5")
+    if effort_env is None:
+        monkeypatch.delenv("JOURNAL_LLM_EFFORT", raising=False)
+    else:
+        monkeypatch.setenv("JOURNAL_LLM_EFFORT", effort_env)
+    built_provider = MagicMock()
+    provider_cls = MagicMock(return_value=built_provider)
+    monkeypatch.setattr(worker_module, "AnthropicProvider", provider_cls)
+    service_cls = MagicMock(return_value=MagicMock())
+    monkeypatch.setattr(worker_module, "ExtractionService", service_cls)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    await worker_module.startup(ctx)  # type: ignore[arg-type]
+
+    provider_cls.assert_called_once_with(
+        api_key="stub-key",
+        model=_STUB_LLM_MODEL,
+        input_price_per_mtok=0.1,
+        output_price_per_mtok=0.5,
+        base_url="",
+        effort=expected_effort,
+    )
+    service_cls.assert_called_once_with(built_provider)
+
+    get_settings.cache_clear()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "missing_env",
+    ["JOURNAL_LLM_API_KEY", "JOURNAL_LLM_MODEL"],
+)
+async def test_worker_startup_fails_fast_when_anthropic_config_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    missing_env: str,
+) -> None:
+    """anthropic without a key or model aborts before any pool opens."""
+    monkeypatch.setenv("JOURNAL_LLM_PROVIDER", "anthropic")
+    handles = _patch_worker_dependencies(monkeypatch)
+    _stub_telemetry(monkeypatch)
+    _stub_runner_with_capture(monkeypatch)
+    monkeypatch.setenv("JOURNAL_LLM_API_KEY", "stub-key")
+    monkeypatch.delenv(missing_env)
+
+    from gubbi.config import get_settings
+
+    get_settings.cache_clear()
+
+    ctx: dict[str, Any] = {}
+    with pytest.raises(ValueError, match=f"JOURNAL_LLM_PROVIDER=anthropic requires {missing_env}"):
         await worker_module.startup(ctx)  # type: ignore[arg-type]
 
     worker_module.init_pool.assert_not_called()  # type: ignore[attr-defined]

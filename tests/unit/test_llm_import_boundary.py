@@ -1,4 +1,4 @@
-"""The OpenAI client libraries stay behind the LLM provider seam."""
+"""The LLM client libraries stay behind the LLM provider seam."""
 
 from __future__ import annotations
 
@@ -8,12 +8,13 @@ import subprocess
 
 _REPO_ROOT = pathlib.Path(__file__).resolve().parents[2]
 _SEAM_DIR = pathlib.PurePosixPath("gubbi/extraction/llm")
-_GUARDED_PACKAGES = frozenset({"openai", "pydantic_ai", "httpx2"})
+_GUARDED_PACKAGES = frozenset({"openai", "anthropic", "pydantic_ai", "httpx2"})
 # Adapter tests drive a real client over an httpx2 transport, so they import
 # the client libraries directly. Nothing else outside the seam may.
 _EXEMPT_FILES = frozenset(
     {
         pathlib.PurePosixPath("tests/unit/test_openai_compatible_provider.py"),
+        pathlib.PurePosixPath("tests/unit/test_anthropic_messages_provider.py"),
         pathlib.PurePosixPath("tests/extraction/test_openai_compatible_live.py"),
     }
 )
@@ -48,7 +49,7 @@ def _files_importing_guarded_packages() -> set[pathlib.PurePosixPath]:
     }
 
 
-def test_openai_libraries_imported_only_inside_llm_package() -> None:
+def test_llm_client_libraries_imported_only_inside_llm_package() -> None:
     importers = _files_importing_guarded_packages()
 
     outside = sorted(
@@ -63,14 +64,18 @@ def test_scan_covers_every_top_level_tree() -> None:
     assert {"gubbi", "tests", "tools", "scripts"} <= roots
 
 
-def test_scan_detects_the_adapter_and_each_exempt_test() -> None:
+def test_scan_detects_each_adapter_and_each_exempt_test() -> None:
     importers = _files_importing_guarded_packages()
 
     assert _SEAM_DIR / "openai_compatible.py" in importers
+    assert _SEAM_DIR / "anthropic_messages.py" in importers
     assert importers >= _EXEMPT_FILES
 
 
 def test_scan_detects_each_import_spelling() -> None:
-    source = "import openai.types\nfrom pydantic_ai.direct import model_request\nimport httpx2\n"
+    source = (
+        "import openai.types\nfrom pydantic_ai.direct import model_request\nimport httpx2\n"
+        "from anthropic import AsyncAnthropic\n"
+    )
 
-    assert _imported_top_level_packages(source) == {"openai", "pydantic_ai", "httpx2"}
+    assert _imported_top_level_packages(source) == _GUARDED_PACKAGES

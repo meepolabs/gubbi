@@ -1,10 +1,15 @@
-"""Live smoke: the extraction job end to end against a real OpenAI-compatible endpoint.
+"""Live smoke: the extraction job end to end against a real LLM provider.
 
-Skipped unless ``JOURNAL_LLM_BASE_URL``, ``JOURNAL_LLM_MODEL`` and
-``GUBBI_LIVE_SMOKE_CONVERSATION`` are set. The last names a JSON file holding
-one conversation as ``{"platform": ..., "messages": [{"role", "content",
-"timestamp"}, ...]}`` (``platform`` optional); a long one (several chunks) is
-the point. ``JOURNAL_LLM_API_KEY`` may stay unset for keyless gateways.
+``JOURNAL_LLM_PROVIDER`` picks the provider: ``openai_compatible`` (default)
+or ``anthropic``. Skipped unless ``GUBBI_LIVE_SMOKE_CONVERSATION`` and the
+provider's own settings are set: ``JOURNAL_LLM_BASE_URL`` and
+``JOURNAL_LLM_MODEL`` for ``openai_compatible`` (``JOURNAL_LLM_API_KEY`` may
+stay unset for keyless gateways); ``JOURNAL_LLM_API_KEY`` and
+``JOURNAL_LLM_MODEL`` for ``anthropic`` (``JOURNAL_LLM_BASE_URL`` and
+``JOURNAL_LLM_EFFORT`` optional). ``GUBBI_LIVE_SMOKE_CONVERSATION`` names a
+JSON file holding one conversation as ``{"platform": ..., "messages":
+[{"role", "content", "timestamp"}, ...]}`` (``platform`` optional); a long one
+(several chunks) is the point.
 
 Everything is real: the provider, chunking, the pipeline, embeddings, dedupe
 and persistence on the RLS-enforced test Postgres. The run's numbers are
@@ -19,13 +24,14 @@ import os
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
 from gubbi.constants import LLM_MAX_OUTPUT_TOKENS
 from gubbi.extraction.dedupe import normalize_text
 from gubbi.extraction.jobs.extract_conversation import extract_conversation
+from gubbi.extraction.llm.anthropic_messages import AnthropicEffort, AnthropicProvider
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from tests.fixtures.extraction_db import SeedMessage, job_ctx, seed_conversation, seed_job
 
@@ -35,16 +41,27 @@ if TYPE_CHECKING:
     import asyncpg
 
     from gubbi.crypto.cipher import ContentCipher
+    from gubbi.extraction.llm.provider import LLMProvider
 
-_REQUIRED_ENV = ("JOURNAL_LLM_BASE_URL", "JOURNAL_LLM_MODEL", "GUBBI_LIVE_SMOKE_CONVERSATION")
+_PROVIDER = os.environ.get("JOURNAL_LLM_PROVIDER", "").strip().lower() or "openai_compatible"
+_PROVIDER_ENV: dict[str, tuple[str, ...]] = {
+    "openai_compatible": ("JOURNAL_LLM_BASE_URL", "JOURNAL_LLM_MODEL"),
+    "anthropic": ("JOURNAL_LLM_API_KEY", "JOURNAL_LLM_MODEL"),
+}
+_REQUIRED_ENV = (*_PROVIDER_ENV.get(_PROVIDER, ()), "GUBBI_LIVE_SMOKE_CONVERSATION")
 _MISSING_ENV = [name for name in _REQUIRED_ENV if not os.environ.get(name, "").strip()]
+_SKIP_REASON = (
+    f"live extraction smoke supports JOURNAL_LLM_PROVIDER in {sorted(_PROVIDER_ENV)}"
+    if _PROVIDER not in _PROVIDER_ENV
+    else f"live extraction smoke with {_PROVIDER} needs {', '.join(_REQUIRED_ENV)} set"
+)
 
 pytestmark = [
     pytest.mark.asyncio(loop_scope="session"),
     pytest.mark.integration,
     pytest.mark.skipif(
-        bool(_MISSING_ENV),
-        reason=f"live extraction smoke needs {', '.join(_REQUIRED_ENV)} set",
+        _PROVIDER not in _PROVIDER_ENV or bool(_MISSING_ENV),
+        reason=_SKIP_REASON,
     ),
 ]
 
@@ -77,7 +94,18 @@ def _load_conversation(path: Path) -> tuple[str | None, list[SeedMessage]]:
     return (platform if platform in _KNOWN_PLATFORMS else None), messages
 
 
-def _provider() -> OpenAICompatibleProvider:
+def _provider() -> LLMProvider:
+    if _PROVIDER == "anthropic":
+        effort = os.environ.get("JOURNAL_LLM_EFFORT", "").strip()
+        return AnthropicProvider(
+            api_key=os.environ["JOURNAL_LLM_API_KEY"],
+            model=os.environ["JOURNAL_LLM_MODEL"],
+            input_price_per_mtok=1.0,
+            output_price_per_mtok=5.0,
+            base_url=os.environ.get("JOURNAL_LLM_BASE_URL", ""),
+            effort=cast("AnthropicEffort", effort) if effort else None,
+            max_output_tokens=LLM_MAX_OUTPUT_TOKENS,
+        )
     return OpenAICompatibleProvider(
         base_url=os.environ["JOURNAL_LLM_BASE_URL"],
         api_key=os.environ.get("JOURNAL_LLM_API_KEY", ""),
@@ -136,6 +164,7 @@ async def test_a_long_conversation_extracts_through_the_live_endpoint(
             f"{key}={value}"
             for key, value in {
                 **numbers,
+                "provider": _PROVIDER,
                 "model": os.environ["JOURNAL_LLM_MODEL"],
                 "topic_path": result["topic_path"],
                 "wall_seconds": wall_seconds,

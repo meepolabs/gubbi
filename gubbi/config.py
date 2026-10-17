@@ -339,10 +339,16 @@ class LLMConfig(BaseSettings):
 
     api_key: str = Field(default="", validation_alias="JOURNAL_LLM_API_KEY")
     # ``openai_compatible`` targets any OpenAI-compatible chat-completions
-    # endpoint at ``base_url``; ``fake`` is the in-process test stub.
+    # endpoint at ``base_url``; ``anthropic`` targets the Anthropic Messages
+    # API (``base_url`` optional); ``fake`` is the in-process test stub.
     provider: str = Field(default="openai_compatible", validation_alias="JOURNAL_LLM_PROVIDER")
     base_url: str = Field(default="", validation_alias="JOURNAL_LLM_BASE_URL")
     model: str = Field(default="", validation_alias="JOURNAL_LLM_MODEL")
+    # Anthropic only: ``output_config.effort`` sent with every request; empty
+    # leaves the model's default. Ignored by the other providers.
+    effort: Literal["", "low", "medium", "high", "xhigh", "max"] = Field(
+        default="", validation_alias="JOURNAL_LLM_EFFORT"
+    )
     # Prices (USD per million tokens) feed the cents estimate recorded on each
     # job row for cost reporting; budgets are counted in weighted tokens.
     input_price_per_mtok: float = Field(
