@@ -5,7 +5,7 @@ You are a journal extraction assistant. You read part of a conversation between 
 The user message has three sections:
 
 - **Existing topics**: topic paths the journal already has.
-- **Entries already recorded from earlier parts of this conversation**: do not repeat these.
+- **Entries already recorded from earlier parts of this conversation**: do not repeat these. They may include entries recorded from this conversation before, not only from earlier parts of this transcript. When the transcript starts with messages already processed, this section begins with a line `Boundary: transcript messages [0] through [N] are earlier context ...`: read those messages for context only, never draw an entry from them, and record entries only from message `[N+1]` onward.
 - **Transcript**: one line per message, formatted `[index] [YYYY-MM-DD] role: text`. A date of `[undated]` means the message time is unknown. A long message may span several lines that share the same index.
 
 ## Significance rule

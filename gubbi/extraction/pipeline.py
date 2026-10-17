@@ -27,7 +27,14 @@ from typing import TYPE_CHECKING, Any, Final, Literal, Protocol
 import structlog
 from opentelemetry import trace
 
-from gubbi.extraction.chunking import Chunk, chunk_messages, render_prior_entries, split_in_two
+from gubbi.constants import PRIOR_ENTRIES_MAX_TOKENS
+from gubbi.extraction.chunking import (
+    Chunk,
+    chunk_messages,
+    estimate_tokens,
+    render_prior_entries,
+    split_in_two,
+)
 from gubbi.extraction.dating import resolve_event_date
 from gubbi.extraction.llm.provider import (
     LLMDeadlineError,
@@ -46,7 +53,7 @@ if TYPE_CHECKING:
     from opentelemetry.trace import Span
 
     from gubbi.extraction.chunk_extraction import ChunkExtraction, TriageVerdict
-    from gubbi.extraction.chunking import ChunkableMessage
+    from gubbi.extraction.chunking import ChunkableMessage, PriorEntry
     from gubbi.extraction.service import ExtractionService
 
 __all__: list[str] = [
@@ -68,6 +75,12 @@ ExtractionMode = Literal["single", "two_call"]
 _STAGE_TRIAGE: Final = "triage"
 _STAGE_CATEGORIZE: Final = "categorize"
 _STAGE_EXTRACT: Final = "extract"
+
+_BOUNDARY_NOTE: Final = (
+    "Boundary: transcript messages [0] through [{last}] are earlier context whose entries "
+    "were already recorded; read them for context only and record entries only from "
+    "message [{first}] onward."
+)
 
 
 @dataclass(frozen=True)
@@ -155,6 +168,9 @@ class _Run:
     mode: ExtractionMode
     triage_enabled: bool
     on_spend: Callable[[PipelineSpend], None]
+    context_count: int
+    prior_entries: tuple[PriorEntry, ...]
+    boundary_note: str
 
 
 @dataclass(frozen=True)
@@ -205,18 +221,28 @@ async def run_pipeline(
     mode: ExtractionMode = "single",
     triage_enabled: bool = False,
     on_spend: Callable[[PipelineSpend], None] = _ignore_spend,
+    context_count: int = 0,
+    prior_entries: Sequence[PriorEntry] = (),
 ) -> PipelineOutcome:
     """Extract topic, summary and dated entry candidates from a role-filtered transcript.
 
     ``deadline`` is a reading of ``clock`` (``time.monotonic`` by default)
     after which no further LLM call starts; a call in flight gets the time
-    left as its budget, so its retries end at the deadline too. ``source_message_index`` on each
-    candidate indexes ``messages``. ``mode`` picks one structured call per
-    chunk (``single``) or a categorize call followed by an entries call per
-    chunk (``two_call``); ``triage_enabled`` screens each chunk first. Triage
+    left as its budget, so its retries end at the deadline too.
+    ``source_message_index`` on each candidate indexes ``messages``, and
+    dating reads the message at that index. ``mode`` picks one structured
+    call per chunk (``single``) or a categorize call followed by an entries
+    call per chunk (``two_call``); ``triage_enabled`` screens each chunk first. Triage
     calls count toward ``usage`` and ``llm_calls`` like any other call.
     ``on_spend`` receives the running totals once the transcript is chunked
     and again after every call, failed calls included.
+
+    The first ``context_count`` messages are context already extracted: every
+    extract call is told so, and a candidate whose ``source_message_index``
+    falls among them is dropped (a candidate with no index is kept).
+    ``prior_entries`` are entries recorded earlier from the same conversation,
+    oldest first; they are shown to every extract call ahead of the run's own
+    candidates.
 
     Raises:
         PipelineFailure: any call failed, a chunk stayed truncated after one
@@ -233,6 +259,9 @@ async def run_pipeline(
         mode=mode,
         triage_enabled=triage_enabled,
         on_spend=on_spend,
+        context_count=context_count,
+        prior_entries=tuple(prior_entries),
+        boundary_note=_boundary_note(context_count),
     )
     chunks = chunk_messages(messages)
     progress = _Progress(chunks=len(chunks))
@@ -288,7 +317,7 @@ async def _extract_chunk_step(
 
 
 async def _extract(run: _Run, progress: _Progress, chunk: Chunk, chunk_index: int) -> _Progress:
-    prior = render_prior_entries(progress.candidates)
+    prior = _prior_text(run, progress)
     request: _Request[ChunkExtraction]
     if run.mode == "two_call":
         topic_path = progress.extractions[0].topic_path
@@ -428,6 +457,25 @@ def _spend_of(progress: _Progress) -> PipelineSpend:
     )
 
 
+def _boundary_note(context_count: int) -> str:
+    if context_count <= 0:
+        return ""
+    return _BOUNDARY_NOTE.format(last=context_count - 1, first=context_count)
+
+
+def _prior_text(run: _Run, progress: _Progress) -> str:
+    entries = (*run.prior_entries, *progress.candidates)
+    if not run.boundary_note:
+        return render_prior_entries(entries)
+    budget = PRIOR_ENTRIES_MAX_TOKENS - estimate_tokens(f"{run.boundary_note}\n")
+    rendered = render_prior_entries(entries, budget)
+    return run.boundary_note if not rendered else f"{run.boundary_note}\n{rendered}"
+
+
+def _in_context_tail(run: _Run, source_message_index: int | None) -> bool:
+    return source_message_index is not None and source_message_index < run.context_count
+
+
 def _candidates(run: _Run, extraction: ChunkExtraction) -> tuple[ExtractedCandidate, ...]:
     return tuple(
         ExtractedCandidate(
@@ -444,6 +492,7 @@ def _candidates(run: _Run, extraction: ChunkExtraction) -> tuple[ExtractedCandid
             source_message_index=entry.source_message_index,
         )
         for entry in extraction.entries
+        if not _in_context_tail(run, entry.source_message_index)
     )
 
 
