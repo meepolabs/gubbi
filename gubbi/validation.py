@@ -4,6 +4,8 @@ import re
 from datetime import datetime
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from gubbi.constants import MAX_MSG_CHARS, MSG_TRUNCATION_MARKER
+
 __all__: list[str] = [
     "harden_llm_topic_path",
     "is_future_date",
@@ -12,6 +14,7 @@ __all__: list[str] = [
     "sanitize_freetext",
     "sanitize_label",
     "slugify",
+    "truncate_synced_message",
     "validate_date",
     "validate_title",
     "validate_topic",
@@ -40,6 +43,24 @@ def sanitize_freetext(value: str, max_len: int = 1_000_000) -> str:
     preserves tabs, newlines, and carriage returns for markdown.
     """
     return _CONTROL_CHARS.sub("", value)[:max_len]
+
+
+# Lone surrogates survive json.loads and Pydantic but make UTF-8 encoding
+# (encryption, asyncpg) raise.
+_LONE_SURROGATES = re.compile(r"[\ud800-\udfff]")
+
+
+def truncate_synced_message(text: str) -> tuple[str, bool]:
+    """Sanitize a synced message and cut it to MAX_MSG_CHARS with a visible marker.
+
+    Returns the cleaned text and whether it was cut. Idempotent: a cut result is
+    exactly MAX_MSG_CHARS long, so a second pass returns it unchanged.
+    """
+    cleaned = _LONE_SURROGATES.sub("\ufffd", sanitize_freetext(text))
+    if len(cleaned) <= MAX_MSG_CHARS:
+        return cleaned, False
+    keep = MAX_MSG_CHARS - len(MSG_TRUNCATION_MARKER)
+    return cleaned[:keep] + MSG_TRUNCATION_MARKER, True
 
 
 _TOOL_CALL_PATTERNS = (

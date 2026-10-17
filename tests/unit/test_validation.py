@@ -3,11 +3,15 @@
 import pytest
 from pydantic import ValidationError
 
+import gubbi.constants
+import gubbi.tools.constants
+from gubbi.constants import MAX_MSG_CHARS, MSG_TRUNCATION_MARKER
 from gubbi.validation import (
     harden_llm_topic_path,
     sanitize_freetext,
     sanitize_label,
     slugify,
+    truncate_synced_message,
     validate_title,
     validate_topic,
 )
@@ -136,6 +140,53 @@ class TestSanitizeFreetext:
     def test_custom_max_length(self) -> None:
         result = sanitize_freetext("a" * 1000, max_len=500)
         assert len(result) == 500
+
+
+_OVER_LIMIT = "a" * (MAX_MSG_CHARS + 1)
+_TRUNCATED_OVER_LIMIT = "a" * (MAX_MSG_CHARS - len(MSG_TRUNCATION_MARKER)) + MSG_TRUNCATION_MARKER
+
+_SYNCED_MESSAGE_CASES = [
+    pytest.param("hello world", "hello world", False, id="under_limit_unchanged"),
+    pytest.param("a" * MAX_MSG_CHARS, "a" * MAX_MSG_CHARS, False, id="at_limit_unchanged"),
+    pytest.param(_OVER_LIMIT, _TRUNCATED_OVER_LIMIT, True, id="limit_plus_one_truncated"),
+    pytest.param("a\x00b\x1bc\x7fd\n", "abcd\n", False, id="control_chars_stripped"),
+    pytest.param("hi \ud800 there \udfff", "hi \ufffd there \ufffd", False, id="lone_surrogate"),
+    pytest.param(
+        "\U0001f600" * MAX_MSG_CHARS,
+        "\U0001f600" * MAX_MSG_CHARS,
+        False,
+        id="astral_counts_as_one_code_point",
+    ),
+]
+
+
+class TestTruncateSyncedMessage:
+    """Sanitize, surrogate-repair and cut synced message text."""
+
+    @pytest.mark.parametrize(("raw", "expected", "expected_cut"), _SYNCED_MESSAGE_CASES)
+    def test_cleans_and_cuts(self, raw: str, expected: str, expected_cut: bool) -> None:
+        text, was_truncated = truncate_synced_message(raw)
+
+        text.encode("utf-8")
+        assert text == expected
+        assert was_truncated is expected_cut
+        assert len(text) <= MAX_MSG_CHARS
+        if expected_cut:
+            assert text.endswith(MSG_TRUNCATION_MARKER)
+
+    @pytest.mark.parametrize(("raw", "expected", "expected_cut"), _SYNCED_MESSAGE_CASES)
+    def test_second_pass_returns_same_text(
+        self, raw: str, expected: str, expected_cut: bool
+    ) -> None:
+        first, _ = truncate_synced_message(raw)
+
+        second, second_cut = truncate_synced_message(first)
+
+        assert second == first
+        assert second_cut is False
+
+    def test_tool_layer_reexports_the_same_cap(self) -> None:
+        assert gubbi.tools.constants.MAX_MSG_CHARS is gubbi.constants.MAX_MSG_CHARS
 
 
 class TestSlugify:

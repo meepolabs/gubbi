@@ -56,6 +56,13 @@ LLM_BACKOFF_BASE_SECS: Final = 1.0  # Backoff before the second attempt; doubles
 LLM_BACKOFF_CAP_SECS: Final = 60.0
 LLM_MAX_OUTPUT_TOKENS: Final = 16_000  # Output-token cap sent with every request
 
+# -- Message text limits -------------------------------------------------------
+
+# Per-message character cap for stored conversation messages.
+MAX_MSG_CHARS: Final = 20_000
+# Appended inside MAX_MSG_CHARS when a message is cut.
+MSG_TRUNCATION_MARKER: Final = "[truncated]"
+
 # -- Pagination -----------------------------------------------------------------
 
 DEFAULT_PAGE_SIZE: Final = 10  # Default repository pagination size

@@ -2,11 +2,10 @@
 
 from typing import Final
 
+from gubbi.constants import MAX_MSG_CHARS as MAX_MSG_CHARS
+
 # Allowed message roles when saving conversations
 KEEP_ROLES: Final = frozenset({"user", "assistant"})
-
-# Per-message character cap -- prevents runaway tool output from bloating storage
-MAX_MSG_CHARS: Final = 20_000
 
 # Per-entry content character cap -- applied pre-sanitization in journal_append_entry
 # and journal_update_entry so we report the real input size, not the post-strip size.
