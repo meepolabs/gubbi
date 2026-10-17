@@ -75,6 +75,10 @@ CHARS_PER_TOKEN: Final = 3.5
 CHUNK_TARGET_TOKENS: Final = 50_000  # Max estimated tokens of transcript per LLM call
 CHUNK_OVERLAP_TOKENS: Final = 2_000  # Whole messages repeated from the previous chunk
 PRIOR_ENTRIES_MAX_TOKENS: Final = 4_000  # Budget for earlier chunks' entries sent forward
+# Already-extracted messages loaded before the new ones as read-only context.
+EXTRACTION_TAIL_MESSAGES: Final = 6
+# Newest entries of the same conversation sent as prior entries to a re-extraction.
+EXTRACTION_THREAD_ENTRIES_LIMIT: Final = 100
 
 # -- Extraction skip rules ------------------------------------------------------
 
