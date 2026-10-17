@@ -675,6 +675,7 @@ def _null_text_body() -> dict[str, Any]:
     for block in body["content"]:
         if block["type"] == "text":
             block["text"] = None
+    body["id"] = _OUTPUT_SENTINEL
     return body
 
 
