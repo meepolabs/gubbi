@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import pathlib
 import traceback
 from collections.abc import Callable, Iterator
@@ -19,6 +20,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from anthropic._utils import _logs as anthropic_logs
 from anthropic.types.beta import BetaMessage
 
 from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
@@ -57,12 +59,14 @@ class _Recorder:
         self.requests: list[dict[str, Any]] = []
         self.urls: list[str] = []
         self.api_keys: list[str | None] = []
+        self.authorizations: list[str | None] = []
         self._respond = respond
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(json.loads(request.content))
         self.urls.append(str(request.url))
         self.api_keys.append(request.headers.get("x-api-key"))
+        self.authorizations.append(request.headers.get("authorization"))
         return self._respond(request)
 
 
@@ -124,6 +128,28 @@ def _provider(
         max_output_tokens=512,
         timeout=5.0,
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(recorder)),
+        sleep=sleep,
+        clock=sleep.clock,
+    )
+
+
+def _default_client_provider(
+    monkeypatch: pytest.MonkeyPatch, recorder: _Recorder, base_url: str
+) -> AnthropicProvider:
+    """A provider on the HTTP client it builds itself, its transport answered by ``recorder``."""
+    mock = httpx2.MockTransport(recorder)
+
+    async def handle(_self: httpx2.AsyncHTTPTransport, request: httpx2.Request) -> httpx2.Response:
+        return await mock.handle_async_request(request)
+
+    monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", handle)
+    sleep = _SleepLog()
+    return AnthropicProvider(
+        api_key="test-key",
+        model="fixture-model",
+        input_price_per_mtok=0.1,
+        output_price_per_mtok=0.5,
+        base_url=base_url,
         sleep=sleep,
         clock=sleep.clock,
     )
@@ -271,6 +297,73 @@ async def test_requests_go_to_the_configured_or_default_base_url(
     await _provider(recorder, base_url=base_url).complete(_MESSAGES, "system prompt", _SCHEMA)
 
     assert recorder.urls[0].startswith(expected_prefix)
+
+
+async def test_custom_headers_from_the_environment_cannot_replace_the_configured_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", "X-Api-Key: FROM_ENV\nAuthorization: Bearer X")
+    recorder = _Recorder(_json_response(_end_turn_body()))
+
+    await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert recorder.api_keys == ["test-key"]
+    assert recorder.authorizations == [None]
+
+
+async def test_redirect_is_not_followed_and_fails_permanently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_host = "llm.example.test"
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == configured_host:
+            return httpx2.Response(307, headers={"Location": "https://elsewhere.example.test/v1"})
+        return httpx2.Response(200, json=_end_turn_body())
+
+    recorder = _Recorder(respond)
+    provider = _default_client_provider(monkeypatch, recorder, f"https://{configured_host}")
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMPermanentError
+    assert [httpx2.URL(url).host for url in recorder.urls] == [configured_host]
+
+
+@pytest.fixture
+def sdk_debug_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[logging.LogRecord]]:
+    """Apply ``ANTHROPIC_LOG=debug`` as SDK import does; collect the SDK's records."""
+    sdk_logger = logging.getLogger("anthropic")
+    saved = [(logger, logger.level) for logger in (sdk_logger, logging.getLogger("httpx2"))]
+    root_handlers = list(logging.getLogger().handlers)
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler(level=logging.DEBUG)
+    handler.emit = records.append  # type: ignore[method-assign]
+    monkeypatch.setenv("ANTHROPIC_LOG", "debug")
+    anthropic_logs.setup_logging()
+    sdk_logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        sdk_logger.removeHandler(handler)
+        for logger, level in saved:
+            logger.setLevel(level)
+        logging.getLogger().handlers[:] = root_handlers
+
+
+async def test_sdk_debug_logging_emits_nothing_below_warning(
+    sdk_debug_logging: list[logging.LogRecord],
+) -> None:
+    assert logging.getLogger("anthropic").isEnabledFor(logging.DEBUG)
+    recorder = _Recorder(_json_response(_end_turn_body()))
+    messages: list[LLMMessage] = [{"role": "user", "content": _OUTPUT_SENTINEL}]
+
+    await _provider(recorder).complete(messages, "system prompt", _SCHEMA)
+
+    assert _OUTPUT_SENTINEL in json.dumps(recorder.requests[0])
+    assert not [r for r in sdk_debug_logging if r.levelno < logging.WARNING]
+    assert not [r for r in sdk_debug_logging if _OUTPUT_SENTINEL in r.getMessage()]
 
 
 # -- Response mapping ----------------------------------------------------------------
@@ -480,6 +573,36 @@ async def test_upstream_body_never_reaches_the_raised_error_or_its_traceback(
     assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__context__ is None
+
+
+@pytest.mark.parametrize(
+    "content_type",
+    [
+        pytest.param(None, id="untyped-body"),
+        pytest.param("application/json", id="json-typed-body"),
+    ],
+)
+async def test_malformed_success_body_is_transient_and_kept_out_of_the_error(
+    content_type: str | None,
+) -> None:
+    headers = {"content-type": content_type} if content_type else None
+
+    def respond(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200, content=f"not json {_OUTPUT_SENTINEL}".encode(), headers=headers
+        )
+
+    recorder = _Recorder(respond)
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert _OUTPUT_SENTINEL not in str(excinfo.value)
+    assert _OUTPUT_SENTINEL not in repr(excinfo.value.args)
 
 
 def test_estimate_cost_uses_configured_prices() -> None:

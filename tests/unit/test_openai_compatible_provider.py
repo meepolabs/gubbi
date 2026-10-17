@@ -12,6 +12,7 @@ import asyncio
 import copy
 import email.utils
 import json
+import logging
 import pathlib
 import time
 import traceback
@@ -21,6 +22,7 @@ from typing import Any
 
 import httpx2
 import pytest
+from openai._utils import _logs as openai_logs
 
 from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
 from gubbi.extraction.llm import model_provider
@@ -59,11 +61,15 @@ class _Recorder:
     def __init__(self, respond: Callable[[httpx2.Request], httpx2.Response]) -> None:
         self.requests: list[dict[str, Any]] = []
         self.authorizations: list[str | None] = []
+        self.urls: list[str] = []
+        self.headers: list[httpx2.Headers] = []
         self._respond = respond
 
     def __call__(self, request: httpx2.Request) -> httpx2.Response:
         self.requests.append(json.loads(request.content))
         self.authorizations.append(request.headers.get("authorization"))
+        self.urls.append(str(request.url))
+        self.headers.append(request.headers)
         return self._respond(request)
 
 
@@ -140,6 +146,28 @@ def _provider(
         http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(recorder)),
         sleep=sleep,
         clock=clock or sleep.clock,
+    )
+
+
+def _default_client_provider(
+    monkeypatch: pytest.MonkeyPatch, recorder: _Recorder, base_url: str
+) -> OpenAICompatibleProvider:
+    """A provider on the HTTP client it builds itself, its transport answered by ``recorder``."""
+    mock = httpx2.MockTransport(recorder)
+
+    async def handle(_self: httpx2.AsyncHTTPTransport, request: httpx2.Request) -> httpx2.Response:
+        return await mock.handle_async_request(request)
+
+    monkeypatch.setattr(httpx2.AsyncHTTPTransport, "handle_async_request", handle)
+    sleep = _SleepLog()
+    return OpenAICompatibleProvider(
+        base_url=base_url,
+        api_key="test-key",
+        model="fixture-model",
+        input_price_per_mtok=1.0,
+        output_price_per_mtok=5.0,
+        sleep=sleep,
+        clock=sleep.clock,
     )
 
 
@@ -566,6 +594,82 @@ async def test_api_key_is_optional_and_passed_through_when_set(
 
 
 @pytest.mark.parametrize(
+    ("api_key", "expected_authorization"),
+    [
+        pytest.param("", "Bearer unused", id="empty-key"),
+        pytest.param("real-key", "Bearer real-key", id="set-key"),
+    ],
+)
+async def test_headers_from_the_environment_never_reach_the_request(
+    monkeypatch: pytest.MonkeyPatch, api_key: str, expected_authorization: str
+) -> None:
+    monkeypatch.setenv("OPENAI_CUSTOM_HEADERS", "Authorization: Bearer FROM_ENV")
+    monkeypatch.setenv("OPENAI_ORG_ID", "FROM_ENV")
+    monkeypatch.setenv("OPENAI_PROJECT_ID", "FROM_ENV")
+    recorder = _Recorder(_json_response(_stop_body()))
+
+    await _provider(recorder, api_key=api_key).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert recorder.authorizations == [expected_authorization]
+    assert "openai-organization" not in recorder.headers[0]
+    assert "openai-project" not in recorder.headers[0]
+
+
+async def test_redirect_is_not_followed_and_fails_permanently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configured_host = "llm.example.test"
+
+    def respond(request: httpx2.Request) -> httpx2.Response:
+        if request.url.host == configured_host:
+            return httpx2.Response(307, headers={"Location": "https://elsewhere.example.test/v1"})
+        return httpx2.Response(200, json=_stop_body())
+
+    recorder = _Recorder(respond)
+    provider = _default_client_provider(monkeypatch, recorder, f"https://{configured_host}/v1")
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMPermanentError
+    assert [httpx2.URL(url).host for url in recorder.urls] == [configured_host]
+
+
+@pytest.fixture
+def sdk_debug_logging(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[logging.LogRecord]]:
+    """Apply ``OPENAI_LOG=debug`` as SDK import does; collect the SDK's records."""
+    sdk_logger = logging.getLogger("openai")
+    saved_level = sdk_logger.level
+    root_handlers = list(logging.getLogger().handlers)
+    records: list[logging.LogRecord] = []
+    handler = logging.Handler(level=logging.DEBUG)
+    handler.emit = records.append  # type: ignore[method-assign]
+    monkeypatch.setenv("OPENAI_LOG", "debug")
+    openai_logs.setup_logging()
+    sdk_logger.addHandler(handler)
+    try:
+        yield records
+    finally:
+        sdk_logger.removeHandler(handler)
+        sdk_logger.setLevel(saved_level)
+        logging.getLogger().handlers[:] = root_handlers
+
+
+async def test_sdk_debug_logging_emits_nothing_below_warning(
+    sdk_debug_logging: list[logging.LogRecord],
+) -> None:
+    assert logging.getLogger("openai").isEnabledFor(logging.DEBUG)
+    recorder = _Recorder(_json_response(_stop_body()))
+    messages: list[LLMMessage] = [{"role": "user", "content": _OUTPUT_SENTINEL}]
+
+    await _provider(recorder).complete(messages, "system prompt", _SCHEMA)
+
+    assert _OUTPUT_SENTINEL in json.dumps(recorder.requests[0])
+    assert not [r for r in sdk_debug_logging if r.levelno < logging.WARNING]
+    assert not [r for r in sdk_debug_logging if _OUTPUT_SENTINEL in r.getMessage()]
+
+
+@pytest.mark.parametrize(
     ("responders", "expected_attempts"),
     [
         pytest.param((_status(503),), LLM_MAX_ATTEMPTS, id="exhausted-retries"),
@@ -688,6 +792,27 @@ def _malformed_completion(_request: httpx2.Request) -> httpx2.Response:
     body = _stop_body()
     body["choices"][0]["finish_reason"] = _OUTPUT_SENTINEL
     return httpx2.Response(200, json=body)
+
+
+async def test_malformed_json_success_body_is_transient_and_kept_out_of_the_error() -> None:
+    def respond(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            content=f"not json {_OUTPUT_SENTINEL}".encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    recorder = _Recorder(respond)
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert _OUTPUT_SENTINEL not in str(excinfo.value)
+    assert _OUTPUT_SENTINEL not in repr(excinfo.value.args)
 
 
 @pytest.mark.parametrize(

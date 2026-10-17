@@ -15,10 +15,11 @@ capability for whichever model is configured.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from typing import TYPE_CHECKING, ClassVar, Literal
+from typing import TYPE_CHECKING, ClassVar, Literal, cast
 
-from anthropic import APITimeoutError, AsyncAnthropic
+from anthropic import APIStatusError, APITimeoutError, AsyncAnthropic, DefaultAsyncHttpxClient, omit
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.profiles.anthropic import AnthropicModelProfile
 from pydantic_ai.providers.anthropic import AnthropicProvider as PydanticAIAnthropicProvider
@@ -47,6 +48,10 @@ _DEFAULT_BASE_URL = "https://api.anthropic.com"
 
 _THINKING_DETAIL_KEY = "thinking_tokens"
 
+# ``ANTHROPIC_LOG`` lowers this logger's level at SDK import; at debug the
+# SDK logs each request's JSON body, which carries conversation text.
+_SDK_LOGGER = "anthropic"
+
 
 class AnthropicProvider(PydanticAIModelProvider):
     """Structured completions against the Anthropic Messages API, with bounded retries.
@@ -61,6 +66,7 @@ class AnthropicProvider(PydanticAIModelProvider):
     """
 
     _timeout_errors: ClassVar[tuple[type[BaseException], ...]] = (APITimeoutError,)
+    _status_errors: ClassVar[tuple[type[BaseException], ...]] = (APIStatusError,)
 
     def __init__(
         self,
@@ -76,12 +82,14 @@ class AnthropicProvider(PydanticAIModelProvider):
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        logging.getLogger(_SDK_LOGGER).setLevel(logging.WARNING)
         client = AsyncAnthropic(
             api_key=api_key,
             base_url=base_url or _DEFAULT_BASE_URL,
             max_retries=0,
             timeout=timeout,
-            http_client=http_client,
+            http_client=http_client or DefaultAsyncHttpxClient(follow_redirects=False),
+            default_headers=_pinned_auth_headers(api_key),
         )
         chat_model = AnthropicModel(
             model,
@@ -114,3 +122,14 @@ class AnthropicProvider(PydanticAIModelProvider):
             cached_input=usage.cache_read_tokens,
             reasoning=usage.details.get(_THINKING_DETAIL_KEY, 0),
         )
+
+
+def _pinned_auth_headers(api_key: str) -> dict[str, str]:
+    """Headers that keep ``ANTHROPIC_CUSTOM_HEADERS`` from replacing the configured key.
+
+    The SDK merges that variable's headers after its own auth headers, so
+    only explicit defaults outrank it.
+    """
+    # The SDK types ``default_headers`` as ``str`` values but removes a
+    # header whose value is ``omit``.
+    return {"X-Api-Key": api_key, "Authorization": cast("str", omit)}

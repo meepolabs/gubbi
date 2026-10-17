@@ -9,10 +9,11 @@ chat model and maps its usage.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, cast
 
-from openai import APITimeoutError, AsyncOpenAI
+from openai import APIStatusError, APITimeoutError, AsyncOpenAI, DefaultAsyncHttpxClient, omit
 from pydantic_ai.models.openai import OpenAIChatModel
 from pydantic_ai.providers.openai import OpenAIProvider
 
@@ -41,6 +42,10 @@ _REASONING_DETAIL_KEY = "reasoning_tokens"
 # credential.
 _PLACEHOLDER_API_KEY = "unused"
 
+# ``OPENAI_LOG`` lowers this logger's level at SDK import; at debug the SDK
+# logs each request's JSON body, which carries conversation text.
+_SDK_LOGGER = "openai"
+
 
 class OpenAICompatibleProvider(PydanticAIModelProvider):
     """Structured completions against an OpenAI-compatible API, with bounded retries.
@@ -53,6 +58,7 @@ class OpenAICompatibleProvider(PydanticAIModelProvider):
     """
 
     _timeout_errors: ClassVar[tuple[type[BaseException], ...]] = (APITimeoutError,)
+    _status_errors: ClassVar[tuple[type[BaseException], ...]] = (APIStatusError,)
 
     def __init__(
         self,
@@ -67,12 +73,15 @@ class OpenAICompatibleProvider(PydanticAIModelProvider):
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
+        logging.getLogger(_SDK_LOGGER).setLevel(logging.WARNING)
+        bearer_key = api_key or _PLACEHOLDER_API_KEY
         client = AsyncOpenAI(
             base_url=base_url,
-            api_key=api_key or _PLACEHOLDER_API_KEY,
+            api_key=bearer_key,
             max_retries=0,
             timeout=timeout,
-            http_client=http_client,
+            http_client=http_client or DefaultAsyncHttpxClient(follow_redirects=False),
+            default_headers=_pinned_headers(bearer_key),
         )
         super().__init__(
             model=model,
@@ -92,3 +101,20 @@ class OpenAICompatibleProvider(PydanticAIModelProvider):
             cached_input=usage.cache_read_tokens or details.get(_CACHED_INPUT_DETAIL_KEY, 0),
             reasoning=details.get(_REASONING_DETAIL_KEY, 0),
         )
+
+
+def _pinned_headers(api_key: str) -> dict[str, str]:
+    """Headers that keep ``OPENAI_*`` environment variables off the wire.
+
+    The SDK merges ``OPENAI_CUSTOM_HEADERS`` and adds organization and
+    project headers from ``OPENAI_ORG_ID`` / ``OPENAI_PROJECT_ID``; only
+    explicit defaults outrank them.
+    """
+    # The SDK types ``default_headers`` as ``str`` values but removes a
+    # header whose value is ``omit``.
+    absent = cast("str", omit)
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "OpenAI-Organization": absent,
+        "OpenAI-Project": absent,
+    }

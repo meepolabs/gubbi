@@ -125,6 +125,12 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
     _timeout_errors: ClassVar[tuple[type[BaseException], ...]]
     """SDK exceptions that mark a request timeout when they cause a ``ModelAPIError``."""
 
+    _status_errors: ClassVar[tuple[type[BaseException], ...]]
+    """SDK exceptions that carry an HTTP ``status_code`` when they cause a ``ModelAPIError``.
+
+    PydanticAI reports statuses below 400 (an unfollowed redirect) this way.
+    """
+
     def __init__(
         self,
         *,
@@ -219,19 +225,24 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         time_limit: float | None,
     ) -> LLMResponse:
         translated: LLMProviderError
+        settings = self._model_settings()
         try:
             async with asyncio.timeout(time_limit):
                 response = await model_request(
                     self._chat_model,
                     model_messages,
-                    model_settings=self._model_settings(),
+                    model_settings=settings,
                     model_request_parameters=parameters,
                     instrument=False,
                 )
         except TimeoutError:
             translated = LLMTimeoutError("upstream request timed out")
         except (ModelAPIError, UnexpectedModelBehavior) as exc:
-            translated = _translate_error(exc, self._timeout_errors)
+            translated = _translate_error(exc, self._timeout_errors, self._status_errors)
+        except (ValueError, AttributeError, TypeError):
+            # An unparseable 2xx body escapes the SDK and PydanticAI as one of
+            # these; the decode error's ``doc`` holds the whole body.
+            translated = LLMTransientError("upstream returned a malformed response")
         else:
             return await self._to_response(response, output_schema)
         # Raised outside the except block so the upstream exception, whose
@@ -394,6 +405,7 @@ def _json_object(parsed: object, usage: LLMUsage) -> dict[str, Any]:
 def _translate_error(
     exc: ModelAPIError | UnexpectedModelBehavior,
     timeout_errors: tuple[type[BaseException], ...],
+    status_errors: tuple[type[BaseException], ...],
 ) -> LLMProviderError:
     """Map a PydanticAI error onto the provider-agnostic hierarchy.
 
@@ -410,7 +422,10 @@ def _translate_error(
             return LLMTransientError(message, retry_after=_retry_after_seconds(exc))
         return LLMPermanentError(message)
     if isinstance(exc, ModelAPIError):
-        if isinstance(exc.__cause__, timeout_errors):
+        cause = exc.__cause__
+        if isinstance(cause, timeout_errors):
             return LLMTimeoutError("upstream request timed out")
+        if isinstance(cause, status_errors):
+            return LLMPermanentError(f"upstream returned HTTP {getattr(cause, 'status_code', '?')}")
         return LLMTransientError("upstream connection failed")
     return LLMTransientError("upstream returned a malformed response")
