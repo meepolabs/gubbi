@@ -90,7 +90,7 @@ _SKIP_KEYWORDS = frozenset(
 )
 
 _SQL_KEYWORD_RE = re.compile(
-    r"(?:FROM|INTO|UPDATE|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+    r"(FROM|INTO|UPDATE|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_]*)",
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -108,6 +108,16 @@ def _cte_aliases(source: str) -> set[str]:
     return {m.group(1).lower() for m in _CTE_ALIAS_RE.finditer(source)}
 
 
+def _is_function_call_in_from(source: str, match: re.Match[str]) -> bool:
+    """Whether a FROM/JOIN item is a set-returning call such as ``unnest(...)``.
+
+    Only FROM and JOIN: ``INSERT INTO messages (id)`` names a real table.
+    """
+    if match.group(1).upper() not in ("FROM", "JOIN"):
+        return False
+    return source[match.end() :].lstrip().startswith("(")
+
+
 def _extract_table_names(source: str, statement: str | None = None) -> set[str]:
     """Parse a SQL string and return the set of table names referenced.
 
@@ -118,7 +128,9 @@ def _extract_table_names(source: str, statement: str | None = None) -> set[str]:
     aliases = _cte_aliases(source if statement is None else statement)
     tables: set[str] = set()
     for match in _SQL_KEYWORD_RE.finditer(source):
-        name = match.group(1)
+        name = match.group(2)
+        if _is_function_call_in_from(source, match):
+            continue
         if name.lower() in _SKIP_KEYWORDS or name.lower() in aliases:
             continue
         if name.startswith("pg_") or name == "information_schema":
@@ -227,6 +239,43 @@ def test_all_app_sql_tables_are_accounted_for() -> None:
     ],
 )
 def test_extract_table_names_subtracts_only_own_cte_aliases(sql: str, expected: set[str]) -> None:
+    assert _extract_table_names(sql) == expected
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        pytest.param(
+            "SELECT u.id FROM unnest($1::uuid[]) AS u(id)",
+            set(),
+            id="from-unnest-ignored",
+        ),
+        pytest.param(
+            "UPDATE messages AS m SET body = r.body "
+            "FROM unnest($1::integer[], $2::text[]) AS r(row_id, body) WHERE m.id = r.row_id",
+            {"messages"},
+            id="update-target-beside-from-unnest-still-flagged",
+        ),
+        pytest.param(
+            "SELECT m.id FROM messages AS m JOIN unnest($1::integer[]) AS r(id) ON m.id = r.id",
+            {"messages"},
+            id="from-table-beside-join-unnest-still-flagged",
+        ),
+        pytest.param(
+            "INSERT INTO messages (id) VALUES (1)",
+            {"messages"},
+            id="insert-into-column-list-still-flagged",
+        ),
+        pytest.param(
+            "INSERT INTO messages(id) VALUES (1)",
+            {"messages"},
+            id="insert-into-tight-column-list-still-flagged",
+        ),
+    ],
+)
+def test_extract_table_names_ignores_only_set_returning_calls_in_from(
+    sql: str, expected: set[str]
+) -> None:
     assert _extract_table_names(sql) == expected
 
 
