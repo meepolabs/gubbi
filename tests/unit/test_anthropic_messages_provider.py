@@ -16,6 +16,7 @@ import logging
 import pathlib
 import ssl
 import traceback
+import warnings
 from collections.abc import Callable, Iterator
 from typing import Any
 
@@ -703,6 +704,31 @@ async def test_unmappable_success_body_is_transient_and_kept_out_of_the_error(bo
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__context__ is None
     assert _OUTPUT_SENTINEL not in "".join(traceback.format_exception(excinfo.value))
+
+
+def _string_web_search_result_body() -> dict[str, Any]:
+    body = _end_turn_body()
+    body["content"].insert(
+        0,
+        {
+            "type": "web_search_tool_result",
+            "tool_use_id": "srvtoolu_fixture",
+            "content": _OUTPUT_SENTINEL,
+        },
+    )
+    return body
+
+
+async def test_wrongly_typed_tool_result_emits_no_warning_quoting_the_body() -> None:
+    recorder = _Recorder(_json_response(_string_web_search_result_body()))
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        provider = _provider(recorder)
+        await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert recorder.requests
+    assert not [w for w in caught if _OUTPUT_SENTINEL in str(w.message)]
 
 
 def test_estimate_cost_uses_configured_prices() -> None:

@@ -305,16 +305,17 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
 def _silence_serializer_warnings() -> None:
     """Keep pydantic serializer warnings, which quote the offending value, off stderr.
 
-    PydanticAI serializes SDK response models; when the upstream sent a field
-    of the wrong type, pydantic warns with an ``input_value=`` excerpt of the
-    response body. A process-wide filter, since ``catch_warnings`` around a
-    request is not safe across concurrent requests.
+    PydanticAI serializes SDK response models and their content blocks; when
+    the upstream sent a field of the wrong type, pydantic warns with an
+    ``input_value=`` excerpt of the response body. The warning is raised from
+    ``pydantic.main`` or ``pydantic.type_adapter`` depending on the call path,
+    so the filter matches the message alone. A process-wide filter, since
+    ``catch_warnings`` around a request is not safe across concurrent requests.
     """
     warnings.filterwarnings(
         "ignore",
         message="Pydantic serializer warnings",
         category=UserWarning,
-        module="pydantic.main",
     )
 
 
