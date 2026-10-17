@@ -25,7 +25,14 @@ content. Four markers:
     model hitting its output-token cap would.
 
 Refusal and truncation errors carry the canned usage, since such calls
-still bill.
+still bill. Failure markers take precedence over the entry marker below.
+
+Entry injection: each ``FAKE_LLM_ENTRY:<token>`` (token ``[a-z0-9-]{1,32}``)
+on a transcript line yields one entry with content ``fake entry <token>``
+and ``source_message_index`` set to the ``[index]`` of the message holding
+it (continuation lines of a multi-line message inherit its index). Any
+schema that returns entries returns exactly these instead of the canned
+entry; without a marker the canned entry is returned unchanged.
 
 Markers are checked against the JOINED content of all messages so the
 test can plant the marker in any role (user message, assistant turn).
@@ -47,6 +54,7 @@ either provider.
 
 from __future__ import annotations
 
+import re
 from typing import TYPE_CHECKING, Any
 
 from gubbi.extraction.llm.provider import (
@@ -83,6 +91,9 @@ _CANNED_USAGE = LLMUsage(input=_CANNED_INPUT_TOKENS, output=_CANNED_OUTPUT_TOKEN
 # fake's behaviour.
 _INPUT_PRICE_PER_MILLION = 1.00
 _OUTPUT_PRICE_PER_MILLION = 5.00
+
+_ENTRY_MARKER_RE = re.compile(r"FAKE_LLM_ENTRY:([a-z0-9-]{1,32})")
+_MESSAGE_HEADER_RE = re.compile(r"^\[(\d+)\] ")
 
 
 class FakeLLMProvider(LLMProvider):
@@ -128,7 +139,7 @@ class FakeLLMProvider(LLMProvider):
         if self.TRUNCATE_MARKER in joined_content:
             raise LLMTruncatedError("FakeLLMProvider: truncation marker found", usage=_CANNED_USAGE)
 
-        content = _canned_content_for_schema(output_schema)
+        content = _canned_content_for_schema(output_schema, _marked_entries(messages))
         return LLMResponse(
             content=content,
             input_tokens=_CANNED_INPUT_TOKENS,
@@ -161,8 +172,38 @@ def _canned_chunk_entry() -> dict[str, Any]:
     }
 
 
+def _marked_entries(messages: list[LLMMessage]) -> list[dict[str, Any]]:
+    """One entry per entry marker, indexed by the transcript message it sits in.
+
+    Lines before the first ``[index]`` header (topic and prior-entry
+    sections of the prompt) carry no message index and are ignored.
+    """
+    entries: list[dict[str, Any]] = []
+    for message in messages:
+        current_index: int | None = None
+        for line in message.get("content", "").split("\n"):
+            header = _MESSAGE_HEADER_RE.match(line)
+            if header is not None:
+                current_index = int(header.group(1))
+            if current_index is None:
+                continue
+            entries.extend(
+                _marked_entry(token, current_index) for token in _ENTRY_MARKER_RE.findall(line)
+            )
+    return entries
+
+
+def _marked_entry(token: str, source_message_index: int) -> dict[str, Any]:
+    return {
+        **_canned_chunk_entry(),
+        "content": f"fake entry {token}",
+        "source_message_index": source_message_index,
+    }
+
+
 def _canned_content_for_schema(
     output_schema: Mapping[str, Any] | None,
+    marked_entries: list[dict[str, Any]],
 ) -> str | dict[str, Any]:
     """Return the dict that ExtractionService expects for this schema.
 
@@ -177,6 +218,7 @@ def _canned_content_for_schema(
     A ``None`` schema (free-form completion) returns a string so the
     contract matches the real provider's text-mode return shape.
     """
+    entries = marked_entries or [_canned_chunk_entry()]
     if output_schema is None:
         return "fake free-form response from FakeLLMProvider"
 
@@ -190,7 +232,7 @@ def _canned_content_for_schema(
             "topic_path": _CANNED_TOPIC_PATH,
             "topic_title": _CANNED_TOPIC_TITLE,
             "summary": "Canned chunk summary from FakeLLMProvider.",
-            "entries": [_canned_chunk_entry()],
+            "entries": entries,
         }
     if "topic_path" in properties:
         return {
@@ -199,7 +241,7 @@ def _canned_content_for_schema(
             "summary": "Canned chunk summary from FakeLLMProvider.",
         }
     if "entries" in properties:
-        return {"entries": [_canned_chunk_entry()]}
+        return {"entries": entries}
     raise ValueError(
         f"FakeLLMProvider has no canned response for output_schema with "
         f"properties {sorted(properties.keys())}; add a branch in "
