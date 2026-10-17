@@ -25,6 +25,7 @@ from gubbi.extraction.retry_policy import FailureOutcome
 from gubbi.extraction.service import ExtractionService
 from gubbi.models.conversation import Message
 from gubbi.storage.repositories.conversations import ExtractionState
+from gubbi.storage.repositories.extraction_slice import ExtractionSlice, SliceMessage, ThreadEntry
 
 USER_ID = "00000000-0000-0000-0000-0000000000a1"
 JOB_ID = "11111111-2222-3333-4444-555555555555"
@@ -159,7 +160,9 @@ class JobMocks:
     tracker: ConnectionTracker
     get_processed_at: AsyncMock
     lock_processed_at: AsyncMock
-    read_conversation: AsyncMock
+    load_slice: AsyncMock
+    list_thread_entries: AsyncMock
+    advance_watermark: AsyncMock
     get_extraction_state: AsyncMock
     list_topics: AsyncMock
     mark_processed: AsyncMock
@@ -196,17 +199,37 @@ def extraction_state(
     )
 
 
+def stored_slice(messages: list[Message], watermark: int | None = None) -> ExtractionSlice:
+    """The slice the loader returns for ``messages`` stored at positions 0.., unfiltered."""
+    stored = [
+        SliceMessage(position=i, role=m.role, content=m.content, timestamp=m.timestamp)
+        for i, m in enumerate(messages)
+    ]
+    floor = -1 if watermark is None else watermark
+    return ExtractionSlice(
+        base=watermark,
+        tail=tuple(m for m in stored if m.position <= floor),
+        new=tuple(m for m in stored if m.position > floor),
+    )
+
+
 @contextmanager
 def patched_job(
     tracker: ConnectionTracker,
     *,
     messages: list[Message] | None = None,
+    watermark: int | None = None,
+    thread_entries: list[ThreadEntry] | None = None,
     state: ExtractionState | None = None,
     persisted_entries: int = 1,
 ) -> Iterator[JobMocks]:
-    """Patch the job's database edge; yields the mocks for assertions."""
+    """Patch the job's database edge; yields the mocks for assertions.
+
+    ``messages`` are stored at positions 0.. and split at ``watermark``.
+    """
     conv = "gubbi.storage.repositories.conversations"
     jobs = "gubbi.storage.repositories.extraction_jobs"
+    slices = "gubbi.storage.repositories.extraction_slice"
     persisted = PersistResult(
         topic_id=7,
         topic_created=True,
@@ -227,10 +250,13 @@ def patched_job(
             tracker=tracker,
             get_processed_at=enter(f"{conv}.get_processed_at", return_value=None),
             lock_processed_at=enter(f"{conv}.lock_processed_at", return_value=None),
-            read_conversation=enter(
-                f"{conv}.read_conversation_by_id",
-                return_value=(MagicMock(), loaded, len(loaded)),
+            load_slice=enter(
+                f"{slices}.load_extraction_slice", return_value=stored_slice(loaded, watermark)
             ),
+            list_thread_entries=enter(
+                f"{slices}.list_thread_entries", return_value=list(thread_entries or [])
+            ),
+            advance_watermark=enter(f"{slices}.advance_watermark", return_value=True),
             get_extraction_state=enter(
                 f"{conv}.get_extraction_state",
                 return_value=state if state is not None else extraction_state(),

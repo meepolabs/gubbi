@@ -214,9 +214,16 @@ async def test_a_conversation_resaved_during_the_run_gets_a_follow_up_job(
 
     class _ResavingProvider(ScriptedProvider):
         async def complete(self, *args: object, **kwargs: object) -> object:
+            text_ct, text_nonce = cipher.encrypt("I also bought new running shoes.")
             await admin_pool.execute(
-                "UPDATE conversations SET updated_at = now() + interval '1 second' WHERE id = $1",
+                "INSERT INTO messages (conversation_id, user_id, role, timestamp, position,"
+                " content_encrypted, content_nonce, search_vector)"
+                " SELECT $1, $2, 'user', now(), max(position) + 1, $3, $4,"
+                " to_tsvector('english', 'x') FROM messages WHERE conversation_id = $1",
                 conv_id,
+                tenant_a,
+                text_ct,
+                text_nonce,
             )
             return await super().complete(*args, **kwargs)  # type: ignore[arg-type]
 

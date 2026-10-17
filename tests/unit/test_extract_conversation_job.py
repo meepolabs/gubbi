@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 from dataclasses import replace
+from datetime import date
 from typing import Any
 from unittest.mock import call, patch
 from uuid import UUID
@@ -28,7 +29,9 @@ from gubbi.extraction.llm.provider import (
 )
 from gubbi.extraction.pipeline import PipelineDeadlineError, PipelineFailure
 from gubbi.extraction.skips import content_hash
+from gubbi.extraction.slice_run import WatermarkMovedError
 from gubbi.models.conversation import Message, keep_conversation_roles
+from gubbi.storage.repositories.extraction_slice import ThreadEntry
 from gubbi.telemetry.attrs import MetricNames
 from tests.fixtures.extraction_job import (
     CALL_CENTS,
@@ -205,7 +208,7 @@ async def test_already_processed_conversation_completes_its_job_without_work() -
 
     assert result["skipped"] is True
     assert provider.user_contents == []
-    mocks.read_conversation.assert_not_awaited()
+    mocks.load_slice.assert_not_awaited()
     mocks.mark_running.assert_awaited_once_with(tracker.conns[0], _JOB_UUID)
     mocks.mark_completed.assert_awaited_once_with(
         tracker.conns[0],
@@ -269,7 +272,7 @@ async def test_a_job_row_another_execution_owns_is_left_alone() -> None:
 
     assert result["skipped"] is True
     assert provider.user_contents == []
-    mocks.read_conversation.assert_not_awaited()
+    mocks.load_slice.assert_not_awaited()
     mocks.persist.assert_not_awaited()
     mocks.mark_completed.assert_not_awaited()
     mocks.mark_failed.assert_not_awaited()
@@ -570,7 +573,7 @@ async def test_load_failure_is_logged_and_re_raised() -> None:
     tracker = ConnectionTracker()
 
     with patched_job(tracker) as mocks:
-        mocks.read_conversation.side_effect = RuntimeError("decrypt")
+        mocks.load_slice.side_effect = RuntimeError("decrypt")
         with pytest.raises(RuntimeError, match="decrypt"):
             await _run(make_ctx(ScriptedProvider([])))
 
@@ -644,3 +647,130 @@ async def test_a_fully_metered_attempt_records_no_unmetered_count(
 
     assert record_counter.call_args_list == []
     assert [log["unmetered_calls"] for log in logs if log["event"] == event] == [0]
+
+
+# ---------------------------------------------------------------------------
+# Watermark slice
+# ---------------------------------------------------------------------------
+
+
+def _thread() -> list[Message]:
+    """Five dated turns; with watermark 2 the first three are context."""
+    return [
+        Message(role="user", content="I planned a trip to Lisbon.", timestamp="2026-03-01T09:00"),
+        Message(role="assistant", content="Sounds lovely.", timestamp="2026-03-01T09:01"),
+        Message(role="user", content="TAIL-CONTEXT-MARKER here.", timestamp="2026-03-02T09:00"),
+        Message(role="user", content="I booked the flights today.", timestamp="2026-03-05T09:00"),
+        Message(role="assistant", content="Great, enjoy it.", timestamp="2026-03-05T09:01"),
+    ]
+
+
+async def test_a_watermarked_run_sends_the_tail_as_context_and_earlier_entries() -> None:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([chunk_output(entries=[entry("Booked flights", source=3)])])
+    earlier = [ThreadEntry(content="EARLIER-ENTRY-MARKER", entry_date=date(2026, 3, 1))]
+
+    with patched_job(tracker, messages=_thread(), watermark=2, thread_entries=earlier) as mocks:
+        await _run(make_ctx(provider))
+
+    (sent,) = provider.user_contents
+    assert "Boundary: transcript messages [0] through [2]" in sent
+    assert "TAIL-CONTEXT-MARKER" in sent
+    assert "EARLIER-ENTRY-MARKER" in sent
+    run = mocks.persist.await_args.args[3]
+    assert [c.entry_date for c in run.candidates] == [date(2026, 3, 5)]
+    assert (run.watermark_base, run.watermark_target) == (2, 4)
+
+
+async def test_a_candidate_from_the_context_tail_is_not_recorded() -> None:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([chunk_output(entries=[entry("Planned Lisbon", source=0)])])
+
+    with patched_job(tracker, messages=_thread(), watermark=2) as mocks:
+        result = await _run(make_ctx(provider))
+
+    assert result["entries_created"] == 0
+    mocks.persist.assert_not_awaited()
+    mocks.advance_watermark.assert_awaited_once_with(tracker.conns[1], CONVERSATION_ID, 2, 4)
+
+
+async def test_a_run_without_a_watermark_reads_everything_and_advances_to_the_last_position() -> (
+    None
+):
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([chunk_output()])
+
+    with patched_job(tracker) as mocks:
+        await _run(make_ctx(provider))
+
+    assert "Boundary:" not in provider.user_contents[0]
+    run = mocks.persist.await_args.args[3]
+    assert (run.watermark_base, run.watermark_target) == (None, len(transcript()) - 1)
+
+
+async def test_nothing_above_the_watermark_completes_unchanged_without_a_model_call() -> None:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([])
+
+    with (
+        patched_job(tracker, messages=_thread(), watermark=4) as mocks,
+        structlog.testing.capture_logs() as logs,
+    ):
+        result = await _run(make_ctx(provider))
+
+    assert result["skipped"] is True
+    assert provider.user_contents == []
+    _assert_completed_empty(mocks, cents=0, llm_calls=0)
+    mocks.advance_watermark.assert_not_awaited()
+    assert [log["reason"] for log in logs if log["event"] == "extraction_skipped"] == ["unchanged"]
+
+
+async def test_new_messages_the_role_filter_drops_complete_unchanged_and_advance() -> None:
+    tracker = ConnectionTracker()
+    messages = [*_thread(), Message(role="system", content="tool output", timestamp=None)]
+
+    with patched_job(tracker, messages=messages, watermark=4) as mocks:
+        await _run(make_ctx(ScriptedProvider([])))
+
+    _assert_completed_empty(mocks, cents=0, llm_calls=0)
+    mocks.advance_watermark.assert_awaited_once_with(tracker.conns[1], CONVERSATION_ID, 4, 5)
+
+
+async def test_a_matching_stored_hash_does_not_skip_new_messages_above_a_watermark() -> None:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([chunk_output(entries=[entry("Booked flights", source=3)])])
+    new_only = content_hash(_thread()[3:])
+    state = extraction_state(stored_hash=new_only, stored_version=EXTRACTION_VERSION)
+
+    with patched_job(tracker, messages=_thread(), watermark=2, state=state) as mocks:
+        await _run(make_ctx(provider))
+
+    assert len(provider.user_contents) == 1
+    mocks.persist.assert_awaited_once()
+
+
+async def test_trivial_new_text_above_the_watermark_is_skipped() -> None:
+    tracker = ConnectionTracker()
+    provider = ScriptedProvider([])
+    messages = [*_thread(), Message(role="user", content="ok", timestamp=None)]
+
+    with patched_job(tracker, messages=messages, watermark=4) as mocks:
+        await _run(make_ctx(provider))
+
+    assert provider.user_contents == []
+    _assert_completed_empty(mocks, cents=0, llm_calls=0)
+    mocks.advance_watermark.assert_awaited_once_with(tracker.conns[1], CONVERSATION_ID, 4, 5)
+
+
+async def test_a_watermark_moved_by_another_run_fails_the_job_without_completing_it() -> None:
+    tracker = ConnectionTracker()
+
+    with patched_job(tracker, messages=_thread(), watermark=2) as mocks:
+        mocks.advance_watermark.return_value = False
+        with pytest.raises(WatermarkMovedError):
+            await _run(make_ctx(ScriptedProvider([chunk_output(entries=[])])))
+
+    mocks.mark_processed.assert_not_awaited()
+    mocks.set_extraction_state.assert_not_awaited()
+    mocks.mark_completed.assert_not_awaited()
+    assert mocks.mark_failed.await_args.kwargs["error_code"] == "internal_error"

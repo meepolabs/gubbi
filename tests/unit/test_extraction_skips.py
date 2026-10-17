@@ -9,7 +9,7 @@ import pytest
 
 from gubbi.constants import EXTRACTION_MIN_USER_CHARS, EXTRACTION_VERSION
 from gubbi.extraction import skips
-from gubbi.extraction.skips import SkipReason, content_hash, evaluate_skip
+from gubbi.extraction.skips import SkipReason, content_hash, evaluate_skip, evaluate_slice_skip
 from gubbi.models.conversation import Message
 
 
@@ -189,3 +189,48 @@ def test_hash_accepts_stored_message_model() -> None:
     )
 
     assert content_hash(stored) == content_hash(CONVERSATION)
+
+
+@pytest.mark.parametrize(
+    ("new_messages", "source", "watermark", "stored_matches", "expected"),
+    [
+        pytest.param(
+            CONVERSATION, "claude", None, True, SkipReason.UNCHANGED, id="null-hash-match"
+        ),
+        pytest.param(CONVERSATION, "claude", None, False, None, id="null-hash-differs"),
+        pytest.param((), "claude", None, False, SkipReason.NO_TEXT, id="null-empty"),
+        pytest.param((), "claude", 4, False, SkipReason.UNCHANGED, id="watermark-nothing-new"),
+        pytest.param(
+            (_Msg("system", "prompt"), _Msg("tool", "{}")),
+            "claude",
+            4,
+            False,
+            SkipReason.UNCHANGED,
+            id="watermark-all-filtered",
+        ),
+        pytest.param(CONVERSATION, "claude", 4, True, None, id="watermark-ignores-hash"),
+        pytest.param(
+            (_Msg("user", "ok"),), "claude", 4, False, SkipReason.TRIVIAL_USER_TEXT, id="trivial"
+        ),
+    ],
+)
+def test_slice_skip_judges_only_the_new_messages(
+    new_messages: tuple[_Msg, ...],
+    source: str,
+    watermark: int | None,
+    stored_matches: bool,
+    expected: SkipReason | None,
+) -> None:
+    stored_hash = content_hash(CONVERSATION) if stored_matches else "0" * 64
+
+    reason = evaluate_slice_skip(new_messages, source, watermark, stored_hash, EXTRACTION_VERSION)
+
+    assert reason is expected
+
+
+def test_slice_skip_keeps_the_automated_source_rule_above_a_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(skips, "AUTOMATED_EXTRACTION_SOURCES", frozenset({"agent_run"}))
+
+    assert evaluate_slice_skip((), "agent_run", 4, None, None) is SkipReason.AUTOMATED_SOURCE

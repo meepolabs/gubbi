@@ -4,7 +4,7 @@ See ``extract_conversation`` function docstring for the CALLER CONTRACT
 (security-critical).
 
 Connection-split design:
-  Phase 1 -- conn1: idempotency check, role-filtered load, rule-based skips.
+  Phase 1 -- conn1: idempotency check, role-filtered load of the unread slice.
   Phase 2 -- LLM pipeline, then embeddings: NO database connection held.
   Phase 3 -- conn2: persistence under an explicit nested SAVEPOINT transaction.
 
@@ -56,8 +56,7 @@ from gubbi.extraction.pipeline import (
     run_pipeline,
 )
 from gubbi.extraction.retry_policy import ErrorCode
-from gubbi.extraction.skips import content_hash, evaluate_skip
-from gubbi.models.conversation import keep_conversation_roles
+from gubbi.extraction.slice_run import RunSlice, advance_or_raise, load_run_slice, skip_reason
 from gubbi.storage.exceptions import ConversationNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import extraction_jobs
@@ -78,7 +77,6 @@ if TYPE_CHECKING:
 
     from gubbi.crypto.cipher import ContentCipher
     from gubbi.extraction.context import ExtractionContext
-    from gubbi.models.conversation import Message
     from gubbi.storage.repositories.conversations import ExtractionState
 
 __all__: list[str] = ["extract_conversation"]
@@ -147,9 +145,9 @@ class _Job:
 
 @dataclass(frozen=True)
 class _Loaded:
-    """Phase 1 output: role-filtered transcript, topic catalog and extraction state."""
+    """Phase 1 output: role-filtered slice, topic catalog and extraction state."""
 
-    messages: tuple[Message, ...]
+    slice: RunSlice
     existing_topics: tuple[str, ...]
     state: ExtractionState
 
@@ -246,11 +244,9 @@ async def _claim_job(conn: asyncpg.Connection, job: _Job) -> bool:
 
 
 async def _load_conversation(conn: asyncpg.Connection, job: _Job) -> _Loaded:
-    """Load the role-filtered transcript, the topic catalog and the extraction state."""
+    """Load the role-filtered slice, the topic catalog and the extraction state."""
     try:
-        _meta, messages, _total = await conv_repo.read_conversation_by_id(
-            conn, job.cipher, job.conversation_id
-        )
+        run_slice = await load_run_slice(conn, job.cipher, job.conversation_id)
         state = await conv_repo.get_extraction_state(conn, job.conversation_id)
         if state is None:
             raise ConversationNotFoundError(f"Conversation id {job.conversation_id} not found")
@@ -264,7 +260,7 @@ async def _load_conversation(conn: asyncpg.Connection, job: _Job) -> _Loaded:
         raise
     existing_topic_metas, _ = await topic_repo.list_all(conn)
     return _Loaded(
-        messages=tuple(keep_conversation_roles(messages)),
+        slice=run_slice,
         existing_topics=tuple(t.topic for t in existing_topic_metas),
         state=state,
     )
@@ -296,7 +292,7 @@ async def _extract(
     settings = get_settings()
     outcome = await run_pipeline(
         ctx["extraction_service"],
-        loaded.messages,
+        loaded.slice.messages,
         existing_topics=loaded.existing_topics,
         conversation_created=loaded.state.created_at.date(),
         deadline=started + EXTRACTION_JOB_DEADLINE_SECS,
@@ -304,6 +300,8 @@ async def _extract(
         mode=settings.llm.extraction_mode,
         triage_enabled=settings.llm.extraction_triage,
         on_spend=functools.partial(_track_spend, ctx, job.ledger),
+        context_count=loaded.slice.context_count,
+        prior_entries=loaded.slice.prior_entries,
     )
     spend = _spend_of(ctx, outcome)
     job.ledger.spend = spend
@@ -319,18 +317,20 @@ async def _extract(
 # ---------------------------------------------------------------------------
 
 
-async def _complete_without_entries(job: _Job, transcript_hash: str, spend: _Spend) -> None:
+async def _complete_without_entries(job: _Job, run_slice: RunSlice, spend: _Spend) -> None:
     """Mark the conversation processed and the job completed with nothing recorded.
 
-    Uses its own short connection. Records the transcript hash so the same
-    content is not sent to the model again at this extractor version. The
-    attempt is charged for ``spend`` in the same transaction.
+    Uses its own short connection. Moves the watermark past the slice and
+    records its hash so the same content is not sent to the model again at
+    this extractor version; a watermark another run moved first raises and
+    writes nothing. The attempt is charged for ``spend`` in the same transaction.
     """
     settled = None
     async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn:
+        await advance_or_raise(conn, job.conversation_id, run_slice.base, run_slice.target)
         await conv_repo.mark_processed(conn, job.conversation_id)
         await conv_repo.set_extraction_state(
-            conn, job.conversation_id, transcript_hash, EXTRACTION_VERSION
+            conn, job.conversation_id, run_slice.content_hash, EXTRACTION_VERSION
         )
         if job.job_uuid is None:
             return
@@ -546,11 +546,13 @@ async def _persist(
         topic_title=extracted.outcome.topic_title,
         candidates=extracted.outcome.candidates,
         embeddings=embeddings,
-        content_hash=content_hash(loaded.messages),
+        content_hash=loaded.slice.content_hash,
         usage=extracted.spend.usage,
         llm_calls=extracted.spend.llm_calls,
         chunks=extracted.spend.chunks,
         cents_spent=extracted.spend.cents,
+        watermark_base=loaded.slice.base,
+        watermark_target=loaded.slice.target,
     )
     async with user_scoped_connection(job.pool, user_id=job.user_uuid) as conn2:  # noqa: SIM117
         async with conn2.transaction():
@@ -590,11 +592,16 @@ async def extract_conversation(
     and writes are RLS-protected. A wrong user_id at enqueue time reads zero
     rows and the load fails. Never run it through the admin pool.
 
-    Flow: idempotency check; role-filtered load; rule-based skips (no text,
-    trivial user text, unchanged content at this extractor version); the
-    extraction pipeline (chunked, optional triage, single or two-call mode);
-    embeddings; persistence with dedupe. A conversation with nothing worth
-    recording completes with ``entries_created=0`` and creates no topic.
+    Flow: idempotency check; role-filtered load of the messages above the
+    extraction watermark, a context tail before them and the entries earlier
+    runs drew from the conversation; rule-based skips on the new messages (no
+    text, trivial user text, nothing new above the watermark, or with no
+    watermark unchanged content at this extractor version); the extraction
+    pipeline (chunked, optional triage, single or two-call mode); embeddings;
+    persistence with dedupe. A conversation with nothing worth recording
+    completes with ``entries_created=0`` and creates no topic. Every
+    completion moves the watermark to the highest position loaded in the
+    transaction that completes the job; a failure leaves it where it was.
 
     Lifecycle UPDATEs:
       mark_running   -- Phase 1, after the idempotency check. A row it cannot
@@ -741,18 +748,13 @@ async def _run_job(ctx: ExtractionContext, job: _Job, user_id: str, job_id: str)
 
 async def _skip_by_rule(job: _Job, loaded: _Loaded) -> bool:
     """Complete the job, charging nothing, when a rule says there is nothing to extract."""
-    skip_reason = evaluate_skip(
-        loaded.messages,
-        loaded.state.source,
-        loaded.state.extracted_content_hash,
-        loaded.state.extraction_version,
-    )
-    if skip_reason is None:
+    reason = skip_reason(loaded.slice, loaded.state)
+    if reason is None:
         return False
     await job.log.info(
-        "extraction_skipped", conversation_id=job.conversation_id, reason=str(skip_reason)
+        "extraction_skipped", conversation_id=job.conversation_id, reason=str(reason)
     )
-    await _complete_without_entries(job, content_hash(loaded.messages), _NO_SPEND)
+    await _complete_without_entries(job, loaded.slice, _NO_SPEND)
     return True
 
 
@@ -776,7 +778,7 @@ async def _record(
             topic_usable=topic_path is not None,
             unmetered_calls=spent.unmetered_calls,
         )
-        await _complete_without_entries(job, content_hash(loaded.messages), spent)
+        await _complete_without_entries(job, loaded.slice, spent)
         return _result(None, 0, spent, skipped=True)
     extracted = replace(extracted, outcome=replace(extracted.outcome, candidates=candidates))
     embeddings = await embed_texts(

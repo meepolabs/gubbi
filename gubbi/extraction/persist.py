@@ -19,6 +19,7 @@ from gubbi.audit import record_audit
 from gubbi.constants import EXTRACTION_VERSION
 from gubbi.extraction.charging import SettledAttempt, settle_attempt
 from gubbi.extraction.dedupe import DedupeAction, DedupeCandidate, DedupeDecision, classify
+from gubbi.extraction.slice_run import advance_or_raise
 from gubbi.storage.exceptions import TopicNotFoundError
 from gubbi.storage.repositories import conversations as conv_repo
 from gubbi.storage.repositories import entries as entry_repo
@@ -67,7 +68,9 @@ class ExtractionToPersist:
 
     ``candidates`` are the output of :func:`sanitize_candidates`, and
     ``embeddings[i]`` is the embedding of ``candidates[i].content`` as stored.
-    ``job_id`` is None when the run has no job row to complete.
+    ``job_id`` is None when the run has no job row to complete. The
+    conversation's watermark moves from ``watermark_base`` to
+    ``watermark_target``; a None target leaves it alone.
     """
 
     user_id: UUID
@@ -84,6 +87,8 @@ class ExtractionToPersist:
     llm_calls: int
     chunks: int
     cents_spent: int
+    watermark_base: int | None = None
+    watermark_target: int | None = None
 
     def __post_init__(self) -> None:
         """Reject a run whose embeddings do not pair one-to-one with its candidates."""
@@ -160,10 +165,15 @@ async def persist_extraction(
     runs for the same user and event day are serialized from the neighbour
     read to commit, so two runs cannot both miss each other's entry and
     insert it twice.
+
+    The watermark moves before anything else is written; when another run
+    moved it first, ``WatermarkMovedError`` is raised and the caller's
+    transaction must roll back.
     """
     if not all(_is_sanitized(candidate) for candidate in run.candidates):
         msg = "persist_extraction requires candidates from sanitize_candidates"
         raise ValueError(msg)
+    await advance_or_raise(conn, run.conversation_id, run.watermark_base, run.watermark_target)
     topic_id, topic_created = await ensure_topic(conn, run.topic_path, run.topic_title)
     await entry_repo.lock_dedupe_days(
         conn, run.user_id, [candidate.entry_date for candidate in run.candidates], run.client

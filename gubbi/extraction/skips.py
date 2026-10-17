@@ -99,6 +99,29 @@ def evaluate_skip(
     return None
 
 
+def evaluate_slice_skip(
+    new_messages: Sequence[SkippableMessage],
+    source: str | None,
+    watermark: int | None,
+    stored_hash: str | None,
+    stored_version: int | None,
+) -> SkipReason | None:
+    """Return why extracting the messages above the watermark should be skipped, or None.
+
+    ``new_messages`` are the messages above ``watermark``. A NULL watermark
+    (never extracted) applies :func:`evaluate_skip` unchanged. With a
+    watermark, nothing left after the role filter is UNCHANGED, and the stored
+    hash is not consulted: edits to text below the watermark never re-extract.
+    """
+    if watermark is None:
+        return evaluate_skip(new_messages, source, stored_hash, stored_version)
+    if is_automated_source(source):
+        return SkipReason.AUTOMATED_SOURCE
+    if not keep_conversation_roles(new_messages):
+        return SkipReason.UNCHANGED
+    return evaluate_skip(new_messages, source, None, None)
+
+
 def _canonical_timestamp(value: datetime | str | None) -> str | None:
     if value is None:
         return None
