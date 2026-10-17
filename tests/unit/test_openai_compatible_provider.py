@@ -868,15 +868,23 @@ def _malformed_completion(_request: httpx2.Request) -> httpx2.Response:
     return httpx2.Response(200, json=body)
 
 
-async def test_malformed_json_success_body_is_transient_and_kept_out_of_the_error() -> None:
-    def respond(_request: httpx2.Request) -> httpx2.Response:
-        return httpx2.Response(
-            200,
-            content=f"not json {_OUTPUT_SENTINEL}".encode(),
-            headers={"content-type": "application/json"},
-        )
+def _malformed_json_body(_request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(
+        200,
+        content=f"not json {_OUTPUT_SENTINEL}".encode(),
+        headers={"content-type": "application/json"},
+    )
 
-    recorder = _Recorder(respond)
+
+def _logged_classes(log_capture: LogCapture, event: str) -> list[str]:
+    lines = [json.loads(line) for line in log_capture.lines if event in line]
+    return [line["error_class"] for line in lines]
+
+
+async def test_malformed_json_success_body_is_transient_and_kept_out_of_the_error(
+    log_capture: LogCapture,
+) -> None:
+    recorder = _Recorder(_malformed_json_body)
 
     with pytest.raises(LLMProviderError) as excinfo:
         await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
@@ -887,6 +895,91 @@ async def test_malformed_json_success_body_is_transient_and_kept_out_of_the_erro
     assert excinfo.value.__context__ is None
     assert _OUTPUT_SENTINEL not in str(excinfo.value)
     assert _OUTPUT_SENTINEL not in repr(excinfo.value.args)
+    malformed = _logged_classes(log_capture, "llm_response_malformed")
+    assert malformed == ["JSONDecodeError"] * LLM_MAX_ATTEMPTS
+    assert "llm_request_build_failed" not in log_capture.text
+    assert _OUTPUT_SENTINEL not in log_capture.text
+
+
+async def test_malformed_success_body_through_the_default_client_is_transient(
+    monkeypatch: pytest.MonkeyPatch, log_capture: LogCapture
+) -> None:
+    recorder = _Recorder(_malformed_json_body)
+    provider = _default_client_provider(monkeypatch, recorder, "https://llm.example.test/v1")
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    malformed = _logged_classes(log_capture, "llm_response_malformed")
+    assert malformed == ["JSONDecodeError"] * LLM_MAX_ATTEMPTS
+    assert "llm_request_build_failed" not in log_capture.text
+
+
+class _Unserializable:
+    pass
+
+
+_UNBUILDABLE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {"field": {"type": "string", "description": _Unserializable()}},
+    "required": ["field"],
+    "additionalProperties": False,
+}
+
+
+async def test_request_build_failure_is_permanent_after_one_attempt_and_logs_its_class(
+    log_capture: LogCapture,
+) -> None:
+    recorder = _Recorder(_json_response(_stop_body()))
+    sleep = _SleepLog()
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await _provider(recorder, sleep).complete(_MESSAGES, "system prompt", _UNBUILDABLE_SCHEMA)
+
+    assert type(excinfo.value) is LLMPermanentError
+    assert excinfo.value.attempts == 1
+    assert recorder.requests == []
+    assert sleep.delays == []
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    assert _logged_classes(log_capture, "llm_request_build_failed") == ["TypeError"]
+    assert "llm_response_malformed" not in log_capture.text
+    assert "not JSON serializable" not in log_capture.text
+
+
+class _FailingLogger:
+    async def error(self, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("log sink unavailable")
+
+    async def warning(self, *_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("log sink unavailable")
+
+
+@pytest.mark.parametrize(
+    ("responder", "schema"),
+    [
+        pytest.param(_malformed_json_body, _SCHEMA, id="malformed-response"),
+        pytest.param(_json_response(_stop_body()), _UNBUILDABLE_SCHEMA, id="request-build"),
+    ],
+)
+async def test_failure_to_log_an_unexpected_error_does_not_carry_it_as_context(
+    monkeypatch: pytest.MonkeyPatch,
+    responder: Callable[[httpx2.Request], httpx2.Response],
+    schema: dict[str, Any],
+) -> None:
+    monkeypatch.setattr(model_provider, "logger", _FailingLogger())
+    recorder = _Recorder(responder)
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", schema)
+
+    assert excinfo.value.__cause__ is None
+    assert excinfo.value.__context__ is None
+    rendered = "".join(traceback.format_exception(excinfo.value))
+    assert _OUTPUT_SENTINEL not in rendered
+    assert "not JSON serializable" not in rendered
 
 
 @pytest.mark.parametrize(

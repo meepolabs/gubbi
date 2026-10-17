@@ -686,6 +686,29 @@ async def test_malformed_success_body_is_transient_and_kept_out_of_the_error(
     assert _OUTPUT_SENTINEL not in log_capture.text
 
 
+async def test_malformed_success_body_through_the_default_client_is_transient(
+    monkeypatch: pytest.MonkeyPatch, log_capture: LogCapture
+) -> None:
+    def respond(_request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            200,
+            content=f"not json {_OUTPUT_SENTINEL}".encode(),
+            headers={"content-type": "application/json"},
+        )
+
+    recorder = _Recorder(respond)
+    provider = _default_client_provider(monkeypatch, recorder, "https://llm.example.test")
+
+    with pytest.raises(LLMProviderError) as excinfo:
+        await provider.complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert type(excinfo.value) is LLMTransientError
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    malformed = [json.loads(line) for line in log_capture.lines if "llm_response_malformed" in line]
+    assert [line["error_class"] for line in malformed] == ["JSONDecodeError"] * LLM_MAX_ATTEMPTS
+    assert "llm_request_build_failed" not in log_capture.text
+
+
 def _schema_with_entry(field: dict[str, Any]) -> dict[str, Any]:
     return {
         "type": "object",

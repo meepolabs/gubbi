@@ -254,7 +254,8 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         output_schema: Mapping[str, Any] | None,
         time_limit: float | None,
     ) -> LLMResponse:
-        translated: LLMProviderError
+        translated: LLMProviderError | None = None
+        unexpected_class = ""
         state = _AttemptState()
         token = _current_attempt.set(state)
         try:
@@ -274,14 +275,16 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         except Exception as exc:
             # Only the class name is logged: the exception's message and args
             # can quote the request or the upstream body.
-            translated = await self._translate_unexpected(type(exc).__qualname__, sent=state.sent)
+            unexpected_class = type(exc).__qualname__
         else:
             return await self._to_response(response, output_schema)
         finally:
             _current_attempt.reset(token)
-        # Raised outside the except block so the upstream exception, whose
-        # text can quote request content, is neither chained nor attached
-        # as context.
+        # Translated and raised outside the except block so the upstream
+        # exception, whose text can quote request content, is neither chained
+        # nor attached as context, including to an error the log call raises.
+        if translated is None:
+            translated = await self._translate_unexpected(unexpected_class, sent=state.sent)
         raise translated
 
     async def _translate_unexpected(self, error_class: str, *, sent: bool) -> LLMProviderError:
