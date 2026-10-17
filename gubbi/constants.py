@@ -101,3 +101,9 @@ DEDUPE_NEAR_COSINE: Final = 0.90
 # dedupe lock instead of a lock per day, so the advisory locks one transaction
 # holds in the shared lock table stay bounded whatever dates the model chose.
 DEDUPE_PER_DAY_LOCK_MAX_DAYS: Final = 32
+
+# -- Request body limits --------------------------------------------------------
+
+# Largest ingest request body accepted (25 MiB), the same cap the hosted gateway
+# applies, so self-hosted servers bound the body before parsing it.
+INGEST_MAX_BODY_BYTES: Final = 26_214_400

@@ -29,6 +29,7 @@ from gubbi_common.telemetry import bound_logger
 from pydantic import BaseModel, Field
 
 from gubbi.api.v1.auth import require_scope
+from gubbi.api.v1.body_limit import IngestBodyLimitRoute
 from gubbi.api.v1.ingest_time import IngestTimestamp  # noqa: TC001 (Pydantic field type)
 from gubbi.app_state import require_app_ctx
 from gubbi.audit.sql import record_audit
@@ -66,7 +67,7 @@ __all__: list[str] = [
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/ingest", tags=["ingest"])
+router = APIRouter(prefix="/ingest", tags=["ingest"], route_class=IngestBodyLimitRoute)
 
 MAX_CONVERSATIONS_PER_REQUEST = 50
 DEFAULT_INBOX_TOPIC = "inbox"
