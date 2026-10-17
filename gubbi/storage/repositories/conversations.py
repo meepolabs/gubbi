@@ -58,6 +58,7 @@ __all__: list[str] = [
     "save_conversation",
     "set_extraction_state",
     "set_platform_metadata",
+    "upsert_linked_entry",
 ]
 
 # ``logger`` is the canonical async-context logger (used inside async
@@ -337,7 +338,7 @@ async def save_conversation(
     # of whether the count changed.
     await conn.execute("DELETE FROM messages WHERE conversation_id = $1", conv_id)
     await _insert_messages(conn, cipher, conv_id, messages)
-    linked_entry_id = await _upsert_linked_entry(
+    linked_entry_id = await upsert_linked_entry(
         conn, cipher, topic_id, conv_id, title, summary, conversation_date, now
     )
 
@@ -491,7 +492,7 @@ async def _insert_messages(
     )
 
 
-async def _upsert_linked_entry(
+async def upsert_linked_entry(
     conn: asyncpg.Connection,
     cipher: ContentCipher,
     topic_id: int,
