@@ -296,6 +296,42 @@ async def test_finished_attempt_reports_a_resave_after_the_attempt_started(
     assert attempt.resaved_during_run is resaved
 
 
+@pytest.mark.parametrize(
+    ("watermark", "delta", "resaved"),
+    [
+        pytest.param(2, timedelta(seconds=1), False, id="watermark-at-max-saved-after-start"),
+        pytest.param(1, timedelta(seconds=-1), True, id="watermark-below-max-saved-before-start"),
+    ],
+)
+async def test_finished_attempt_reports_a_resave_from_messages_above_the_watermark(
+    app_pool: asyncpg.Pool,
+    admin_pool: asyncpg.Pool,
+    rls_users: tuple[UUID, UUID],
+    conversation_id: int,
+    watermark: int,
+    delta: timedelta,
+    resaved: bool,
+) -> None:
+    user_a, _ = rls_users
+    for position in range(3):
+        await _add_message(admin_pool, user_a, conversation_id, None, position)
+    await admin_pool.execute(
+        "UPDATE conversations SET extracted_through_position = $2 WHERE id = $1",
+        conversation_id,
+        watermark,
+    )
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        job_id = await _create_admitted(conn, user_a, conversation_id)
+        assert await mark_running(conn, job_id)
+    await _resave(admin_pool, conversation_id, delta)
+
+    async with user_scoped_connection(app_pool, user_id=user_a) as conn:
+        attempt = await finished_attempt(conn, job_id)
+
+    assert attempt is not None
+    assert attempt.resaved_during_run is resaved
+
+
 async def test_create_follow_up_queues_a_new_job_and_reopens_the_conversation(
     app_pool: asyncpg.Pool,
     admin_pool: asyncpg.Pool,
@@ -342,15 +378,20 @@ _CONVERSATION_UPDATED_AT = datetime(2026, 2, 1, tzinfo=UTC)
 
 
 async def _add_message(
-    admin_pool: asyncpg.Pool, user_id: UUID, conversation_id: int, stamp: datetime | None
+    admin_pool: asyncpg.Pool,
+    user_id: UUID,
+    conversation_id: int,
+    stamp: datetime | None,
+    position: int = 0,
 ) -> None:
     await admin_pool.execute(
         "INSERT INTO messages (conversation_id, user_id, role, timestamp, position,"
         " content_encrypted, content_nonce)"
-        " VALUES ($1, $2, 'user', $3, 0, 'x'::bytea, 'nonce_msg_12'::bytea)",
+        " VALUES ($1, $2, 'user', $3, $4, 'x'::bytea, 'nonce_msg_12'::bytea)",
         conversation_id,
         user_id,
         stamp,
+        position,
     )
 
 

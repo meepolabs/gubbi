@@ -477,8 +477,10 @@ class FinishedAttempt:
     """The latest attempt of a job, read in the transaction that ends it.
 
     attempt            : the row's ``attempts``, the number of this attempt
-    resaved_during_run : the conversation was saved again after this attempt
-                         started, so the run may have read older content
+    resaved_during_run : the conversation holds a message above its extraction
+                         watermark; with no watermark yet, it was saved again
+                         after this attempt started. Either way the run may
+                         not have read its latest content
     """
 
     job_id: UUID
@@ -495,7 +497,17 @@ async def finished_attempt(conn: asyncpg.Connection, job_id: UUID) -> FinishedAt
     row = await conn.fetchrow(
         """
         SELECT j.user_id, j.conversation_id, j.source, j.lane, j.attempts,
-               coalesce(c.updated_at > j.started_at, false) AS resaved_during_run
+               coalesce(
+                   CASE
+                       WHEN c.extracted_through_position IS NULL
+                           THEN c.updated_at > j.started_at
+                       ELSE (
+                           SELECT max(m.position) FROM messages AS m
+                           WHERE m.conversation_id = c.id
+                       ) > c.extracted_through_position
+                   END,
+                   false
+               ) AS resaved_during_run
         FROM extraction_jobs AS j
         LEFT JOIN conversations AS c ON c.id = j.conversation_id
         WHERE j.id = $1
@@ -522,11 +534,11 @@ async def create_follow_up(
 
     Must run inside the caller's transaction, after the finished job left the
     active statuses. The conversation's ``processed_at`` is cleared so the new
-    job extracts it again; content unchanged since the last extraction is
-    then skipped by its content hash. The new job's ``activity_at`` is the
-    conversation's latest message timestamp as saved now, else its
-    ``updated_at``, never later than now. Returns the new job id, or None when
-    another job of the conversation is already active.
+    job extracts it again; only messages above its extraction watermark are
+    new to that job, so content already extracted is not extracted twice. The
+    new job's ``activity_at`` is the conversation's latest message timestamp
+    as saved now, else its ``updated_at``, never later than now. Returns the
+    new job id, or None when another job of the conversation is already active.
     """
     activity_at = await conn.fetchval(
         """
