@@ -186,7 +186,7 @@ def _configure_worker_telemetry(settings: Settings) -> None:
     After wiring, ``rebind_metrics_after_configure()`` is invoked so the
     ``gateway.replica_count_warning`` counter -- and the three
     orphan-counter factories (orphan_cleanup, extract_conversation,
-    openai_compatible) -- bind to the live MeterProvider and actually
+    model_provider) -- bind to the live MeterProvider and actually
     export.
 
     Deploy dependency: because this enables OTLP export, the worker's
@@ -229,7 +229,7 @@ def _configure_worker_telemetry(settings: Settings) -> None:
         # MeterProvider. Goes through ``rebind_metrics_after_configure`` --
         # the same hook the FastAPI lifespan uses -- so the canonical
         # ``initialize_metrics`` lru_cache AND the three orphan-counter
-        # factories (orphan_cleanup, extract_conversation, openai_compatible)
+        # factories (orphan_cleanup, extract_conversation, model_provider)
         # all bind to the SDK provider rather than a stale NoOp handle.
         # The cache_clear + re-prime sequence is NOT atomic, but it is safe
         # here only because the health-server thread started later in

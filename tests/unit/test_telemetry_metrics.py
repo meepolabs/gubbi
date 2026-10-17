@@ -76,7 +76,7 @@ def _restore_otel_globals() -> Iterator[None]:
         # ``cache_clear()`` here AND in the rebind hook. Drift between
         # the two means tests will leak state across the suite OR
         # production will leak state across lifespan re-runs.
-        from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
+        from gubbi.extraction.llm.model_provider import _get_llm_retry_counter
         from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
 
         _get_orphan_cleanup_swept_counter.cache_clear()
@@ -628,7 +628,7 @@ def test_orphan_cleanup_swept_counter_rebinds_to_real_provider() -> None:
 
 def test_llm_retry_counter_rebinds_to_real_provider() -> None:
     """``llm.retry_count_total`` lands in a real reader after rebind."""
-    from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
+    from gubbi.extraction.llm.model_provider import _get_llm_retry_counter
     from gubbi.telemetry import rebind_metrics_after_configure
 
     _set_provider(NoOpMeterProvider())

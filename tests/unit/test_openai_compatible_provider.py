@@ -23,7 +23,7 @@ import httpx2
 import pytest
 
 from gubbi.constants import LLM_BACKOFF_CAP_SECS, LLM_MAX_ATTEMPTS
-from gubbi.extraction.llm import openai_compatible
+from gubbi.extraction.llm import model_provider
 from gubbi.extraction.llm.openai_compatible import OpenAICompatibleProvider
 from gubbi.extraction.llm.provider import (
     LLMDeadlineError,
@@ -457,7 +457,7 @@ async def test_retry_counter_records_each_retry_and_the_exhaustion(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     counter = _CounterLog()
-    monkeypatch.setattr(openai_compatible, "_get_llm_retry_counter", lambda: counter)
+    monkeypatch.setattr(model_provider, "_get_llm_retry_counter", lambda: counter)
     recorder = _Recorder(_status(429))
 
     with pytest.raises(LLMRateLimitError):

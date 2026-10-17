@@ -106,14 +106,14 @@ def rebind_metrics_after_configure() -> None:
 
     Two out-of-tree counters live in their own
     ``@lru_cache``-deferred factories rather than ``initialize_metrics`` --
-    ``orphan_cleanup`` / ``openai_compatible`` each define their own
+    ``orphan_cleanup`` / ``model_provider`` each define their own
     counter local to the module that emits it, keeping the counter
     definition co-located with its single call site (neither needs a
     ``record_*`` indirection layer). Each factory is cleared + re-primed
     here so the post-lifespan emitters bind to the SDK provider, not the
     import-time NoOp.
     """
-    from gubbi.extraction.llm.openai_compatible import _get_llm_retry_counter
+    from gubbi.extraction.llm.model_provider import _get_llm_retry_counter
     from gubbi.extraction.orphan_cleanup import _get_orphan_cleanup_swept_counter
     from gubbi.telemetry.metrics import initialize_metrics
 
