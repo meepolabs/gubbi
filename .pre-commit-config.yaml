@@ -52,7 +52,7 @@ repos:
           - types-PyYAML==6.0.12.20260408
         exclude: ^(tests/)
 
-  # Secret scanning at commit time. The CI gitleaks workflow is the
+  # Secret scanning at commit time. The CI security floor check is the
   # second line of defense; this hook catches leaks before they reach
   # the remote.
   - repo: https://github.com/gitleaks/gitleaks

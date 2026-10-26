@@ -1,18 +1,15 @@
 # CI orchestrator: every blocking lane runs from this workflow, and the
-# terminal `required` job is the single check branch protection names.
+# terminal `required` job is the single ci.yml check branch protection names.
 #
 # Lanes:
 #   - lint + typecheck (this file)
 #   - security-tests.yml (called): env-contract check, unit suite, and the
 #     Postgres-backed security suite with its coverage gate
-#   - gitleaks.yml (called): secret scan. It also keeps its own push and
-#     schedule triggers; its push runs are grouped per commit SHA, so a newer
-#     push that cancels this run never drops the scan of an earlier commit.
 #   - image-closure (this file): replays the production image's hash-pinned
 #     Poetry install when the diff can affect it
 #
-# The advisory dependency-scan.yml is deliberately NOT a lane of `required`:
-# an advisory finding must not block unrelated work.
+# The secret and dependency scans run in security.yml (the `security-floor`
+# check), outside `required`.
 
 name: ci
 
@@ -84,15 +81,6 @@ jobs:
     permissions:
       contents: read
 
-  secret-scan:
-    name: secret scan
-    uses: ./.github/workflows/gitleaks.yml
-    # At least what gitleaks.yml declares; the action lists PR commits.
-    permissions:
-      contents: read
-      pull-requests: read
-    secrets: inherit
-
   # Proves the hash-pinned Poetry closure the production image installs still
   # installs. The Dockerfile installs Poetry from a pip-compile lock of Poetry
   # plus its transitive dependencies; bumps move only the `poetry` pin (with
@@ -162,7 +150,6 @@ jobs:
     needs:
       - lint
       - security-tests
-      - secret-scan
       - image-closure
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0

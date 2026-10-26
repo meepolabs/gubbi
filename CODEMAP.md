@@ -200,9 +200,8 @@ its tables.
   (`openai_compatible`: `JOURNAL_LLM_BASE_URL` + `JOURNAL_LLM_MODEL`;
   `anthropic`: `JOURNAL_LLM_API_KEY` + `JOURNAL_LLM_MODEL`).
 - CI gate (`.github/workflows/ci.yml`): the terminal `required` job is
-  the one check branch protection names; it needs every blocking lane
-  (lint + typecheck, the called `security-tests.yml` and `gitleaks.yml`)
-  and fails unless all succeeded. Before the verdict it runs
+  the one ci.yml check branch protection names; it needs every blocking
+  lane (lint + typecheck, the called `security-tests.yml`) and fails unless all succeeded. Before the verdict it runs
   `tools/check_required_needs.py --self-test` (stdlib, on the runner's
   python3), which fails it when `needs` misses a job or the file leaves
   the one layout the check accepts.
@@ -222,6 +221,7 @@ its tables.
   unreadable base runs it); otherwise installs the hash-pinned Poetry
   closure in the Dockerfile's base image and checks `POETRY_VERSION`
   matches the lock's `poetry` pin.
-- Dependency scan (`.github/workflows/dependency-scan.yml`): advisory
-  OSV scan of every lockfile via the digest-pinned scanner image; red on
-  a finding, required by nothing.
+- Security floor (`.github/workflows/security.yml`): the shared
+  security floor action's secret and dependency scans, as the
+  `security-floor` check; required at the branch rule, not a lane of
+  `required`.

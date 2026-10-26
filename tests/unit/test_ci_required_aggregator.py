@@ -27,19 +27,21 @@ _CI = _WORKFLOWS / "ci.yml"
 _AGGREGATOR = "required"
 _AGGREGATOR_STEP = "every required job succeeded"
 
-# Workflows that must never gate `required`: advisory scans, which must not
-# block unrelated work.
-_NEVER_REQUIRED = ("dependency-scan.yml",)
-
 # Called lanes that are call-only (no triggers of their own).
 _CALL_ONLY = ("security-tests.yml",)
 
-# The secret scan keeps its own push, schedule and manual triggers so a pushed
-# commit is scanned even when the ci run is cancelled; pull requests reach it
-# only through ci.yml.
-_SECRET_SCAN = "gitleaks.yml"
-_SECRET_SCAN_JOB = "secret-scan"
-_SECRET_SCAN_TRIGGERS = {"workflow_call", "push", "schedule", "workflow_dispatch"}
+# The secret and dependency scans run from the shared security floor action in
+# their own workflow, whose check branch protection requires directly; it is
+# never a lane of `required`.
+_SECURITY_FLOOR = "security.yml"
+_SECURITY_FLOOR_JOB = "security-floor"
+_SECURITY_FLOOR_ACTION = re.compile(
+    r"meepolabs/meepolabs-conventions/actions/security-floor@[0-9a-f]{40}"
+)
+
+# Standalone scan workflows the security floor replaced.
+_RETIRED_SCAN_WORKFLOWS = ("gitleaks.yml", "dependency-scan.yml")
+_SCANNER_MARKERS = ("gitleaks", "osv-scanner")
 
 
 def _load(path: Path) -> dict[str, Any]:
@@ -101,11 +103,8 @@ def test_required_needs_every_other_ci_job() -> None:
 
 def test_required_needs_the_named_blocking_lanes() -> None:
     """Positive control: an empty ci.yml would satisfy the completeness test."""
-    assert {"lint", "security-tests", "secret-scan"} <= set(_needs())
-    assert _called_workflows() == {
-        "security-tests": "security-tests.yml",
-        "secret-scan": _SECRET_SCAN,
-    }
+    assert {"lint", "security-tests", "image-closure"} <= set(_needs())
+    assert _called_workflows() == {"security-tests": "security-tests.yml"}
 
 
 def test_required_always_runs_and_is_named_for_branch_protection() -> None:
@@ -116,9 +115,10 @@ def test_required_always_runs_and_is_named_for_branch_protection() -> None:
     assert job.get("if") == "${{ always() }}"
 
 
-@pytest.mark.parametrize("workflow", _NEVER_REQUIRED)
-def test_advisory_workflows_are_not_lanes(workflow: str) -> None:
-    assert workflow not in _called_workflows().values()
+def test_security_floor_is_not_a_lane_of_required() -> None:
+    """Its check is required at the branch rule; as a lane it would also gate `required`."""
+    assert _SECURITY_FLOOR not in _called_workflows().values()
+    assert "workflow_call" not in _triggers(_load(_WORKFLOWS / _SECURITY_FLOOR))
 
 
 # -- aggregator step behaviour ------------------------------------------------
@@ -172,52 +172,37 @@ def test_call_only_lanes_have_no_trigger_of_their_own(workflow: str) -> None:
     assert _triggers(_load(_WORKFLOWS / workflow)) == {"workflow_call"}
 
 
-def test_secret_scan_keeps_its_own_triggers_except_pull_request() -> None:
-    """Pull requests reach the scan through ci.yml; a second PR trigger double-runs it."""
-    assert _triggers(_load(_WORKFLOWS / _SECRET_SCAN)) == _SECRET_SCAN_TRIGGERS
-
-
 @pytest.mark.parametrize("workflow", _CALL_ONLY)
 def test_call_only_lanes_declare_no_workflow_concurrency(workflow: str) -> None:
     assert "concurrency" not in _load(_WORKFLOWS / workflow)
 
 
-def test_secret_scan_concurrency_group_differs_from_the_callers() -> None:
-    """Called from ci.yml, an equal group expression would cancel the caller."""
-    caller = _load(_CI)["concurrency"]["group"]
-    callee = _load(_WORKFLOWS / _SECRET_SCAN)["concurrency"]["group"]
-
-    assert "github.event_name" in callee
-    assert "github.event_name" not in caller
-    assert callee != caller
+# -- security floor -------------------------------------------------------------
 
 
-def test_secret_scan_push_runs_are_grouped_per_commit() -> None:
-    """A ref-keyed push group lets a newer push displace the pending scan of an older one."""
-    concurrency = _load(_WORKFLOWS / _SECRET_SCAN)["concurrency"]
+def test_security_floor_runs_the_pinned_shared_action_on_pull_requests() -> None:
+    """The check branch protection requires must exist and run the shared action."""
+    workflow = _load(_WORKFLOWS / _SECURITY_FLOOR)
+    steps = workflow["jobs"][_SECURITY_FLOOR_JOB]["steps"]
 
-    assert concurrency["group"] == (
-        "${{ github.workflow }}-${{ github.event_name }}-"
-        "${{ github.event_name == 'push' && github.sha || github.ref }}"
-    )
-    assert concurrency["cancel-in-progress"] == "${{ github.event_name == 'pull_request' }}"
+    assert "pull_request" in _triggers(workflow)
+    assert any(_SECURITY_FLOOR_ACTION.fullmatch(str(step.get("uses", ""))) for step in steps)
 
 
-def test_the_secret_scan_lane_is_the_canonical_required_job() -> None:
-    """The job id and display name are what branch protection and tooling expect."""
-    jobs = _ci_jobs()
-
-    assert _SECRET_SCAN_JOB in _needs()
-    assert jobs[_SECRET_SCAN_JOB]["name"] == "secret scan"
-    assert _called_workflows()[_SECRET_SCAN_JOB] == _SECRET_SCAN
+@pytest.mark.parametrize("workflow", _RETIRED_SCAN_WORKFLOWS)
+def test_retired_scan_workflows_stay_deleted(workflow: str) -> None:
+    """A second scan workflow would drift from the shared floor's scanner and config."""
+    assert not (_WORKFLOWS / workflow).exists()
 
 
-def test_secret_scan_caller_grants_what_the_callee_declares() -> None:
-    """A called workflow cannot exceed the permissions its calling job grants."""
-    callee = _load(_WORKFLOWS / _SECRET_SCAN)["permissions"]
-    caller = _ci_jobs()[_SECRET_SCAN_JOB]["permissions"]
+def test_no_workflow_besides_the_security_floor_runs_a_scanner() -> None:
+    others = [path for path in _WORKFLOWS.glob("*.y*ml") if path.name != _SECURITY_FLOOR]
 
-    assert caller == callee
+    assert {"ci.yml", "security-tests.yml"} <= {path.name for path in others}
+    for path in others:
+        text = path.read_text(encoding="utf-8").lower()
+        for marker in _SCANNER_MARKERS:
+            assert marker not in text, f"{path.name} mentions {marker!r}"
 
 
 # -- service image pins ---------------------------------------------------------

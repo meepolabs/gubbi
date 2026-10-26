@@ -72,17 +72,10 @@
 			"enabled": false
 		},
 		{
-			"description": "The pre-commit hook resolves gitleaks from git tags while the CI binary resolves from GitHub releases; resolve the hook from releases too so both group members see the same versions and release timestamps and always land on one version",
+			"description": "The pre-commit hook resolves gitleaks from git tags; resolve it from GitHub releases instead so updates see the release timestamps the release-age delay needs",
 			"matchManagers": ["pre-commit"],
 			"matchDepNames": ["gitleaks/gitleaks"],
 			"overrideDatasource": "github-releases"
-		},
-		{
-			"description": "Bump the CI gitleaks binary and the pre-commit hook rev together so local and CI scans agree; require both members rather than letting one open a PR alone",
-			"matchPackageNames": ["gitleaks/gitleaks"],
-			"groupName": "gitleaks",
-			"groupSlug": "gitleaks",
-			"minimumGroupSize": 2
 		},
 		{
 			"description": "Major version bumps need explicit review; never auto-merge",
@@ -106,15 +99,6 @@
 			],
 			"depNameTemplate": "poetry",
 			"datasourceTemplate": "pypi"
-		},
-		{
-			"customType": "regex",
-			"description": "gitleaks binary version pinned in the workflow env",
-			"managerFilePatterns": ["/(^|/)\\.github/workflows/[^/]+\\.ya?ml$/"],
-			"matchStrings": ["(?:^|\\n)\\s*GITLEAKS_VERSION:\\s*['\\\"]?(?<currentValue>\\d+\\.\\d+\\.\\d+)['\\\"]?"],
-			"depNameTemplate": "gitleaks/gitleaks",
-			"datasourceTemplate": "github-releases",
-			"extractVersionTemplate": "^v(?<version>.+)$"
 		},
 		{
 			"customType": "regex",
