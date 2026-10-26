@@ -1,5 +1,6 @@
 # CI orchestrator: every blocking lane runs from this workflow, and the
-# terminal `required` job is the single ci.yml check branch protection names.
+# terminal `required` job is its aggregator check. The `security-floor` check
+# from security.yml is a separate status.
 #
 # Lanes:
 #   - lint + typecheck (this file)
@@ -135,8 +136,9 @@ jobs:
             /tmp/poetry/bin/pip install --disable-pip-version-check --no-cache-dir --require-hashes --only-binary=:all: -r "/workspace/$REQUIREMENTS"
             /tmp/poetry/bin/poetry --version'
 
-  # Branch protection names only this job, so renaming or adding a lane is an
-  # edit to `needs` below rather than to the protection settings. It must run
+  # This is the workflow's aggregator check (security.yml's `security-floor` is
+  # a separate status), so renaming or adding a lane is an edit to `needs`
+  # below rather than to the protection settings. It must run
   # even when a lane fails (`always()`): a skipped required check counts as
   # passing. A skipped lane fails it too, so a lane that silently stops
   # running cannot pass as green. Every other job in this file belongs in

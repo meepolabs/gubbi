@@ -1,6 +1,7 @@
 """Contract tests for the ``required`` aggregator job in ci.yml.
 
-Branch protection names one check, ``required``. It is only meaningful if it
+``required`` is ci.yml's aggregator check; the ``security-floor`` check from
+security.yml is a separate status. ``required`` is only meaningful if it
 depends on every blocking lane, fails on any result other than success, and is
 never itself skipped. The lanes it calls must not double-run (a called workflow
 that keeps its own pull_request trigger runs twice per PR) and must not share a
@@ -35,6 +36,7 @@ _CALL_ONLY = ("security-tests.yml",)
 # never a lane of `required`.
 _SECURITY_FLOOR = "security.yml"
 _SECURITY_FLOOR_JOB = "security-floor"
+_SECURITY_FLOOR_STEP = "actions/security-floor"
 _SECURITY_FLOOR_ACTION = re.compile(
     r"meepolabs/meepolabs-conventions/actions/security-floor@[0-9a-f]{40}"
 )
@@ -119,6 +121,22 @@ def test_security_floor_is_not_a_lane_of_required() -> None:
     """Its check is required at the branch rule; as a lane it would also gate `required`."""
     assert _SECURITY_FLOOR not in _called_workflows().values()
     assert "workflow_call" not in _triggers(_load(_WORKFLOWS / _SECURITY_FLOOR))
+
+
+def _security_floor_step_sites(workflow: dict[str, Any]) -> list[str]:
+    return [
+        f"{job_id}:{step.get('name', step['uses'])}"
+        for job_id, job in (workflow.get("jobs") or {}).items()
+        for step in (job.get("steps") or [])
+        if _SECURITY_FLOOR_STEP in str(step.get("uses", ""))
+    ]
+
+
+def test_no_job_in_the_required_graph_runs_the_security_floor_action() -> None:
+    """A job running the action as a step and listed in `needs` would make it a lane."""
+    assert _security_floor_step_sites(_load(_WORKFLOWS / _SECURITY_FLOOR)), "matcher finds nothing"
+    for name, workflow in _gated_workflows():
+        assert not _security_floor_step_sites(workflow), f"{name} runs the security floor action"
 
 
 # -- aggregator step behaviour ------------------------------------------------

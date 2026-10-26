@@ -200,7 +200,8 @@ its tables.
   (`openai_compatible`: `JOURNAL_LLM_BASE_URL` + `JOURNAL_LLM_MODEL`;
   `anthropic`: `JOURNAL_LLM_API_KEY` + `JOURNAL_LLM_MODEL`).
 - CI gate (`.github/workflows/ci.yml`): the terminal `required` job is
-  the one ci.yml check branch protection names; it needs every blocking
+  ci.yml's aggregator check (the `security-floor` check from
+  `security.yml` is a separate status); it needs every blocking
   lane (lint + typecheck, the called `security-tests.yml`) and fails unless all succeeded. Before the verdict it runs
   `tools/check_required_needs.py --self-test` (stdlib, on the runner's
   python3), which fails it when `needs` misses a job or the file leaves
