@@ -33,7 +33,7 @@ gunicorn = "^23.0.0"
 # also upstream's own recommended position for staying on v1 (`>=1.28,<2`).
 # v1.x is in maintenance mode (security fixes only), so the real fix is the
 # v2 migration -- filed, and it owns the private-internals question.
-mcp = ">=1.28.1,<1.29"
+mcp = ">=1.30,<1.31"
 bcrypt = "^5.0.0"
 # PostgreSQL async driver + pgvector extension codec
 asyncpg = "^0.30.0"
