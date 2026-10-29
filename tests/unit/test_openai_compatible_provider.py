@@ -14,12 +14,14 @@ import email.utils
 import json
 import logging
 import pathlib
+import signal
 import ssl
 import time
 import traceback
 import warnings
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime, timedelta
+from types import FrameType
 from typing import Any
 
 import httpx2
@@ -606,6 +608,50 @@ async def test_connection_error_is_not_reported_as_a_malformed_response(
     assert "llm_response_malformed" not in log_capture.text
 
 
+_CYCLE_WALK_LIMIT_SECS = 2.0
+
+
+def _cyclic_connect_error(request: httpx2.Request) -> httpx2.Response:
+    first = httpx2.ConnectError("refused", request=request)
+    second = OSError("connection reset")
+    first.__cause__ = second
+    second.__cause__ = first
+    raise first
+
+
+class _WalkDidNotTerminate(BaseException):
+    pass
+
+
+def _abort_hung_walk(_signum: int, _frame: FrameType | None) -> None:
+    raise _WalkDidNotTerminate("cause-chain walk did not terminate")
+
+
+@pytest.fixture
+def walk_deadline() -> Iterator[None]:
+    previous = signal.signal(signal.SIGALRM, _abort_hung_walk)
+    signal.setitimer(signal.ITIMER_REAL, _CYCLE_WALK_LIMIT_SECS)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.usefixtures("walk_deadline")
+async def test_cyclic_cause_chain_keeps_the_connection_failed_mapping(
+    log_capture: LogCapture,
+) -> None:
+    recorder = _Recorder(_cyclic_connect_error)
+
+    with pytest.raises(LLMTransientError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert str(excinfo.value) == "upstream connection failed"
+    assert len(recorder.requests) == LLM_MAX_ATTEMPTS
+    assert "llm_response_malformed" not in log_capture.text
+
+
 async def test_non_json_output_is_not_retried() -> None:
     body = _stop_body()
     body["choices"][0]["message"]["content"] = _OUTPUT_SENTINEL
@@ -888,15 +934,32 @@ def _malformed_json_body(_request: httpx2.Request) -> httpx2.Response:
     )
 
 
+def _invalid_utf8_body(_request: httpx2.Request) -> httpx2.Response:
+    return httpx2.Response(
+        200,
+        content=b"\xff" + _OUTPUT_SENTINEL.encode(),
+        headers={"content-type": "application/json"},
+    )
+
+
 def _logged_classes(log_capture: LogCapture, event: str) -> list[str]:
     lines = [json.loads(line) for line in log_capture.lines if event in line]
     return [line["error_class"] for line in lines]
 
 
+@pytest.mark.parametrize(
+    ("responder", "error_class"),
+    [
+        pytest.param(_malformed_json_body, "JSONDecodeError", id="invalid-json"),
+        pytest.param(_invalid_utf8_body, "UnicodeDecodeError", id="invalid-utf8"),
+    ],
+)
 async def test_malformed_json_success_body_is_transient_and_kept_out_of_the_error(
+    responder: Callable[[httpx2.Request], httpx2.Response],
+    error_class: str,
     log_capture: LogCapture,
 ) -> None:
-    recorder = _Recorder(_malformed_json_body)
+    recorder = _Recorder(responder)
 
     with pytest.raises(LLMProviderError) as excinfo:
         await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
@@ -908,7 +971,7 @@ async def test_malformed_json_success_body_is_transient_and_kept_out_of_the_erro
     assert _OUTPUT_SENTINEL not in str(excinfo.value)
     assert _OUTPUT_SENTINEL not in repr(excinfo.value.args)
     malformed = _logged_classes(log_capture, "llm_response_malformed")
-    assert malformed == ["JSONDecodeError"] * LLM_MAX_ATTEMPTS
+    assert malformed == [error_class] * LLM_MAX_ATTEMPTS
     assert "llm_request_build_failed" not in log_capture.text
     assert _OUTPUT_SENTINEL not in log_capture.text
 

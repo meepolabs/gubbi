@@ -488,10 +488,12 @@ def _undecodable_body_cause(exc: BaseException) -> BaseException | None:
     """
     if not isinstance(exc, ModelAPIError):
         return None
+    seen: set[int] = set()
     cause = exc.__cause__
-    while cause is not None:
+    while cause is not None and id(cause) not in seen:
         if isinstance(cause, _DECODE_ERRORS):
             return cause
+        seen.add(id(cause))
         cause = cause.__cause__
     return None
 
