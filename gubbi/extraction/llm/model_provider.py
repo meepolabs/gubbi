@@ -271,7 +271,11 @@ class PydanticAIModelProvider(LLMProvider, abc.ABC):
         except TimeoutError:
             translated = LLMTimeoutError("upstream request timed out")
         except (ModelAPIError, UnexpectedModelBehavior) as exc:
-            translated = _translate_error(exc, self._timeout_errors, self._status_errors)
+            decode_error = _undecodable_body_cause(exc)
+            if decode_error is None:
+                translated = _translate_error(exc, self._timeout_errors, self._status_errors)
+            else:
+                unexpected_class = type(decode_error).__qualname__
         except Exception as exc:
             # Only the class name is logged: the exception's message and args
             # can quote the request or the upstream body.
@@ -470,6 +474,26 @@ def _json_object(parsed: object, usage: LLMUsage) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise LLMSchemaError("model output is not a JSON object", usage=usage)
     return parsed
+
+
+_DECODE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError)
+
+
+def _undecodable_body_cause(exc: BaseException) -> BaseException | None:
+    """Return the decode error behind a ``ModelAPIError``, if there is one.
+
+    PydanticAI wraps a 2xx body the SDK could not decode in ``ModelAPIError``
+    raised ``from`` the decoder's error; any other ``ModelAPIError`` is a
+    transport or API failure and keeps its own mapping.
+    """
+    if not isinstance(exc, ModelAPIError):
+        return None
+    cause = exc.__cause__
+    while cause is not None:
+        if isinstance(cause, _DECODE_ERRORS):
+            return cause
+        cause = cause.__cause__
+    return None
 
 
 def _translate_error(

@@ -594,6 +594,18 @@ async def test_connection_error_maps_to_transient_not_timeout() -> None:
     assert len(recorder.requests) == LLM_MAX_ATTEMPTS
 
 
+async def test_connection_error_is_not_reported_as_a_malformed_response(
+    log_capture: LogCapture,
+) -> None:
+    recorder = _Recorder(_connect_error)
+
+    with pytest.raises(LLMTransientError) as excinfo:
+        await _provider(recorder).complete(_MESSAGES, "system prompt", _SCHEMA)
+
+    assert str(excinfo.value) == "upstream connection failed"
+    assert "llm_response_malformed" not in log_capture.text
+
+
 async def test_non_json_output_is_not_retried() -> None:
     body = _stop_body()
     body["choices"][0]["message"]["content"] = _OUTPUT_SENTINEL
