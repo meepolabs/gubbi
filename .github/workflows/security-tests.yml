@@ -92,7 +92,7 @@ jobs:
       # The `-poetry<version>-` literal is what Renovate's poetry regex
       # matches; keep it a literal, not an expression.
       - name: Cache Poetry virtualenv
-        uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-poetry2.4.1-${{ hashFiles('poetry.lock') }}
@@ -217,7 +217,7 @@ jobs:
       # The `-poetry<version>-` literal is what Renovate's poetry regex
       # matches; keep it a literal, not an expression.
       - name: Cache Poetry virtualenv
-        uses: actions/cache@a7833574556fa59680c1b7cb190c1735db73ebf0 # v5.0.0
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .venv
           key: venv-${{ runner.os }}-py${{ steps.setup-python.outputs.python-version }}-poetry2.4.1-${{ hashFiles('poetry.lock') }}
